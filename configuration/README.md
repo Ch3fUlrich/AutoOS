@@ -1,0 +1,135 @@
+# configuration/ — one place for every moving part
+
+Everything AutoOS wires into apps lives here, so a machine can be re-created
+from this folder plus `catalog/`. Keys never leave it: the real key file is
+git-ignored, only the template is tracked.
+
+| Path | What it is | Read by |
+|---|---|---|
+| `api-keys.yml` | **The key file.** Flat `provider: key`. Git-ignored. | `omniroute/apply.*`, `start-stack.*`, the browser UI (status only) |
+| `api-keys.example.yml` | Tracked template — copy to `api-keys.yml` | you |
+| `omniroute/combos.json` | Tier definitions (l1-orchestrator/l2-worker/l3-driver/t4-rag + `-clean`/`-free-only` variants) | `omniroute/apply.*` |
+| `omniroute/apply.sh` / `apply.ps1` | Registers providers + (re)creates combos | you, once after keys are in |
+| `start-stack.sh` / `start-stack.ps1` | Starts OmniRoute if needed, then an app wired to it | you |
+| `autostart/` | Opt-in resume after reboot (scheduled task / systemd unit + launcher) | you, once |
+| `healthcheck.sh` / `healthcheck.ps1` | Probe `:20128` `:3000` `:4096` `:8777`; log-only, `--fix`/`-Fix` resumes | you |
+| `litellm/` | The manual fallback router (off by default) | `setup.*` when LiteLLM is ticked |
+| `openhands/config.toml` | OpenHands LLM profiles (dev path); docker path uses env. Token windows are synced from `catalog/ide-models.json` | OpenHands |
+| `openhands/tier-profiles.json` | OpenHands tier profile spec; its ORDER is the push priority (the app keeps 10). Token windows synced from `catalog/ide-models.json` | `start-stack.*`, the installers |
+| `hostexec/policy.example.toml` | Template for the hostexec deny-list broker's policy — copy elsewhere and fill in, never edit in place | `tools/hostexec.py check\|serve` (real policy lives outside this repo) |
+| `hostexec/README.md` | What hostexec is (a deny-list + audit boundary, NOT containment), quick start, the rule table | you, before enabling it — see the file |
+
+## First run
+
+```bash
+cp configuration/api-keys.example.yml configuration/api-keys.yml   # fill in
+./configuration/omniroute/apply.sh --dry-run   # preview what it would change (no GO needed)
+# A live apply mutates the gateway, so fleet rule D-825 requires an explicit judge GO
+# naming the sha it covers (a judge run id, D-<n> or OS-<n>). The reference must name an
+# artefact that EXISTS, not merely look like one — see "The GO reference" below.
+./configuration/omniroute/apply.sh --go <ref> --go-sha "$(git rev-parse HEAD)"   # register keys + build combos
+./configuration/start-stack.sh opencode     # gateway + app
+```
+
+```powershell
+Copy-Item configuration\api-keys.example.yml configuration\api-keys.yml
+.\configuration\omniroute\apply.ps1 -DryRun
+# -Go <ref> -GoSha (git rev-parse HEAD) on the live run (fleet rule D-825):
+.\configuration\omniroute\apply.ps1 -Go <ref> -GoSha (git rev-parse HEAD)
+.\configuration\start-stack.ps1 -App opencode
+```
+
+### The GO reference
+
+`--go`/`-Go` is checked against the artefact tree before a live run proceeds:
+
+| ref | must exist as | read from |
+|---|---|---|
+| `D-<n>` | a line with that exact id | `$AUTOOS_DECISIONS_LOG`, else `$AUTOOS_ROUTING_DIR/docs/decisions-log.md` and `$AUTOOS_ROUTING_DIR/DECISIONS.md` |
+| `OS-<n>` | a line with that exact id | `$AUTOOS_ROUTING_DIR/QUESTIONS.md` or `ANSWERS.md` |
+| `YYYYMMDD-HHMMSS-…` | a worker record | `$AUTOOS_WORKERS_DIR/<id>.json`, else `logs/workers/<id>.json` and `logs/agents/<id>/` under the checkout |
+
+`AUTOOS_ROUTING_DIR` defaults to `~/code/routing`. The match is on the whole id, so
+`D-82` never matches a `D-825` line. An unreadable or missing tree refuses the same way
+an absent id does; `--go-offline` / `-GoOffline` is the declared exception — the run
+proceeds and logs `GO-OFFLINE: <ref> unverified` as its first line, and `--go-sha`/`-GoSha`
+is still verified against `git rev-parse HEAD`. `apply.sh`, `apply.ps1`,
+`apply-capability-overrides.ps1`, `apply-cluster.sh`, `compact-graphs.ps1`, `dedup-graph.py`,
+`populate-embeddings.py` and `split-project-graph.py` all ask the same implementation,
+[`../infra/mcp-servers/scripts/_go_gate.py`](../infra/mcp-servers/scripts/_go_gate.py)
+(PowerShell through `invoke-go-gate.ps1`), so the rule cannot drift between them.
+
+Key origins: [docs/api-keys.md](../docs/api-keys.md). Tier meanings and the
+training-data rules: [docs/models.md](../docs/models.md). Phone reachability:
+[docs/troubleshooting.md](../docs/troubleshooting.md#phone-over-tailscale-remote-uis).
+
+## opencode serve (phone fallback web UI)
+
+```bash
+./configuration/autostart/run-opencode-serve.sh --detach   # 0.0.0.0:4096, background
+./configuration/start-stack.sh opencode-serve              # same, no-op when up
+```
+
+opencode V2 serves its UI to anyone and guards `/api/*` with HTTP Basic auth:
+user **`opencode`**, password from `OPENCODE_PASSWORD`. Without that variable
+it invents a new password on every start, so the value is pinned in
+`configuration/api-keys.yml` → `opencode_password` — the single source, edited
+there or in the browser UI's **Logins and keys** card. The wrapper reads that key
+first and falls back to `~/.config/autoos/opencode-serve.password` (mode 600, a
+derived copy, generated on first use, never printed); the docker stack gets a
+second derived copy in `~/.config/autoos/ai-stack/opencode.env`
+(`ai-stack.sh init`) - see
+[Logins and secrets](../docs/web-services.md#logins-and-secrets). It also exports the `{env:...}` keys the global opencode config
+references (read literally from `configuration/litellm/.env` and
+`api-keys.yml`). A client on another machine connects with
+`OPENCODE_PASSWORD=... opencode --server http://<this-host>:4096`.
+
+## Autostart after reboot (opt-in)
+
+```powershell
+.\configuration\autostart\Register-AutoOSAutostart.ps1            # register the logon task
+.\configuration\autostart\Register-AutoOSAutostart.ps1 -Unregister # remove it again
+```
+
+```bash
+./configuration/autostart/register-autostart.sh --dry-run    # what it would write
+./configuration/autostart/register-autostart.sh              # write, enable, start
+./configuration/autostart/register-autostart.sh --takeover   # also replace hand-started copies
+./configuration/autostart/register-autostart.sh --unregister # remove them again
+```
+
+Linux registers four systemd `--user` units, rendered with this checkout's
+path and the PATH this machine needs (nvm's node, `~/.local/bin`), so re-run
+it after moving the checkout or upgrading node:
+
+| Unit | Runs | Listens |
+|---|---|---|
+| `autoos-omniroute` | `omniroute serve` (notify + watchdog) | `0.0.0.0:20128` |
+| `autoos-litellm` | `configuration/litellm/start-litellm.sh --foreground` | `127.0.0.1:4000` |
+| `autoos-opencode` | `configuration/autostart/run-opencode-serve.sh` | `0.0.0.0:4096` |
+| `autoos-stack` | `Start-AutoOSStack.sh` (oneshot: OpenHands container, anything down) | - |
+
+A service somebody started by hand keeps running: its unit is enabled (it
+takes over at the next boot) but not started, unless `--takeover`. The
+gateway keeps `REQUIRE_API_KEY=true` in `~/.omniroute/.env`; registration
+appends it there (after a backup) only when the line is missing. The units
+start at boot only with lingering on (`loginctl enable-linger`); the script
+says when that needs sudo. By hand instead: copy a unit, fill in the paths,
+then `systemctl --user enable --now autoos-stack.service`.
+
+AutoOS `--serve` never autostarts (its token is random per run). Registration
+is idempotent: re-running reports unchanged units as skipped. Health:
+`healthcheck.sh` / `healthcheck.ps1` (log-only; `--fix` / `-Fix` resumes the
+gateway, litellm, OpenHands and opencode serve). Windows: prefer the
+`.ps1` - Git Bash `curl` cannot reach IPv4-only loopback listeners on some
+boxes and would report them down.
+
+## Rules
+
+- **Keys only in `api-keys.yml`** (and the fallback LiteLLM `.env`). No key
+  ever appears in a tracked file, an argument on the command line, or the
+  browser payload.
+- **`apply` is idempotent**: re-running replaces combos and re-adds providers.
+- Model refs in `combos.json` are validated against the live catalog when the
+  client key allows it; unknown refs are skipped with a warning, never
+  silently swapped for something else.

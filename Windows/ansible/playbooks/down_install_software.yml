@@ -1,0 +1,51 @@
+---
+- name: Download and install vendor installers
+  hosts: windows
+  gather_facts: true
+
+  vars:
+    install_dir: '{{ ansible_env.USERPROFILE }}\Downloads\installs'
+
+  tasks:
+    # `lookup('env', ...)` evaluates on the CONTROL node, where USERPROFILE is
+    # unset - every path used to collapse to \Downloads\installs. ansible_env
+    # is the target's environment, which is what was meant.
+    - name: Ensure the installer directory exists
+      ansible.windows.win_file:
+        path: "{{ install_dir }}"
+        state: directory
+
+    - name: Download installers
+      ansible.windows.win_get_url:
+        url: "{{ item.url }}"
+        dest: '{{ install_dir }}\{{ item.filename }}'
+      loop: "{{ software_list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: downloads
+      # Targeted rather than blanket: a download may legitimately fail behind a
+      # VPN, but everything else must still surface as a real failure.
+      failed_when: false
+
+    - name: Install downloaded packages
+      ansible.windows.win_package:
+        path: '{{ install_dir }}\{{ item.filename }}'
+        arguments: "{{ item.silent_args }}"
+        state: present
+      loop: "{{ software_list }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when: item.filename in (downloads.results | default([])
+                              | selectattr('failed', 'defined')
+                              | rejectattr('failed')
+                              | map(attribute='item.filename') | list)
+      register: installs
+      failed_when: false
+
+    - name: Report what happened
+      ansible.builtin.debug:
+        msg:
+          - "downloaded: {{ downloads.results | default([]) | rejectattr('failed', 'defined') | list | length }}"
+          - "installed:  {{ installs.results | default([]) | selectattr('changed', 'defined') | selectattr('changed') | list | length }}"
+          - "failed:     {{ (downloads.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | list | length)
+                            + (installs.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | list | length) }}"

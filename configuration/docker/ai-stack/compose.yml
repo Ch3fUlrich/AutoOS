@@ -1,0 +1,243 @@
+# AutoOS AI stack in Docker: OmniRoute gateway + opencode serve + OpenHands.
+#
+# The `server` profile's way to run the three LAN-facing AI services. Design,
+# RAM budget and the reason for every flag: docs/web-services.md (Server profile section).
+# Do not run this file by hand - configuration/docker/ai-stack/ai-stack.sh
+# passes the env files it needs (--env-file ~/.config/autoos/ai-stack/stack.env)
+# and keeps every secret out of this public template:
+#
+#   ./configuration/docker/ai-stack/ai-stack.sh init     # env files + opencode config
+#   ./configuration/docker/ai-stack/ai-stack.sh up       # build/pull, start, wait healthy
+#   ./configuration/docker/ai-stack/ai-stack.sh migrate  # plan: native units -> containers
+#
+# Kept anchor-free on purpose: tests/helpers/check_compose.py reads it without
+# PyYAML, and each service states its own hardening where a reviewer sees it.
+name: autoos-ai
+
+networks:
+  # Fixed name: OpenHands sandboxes and the shared MCP containers are attached
+  # to it by name (ai-stack.sh up), and the services reach each other as
+  # http://omniroute:20128, http://opencode:4096, http://openhands:3000.
+  autoos-ai:
+    name: autoos-ai
+
+services:
+  omniroute:
+    # Upstream image + qodercli (the Qoder PAT login spawns it; the bare image
+    # has none). The FROM is pinned by digest: a moved tag can never change the
+    # gateway underneath the encrypted provider credentials. Bump deliberately
+    # (docs page).
+    build:
+      context: .
+      dockerfile: omniroute.Dockerfile
+      # tools/apply-vertex-patch.py for the U2 build stage (omniroute.Dockerfile).
+      additional_contexts:
+        tools: ../../../tools
+    image: autoos/omniroute:3.8.50-autoos5
+    container_name: autoos-omniroute
+    restart: unless-stopped
+    # The image's own user is node (1000); the host user's ids keep the
+    # bind-mounted data directory owned by the operator, backup-able as-is.
+    user: "${AUTOOS_UID:-1000}:${AUTOOS_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    environment:
+      # Pinned here, not left to the data dir's .env: /v1 is published to the
+      # LAN and (through the proxy) beyond, and process env wins over files.
+      REQUIRE_API_KEY: "true"
+      DATA_DIR: /app/data
+      OMNIROUTE_MEMORY_MB: ${OMNIROUTE_MEMORY_MB:-1536}
+      # Chat admission gate: the image defaults (1 heavy request in flight,
+      # 2000 ms queue) reject parallel agent sub-requests with retryable 503,
+      # killing worker runs (4 of 5; measured 2026-09-27). OMNIROUTE_MEMORY_MB
+      # above is the heap knob (the entrypoint appends it to NODE_OPTIONS; the
+      # last --max-old-space-size flag wins - do NOT add NODE_OPTIONS here).
+      OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT: ${OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT:-6}
+      OMNIROUTE_CHAT_ADMISSION_QUEUE_MS: ${OMNIROUTE_CHAT_ADMISSION_QUEUE_MS:-60000}
+      # Muse's first byte: 3-32 s at minimal/low/medium, 4-58 s straight to the
+      # provider (measured 2026-09-28). Unset ships 30000 ms, which 504'd high.
+      OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS: ${OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS:-180000}
+      # Per-call log artifacts: each chat call writes files under /app/data/call_logs
+      # (831 MB in 3905 files in one day, largest ~510 KB; measured 2026-09-27).
+      # That page cache counts toward the gateway's own pressure guard (it answers
+      # 503 to every chat call above 92% cgroup use), so the logs are capped here.
+      CHAT_LOG_MAX_BODY_KB: ${CHAT_LOG_MAX_BODY_KB:-64}
+      CHAT_LOG_TEXT_LIMIT: ${CHAT_LOG_TEXT_LIMIT:-16384}
+      CALL_LOG_RETENTION_DAYS: ${CALL_LOG_RETENTION_DAYS:-3}
+      # The gateway's public origin, from stack.env (AUTOOS_OMNIROUTE_PUBLIC_URL;
+      # docs/web-services.md says what it does and does not change). Unset gives
+      # empty values, which are the same as absent: the image's launcher drops
+      # empty variables before it starts the server, and every reader treats ""
+      # as no value (measured, image 3.8.50).
+      NEXT_PUBLIC_BASE_URL: ${AUTOOS_OMNIROUTE_PUBLIC_URL:-}
+      OMNIROUTE_PUBLIC_BASE_URL: ${AUTOOS_OMNIROUTE_PUBLIC_URL:-}
+      # Only while a public URL is set: the gateway's own calls to itself (A2A
+      # skills, MCP tools, cloud sync) fall back to NEXT_PUBLIC_BASE_URL when
+      # BASE_URL is empty, and would then leave through the proxy. Pin them to
+      # loopback, the value they default to when nothing is set.
+      BASE_URL: ${AUTOOS_OMNIROUTE_PUBLIC_URL:+http://localhost:20128}
+      # The Qoder PAT login runs this binary (absolute, so PATH plays no part).
+      CLI_QODER_BIN: /usr/local/bin/qodercli
+      # qodercli crashes at start (even --version) when it cannot create
+      # $HOME/.qoder, and the root filesystem is read-only: a persistent HOME.
+      HOME: /home/qoder
+    volumes:
+      # OmniRoute's own state: storage.sqlite, and .env with the
+      # STORAGE_ENCRYPTION_KEY the provider credentials are encrypted with.
+      - ${AUTOOS_STACK_DATA:?run ai-stack.sh init}/omniroute:/app/data
+      # qodercli's HOME: its machine id, logs and cache. Persistent (a tmpfs
+      # would give the gateway a new machine id on every restart); the login
+      # itself lives in the gateway data above (--config-dir $DATA_DIR/qoder-cli).
+      - ${AUTOOS_STACK_DATA:?run ai-stack.sh init}/qoder-home:/home/qoder
+    ports:
+      - "${AUTOOS_STACK_BIND:-0.0.0.0}:20128:20128"
+    mem_limit: ${OMNIROUTE_MEM_LIMIT:-2560m}
+    pids_limit: 512
+    stop_grace_period: 40s
+    healthcheck:
+      # The image's probe: /healthz, in-memory, no SQLite (upstream #10311).
+      test: ["CMD", "node", "healthcheck.mjs"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - autoos-ai
+
+  opencode:
+    # Upstream image + git/bash/node/uv (the bare image is Alpine without
+    # them: no commits, no npx/uvx MCP servers). FROM is digest-pinned.
+    build:
+      context: .
+      dockerfile: opencode.Dockerfile
+    image: autoos/opencode:2.0.19-autoos1
+    container_name: autoos-opencode
+    restart: unless-stopped
+    # init:true runs tini as PID 1, which reaps orphaned processes. Without it
+    # the container accumulated ~2600 unreaped git/timeout zombies (D-171);
+    # once pids.current hit the ceiling, pthread_create failed, Bun aborted in
+    # WTF::Thread::create and PID 1 died -> every in-flight run was cut. The
+    # operator raised the live ceiling with `docker update --pids-limit 4096`;
+    # these two lines make a recreate keep both the reaper and the ceiling.
+    init: true
+    user: "${AUTOOS_UID:-1000}:${AUTOOS_GID:-1000}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    command: ["serve", "--hostname", "0.0.0.0", "--port", "4096"]
+    working_dir: ${AUTOOS_CODE_DIR:?run ai-stack.sh init}
+    # OPENCODE_PASSWORD (Basic auth on /api/*), the gateway client key and the
+    # other {env:...} keys the rendered config references. Only these: the
+    # agent's shell can read this container's environment.
+    env_file:
+      - ${AUTOOS_STACK_CONFIG:?run ai-stack.sh init}/opencode.env
+    environment:
+      HOME: /home/opencode
+    volumes:
+      # Same path inside as outside: sessions, git worktrees and absolute
+      # paths in prompts mean the same file for opencode, OpenHands and the
+      # host CLIs.
+      - ${AUTOOS_CODE_DIR:?run ai-stack.sh init}:${AUTOOS_CODE_DIR}:rw
+      # Config (rendered by ai-stack.sh init), sessions, npm/uv caches.
+      - ${AUTOOS_STACK_DATA:?run ai-stack.sh init}/opencode-home:/home/opencode
+    extra_hosts:
+      # omnigraph-server is published on the host's :8080.
+      - host.docker.internal:host-gateway
+    ports:
+      - "${AUTOOS_STACK_BIND:-0.0.0.0}:4096:4096"
+    # mem_limit removed 2026-09-29 (operator): the 1536m cap was OOM-killing
+    # PID 1 (opencode serve) repeatedly and every restart cut every in-flight
+    # run across the fleet. pids_limit mirrors the live `docker update`
+    # (operator 2026-09-30) so a recreate does not revert to 1024; init:true
+    # above is the actual cure, the higher ceiling only buys headroom.
+    pids_limit: 4096
+    healthcheck:
+      # The UI answers 200 without the password; /api/* is what is guarded.
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:4096/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    depends_on:
+      - omniroute
+    networks:
+      - autoos-ai
+
+  openhands:
+    # The image start-stack.sh ran as :latest, pinned to the digest measured
+    # working with its settings repair (agent-server 1.36.0). Bump
+    # deliberately: newer app images change the settings schema.
+    image: docker.openhands.dev/openhands/openhands@sha256:17d0648956f9c181ca4ee18bd8e87a6e1bc1ddeee3862395a92bdb33d38653c8
+    # Kept: start-stack.sh, healthcheck.sh and the profile sync all know it.
+    container_name: openhands-app
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # The entrypoint must start as root: it creates `enduser` with
+    # SANDBOX_USER_ID (useradd/usermod/groupadd: CHOWN, DAC_OVERRIDE, FOWNER)
+    # and drops to it with su (SETUID, SETGID). Measured: nothing else.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETUID
+      - SETGID
+    # LLM_API_KEY, and the remote-browser pair OH_SANDBOX_CONTAINER_URL_PATTERN
+    # + WEB_HOST when set (docs/web-services.md).
+    env_file:
+      - ${AUTOOS_STACK_CONFIG:?run ai-stack.sh init}/openhands.env
+    environment:
+      SANDBOX_USER_ID: ${AUTOOS_UID:-1000}
+      LLM_MODEL: openai/l1-orchestrator
+      LLM_BASE_URL: http://omniroute:20128/v1
+      LOG_ALL_EVENTS: "true"
+      # Every conversation's sandbox sees the code tree at the same path.
+      SANDBOX_VOLUMES: ${AUTOOS_CODE_DIR:?run ai-stack.sh init}:${AUTOOS_CODE_DIR}:rw
+    volumes:
+      # Root-equivalent on the host: the app starts sandbox containers.
+      # This is why OpenHands has no business on the open LAN (docs page).
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${AUTOOS_OPENHANDS_DIR:?run ai-stack.sh init}:/.openhands
+    extra_hosts:
+      # The app reaches each sandbox on its published host port.
+      - host.docker.internal:host-gateway
+    ports:
+      - "${AUTOOS_STACK_BIND:-0.0.0.0}:3000:3000"
+    mem_limit: ${AUTOOS_OPENHANDS_MEMORY:-2g}
+    pids_limit: 1024
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 5s
+      start_period: 90s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    depends_on:
+      - omniroute
+    networks:
+      - autoos-ai

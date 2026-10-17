@@ -1,0 +1,1066 @@
+# shellcheck shell=bash
+# sourced by tests/run-tests.sh; shares its harness and globals
+# shellcheck disable=SC2034,SC2154
+
+describe "herdr-sessions"
+
+# Boot-restore engine for Claude Code sessions in Herdr
+# (configuration/herdr-sessions/, imported from the Server repo's
+# Applications/herdr-sessions at 12f0ff7; the catalog component and its
+# dispatch are tested further down). Dry-run only: no live systemctl, no live herdr --
+# install.sh --dry-run never execs either (its `run()` wrapper only echoes
+# "would: ...", it never calls systemctl or herdr for real), so nothing here
+# needs an env/PATH stub the way a live-call test would.
+if it "herdr-sessions: smoke (bash -n, py_compile, install --dry-run)"; then
+    out="$(bash configuration/herdr-sessions/tests/test_smoke.sh 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# Finding 6 (qoder review, L1-backlog.review-herdr-qoder.md, low): prof_key's
+# `tr -d '[:space:]'` deleted whitespace INSIDE the value too, not just around
+# it -- HS_WORKDIR=/opt/My Files parsed as /opt/MyFiles, the units installed
+# cleanly, and the service would fail at boot with a nonexistent
+# WorkingDirectory, nothing at install time saying so. prof_key also parses
+# HERDR_BIN (used only for the system-scope dry-run precondition message,
+# which is safe to run with no root and no stubs), so that key -- not
+# HS_WORKDIR, which render_unit only ever splices into the system-scope
+# herdr-server.service and a REAL system-scope install needs root and writes
+# to a real /etc, disallowed for this suite -- is what exercises prof_key's
+# trimming here without live systemctl or a real /etc write.
+if it "herdr-sessions: prof_key trims only leading/trailing whitespace, not spaces inside the value"; then
+    tmp="$(mktemp -d)"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=system
+HERDR_BIN=$tmp/My Herdr/bin/herdr
+FALLBACK=none
+EOF
+    out="$(bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --dry-run 2>&1)"; rc=$?
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [[ "$out" == *"herdr at $tmp/My Herdr/bin/herdr"* ]]; then
+        pass
+    else
+        fail "rc=$rc out=${out:0:400}"
+    fi
+fi
+
+# Bug (b) from the proposal doc: which uuid a restored pane resumes, when a
+# background job's transcript shares the pane's own directory (unit tests).
+if it "herdr-sessions: uuid picking excludes background sessions (unit tests)"; then
+    out="$(python3 tests/test_herdr_sessions.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# ADDENDUM item 7: --profile accepts a path as well as a name under profiles/,
+# a re-run reports "already current" (cmp) or backs up a differing unit before
+# replacing it, and --unregister removes exactly what was installed. These
+# ARE real (non-dry-run) installs -- into a throwaway HOME, with systemctl and
+# loginctl stubbed via PATH so no live systemd is ever touched.
+hs_stub_bin() {
+    local dir="$1"
+    mkdir -p "$dir"
+    cat > "$dir/systemctl" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    cat > "$dir/loginctl" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "show-user" ] && echo yes
+exit 0
+STUB
+    chmod +x "$dir/systemctl" "$dir/loginctl"
+}
+
+# hs_fake_herdr <path>: an executable standing in for the herdr binary a profile
+# points HERDR_BIN at. install.sh refuses a real install -- in either scope --
+# when that path is not executable, because the units it is about to write exec
+# it, so any test that installs for real has to place one first.
+hs_fake_herdr() {
+    mkdir -p "$(dirname "$1")"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$1"
+    chmod +x "$1"
+}
+
+# hs_write_profile <conf> <scope> <workdir> [herdr_bin]
+# One place to write a profile: printf '%s' keeps every character of the values
+# literal (a backslash or a `%` in a path must survive into the profile).
+hs_write_profile() {
+    local conf="$1" scope="$2" workdir="$3" herdr="${4:-}"
+    {
+        printf 'HS_SCOPE=%s\n' "$scope"
+        printf 'HS_WORKDIR=%s\n' "$workdir"
+        [[ -n "$herdr" ]] && printf 'HERDR_BIN=%s\n' "$herdr"
+        printf 'FALLBACK=none\n'
+    } > "$conf"
+}
+
+# hs_unit_verifiable <unit-file>: systemd's own parser, minus the complaints that
+# are not this bug's (a sibling unit the scratch HOME does not install). Prints
+# the verdict; returns non-zero when the unit has a FATAL problem.
+hs_unit_fatal() {
+    local unit="$1" out
+    command -v systemd-analyze >/dev/null 2>&1 || return 1
+    out="$(systemd-analyze verify "$unit" 2>&1 || true)"
+    printf '%s\n' "$out" | grep -E 'Failed to resolve unit specifiers|Ignoring unknown escape|Unbalanced quoting|fatal error|bad unit file setting' || true
+}
+
+
+if it "herdr-sessions: install.sh accepts an absolute-path profile, not only a name"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"; rc=$?
+    got="$(grep -h HERDR_PROFILE "$tmp/home/.config/systemd/user/herdr-sessions-restore.service" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=\"$tmp/site.conf\"" ]; then
+        pass
+    else
+        fail "rc=$rc got=[$got] out=$out"
+    fi
+fi
+
+# Finding 5 (qoder review, L1-backlog.review-herdr-qoder.md, low): render_unit
+# spliced user-supplied paths into sed replacement text with no escaping -- a
+# profile at /srv/a&b/hs.conf rendered HERDR_PROFILE=/srv/a@PROFILE_PATH@b/hs.conf
+# (& expands to the matched token in sed's replacement), the install reported
+# success, and restore would fail at the next boot with a bogus profile path.
+if it "herdr-sessions: render_unit renders a profile path containing '&' literally, not as a sed backreference"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    site_dir="$tmp/a&b"; mkdir -p "$site_dir"
+    conf="$site_dir/hs.conf"
+    cat > "$conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$conf" 2>&1)"; rc=$?
+    got="$(grep -h HERDR_PROFILE "$tmp/home/.config/systemd/user/herdr-sessions-restore.service" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [ "$rc" = "0" ] && [ "$got" = "Environment=HERDR_PROFILE=\"$conf\"" ]; then
+        pass
+    else
+        fail "rc=$rc got=[$got] out=${out:0:300}"
+    fi
+fi
+
+# rv2 item 1: the user units set no PATH, so every pane inherited the user
+# manager's minimal environment -- claude, herdr and uv/uvx in ~/.local/bin were
+# not on it (the system units already set PATH=/root/.local/bin:...). Every
+# rendered user service must lead with %h/.local/bin, the user-scope twin of the
+# system line, so a pane finds the same tools an interactive shell would.
+if it "herdr-sessions: every rendered user unit puts %h/.local/bin first on PATH"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    want='Environment=PATH=%h/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+    ok=1
+    for u in herdr-server herdr-sessions-restore herdr-sessions-snapshot herdr-sessions-update; do
+        f="$tmp/home/.config/systemd/user/$u.service"
+        grep -qxF "$want" "$f" || { ok=0; echo "missing PATH in $u.service: [$(grep -n '^Environment=PATH' "$f" 2>/dev/null)]" >&2; }
+    done
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "one or more user units do not set %h/.local/bin on PATH"; fi
+fi
+
+# rv2 item 2: render_unit spliced arbitrary paths into the units with no
+# systemd quoting or escaping at all. A profile whose directory contains a
+# space rendered an unquoted Environment=/ExecStart= that systemd split at the
+# space ("Invalid environment assignment, ignoring: ..."), and a literal `%`
+# was read as a specifier ("Failed to resolve specifiers in %Qdir/..., ...
+# Invalid slot, ignoring") -- the unit loaded with its profile silently
+# dropped, so the restore ran against the wrong (or no) profile. The fix is
+# hostexec's (configuration/hostexec/install.sh): double `\`, `"` and `%`,
+# and wrap each substituted path in double quotes. WorkingDirectory stays
+# UNQUOTED -- systemd does not strip quotes there and fails the unit. Proven
+# on the exact rendered bytes and again through systemd's own parser.
+if it "herdr-sessions: render_unit systemd-quotes and escapes a profile path with a space and a %"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    site_dir="$tmp/sp ace %Qdir"; mkdir -p "$site_dir"
+    conf="$site_dir/hs.conf"
+    cat > "$conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    apdir="$ROOT/configuration/herdr-sessions"
+    esc_conf="$(printf '%s' "$conf" | sed 's/%/%%/g')"
+    got_profile="$(grep -h '^Environment=HERDR_PROFILE=' "$unit" 2>/dev/null || true)"
+    got_exec="$(grep -h '^ExecStart=' "$unit" 2>/dev/null || true)"
+    got_doc="$(grep -h '^Documentation=' "$unit" 2>/dev/null || true)"
+    # systemd-analyze verify reads every unit in the directory. Capture its
+    # verdict before the scratch HOME goes away; only the two messages this
+    # bug itself produces are fatal here (an absent dependency unit is not).
+    verify=""
+    command -v systemd-analyze >/dev/null 2>&1 && verify="$(systemd-analyze verify "$unit" 2>&1 || true)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$got_profile" == "Environment=HERDR_PROFILE=\"$esc_conf\"" ]] \
+        || { ok=0; echo "HERDR_PROFILE line: [$got_profile] want [Environment=HERDR_PROFILE=\"$esc_conf\"]" >&2; }
+    [[ "$got_exec" == "ExecStart=\"$apdir/herdr-sessions.sh\" restore" ]] \
+        || { ok=0; echo "ExecStart line: [$got_exec]" >&2; }
+    [[ "$got_doc" == "Documentation=\"file://$apdir/README.md\"" ]] \
+        || { ok=0; echo "Documentation line: [$got_doc]" >&2; }
+    [[ "$verify" != *"Failed to resolve specifiers"* ]] \
+        || { ok=0; echo "systemd-analyze verify still rejects the unit: $verify" >&2; }
+    [[ "$verify" != *"Invalid environment assignment"* ]] \
+        || { ok=0; echo "systemd-analyze verify still rejects the unit: $verify" >&2; }
+    if (( ok )); then pass; else fail "render_unit did not systemd-quote/escape the substituted paths"; fi
+fi
+
+# The system herdr-server unit is the one place @WORKDIR@ is spliced, into a
+# WorkingDirectory= line. WorkingDirectory is NOT quote-aware: a quoted value
+# fails to load ("Failed to resolve specifiers"/"path is not absolute"), so it
+# must stay bare (the value still gets `%`-doubling, since WorkingDirectory
+# also runs specifier expansion). Not renderable in this suite -- a real
+# system install needs root and writes /etc -- so pin the template shape.
+if it "herdr-sessions: the system herdr-server template keeps WorkingDirectory unquoted"; then
+    line="$(grep -h '^WorkingDirectory=' configuration/herdr-sessions/systemd/system/herdr-server.service || true)"
+    if [ "$line" = "WorkingDirectory=@WORKDIR@" ]; then
+        pass
+    else
+        fail "WorkingDirectory line is [$line], want the bare WorkingDirectory=@WORKDIR@ (systemd does not strip quotes here)"
+    fi
+fi
+
+# rv2 item 3: the herdr binary path was hard-coded into both herdr-server
+# templates -- the user unit's /bin/sh guard and exec both said
+# %h/.local/bin/herdr, the system unit's ExecCondition/ExecStart both said
+# /root/.local/bin/herdr -- even though the profile already carries HERDR_BIN
+# (example.conf sets it, and the driver reads it via lib/herdr-lib.sh). A host
+# that keeps herdr anywhere else installed a unit that could never start, with
+# nothing at install time saying so. install.sh now renders @HERDR_BIN@ from the
+# profile's HERDR_BIN, defaulting per scope to the previous literal when unset.
+if it "herdr-sessions: the rendered user herdr-server unit takes its herdr path from HERDR_BIN"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+HERDR_BIN=$tmp/opt x/herdr
+FALLBACK=none
+EOF
+    hs_fake_herdr "$tmp/opt x/herdr"
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-server.service"
+    got="$(grep -h '^ExecStart=' "$unit" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [[ "$got" == *'if "$1" status'* && "$got" == *"exec \"\$1\" server' _ \"$tmp/opt x/herdr\""* ]] \
+       && [[ "$got" != *"%h/.local/bin/herdr"* ]]; then
+        pass
+    else
+        fail "rendered ExecStart does not carry HERDR_BIN as one argument: [$got]"
+    fi
+fi
+
+# Default unchanged when the profile does not set HERDR_BIN: the user unit keeps
+# the %h specifier the manager expands per user (so a checkout installed for two
+# users resolves to each one's own home), now quoted as the one argument it is.
+if it "herdr-sessions: an unset HERDR_BIN leaves the user herdr-server path at %h/.local/bin/herdr"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-server.service"
+    got="$(grep -h '^ExecStart=' "$unit" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [[ "$got" == *'_ "%h/.local/bin/herdr"'* ]]; then
+        pass
+    else
+        fail "an unset HERDR_BIN changed the user unit's herdr path: [$got]"
+    fi
+fi
+
+# Both templates must carry the token, not a hard-coded path: the system scope
+# (default /root/.local/bin/herdr) cannot be rendered here -- a real system
+# install needs root and writes a real /etc -- so pin the template shape.
+if it "herdr-sessions: both herdr-server templates carry @HERDR_BIN@, not a hard-coded herdr path"; then
+    ok=1
+    for f in configuration/herdr-sessions/systemd/user/herdr-server.service \
+             configuration/herdr-sessions/systemd/system/herdr-server.service; do
+        grep -q '@HERDR_BIN@' "$f" || { ok=0; echo "no @HERDR_BIN@ token in $f" >&2; }
+        # Comments may name the default; only the directives must not hard-code it.
+        bad="$(grep -v '^[[:space:]]*#' "$f" | grep 'local/bin/herdr' | grep -v '@HERDR_BIN@' || true)"
+        [ -z "$bad" ] || { ok=0; echo "hard-coded herdr path in $f:"; echo "$bad" >&2; }
+    done
+    if (( ok )); then pass; else fail "a herdr-server template still hard-codes the herdr path"; fi
+fi
+
+if it "herdr-sessions: both templates pass @HERDR_BIN@ as an argument, never as the unit executable"; then
+    # rv4, measured on systemd 255: a unit's EXECUTABLE is validated as a path
+    # and systemd refuses one holding a quote, a backslash or a tab --
+    # "Executable name contains special characters: /opt/o'brien/herdr" plus
+    # "Unit configuration has fatal error, unit will not be started" -- while
+    # exactly the same path quoted as an ARGUMENT parses clean. So both
+    # templates hand @HERDR_BIN@ to the shell as "$1" (via `exec`, which keeps
+    # herdr the unit's own process) instead of putting it in the executable
+    # position or interpolating it into the script text.
+    ok=1
+    for f in configuration/herdr-sessions/systemd/user/herdr-server.service \
+             configuration/herdr-sessions/systemd/system/herdr-server.service; do
+        while IFS= read -r line; do
+            [[ "$line" == *'"$1"'* ]]        || { ok=0; echo "$f: exec line does not use \"\$1\": $line" >&2; }
+            [[ "$line" == *"' _ @HERDR_BIN@"* ]] \
+                                             || { ok=0; echo "$f: @HERDR_BIN@ is not the argument after the script: $line" >&2; }
+            [[ "$line" != "@HERDR_BIN@ "* ]] || { ok=0; echo "$f: execs the herdr path directly: $line" >&2; }
+            [[ "$line" != *'@HERDR_BIN_SH@'* ]] \
+                                             || { ok=0; echo "$f: still carries the removed @HERDR_BIN_SH@ token: $line" >&2; }
+        done < <(grep -E '^(ExecStart|ExecCondition)=' "$f")
+    done
+    if (( ok )); then pass; else fail "a herdr-server template puts HERDR_BIN where systemd validates it as an executable"; fi
+fi
+
+# rv4 (medium, install.sh's shell_quote + systemd_escape_path): the herdr path
+# was quoted for the unit with `printf %q` and never escaped for systemd, so
+# rv3's HERDR_BIN work re-opened the exact bug rv2 had fixed for the other
+# substituted paths. Reproduced on systemd 255 -- a HERDR_BIN containing a `%`
+# renders an ExecStart the parser refuses:
+#   "Failed to resolve unit specifiers in if /tmp/sp ace %Qdir/herdr ...:
+#    Invalid slot" and "Unit configuration has fatal error, unit will not be
+#    started"; one containing a space logs "Ignoring unknown escape sequences",
+#    because %q's backslashes are SHELL escapes and systemd does not process
+#    them inside its own quotes; a path with a single quote is worse still, %q
+#    emits `\'`, which ends systemd's single-quoted script silently.
+# The path now reaches the shell as one already-split argument
+# (`sh -c 'script' _ "$1"`), so there is no second escaping layer left to get
+# wrong, and the one that remains is systemd's -- doubling `%` except the
+# leading `%h/` specifier the user-scope default is built from.
+hs_bin_expectation() {  # <path> <keep-leading-h:0|1> -> the token systemd must read back
+    python3 -c '
+import sys
+p, keep = sys.argv[1], sys.argv[2] == "1"
+pre = ""
+if keep and p.startswith("%h/"):
+    pre, p = "%h", p[2:]
+sys.stdout.write("\"%s%s\"" % (pre, p.replace("\\", "\\\\").replace("\"", "\\\"").replace("%", "%%")))
+' "$1" "$2"
+}
+
+hs_assert_bin_renders() {  # <path-under-scratch> <keep-leading-h> -> 0 when the unit is right
+    local name="$1" keep="${2:-0}" tmp stub unit hb got want fatal ok=1
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    if [[ "$keep" == 1 ]]; then
+        # The %h spelling resolves against the installing user's HOME, which is
+        # what the precondition checks; the rendered unit keeps the specifier.
+        hb="%h/$name/herdr"
+        hs_fake_herdr "$tmp/home/${hb#%h/}"
+    else
+        hb="$tmp/$name/herdr"
+        hs_fake_herdr "$hb"
+    fi
+    hs_write_profile "$tmp/site.conf" user "$tmp/proj" "$hb"
+    want="$(hs_bin_expectation "$hb" "$keep")"
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-server.service"
+    got="$(grep -h '^ExecStart=' "$unit" 2>/dev/null || true)"
+    fatal="$(hs_unit_fatal "$unit")"
+    [[ "$got" == *" _ $want"* ]] \
+        || { ok=0; echo "ExecStart does not end with the one argument [$want]: [$got]" >&2; }
+    [[ "$got" != *'\ '* ]] \
+        || { ok=0; echo "ExecStart carries a shell backslash escape systemd ignores: [$got]" >&2; }
+    if [[ -n "$fatal" ]]; then ok=0; echo "systemd rejects the rendered unit: $fatal" >&2; fi
+    rm -rf "$tmp"
+    (( ok ))
+}
+
+if it "herdr-sessions: a HERDR_BIN with a space, a % or a quote renders one argument systemd accepts"; then
+    ok=1
+    for name in 'sp ace %Qdir' "o'brien" 'dq"uote' 'ba\ckslash' 'tabs	here' 'pct%%20'; do
+        hs_assert_bin_renders "$name" 0 || { ok=0; echo "  ^ for a HERDR_BIN directory named [$name]" >&2; }
+    done
+    if (( ok )); then pass; else fail "a HERDR_BIN with spaces/quotes/% rendered a unit systemd rejects"; fi
+fi
+
+if it "herdr-sessions: a HERDR_BIN copied from the %h default keeps its specifier and quotes its spaces"; then
+    # The user-scope default IS `%h/.local/bin/herdr`; a site that copies that
+    # spelling (or adds a directory with a space) must still get a unit whose
+    # `%h` the manager expands, whose rest is escaped, and which is one argument.
+    if hs_assert_bin_renders 'My Bin' 1; then pass
+    else fail "a %h/-prefixed HERDR_BIN lost its specifier or its quoting"; fi
+fi
+
+# rv4 (medium, install.sh's user-scope branch): only the system branch checked
+# `[ -x "$HERDR_BIN" ]`. A user profile pointing at a path with nothing there
+# installed a herdr-server unit that can never start -- the very defect the
+# HERDR_BIN change exists to close -- and said nothing at install time.
+if it "herdr-sessions: a user-scope install refuses when HERDR_BIN is not an executable"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_write_profile "$tmp/site.conf" user "$tmp/proj" "$tmp/nowhere/herdr"
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "rc=0 although no herdr exists at the profile's HERDR_BIN: ${out:0:300}" >&2; }
+    [[ "$out" == *"herdr is not installed"*"$tmp/nowhere/herdr"* ]] \
+        || { ok=0; echo "no FATAL naming the missing binary: ${out:0:300}" >&2; }
+    [[ -z "$(find "$tmp/home" -type f -o -type l 2>/dev/null)" ]] \
+        || { ok=0; echo "units were written although herdr is missing: $(find "$tmp/home" -mindepth 1 | head -5)" >&2; }
+    # ... and --dry-run still works with no herdr anywhere (the CI smoke path).
+    dry="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --dry-run 2>&1)"; drc=$?
+    (( drc == 0 )) || { ok=0; echo "a dry run failed with no herdr installed (rc=$drc): ${dry:0:300}" >&2; }
+    [[ -z "$(find "$tmp/home" -type f -o -type l 2>/dev/null)" ]] \
+        || { ok=0; echo "the dry run wrote files" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "the user-scope branch installed units for a herdr that is not there"; fi
+fi
+
+if it "herdr-sessions: the user-scope check resolves %h against the installing user's HOME"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    # The default (no HERDR_BIN key) means %h/.local/bin/herdr -- the same path
+    # the driver would run. Nothing there yet: refuse.
+    hs_write_profile "$tmp/site.conf" user "$tmp/proj"
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "rc=0 with no %h/.local/bin/herdr: ${out:0:300}" >&2; }
+    # Put one there and the same command installs.
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1 || {
+        ok=0; echo "install still failed with herdr at \$HOME/.local/bin/herdr"; }
+    [[ -f "$tmp/home/.config/systemd/user/herdr-server.service" ]] || { ok=0; echo "no unit written"; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "the user-scope precondition does not resolve %h against HOME"; fi
+fi
+
+# rv4 (low, install.sh's user-scope default vs. the driver): the unit's default
+# is the systemd spelling `%h/.local/bin/herdr`, but a profile that copies that
+# default into HERDR_BIN hands the SAME string to herdr-sessions.sh, whose
+# `command -v` has no idea what `%h` is and dies with "herdr not found" -- a
+# working unit and a broken driver off one profile. `%h/` now means this user's
+# home to both consumers.
+if it "herdr-sessions: the driver resolves a %h/ HERDR_BIN to the home it runs in"; then
+    tmp="$(mktemp -d)"
+    log="$tmp/herdr-argv.log"
+    mkdir -p "$tmp/home/.local/bin"
+    printf '#!/usr/bin/env bash\nprintf "%%s | %%s\\n" "$0" "$*" >> %s\nexit 0\n' "$log" > "$tmp/home/.local/bin/herdr"
+    chmod +x "$tmp/home/.local/bin/herdr"
+    hs_write_profile "$tmp/site.conf" user "$tmp/proj" '%h/.local/bin/herdr'
+    out="$(HOME="$tmp/home" bash configuration/herdr-sessions/herdr-sessions.sh status --profile "$tmp/site.conf" 2>&1)"; rc=$?
+    argv="$(cat "$log" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "the driver refused the profile (rc=$rc): ${out:0:300}" >&2; }
+    [[ "$out" != *"herdr not found"* ]] || { ok=0; echo "the driver could not run %h/.local/bin/herdr: ${out:0:300}" >&2; }
+    [[ "$argv" == *"/.local/bin/herdr | pane list"* ]] \
+        || { ok=0; echo "herdr was never exec'd at the resolved path: argv=[$argv] out=${out:0:300}" >&2; }
+    [[ "$argv" != *"%h"* ]] \
+        || { ok=0; echo "the driver passed a literal %h to herdr: argv=[$argv]" >&2; }
+    if (( ok )); then pass; else fail "the driver treated %h in HERDR_BIN as a literal directory"; fi
+fi
+
+if it "herdr-sessions: re-run reports already current; a drifted unit is backed up before replacing"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    rerun="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"
+    echo "# hand edit" >> "$unit"
+    drift="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1)"
+    n_bak="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name '*autoos-backup*' | wc -l | tr -d ' ')"
+    rm -rf "$tmp"
+    ok=1
+    printf '%s\n' "$rerun" | grep -q "herdr-sessions-restore.service: already current" || ok=0
+    printf '%s\n' "$drift" | grep -q "herdr-sessions-restore.service: differs from the installed copy -- backed up" || ok=0
+    [ "$n_bak" = "1" ] || ok=0
+    if [ "$ok" = "1" ]; then pass; else fail "rerun=[$rerun] drift=[$drift] backups=$n_bak"; fi
+fi
+
+if it "herdr-sessions: install.sh prints the all-current summary only when no unit changed"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    printf 'HS_SCOPE=user\nHS_WORKDIR=%s/proj\nFALLBACK=none\n' "$tmp" > "$tmp/site.conf"
+    run_hs() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" 2>&1; }
+    first="$(run_hs)"; rerun="$(run_hs)"
+    echo "# hand edit" >> "$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    drift="$(run_hs)"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$first" != *"herdr-sessions: all units already current"* ]] || { ok=0; echo "fresh install claims all current" >&2; }
+    [[ "$rerun" == *"herdr-sessions: all units already current"* ]] || { ok=0; echo "unchanged re-run lacks the summary" >&2; }
+    [[ "$drift" != *"herdr-sessions: all units already current"* ]] || { ok=0; echo "a run that replaced a unit claims all current" >&2; }
+    if (( ok )); then pass; else fail "first=[${first:0:200}] rerun=[${rerun:0:200}] drift=[${drift:0:300}]"; fi
+fi
+
+if it "herdr-sessions: two drifted re-runs in the same second keep two distinct backups"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    printf '#!/usr/bin/env bash\necho 20260926120000\n' > "$stub/date"; chmod +x "$stub/date"
+    printf 'HS_SCOPE=user\nHS_WORKDIR=%s/proj\nFALLBACK=none\n' "$tmp" > "$tmp/site.conf"
+    run_hs() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1; }
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    run_hs
+    echo "# edit one" >> "$unit"; run_hs
+    echo "# edit two" >> "$unit"; run_hs
+    n="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name 'herdr-sessions-restore.service.autoos-backup*' | wc -l | tr -d ' ')"
+    one="$(grep -l '# edit one' "$tmp"/home/.config/systemd/user/herdr-sessions-restore.service.autoos-backup* 2>/dev/null | wc -l)"
+    rm -rf "$tmp"
+    if [[ "$n" == 2 && "$one" -ge 1 ]]; then pass; else fail "backups=$n, backups holding the first edit=$one (a same-second backup overwrote the earlier one)"; fi
+fi
+
+# Review follow-up: the backup stamp here (and in templates/rescue-bootstrap.sh)
+# was %Y%m%d%H%M%S, while every other backup site in the repository
+# (lib/linux/install.sh backup_path, the agent harness) writes %Y%m%d-%H%M%S.
+# Two spellings of one name made the documented <file>.autoos-backup-<stamp>
+# shape un-greppable. Pin the canonical format: the stub date answers ONLY the
+# hyphenated shape, and a legacy-formatted call must leave no backup behind.
+if it "herdr-sessions: a drifted unit's backup carries the canonical hyphenated stamp"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    cat > "$stub/date" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+    '+%Y%m%d-%H%M%S') echo '20260926120000' ;;
+    *) echo 'legacy-no-hyphen' ;;
+esac
+STUB
+    chmod +x "$stub/date"
+    printf 'HS_SCOPE=user\nHS_WORKDIR=%s/proj\nFALLBACK=none\n' "$tmp" > "$tmp/site.conf"
+    run_hs() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1; }
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    run_hs
+    echo "# drifted" >> "$unit"
+    run_hs
+    canon="$unit.autoos-backup-20260926120000"
+    legacy="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name '*autoos-backup-legacy-no-hyphen*' | wc -l | tr -d ' ')"
+    found=0; [[ -f "$canon" ]] && found=1
+    rm -rf "$tmp"
+    if [[ "$found" == 1 && "$legacy" == 0 ]]; then
+        pass
+    else
+        fail "backup not at the canonical hyphenated stamp (found=$found, legacy-stamped=$legacy)"
+    fi
+fi
+
+if it "herdr-sessions: --unregister removes what it installed, twice is 'nothing to remove'"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    first="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"
+    left="$(find "$tmp/home/.config/systemd/user" -mindepth 1 -maxdepth 1 ! -name '*autoos-backup*' 2>/dev/null | wc -l | tr -d ' ')"
+    second="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"
+    rm -rf "$tmp"
+    if printf '%s\n' "$first" | grep -q "removed 5 unit(s)" && [ "$left" = "0" ] && printf '%s\n' "$second" | grep -q "nothing to remove"; then
+        pass
+    else
+        fail "first=[$first] left=$left second=[$second]"
+    fi
+fi
+
+# Finding 2 (qoder review, L1-backlog.review-herdr-qoder.md, medium):
+# remove_unit's backup had no taken-suffix loop, and cp -p overwrites -- an
+# --unregister backup in the same second as a drifted install's own backup
+# silently destroyed the only copy of the user's original unit. Both paths
+# now share one helper (unique_backup_path + back_up_or_die) instead of
+# drifting apart.
+if it "herdr-sessions: remove_unit's backup uses install_unit's collision loop -- a same-second unregister keeps both backups"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    printf '#!/usr/bin/env bash\necho 20260926130000\n' > "$stub/date"; chmod +x "$stub/date"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    run_hs2() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" "$@" >/dev/null 2>&1; }
+    run_hs2   # fresh install: no backup yet
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    echo "# original edit" >> "$unit"
+    run_hs2   # drift, same stubbed second: backs up "# original edit" content
+    run_hs2 --unregister   # same stubbed second: must not overwrite that backup
+    n="$(find "$tmp/home/.config/systemd/user" -maxdepth 1 -name 'herdr-sessions-restore.service.autoos-backup*' 2>/dev/null | wc -l | tr -d ' ')"
+    original_kept="$(grep -l '# original edit' "$tmp"/home/.config/systemd/user/herdr-sessions-restore.service.autoos-backup* 2>/dev/null | wc -l)"
+    rm -rf "$tmp"
+    if [[ "$n" == 2 && "$original_kept" -ge 1 ]]; then
+        pass
+    else
+        fail "backups=$n, backups holding the original edit=$original_kept (unregister overwrote the install backup)"
+    fi
+fi
+
+if it "herdr-sessions: remove_unit is fail-closed -- a backup that cannot be written leaves the unit in place"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; hs_stub_bin "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" >/dev/null 2>&1
+    unit="$tmp/home/.config/systemd/user/herdr-sessions-restore.service"
+    cat > "$stub/cp" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$stub/cp"
+    out="$(HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" --unregister 2>&1)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "rc=0 although the backup copy failed: ${out:0:300}" >&2; }
+    [[ "$out" == *"FATAL"*"back up"* ]] || { ok=0; echo "no FATAL backup message: ${out:0:300}" >&2; }
+    [[ -f "$unit" ]] || { ok=0; echo "the unit was removed although its backup failed" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "remove_unit is not fail-closed on a backup failure"; fi
+fi
+
+# Finding 3 (qoder review, L1-backlog.review-herdr-qoder.md, medium):
+# remove_unit disabled but never stopped, and install starts the snapshot
+# timer with --now -- so --unregister left the timer active in memory,
+# still firing and writing snapshots, while detection now (correctly, after
+# finding 1/2's fixes) reports herdr-sessions gone -- letting claude-autostart
+# install and run concurrently.
+if it "herdr-sessions: --unregister disables --now (stops the timer) before removing, not disable alone"; then
+    tmp="$(mktemp -d)"; stub="$tmp/stub"; mkdir -p "$stub"
+    hs_fake_herdr "$tmp/home/.local/bin/herdr"
+    log="$tmp/systemctl.log"
+    cat > "$stub/systemctl" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+exit 0
+STUB
+    chmod +x "$stub/systemctl"
+    cat > "$stub/loginctl" <<'STUB'
+#!/usr/bin/env bash
+[ "$1" = "show-user" ] && echo yes
+exit 0
+STUB
+    chmod +x "$stub/loginctl"
+    cat > "$tmp/site.conf" <<EOF
+HS_SCOPE=user
+HS_WORKDIR=$tmp/proj
+FALLBACK=none
+EOF
+    run_hs3() { HOME="$tmp/home" PATH="$stub:$PATH" bash configuration/herdr-sessions/install.sh --profile "$tmp/site.conf" "$@" >/dev/null 2>&1; }
+    run_hs3
+    : > "$log"
+    run_hs3 --unregister
+    n="$(grep -c '^--user disable --now ' "$log" 2>/dev/null || true)"
+    stale="$(grep -c '^--user disable [^-]' "$log" 2>/dev/null || true)"
+    rm -rf "$tmp"
+    if [[ "$n" -ge 1 && "$stale" -eq 0 ]]; then
+        pass
+    else
+        fail "disable --now calls=$n, disable-without-now calls=$stale"
+    fi
+fi
+
+# Item 8 (L0): a single pane process killed by the kernel OOM killer must not
+# take the whole herdr-server unit down with it -- systemd's default
+# OOMPolicy=stop did exactly that, twice, ending every pane in the session.
+if it "herdr-sessions: both server unit templates set OOMPolicy=continue so an OOM-killed pane doesn't stop the whole service"; then
+    ok=1
+    for f in configuration/herdr-sessions/systemd/user/herdr-server.service configuration/herdr-sessions/systemd/system/herdr-server.service; do
+        grep -q '^OOMPolicy=continue$' "$f" || { ok=0; echo "missing OOMPolicy=continue in $f" >&2; }
+    done
+    if (( ok )); then pass; else fail "OOMPolicy=continue missing from one or both server unit templates"; fi
+fi
+
+# herdr_stub_driver <dir> [mode]: writes a fake configuration/herdr-sessions/
+# driver (the interface herdr-a imports separately - see spec.herdr-b.md's
+# PARALLEL note: `install.sh --profile <path> [--dry-run]`) into
+# <dir>/install.sh. --dry-run always prints a "would" line and NEVER touches
+# <dir>/installed-marker, regardless of mode - that is exactly what "dry run
+# changes nothing" checks. A real run's behaviour depends on mode:
+#   installed (default) - touches the marker, prints "installed from <profile>"
+#   current             - prints "already current", touches no marker (the
+#                         driver's OWN idempotency, as on a second call)
+#   fail                - exits 1
+#   dry-fail            - exits 1 only under --dry-run
+herdr_stub_driver() {
+    local dir="$1" mode="${2:-installed}"
+    mkdir -p "$dir"
+    cat >"$dir/install.sh" <<STUB
+#!/usr/bin/env bash
+set -euo pipefail
+profile=""; dry=0
+while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+        --profile) profile="\$2"; shift 2 ;;
+        --dry-run) dry=1; shift ;;
+        *) shift ;;
+    esac
+done
+if (( dry )); then
+    if [[ "$mode" == dry-fail ]]; then
+        printf 'driver: dry boom\n' >&2
+        exit 1
+    fi
+    printf 'would restore panes from %s\n' "\$profile"
+    exit 0
+fi
+case "$mode" in
+    fail) printf 'driver: boom\n' >&2; exit 1 ;;
+    current) printf '    x.service: already current\nherdr-sessions: all units already current\n'; exit 0 ;;
+    partial) printf '    x.service: already current\n    y.service: installed\n'; exit 0 ;;
+    *) printf 'installed\n' >"$dir/installed-marker"; printf 'installed from %s\n' "\$profile"; exit 0 ;;
+esac
+STUB
+    chmod +x "$dir/install.sh"
+}
+
+# herdr_run <scratch> <driver-dir> <profile-or-empty> [dry:0|1] [plan_ids]
+# One install_herdr_sessions call against a scratch SYS_HOME, with
+# AUTOOS_HERDR_SESSIONS_DIR pointed at the stub driver (the test seam
+# lib/linux/install.sh adds next to install_herdr_sessions for exactly this).
+# INSTALL_SCRIPT_STATE cannot cross the subshell boundary back to the caller
+# (lib/linux/install.sh's own note on that global), so it is printed as a
+# trailer line and parsed back out - the pattern the antigravity tests use.
+herdr_run() {
+    local sb="$1" drv="$2" profile="$3" dry="${4:-0}" plan="${5:-}"
+    (
+        AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN="$dry"
+        AUTOOS_HERDR_SESSIONS_DIR="$drv"; PLAN_IDS="$plan"
+        if [[ -n "$profile" ]]; then AUTOOS_ANSWERS[herdr_sessions_profile]="$profile"
+        else unset 'AUTOOS_ANSWERS[herdr_sessions_profile]'; fi
+        INSTALL_SCRIPT_STATE=""
+        rc=0
+        install_herdr_sessions || rc=$?
+        printf 'HERDR_RESULT %s %s\n' "${INSTALL_SCRIPT_STATE:-installed}" "$rc"
+    ) 2>&1
+}
+herdr_state() { sed -n 's/^HERDR_RESULT \([a-z]*\) [0-9]*$/\1/p' <<<"$1"; }
+herdr_rc()    { sed -n 's/^HERDR_RESULT [a-z]* \([0-9]*\)$/\1/p' <<<"$1"; }
+
+if it "herdr-sessions: a dry run calls the driver with --dry-run and changes nothing"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$drv" "$profile" 1)"
+    rc="$(herdr_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:300}" >&2; }
+    [[ "$out" == *"would run: bash"* && "$out" == *"--dry-run"* ]] || { ok=0; echo "no 'would run ... --dry-run' line: ${out:0:300}" >&2; }
+    [[ "$out" == *"would restore panes from $profile"* ]] || { ok=0; echo "the driver's own dry-run output is missing: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "a dry run touched the driver's marker file" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions dry run is not side-effect free"; fi
+fi
+
+# A dry run must not silently pass when the driver's own dry run fails: the
+# driver is called in a command substitution whose non-zero status used to be
+# discarded (install_script runs under install_component's `|| rc=$?`, which
+# suppresses errexit), so a failure printed nothing and reported success.
+if it "herdr-sessions: a dry run reports a driver that fails its own dry run"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" dry-fail
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$drv" "$profile" 1)"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "a failing dry run reported success (rc=$rc): ${out:0:300}" >&2; }
+    [[ "$out" == *"dry run failed"* && "$out" == *"driver: dry boom"* ]] \
+        || { ok=0; echo "the failure was not reported: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "a dry run touched the driver's marker file" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions swallows a failing dry run"; fi
+fi
+
+# Finding 4 (qoder review, L1-backlog.review-herdr-qoder.md, low): the dry-run
+# branch ran the driver uncaptured, so its output bypassed the ui_* layer --
+# under NO_COLOR it printed the driver's raw ANSI escapes and none of its
+# would-lines reached the AutoOS log file, unlike the real (non-dry) path,
+# which captures and re-emits via ui_muted. Proven here via ui_muted's own
+# side effect (it also calls _log, which writes to AUTOOS_LOG) rather than by
+# stdout content alone, since stdout is captured either way by this test's
+# own subshell.
+if it "herdr-sessions: a dry run's driver output goes through ui_muted, reaching the AutoOS log like the real path"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile
+' >"$profile"
+    logfile="$sb/autoos.log"
+    out="$( ( AUTOOS_ROOT="$ROOT"; SYS_HOME="$sb/home"; AUTOOS_DRY_RUN=1
+              AUTOOS_HERDR_SESSIONS_DIR="$drv"; PLAN_IDS=""; AUTOOS_LOG="$logfile"
+              AUTOOS_ANSWERS[herdr_sessions_profile]="$profile"
+              INSTALL_SCRIPT_STATE=""
+              install_herdr_sessions ) 2>&1 )"
+    [[ "$out" == *"would restore panes from $profile"* ]] || { ok=0; echo "driver dry-run line missing from stdout: ${out:0:300}" >&2; }
+    grep -q "would restore panes from $profile" "$logfile" 2>/dev/null \
+        || { ok=0; echo "driver dry-run line never reached the AutoOS log (ui_muted bypassed): $(cat "$logfile" 2>/dev/null)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions dry-run does not route the driver's output through ui_muted"; fi
+fi
+
+if it "herdr-sessions: an empty profile answer is skipped, never a guessed path"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    out="$(herdr_run "$sb" "$drv" "")"
+    state="$(herdr_state "$out")"; rc="$(herdr_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "state=[$state] want skipped" >&2; }
+    [[ "$out" == *"skipped: no profile"* ]] || { ok=0; echo "no 'skipped: no profile' line: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran although no profile was given" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions guessed at a profile instead of skipping"; fi
+fi
+
+if it "herdr-sessions: a profile path that is not a regular file fails, naming the path"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/does-not-exist.conf"
+    out="$(herdr_run "$sb" "$drv" "$profile")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "rc=0 for a missing profile: ${out:0:300}" >&2; }
+    [[ "$out" == *"$profile"* ]] || { ok=0; echo "the error does not name the path: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran against a missing profile" >&2; }
+    # A directory is not a regular file either.
+    mkdir -p "$sb/adir"
+    out2="$(herdr_run "$sb" "$drv" "$sb/adir")"; rc2="$(herdr_rc "$out2")"
+    (( rc2 != 0 )) || { ok=0; echo "rc=0 for a directory given as the profile: ${out2:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions did not refuse a bad profile path"; fi
+fi
+
+if it "herdr-sessions: a missing driver directory is a clear error, not a silent success"; then
+    sb="$(mktemp -d)"; ok=1
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$sb/no-such-driver-dir" "$profile")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "rc=0 with no driver present: ${out:0:300}" >&2; }
+    [[ "$out" == *"driver not found"* && "$out" == *"$sb/no-such-driver-dir"* ]] || { ok=0; echo "no clear error naming the driver dir: ${out:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "install_herdr_sessions silently accepted a missing driver"; fi
+fi
+
+if it "herdr-sessions: the driver reporting already current is skipped, never installed a second time"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out1="$(herdr_run "$sb" "$drv" "$profile")"
+    state1="$(herdr_state "$out1")"; rc1="$(herdr_rc "$out1")"
+    (( rc1 == 0 )) || { ok=0; echo "first run rc=$rc1: ${out1:0:300}" >&2; }
+    [[ "$state1" != skipped ]] || { ok=0; echo "the FIRST run already reports skipped - the test is not isolating the second run" >&2; }
+    [[ -e "$drv/installed-marker" ]] || { ok=0; echo "the driver never ran on the first call" >&2; }
+    # AGENTS.md hard rule 3: safe to run twice, second run reports skipped. Here
+    # the DRIVER is the one deciding it is current (its own idempotency) - the
+    # dispatch must pass that straight through, not report installed again.
+    herdr_stub_driver "$drv" current
+    out2="$(herdr_run "$sb" "$drv" "$profile")"
+    state2="$(herdr_state "$out2")"; rc2="$(herdr_rc "$out2")"
+    (( rc2 == 0 )) || { ok=0; echo "second run rc=$rc2: ${out2:0:300}" >&2; }
+    [[ "$state2" == skipped ]] || { ok=0; echo "second run state=[$state2] want skipped" >&2; }
+    [[ "$out2" == *"already current"* ]] || { ok=0; echo "no 'already current' line: ${out2:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "a second herdr-sessions run reported installed instead of skipped"; fi
+fi
+
+if it "herdr-sessions: refuses when claude-autostart was selected this run or is already installed, writing nothing"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+
+    out="$(herdr_run "$sb" "$drv" "$profile" 0 "claude-autostart")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "rc=0 with claude-autostart selected: ${out:0:300}" >&2; }
+    [[ "$out" == *"claude-autostart"* ]] || { ok=0; echo "no mention of claude-autostart: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the conflict (selected)" >&2; }
+
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/claude-sessions-restore.service"
+    out2="$(herdr_run "$sb" "$drv" "$profile" 0 "")"
+    state2="$(herdr_state "$out2")"; rc2="$(herdr_rc "$out2")"
+    (( rc2 == 0 )) || { ok=0; echo "rc=$rc2 want 0 with claude-autostart already installed: ${out2:0:300}" >&2; }
+    [[ "$state2" == skipped ]] || { ok=0; echo "state=[$state2] want skipped (installed case)" >&2; }
+    [[ "$out2" == *"claude-autostart"* && "$out2" == *"skipped"* ]] || { ok=0; echo "no skip naming claude-autostart (installed case): ${out2:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the skip (installed)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions installed alongside claude-autostart"; fi
+fi
+
+if it "herdr-sessions: claude-autostart refuses when herdr-sessions was selected this run or is already installed, writing nothing"; then
+    sb="$(mktemp -d)"; ok=1
+    out="$(autostart_run_full "$sb" 0 "herdr-sessions")"
+    rc="$(autostart_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "rc=0 with herdr-sessions selected: ${out:0:300}" >&2; }
+    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions: ${out:0:300}" >&2; }
+    [[ ! -d "$sb/home/.config/systemd/user" ]] || { ok=0; echo "claude-autostart wrote units despite the conflict (selected)" >&2; }
+
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    out2="$(autostart_run_full "$sb" 0 "")"
+    state2="$(autostart_state "$out2")"; rc2="$(autostart_rc "$out2")"
+    (( rc2 == 0 )) || { ok=0; echo "rc=$rc2 want 0 with herdr-sessions already installed: ${out2:0:300}" >&2; }
+    [[ "$state2" == skipped ]] || { ok=0; echo "state=[$state2] want skipped (installed case)" >&2; }
+    [[ "$out2" == *"herdr-sessions"* && "$out2" == *"skipped"* ]] || { ok=0; echo "no skip naming herdr-sessions (installed case): ${out2:0:300}" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "claude-autostart wrote units despite the skip (installed)" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart installed alongside herdr-sessions"; fi
+fi
+
+if it "herdr-sessions detect: true only when the restore service unit exists (user scope)"; then
+    sb="$(mktemp -d)"; ok=1
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/no-etc"
+      ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with no unit file present" >&2; }
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/no-etc"
+      script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the user-scope unit file exists" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions detection does not match the user-scope unit file's presence"; fi
+fi
+
+# Finding 1 (qoder review, L1-backlog.review-herdr-qoder.md): a SYSTEM-scope
+# install (HS_SCOPE=system, units in /etc/systemd/system - see
+# configuration/herdr-sessions/install.sh) was invisible here, so a later
+# claude-autostart install passed the install_claude_autostart mutual-exclusion
+# gate (lib/linux/install.sh: the other selected in this plan is refused, the
+# other already installed is skipped, rc 0) and ran beside a live herdr
+# restore. /etc/systemd/system is injectable
+# via AUTOOS_ETC_SYSTEMD_SYSTEM_DIR, the same seam pattern as SYS_HOME, so
+# this never needs a real /etc write to test.
+if it "herdr-sessions detect: also true for a system-scope unit, independent of the user-scope path"; then
+    sb="$(mktemp -d)"; ok=1
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+      ! script_is_installed herdr-sessions ) || { ok=0; echo "reported installed with neither path present" >&2; }
+    mkdir -p "$sb/etc"
+    touch "$sb/etc/herdr-sessions-restore.service"
+    ( SYS_HOME="$sb/home"; AUTOOS_ETC_SYSTEMD_SYSTEM_DIR="$sb/etc"
+      script_is_installed herdr-sessions ) || { ok=0; echo "reported NOT installed although the system-scope unit file exists" >&2; }
+    [[ ! -d "$sb/home" ]] || { ok=0; echo "the user-scope dir was touched by a system-scope check" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions detection does not see a system-scope install"; fi
+fi
+
+if it "herdr-sessions: claude-autostart's mutual-exclusion gate sees a system-scope herdr-sessions install too"; then
+    sb="$(mktemp -d)"; ok=1
+    mkdir -p "$sb/home/.config/systemd/user" "$sb/etc"
+    touch "$sb/etc/herdr-sessions-restore.service"
+    out="$(autostart_run_full "$sb" 0 "" "$sb/etc")"
+    state="$(autostart_state "$out")"; rc="$(autostart_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc want 0 with herdr-sessions installed system-scope only: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "state=[$state] want skipped (system-scope case)" >&2; }
+    [[ "$out" == *"herdr-sessions"* && "$out" == *"skipped"* ]] || { ok=0; echo "no skip naming herdr-sessions (system-scope case): ${out:0:300}" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "claude-autostart wrote units despite the system-scope skip" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart installed alongside a system-scope-only herdr-sessions"; fi
+fi
+
+if it "herdr-sessions: claude-autostart skips when herdr-sessions is already installed (not selected)"; then
+    sb="$(mktemp -d)"; ok=1
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    out="$(autostart_run_full "$sb" 0 "")"
+    state="$(autostart_state "$out")"; rc="$(autostart_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc want 0: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "state=[$state] want skipped" >&2; }
+    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "no mention of herdr-sessions: ${out:0:300}" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "claude-autostart wrote units despite the skip" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart did not skip when herdr-sessions is already installed"; fi
+fi
+
+if it "herdr-sessions: claude-autostart dry run skips when herdr-sessions is already installed"; then
+    sb="$(mktemp -d)"; ok=1
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    out="$(autostart_run_full "$sb" 1 "")"
+    state="$(autostart_state "$out")"; rc="$(autostart_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "dry-run rc=$rc want 0: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "dry-run state=[$state] want skipped" >&2; }
+    [[ "$out" == *"herdr-sessions"* ]] || { ok=0; echo "dry-run names nothing: ${out:0:300}" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name 'claude-sessions-*')" ]] \
+        || { ok=0; echo "dry run wrote units despite the skip" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "claude-autostart dry run did not skip when herdr-sessions is already installed"; fi
+fi
+
+if it "herdr-sessions: herdr-sessions skips when claude-autostart is already installed (not selected)"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/claude-sessions-restore.service"
+    out="$(herdr_run "$sb" "$drv" "$profile" 0 "")"
+    state="$(herdr_state "$out")"; rc="$(herdr_rc "$out")"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc want 0: ${out:0:300}" >&2; }
+    [[ "$state" == skipped ]] || { ok=0; echo "state=[$state] want skipped" >&2; }
+    [[ "$out" == *"claude-autostart"* ]] || { ok=0; echo "no mention of claude-autostart: ${out:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the skip" >&2; }
+    outdry="$(herdr_run "$sb" "$drv" "$profile" 1 "")"
+    rcdry="$(herdr_rc "$outdry")"; statedry="$(herdr_state "$outdry")"
+    (( rcdry == 0 )) || { ok=0; echo "dry-run rc=$rcdry want 0: ${outdry:0:300}" >&2; }
+    [[ "$statedry" == skipped ]] || { ok=0; echo "dry-run state=[$statedry] want skipped" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "herdr-sessions did not skip when claude-autostart is already installed"; fi
+fi
+
+if it "herdr-sessions: with both units already present, both installers report skipped, rc 0"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    mkdir -p "$sb/home/.config/systemd/user"
+    printf 'seeded claude restore\n' >"$sb/home/.config/systemd/user/claude-sessions-restore.service"
+    printf 'seeded herdr restore\n' >"$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    out_h="$(herdr_run "$sb" "$drv" "$profile" 0 "")"
+    state_h="$(herdr_state "$out_h")"; rc_h="$(herdr_rc "$out_h")"
+    (( rc_h == 0 )) || { ok=0; echo "herdr rc=$rc_h want 0: ${out_h:0:300}" >&2; }
+    [[ "$state_h" == skipped ]] || { ok=0; echo "herdr state=[$state_h] want skipped" >&2; }
+    [[ "$out_h" == *"claude-autostart"* && "$out_h" == *"skipped"* ]] || { ok=0; echo "herdr skip names nothing: ${out_h:0:300}" >&2; }
+    [[ ! -e "$drv/installed-marker" ]] || { ok=0; echo "the driver ran despite the skip" >&2; }
+    out_a="$(autostart_run_full "$sb" 0 "")"
+    state_a="$(autostart_state "$out_a")"; rc_a="$(autostart_rc "$out_a")"
+    (( rc_a == 0 )) || { ok=0; echo "autostart rc=$rc_a want 0: ${out_a:0:300}" >&2; }
+    [[ "$state_a" == skipped ]] || { ok=0; echo "autostart state=[$state_a] want skipped" >&2; }
+    [[ "$out_a" == *"herdr-sessions"* && "$out_a" == *"skipped"* ]] || { ok=0; echo "autostart skip names nothing: ${out_a:0:300}" >&2; }
+    [[ "$(cat "$sb/home/.config/systemd/user/claude-sessions-restore.service")" == "seeded claude restore" ]] || { ok=0; echo "claude-autostart rewrote the seeded unit" >&2; }
+    [[ -z "$(find "$sb/home/.config/systemd/user" -maxdepth 1 -name '*.autoos-backup-*')" ]] || { ok=0; echo "autostart took a backup during a skip" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "both installers did not skip with both units already present"; fi
+fi
+
+if it "herdr-sessions: both selected in one plan is still refused"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"; ok=1
+    herdr_stub_driver "$drv" installed
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$drv" "$profile" 0 "claude-autostart herdr-sessions")"
+    rc="$(herdr_rc "$out")"
+    (( rc != 0 )) || { ok=0; echo "herdr rc=0 with both selected: ${out:0:300}" >&2; }
+    [[ "$out" == *"claude-autostart"* ]] || { ok=0; echo "herdr names nothing: ${out:0:300}" >&2; }
+    out2="$(autostart_run_full "$sb" 0 "claude-autostart herdr-sessions")"
+    rc2="$(autostart_rc "$out2")"
+    (( rc2 != 0 )) || { ok=0; echo "autostart rc=0 with both selected: ${out2:0:300}" >&2; }
+    [[ "$out2" == *"herdr-sessions"* ]] || { ok=0; echo "autostart names nothing: ${out2:0:300}" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "both-selected plan was not refused"; fi
+fi
+
+if it "dry run with herdr-sessions installed still exits 0 (workstation selects claude-autostart)"; then
+    sb="$(mktemp -d)"; ok=1
+    mkdir -p "$sb/home/.config/systemd/user"
+    touch "$sb/home/.config/systemd/user/herdr-sessions-restore.service"
+    out="$(SUDO_USER="autoos-no-such-user-excl-skip" HOME="$sb/home" bash setup.sh --profile workstation --dry-run --yes --no-color 2>&1)"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "rc=$rc want 0: $(printf '%s' "$out" | tail -n 5)" >&2; }
+    executed="$(printf '%s' "$out" | grep -c '^run:' || true)"
+    [[ "$executed" == 0 ]] || { ok=0; echo "executed=$executed want 0" >&2; }
+    rm -rf "$sb"
+    if (( ok )); then pass; else fail "workstation dry run fails when herdr-sessions is already installed"; fi
+fi
+
+if it "herdr-sessions: a driver run that replaced some units is installed, not skipped"; then
+    sb="$(mktemp -d)"; drv="$sb/driver"
+    herdr_stub_driver "$drv" partial
+    profile="$sb/site.conf"; printf '# site profile\n' >"$profile"
+    out="$(herdr_run "$sb" "$drv" "$profile")"
+    state="$(herdr_state "$out")"
+    rm -rf "$sb"
+    if [[ "$state" != skipped ]]; then pass; else fail "one unit changed but the component reports skipped: ${out:0:300}"; fi
+fi
+

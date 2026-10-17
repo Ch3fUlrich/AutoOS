@@ -1,0 +1,3076 @@
+# shellcheck shell=bash
+# sourced by tests/run-tests.sh; shares its harness and globals
+# shellcheck disable=SC2034,SC2154
+
+# ─── WSL detection ──────────────────────────────────────────────────────────
+describe "MCP wiring"
+
+if it "graphify is registered once, at user scope"; then
+    # The command is cwd-relative, so one definition serves every repository its
+    # own graph. A per-repo entry would pin one repo's graph for all of them.
+    if grep -q "register_mcp_server graphify user" lib/linux/install.sh &&
+       grep -q "graphify-out/graph.json" lib/linux/install.sh; then pass
+    else fail "graphify is not a single cwd-relative user-scope entry"; fi
+fi
+
+if it "omnigraph is never registered at user scope"; then
+    # A user-scope omnigraph silently wins over the per-repo one and answers
+    # from the wrong graph, which looks identical to it working.
+    if grep -q "register_mcp_server omnigraph" lib/linux/install.sh; then
+        fail "omnigraph is being registered as a user server"
+    elif grep -q "claude mcp remove omnigraph" lib/linux/install.sh; then pass
+    else fail "the shadowing case is never called out"; fi
+fi
+
+if it "a project MCP server is approved, not just declared"; then
+    # A tracked .mcp.json cannot approve itself; Claude Code skips an unapproved
+    # project server silently.
+    if grep -q "enabledMcpjsonServers" lib/linux/install.sh; then pass
+    else fail "nothing writes the approval list"; fi
+fi
+
+if it "approving a server keeps the rest of the settings file"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.claude"
+    printf '%s' '{"permissions":{"allow":["Bash(ls:*)"]},"enabledMcpjsonServers":["already"]}' \
+        >"$tmp/.claude/settings.local.json"
+    AUTOOS_DRY_RUN=0 enable_project_mcp_server "$tmp" omnigraph >/dev/null 2>&1
+    got="$(python3 -c "
+import json,sys
+d=json.load(open(sys.argv[1],encoding='utf-8'))
+print('perm' if d.get('permissions') else 'LOST', ','.join(d.get('enabledMcpjsonServers',[])))
+" "$tmp/.claude/settings.local.json")"
+    rm -rf "$tmp"
+    if [[ "$got" == "perm already,omnigraph" ]]; then pass
+    else fail "expected the permissions block kept and omnigraph appended, got: $got"; fi
+fi
+
+if it "approving twice adds nothing the second time"; then
+    tmp="$(mktemp -d)"
+    AUTOOS_DRY_RUN=0 enable_project_mcp_server "$tmp" omnigraph >/dev/null 2>&1
+    AUTOOS_DRY_RUN=0 enable_project_mcp_server "$tmp" omnigraph >/dev/null 2>&1
+    n="$(python3 -c "
+import json,sys
+print(len(json.load(open(sys.argv[1],encoding='utf-8')).get('enabledMcpjsonServers',[])))
+" "$tmp/.claude/settings.local.json")"
+    rm -rf "$tmp"
+    if [[ "$n" == "1" ]]; then pass; else fail "expected 1 entry, got $n"; fi
+fi
+
+if it "no bearer token is ever invented"; then
+    # This repository is public. A real-looking secret in it is a leak whether or
+    # not it happens to work, and a guessed one fails as an unexplainable 401.
+    if grep -qE "OMNIGRAPH_TOKEN=[\"']?[A-Za-z0-9]" lib/linux/install.sh; then
+        fail "a token literal is present"
+    elif grep -q "OMNIGRAPH_TOKEN is not set" lib/linux/install.sh; then pass
+    else fail "a missing token is never reported"; fi
+fi
+
+# ─── Omnigraph reachability (measured 2026-09-24) ──────────────────────────
+# The bridge refuses to start without OMNIGRAPH_BASE_URL and OMNIGRAPH_GRAPH_ID
+# (the client only says "Connection closed"), and answers health/tools-list
+# without a token, so clients show "connected" while every read fails.
+
+if it "omnigraph config shape passes the offline probe"; then
+    out="$(python3 tools/check-omnigraph.py --offline 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]]; then pass; else fail "exit $rc: $out"; fi
+fi
+
+if it "omnigraph probe rejects a token value and a missing graph id"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/catalog"
+    cp catalog/agent-harness.json "$tmp/catalog/"
+    pin="$(python3 -c 'import json;print(json.load(open("catalog/agent-harness.json"))["mcp_servers"]["omnigraph"]["package"])')"
+    printf '{"mcpServers":{"omnigraph":{"command":"npx","args":["-y","%s"],"env":{"OMNIGRAPH_BASE_URL":"http://localhost:8080","OMNIGRAPH_TOKEN":"not-a-reference"}}}}' "$pin" >"$tmp/.mcp.json"
+    printf '{"mcp":{"servers":{"omnigraph":{"type":"local","command":["npx","-y","%s"],"environment":{"OMNIGRAPH_BASE_URL":"http://localhost:8080","OMNIGRAPH_TOKEN":"x"}}}}}' "$pin" >"$tmp/opencode.jsonc"
+    out="$(python3 tools/check-omnigraph.py --offline --root "$tmp" 2>&1)"; rc=$?
+    rm -rf "$tmp"
+    ok=1
+    [[ $rc -eq 1 ]] || ok=0
+    for frag in "OMNIGRAPH_GRAPH_ID is empty" "never a value" "not the file"; do
+        [[ "$out" == *"$frag"* ]] || { ok=0; echo "missing: $frag" >&2; }
+    done
+    [[ "$out" != *"not-a-reference"* ]] || ok=0
+    if (( ok )); then pass; else fail "rc=$rc out=$out"; fi
+fi
+
+if it "omnigraph probe warns when a local .env names a different graph id"; then
+    # agent-skills' trust_worktree.py writes OMNIGRAPH_GRAPH_ID=<folder name>
+    # (here "AutoOS") into worktree .env files; graph ids are case-sensitive and
+    # the server only has "autoos". Nothing in this repo reads that .env, so it
+    # warns instead of failing, but it must never go unnoticed.
+    tmp="$(mktemp -d)"
+    cp -r catalog "$tmp/" && cp .mcp.json opencode.jsonc "$tmp/"
+    printf 'OMNIGRAPH_GRAPH_ID=AutoOS\n' >"$tmp/.env"
+    out="$(python3 tools/check-omnigraph.py --offline --root "$tmp" 2>&1)"; rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$out" == *"WARN"*"'AutoOS'"*"'autoos'"* ]]; then pass
+    else fail "rc=$rc out=$out"; fi
+fi
+
+if it "omnigraph live probe names a missing token, a rejected token and a missing graph"; then
+    # A stub server on a random port stands in for omnigraph-server; nothing
+    # leaves the machine and nothing is installed.
+    stub="$(mktemp -d)"
+    cat >"$stub/stub.py" <<'PY'
+import http.server, json, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, code, body):
+        data = json.dumps(body).encode()
+        self.send_response(code); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+    def _auth(self):
+        return self.headers.get("Authorization") == "Bearer good-token"
+    def do_GET(self):
+        if self.path == "/healthz": return self._send(200, {"status": "ok", "version": "stub"})
+        if not self._auth(): return self._send(401, {"error": "invalid bearer token"})
+        if self.path == "/graphs/autoos/schema": return self._send(200, {"source": "node Project {}"})
+        return self._send(404, {"error": "graph not found"})
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if not self._auth(): return self._send(401, {"error": "invalid bearer token"})
+        # /query takes `query` (server 0.8.1); `query_source` is /read's field.
+        if self.path != "/graphs/autoos/query" or "query" not in body:
+            return self._send(422, {"error": "missing field `query`"})
+        return self._send(200, {"rows": [{"p.slug": "autoos"}]})
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+open(sys.argv[1], "w").write(str(srv.server_address[1]))
+srv.serve_forever()
+PY
+    python3 "$stub/stub.py" "$stub/port" & stub_pid=$!
+    for _ in 1 2 3 4 5 6 7 8 9 10; do [[ -s "$stub/port" ]] && break; sleep 0.2; done
+    base="http://127.0.0.1:$(cat "$stub/port" 2>/dev/null)"
+    probe() { env -u OMNIGRAPH_TOKEN AUTOOS_OMNIGRAPH_ENV_FILE="$stub/none.env" "$@" python3 tools/check-omnigraph.py --base-url "$base" 2>&1; }
+    good="$(probe OMNIGRAPH_TOKEN=good-token)"; good_rc=$?
+    none="$(probe)"; none_rc=$?
+    bad="$(probe OMNIGRAPH_TOKEN=wrong)"; bad_rc=$?
+    nograph="$(env -u OMNIGRAPH_TOKEN OMNIGRAPH_TOKEN=good-token python3 tools/check-omnigraph.py --base-url "$base" --graph nope 2>&1)"; nograph_rc=$?
+    printf 'OMNIGRAPH_TOKEN=good-token\n' >"$stub/file.env"
+    fromfile="$(env -u OMNIGRAPH_TOKEN AUTOOS_OMNIGRAPH_ENV_FILE="$stub/file.env" python3 tools/check-omnigraph.py --base-url "$base" 2>&1)"; file_rc=$?
+    kill "$stub_pid" 2>/dev/null; wait "$stub_pid" 2>/dev/null
+    rm -rf "$stub"
+    unset -f probe
+    got="$good_rc$none_rc$bad_rc$nograph_rc$file_rc"
+    ok=1
+    [[ "$got" == "01110" ]] || ok=0
+    [[ "$good" == *"project autoos"* ]] || ok=0
+    [[ "$none" == *"OMNIGRAPH_TOKEN is not set"* ]] || ok=0
+    [[ "$bad" == *"401"* ]] || ok=0
+    [[ "$nograph" == *"'nope' does not exist"* ]] || ok=0
+    [[ "$fromfile" == *"token from"* ]] || ok=0
+    [[ "$good$bad$fromfile" != *"good-token"* ]] || ok=0
+    if (( ok )); then pass; else fail "rc=$got good=[$good] none=[$none] bad=[$bad] nograph=[$nograph] file=[$fromfile]"; fi
+fi
+
+# The D9 bridge benchmark (SPEC-OMNI A5). CI can neither install npm packages
+# nor reach a server, so both checks below run against `--fake-server` and the
+# fake stdio bridge fixture — the live 16-parallel cold/warm run is the
+# operator's step and its numbers go in docs/omnigraph.md.
+if it "omnigraph bridge benchmark: unit tests pass offline (fake server + fake bridge)"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_check_omnigraph_bridge.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
+fi
+
+if it "omnigraph live doctor: unit tests pass offline (fake 0.13 server)"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_check_omnigraph.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
+fi
+
+if it "omnigraph bridge benchmark: the sh wrapper drives a fake-server run to exit 0"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(tools/check-omnigraph-bridge.sh --fake-server \
+                  --bridge-cmd "python3 tests/fixtures/omnigraph_bridge_stub.py" \
+                  --parallel 2 --graph-id autoos --warm 2>&1)"; rc=$?
+        if [[ $rc -eq 0 && "$out" == *"healthy 2/2"* && "$out" == *"whoami ok 2/2"* ]]; then pass
+        else fail "rc=$rc [$out]"; fi
+    fi
+fi
+
+if it "both healthchecks probe omnigraph through the live probe"; then
+    ok=1
+    for f in configuration/healthcheck.sh configuration/healthcheck.ps1; do
+        grep -q 'check-omnigraph.py' "$f" || { ok=0; echo "$f does not run the probe" >&2; }
+    done
+    if (( ok )); then pass; else fail "an omnigraph probe is missing"; fi
+fi
+
+if it "zed's omnigraph context server carries the base URL and graph id the bridge requires"; then
+    scratch="$(mktemp -d)"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 route_zed_to_proxy >/dev/null 2>&1 )
+    got="$(python3 -c "
+import json,sys
+e=json.load(open(sys.argv[1],encoding='utf-8'))['context_servers']['omnigraph'].get('env',{})
+print(bool(e.get('OMNIGRAPH_BASE_URL')), e.get('OMNIGRAPH_GRAPH_ID'), 'OMNIGRAPH_TOKEN' in e)
+" "$scratch/.config/zed/settings.json" 2>&1)"
+    rm -rf "$scratch"
+    assert_eq "$got" "True autoos False"
+fi
+
+# The omnigraph_url answer decides where every client's bridge points.
+# The omnigraph step honoured it; the Zed writer hardcoded localhost:8080, so
+# a machine with a remote omnigraph got Zed pointed at nothing. One helper,
+# omnigraph_base_url, now derives it for both (SPEC-OMNI A7b: the omnigraph half
+# of the retired agent-skills step is install_omnigraph_client's).
+# zed_omni_url <answer or empty>: the OMNIGRAPH_BASE_URL route_zed_to_proxy writes.
+zed_omni_url() {
+    local scratch out
+    scratch="$(mktemp -d)"
+    (
+        AUTOOS_ANSWERS=()
+        [[ -z "$1" ]] || AUTOOS_ANSWERS[omnigraph_url]="$1"
+        SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 route_zed_to_proxy >/dev/null 2>&1
+    )
+    out="$(python3 -c "
+import json, sys
+print(json.load(open(sys.argv[1], encoding='utf-8'))['context_servers']['omnigraph']['env']['OMNIGRAPH_BASE_URL'])
+" "$scratch/.config/zed/settings.json" 2>&1)"
+    rm -rf "$scratch"
+    printf '%s' "$out"
+}
+
+if it "zed: the omnigraph entry uses the omnigraph_url answer"; then
+    ok=1
+    got="$(zed_omni_url "https://graph.example.invalid:9000/")"
+    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got], not the answer without its trailing slash" >&2; }
+    helper="$( ( AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="https://graph.example.invalid:9000/"; omnigraph_base_url ) 2>&1)"
+    [[ "$helper" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
+    if (( ok )); then pass; else fail "the Zed omnigraph entry ignores the omnigraph_url answer"; fi
+fi
+
+# The contract is "no trailing slash", not "one slash off": consumers append
+# /paths to the base, and the Windows side does .TrimEnd('/') (every trailing
+# slash). A pasted "http://host//" must not survive as "http://host/".
+if it "omnigraph: omnigraph_base_url strips every trailing slash and nothing else"; then
+    ok=1
+    while IFS='|' read -r given want; do
+        got="$( ( AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="$given"; omnigraph_base_url ) 2>&1)"
+        [[ "$got" == "$want" ]] || { ok=0; echo "omnigraph_url [$given]: the helper says [$got], expected [$want]" >&2; }
+    done <<'CASES'
+http://host|http://host
+http://host/|http://host
+http://host//|http://host
+http://host:8080///|http://host:8080
+http://host/graph//|http://host/graph
+http://host//graph/|http://host//graph
+/|http://localhost:8080
+//|http://localhost:8080
+CASES
+    # ...and the Zed writer, the other consumer, writes the same stripped value.
+    got="$(zed_omni_url "https://graph.example.invalid:9000//")"
+    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got] for a doubled trailing slash" >&2; }
+    if (( ok )); then pass; else fail "omnigraph_base_url leaves a trailing slash on the base URL"; fi
+fi
+
+if it "zed: the omnigraph entry defaults to localhost:8080"; then
+    ok=1
+    got="$(zed_omni_url "")"
+    [[ "$got" == "http://localhost:8080" ]] || { ok=0; echo "the Zed entry says [$got]" >&2; }
+    # Both consumers take the default from the one helper, so they cannot drift.
+    helper="$( ( AUTOOS_ANSWERS=(); omnigraph_base_url ) 2>&1)"
+    [[ "$helper" == "http://localhost:8080" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
+    [[ "$(grep -c '\$(omnigraph_base_url)' lib/linux/install.sh)" -ge 2 ]] \
+        || { ok=0; echo "the helper is not called by both install_omnigraph_client and route_zed_to_proxy" >&2; }
+    if (( ok )); then pass; else fail "the omnigraph default differs between the Zed writer and install_omnigraph_client"; fi
+fi
+
+if it "the omnigraph env file is private, merged, linked for systemd, and stable on a re-run"; then
+    tmp="$(mktemp -d)"
+    printf 'KEEP_ME=1\nOMNIGRAPH_BASE_URL=http://old.invalid\n' >"$tmp/.autoos-omnigraph.env"
+    touch "$tmp/.bashrc"
+    run_env() { ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 OMNIGRAPH_TOKEN="test-token-value"; docker() { return 1; }; write_omnigraph_env "http://localhost:8080" ) 2>&1; }
+    first="$(run_env)"; second="$(run_env)"
+    mode="$(stat -c '%a' "$tmp/.autoos-omnigraph.env")"
+    body="$(sort "$tmp/.autoos-omnigraph.env" | tr '\n' ' ')"
+    link="$(readlink "$tmp/.config/environment.d/60-autoos-omnigraph.conf")"
+    backups="$(ls "$tmp"/.autoos-omnigraph.env.autoos-backup-* 2>/dev/null | wc -l)"
+    bmode="$(stat -c '%a' "$tmp"/.autoos-omnigraph.env.autoos-backup-* 2>/dev/null | head -1)"
+    rc_blocks="$(grep -c 'AutoOS:omnigraph-env' "$tmp/.bashrc")"
+    rm -rf "$tmp"
+    unset -f run_env
+    assert_eq "$mode|$body|${link##*/}|$backups|$bmode|$rc_blocks|$([[ "$second" == *unchanged* ]] && echo stable)|$([[ "$first$second" == *test-token-value* ]] && echo LEAK)" \
+        "600|KEEP_ME=1 OMNIGRAPH_BASE_URL=http://localhost:8080 OMNIGRAPH_TOKEN=test-token-value |.autoos-omnigraph.env|1|600|1|stable|"
+fi
+
+# Review finding 2026-09-25: the rc line used to `set -a; . file`, so a value
+# holding $(...) executed in every new shell. It must read the three keys
+# literally, in bash AND zsh, and replace an older AutoOS line in place.
+if it "the omnigraph rc line loads values literally and replaces the old sourcing line"; then
+    tmp="$(mktemp -d)"
+    printf 'OMNIGRAPH_BASE_URL=http://x$(touch %s/pwned)\nOMNIGRAPH_TOKEN=tok=with=equals\nOTHER=$(touch %s/pwned2)\n' "$tmp" "$tmp" >"$tmp/.autoos-omnigraph.env"
+    # An rc file that already carries the v1 sourcing line, as an older run wrote it.
+    printf '# mine\n[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env\n' >"$tmp/.bashrc"
+    cp "$tmp/.bashrc" "$tmp/.zshrc"
+    # Keep the env file as crafted: only the rc handling is under test here.
+    ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 OMNIGRAPH_TOKEN="tok=with=equals"; docker() { return 1; }
+      write_omnigraph_env 'http://x$(touch '"$tmp"'/pwned)' ) >/dev/null 2>&1
+    got_b="$(env -i HOME="$tmp" bash -c ". \"$tmp/.bashrc\"; printf '%s|%s' \"\$OMNIGRAPH_BASE_URL\" \"\$OMNIGRAPH_TOKEN\"" 2>&1)"
+    got_z=""
+    if command -v zsh >/dev/null; then
+        got_z="$(env -i HOME="$tmp" zsh -f -c ". \"$tmp/.zshrc\"; printf '%s|%s' \"\$OMNIGRAPH_BASE_URL\" \"\$OMNIGRAPH_TOKEN\"" 2>&1)"
+    fi
+    v1="$(grep -c 'set -a; \.' "$tmp/.bashrc" || true)"
+    ours="$(grep -cF -- "$(omnigraph_rc_marker)" "$tmp/.bashrc" || true)"
+    pwned="$(ls "$tmp"/pwned* 2>/dev/null | wc -l)"
+    rm -rf "$tmp"
+    want='http://x$(touch '"${tmp}"'/pwned)|tok=with=equals'
+    ok=1
+    [[ "$pwned" == 0 ]] || { ok=0; echo "a value was executed" >&2; }
+    [[ "$got_b" == "$want" ]] || { ok=0; echo "bash got: $got_b" >&2; }
+    [[ -z "$got_z" || "$got_z" == "$want" ]] || { ok=0; echo "zsh got: $got_z" >&2; }
+    [[ "$v1" == 0 && "$ours" == 1 ]] || { ok=0; echo "v1=$v1 ours=$ours (old line not replaced)" >&2; }
+    if (( ok )); then pass; else fail "the omnigraph rc line is not a literal reader"; fi
+fi
+
+# Re-review 2026-09-25: CRLF values, a last line without a newline, and a file
+# that carries BOTH the v1 sourcing line and the current reader (v1 must go).
+if it "the omnigraph rc reader copes with CRLF and a missing last newline, and purges v1 next to the current line"; then
+    tmp="$(mktemp -d)"
+    printf 'OMNIGRAPH_BASE_URL=http://crlf\r\nOMNIGRAPH_TOKEN=last-line-no-newline' >"$tmp/.autoos-omnigraph.env"
+    v1='[ -z "${OMNIGRAPH_TOKEN:-}" ] && [ -r "$HOME/.autoos-omnigraph.env" ] && { set -a; . "$HOME/.autoos-omnigraph.env"; set +a; }  # AutoOS:omnigraph-env'
+    printf '%s\n' "$v1" >"$tmp/.bashrc"
+    # The first call adds the current line by replacing v1; then plant v1 again
+    # next to it (a stale copy) and call once more: v1 must be purged.
+    ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 OMNIGRAPH_TOKEN=""; docker() { return 1; }
+      replace_or_append_marked_line "$tmp/.bashrc" "AutoOS:omnigraph-env" "$(omnigraph_rc_marker)" "$(omnigraph_rc_line)" ) >/dev/null 2>&1
+    printf '%s\n' "$v1" >>"$tmp/.bashrc"
+    ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0
+      replace_or_append_marked_line "$tmp/.bashrc" "AutoOS:omnigraph-env" "$(omnigraph_rc_marker)" "unused" ) >/dev/null 2>&1
+    got="$(env -i HOME="$tmp" bash -c ". \"$tmp/.bashrc\"; printf '%s|%s' \"\$OMNIGRAPH_BASE_URL\" \"\$OMNIGRAPH_TOKEN\"" 2>&1)"
+    v1n="$(grep -c 'set -a; \.' "$tmp/.bashrc" || true)"
+    oursn="$(grep -cF -- "$(omnigraph_rc_marker)" "$tmp/.bashrc" || true)"
+    rm -rf "$tmp"
+    assert_eq "$got|$v1n|$oursn" "http://crlf|last-line-no-newline|0|1"
+fi
+
+if it "the omnigraph token falls back to the local server container, else is reported missing"; then
+    tmp="$(mktemp -d)"
+    ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0
+      unset OMNIGRAPH_TOKEN
+      has_cmd() { [[ "$1" == docker ]] || command -v "$1" >/dev/null 2>&1; }
+      docker() { printf 'PATH=/bin\nOMNIGRAPH_SERVER_BEARER_TOKEN=from-container\n'; }
+      write_omnigraph_env "http://localhost:8080" >/dev/null 2>&1 )
+    from_container="$(grep -c '^OMNIGRAPH_TOKEN=from-container$' "$tmp/.autoos-omnigraph.env")"
+    rm -rf "$tmp"; tmp="$(mktemp -d)"
+    out="$( ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0
+      unset OMNIGRAPH_TOKEN
+      docker() { return 1; }
+      write_omnigraph_env "http://localhost:8080" ) 2>&1)"
+    no_token_line="$(grep -c '^OMNIGRAPH_TOKEN=' "$tmp/.autoos-omnigraph.env")"
+    rm -rf "$tmp"
+    assert_eq "$from_container|$no_token_line|$([[ "$out" == *"OMNIGRAPH_TOKEN is not set"* ]] && echo warned)" "1|0|warned"
+fi
+
+if it "the omnigraph env file is announced, not written, in a dry run"; then
+    tmp="$(mktemp -d)"
+    out="$( ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=1; write_omnigraph_env "http://localhost:8080" ) 2>&1)"
+    left="$(find "$tmp" -mindepth 1 | wc -l)"
+    rm -rf "$tmp"
+    assert_eq "$left|$([[ "$out" == *"would write"* ]] && echo announced)" "0|announced"
+fi
+
+# omni_client_spec <tmp> [url]: run install_omnigraph_client with the client's
+# own write steps stubbed and print the spec it hands Antigravity on stdout.
+# A7b: the Antigravity omnigraph entry is the omnigraph-client component's work —
+# it carries the resolved URL and token, so it lives after that component's gates.
+# mcp_package is stubbed so no scratch AUTOOS_ROOT needs the harness catalog, and
+# every filesystem-writing helper is stubbed so the real checkout is never touched.
+omni_client_spec() {
+    local tmp="$1" url="${2:-https://graph.example.invalid}"
+    (
+        SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+        # State and EXPORT every input this fixture needs: the spec is built by a
+        # python3 child that reads os.environ (install.sh:4698), so a bare
+        # assignment reaches that child only on a host that already exports
+        # OMNIGRAPH_TOKEN itself. CI 36391119133 exports nothing, and the entry
+        # came out token-less. FORCE_COLOR is the same class of leak — the host's
+        # colour choice must never decide what the captured text looks like.
+        export OMNIGRAPH_TOKEN="dummy-token-1234"
+        unset OMNIGRAPH_GRAPH_ID OMNIGRAPH_BASE_URL FORCE_COLOR
+        AUTOOS_ANSWERS=([omnigraph_url]="$url")
+        mkdir -p "$AUTOOS_ROOT"
+        write_omnigraph_env() { :; }
+        omnigraph_install_bridge() { :; }
+        omnigraph_install_wrapper() { :; }
+        omnigraph_retire_rc_token_lines() { :; }
+        report_stale_homelab_mcp_entry() { :; }
+        enable_project_mcp_server() { :; }
+        mcp_has_server() { return 1; }
+        has_cmd() { [[ "$1" == npm ]]; }
+        mcp_package() { printf 'dummy-omnigraph-mcp\n'; }
+        register_antigravity_mcp_server() { [[ "$1" == omnigraph ]] && printf '%s\n' "$2" >&3; }
+        install_omnigraph_client >/dev/null 2>&1
+    ) 3>&1
+}
+
+if it "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)"; then
+    tmp="$(mktemp -d)"
+    spec="$(omni_client_spec "$tmp")"
+    rm -rf "$tmp"
+    got="$(printf '%s' "$spec" | python3 -c "import json,sys;e=json.load(sys.stdin)['env'];print(e.get('OMNIGRAPH_GRAPH_ID'),'OMNIGRAPH_TOKEN' in e)" 2>&1)"
+    assert_eq "$got" "autoos True"
+fi
+
+# The omnigraph_url answer is user input. install_agent_skills used to splice it
+# into the SOURCE of a `python3 -c "..."` string, so a quote, a backslash or
+# Python code in the answer broke the literal or ran (`' + os.system(...)`).
+# It travels in the environment now (like the Zed writer's OMNI_BASE) and must
+# arrive byte for byte. Every marker file below is what a payload would create.
+if it "omnigraph: a hostile omnigraph_url answer is data, never python source"; then
+    scratch="$(mktemp -d)"; ok=1
+    payloads=(
+        "http://x/\"; touch $scratch/pwned1; echo \""
+        "http://x/'\$(touch $scratch/pwned2)"
+        "http://x/'\`touch $scratch/pwned3\`"
+        "http://x/' + str(__import__('os').system('touch $scratch/pwned4')) + '"
+        'http://x/a\nb\\c\x41'
+    )
+    i=0
+    for url in "${payloads[@]}"; do
+        i=$((i + 1))
+        # AUTOOS_ROOT is an empty scratch dir inside the sandbox: neither the real
+        # checkout's .claude/skills nor its settings.local.json can be reached.
+        omni_client_spec "$scratch/home$i" "$url" >"$scratch/spec-$i.json"
+        if [[ ! -s "$scratch/spec-$i.json" ]]; then
+            ok=0; echo "payload $i [$url]: no omnigraph spec was produced (the python source broke)" >&2
+        else
+            got="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["env"]["OMNIGRAPH_BASE_URL"])' "$scratch/spec-$i.json")"
+            [[ "$got" == "$url" ]] || { ok=0; echo "payload $i: the config holds [$got], not [$url]" >&2; }
+        fi
+    done
+    compgen -G "$scratch/pwned*" >/dev/null && { ok=0; echo "a payload ran: $(cd "$scratch" && ls -d pwned* | tr '\n' ' ')" >&2; }
+    rm -rf "$scratch"
+    if (( ok )); then pass; else fail "the omnigraph_url answer is interpolated into python source"; fi
+fi
+
+if it "Antigravity MCP config is merged, not replaced"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.gemini/config"
+    printf '%s' '{"mcpServers":{"existing":{"command":"node","args":["index.js"]}}}' \
+        >"$tmp/.gemini/config/mcp_config.json"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        register_antigravity_mcp_server "playwright" '{"command":"npx","args":["-y","@playwright/mcp"]}' >/dev/null 2>&1
+    )
+    got="$(python3 -c "
+import json,sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+servers = d.get('mcpServers', {})
+print(','.join(sorted(servers.keys())))
+" "$tmp/.gemini/config/mcp_config.json")"
+    rm -rf "$tmp"
+    if [[ "$got" == "existing,playwright" ]]; then pass
+    else fail "expected existing and playwright, got: $got"; fi
+fi
+
+if it "register_antigravity_mcp_server is idempotent and creates backup"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.gemini/config"
+    printf '%s' '{"mcpServers":{"existing":{"command":"node"}}}' >"$tmp/.gemini/config/mcp_config.json"
+    (
+        SYS_HOME="$tmp"
+        AUTOOS_DRY_RUN=0
+        register_antigravity_mcp_server "serena" '{"command":"uvx"}' >/dev/null 2>&1
+        register_antigravity_mcp_server "serena" '{"command":"uvx"}' >/dev/null 2>&1
+    )
+    backups=( "$tmp"/.gemini/config/mcp_config.json.autoos-backup-* )
+    has_backup=0
+    [[ -f "${backups[0]}" ]] && has_backup=1
+    rm -rf "$tmp"
+    if (( has_backup )); then pass
+    else fail "backup was not created before edit"; fi
+fi
+
+# The skills-link cases (Antigravity, Claude Code, project .claude/skills,
+# ~/.agents/skills, ~/.codex/skills) all live together in the "skill targets"
+# section below, where the scratch repo helper is defined — A7b moved that whole
+# duty out of the retired agent-skills step into install_agent_skill_links, and
+# one writer deserves one block.
+
+if it "omnigraph-client records a refused project-server approval for the summary"; then
+    # A post-install step that refuses to touch a user's file (no backup, no
+    # write) must still be counted: setup.sh folds autoos_record_failure ids
+    # into its failed count and exit code, so the summary cannot read "done"
+    # over a change that never happened. Both project servers approved here map
+    # to one id, and the recorder is idempotent.
+    tmp="$(mktemp -d)"; ok=1
+    mkdir -p "$tmp/repo/.claude"
+    mkdir -p "$tmp/repo"
+    printf '{}\n' >"$tmp/repo/.mcp.json"
+    printf '{"theme":"mine"}\n' >"$tmp/repo/.claude/settings.local.json"
+    out="$( (
+        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp/repo"; AUTOOS_DRY_RUN=0
+        AUTOOS_EXTRA_FAILURES=()
+        OMNIGRAPH_TOKEN="dummy-token-1234"
+        AUTOOS_ANSWERS=([omnigraph_url]="https://graph.example.invalid")
+        write_omnigraph_env() { :; }
+        omnigraph_install_bridge() { :; }
+        omnigraph_install_wrapper() { :; }
+        omnigraph_retire_rc_token_lines() { :; }
+        report_stale_homelab_mcp_entry() { :; }
+        register_antigravity_mcp_server() { :; }
+        mcp_has_server() { return 1; }
+        mcp_package() { printf 'dummy-omnigraph-mcp\n'; }
+        has_cmd() { [[ "$1" == npm ]]; }
+        backup_file() { return 1; }
+        install_omnigraph_client >/dev/null 2>&1
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    ) 2>&1 )"
+    [[ "$out" == *"recorded: omnigraph-client"* ]] || { ok=0; echo "the refusal was not recorded: [${out:0:400}]" >&2; }
+    [[ "$out" != *"omnigraph-client omnigraph-client"* ]] || { ok=0; echo "the id was recorded twice" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "install_omnigraph_client did not record a refused project-server approval"; fi
+fi
+
+# omni_client_run <tmp>: install_omnigraph_client on a scratch home, with every
+# filesystem-writing helper stubbed to a marker file in <tmp>/log so the caller
+# sees the DECISIONS, not the bytes. OMNI_HAS_USER_SCOPE=0 makes Claude Code
+# report an omnigraph entry at user scope; OMNI_URL='' answers the prompt blank.
+omni_client_run() {
+    local tmp="$1"
+    (
+        SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+        AUTOOS_EXTRA_FAILURES=()
+        OMNIGRAPH_TOKEN="dummy-token-1234"
+        AUTOOS_ANSWERS=([omnigraph_url]="${OMNI_URL-https://graph.example.invalid}")
+        mkdir -p "$tmp/repo" "$tmp/log"
+        write_omnigraph_env() { printf 'env %s %s\n' "$1" "$2" >>"$tmp/log/env"; }
+        omnigraph_install_bridge() { : >>"$tmp/log/bridge"; }
+        omnigraph_install_wrapper() { : >>"$tmp/log/wrapper"; }
+        omnigraph_retire_rc_token_lines() { : >>"$tmp/log/retire"; }
+        report_stale_homelab_mcp_entry() { : >>"$tmp/log/homelab"; }
+        register_mcp_server() { printf 'claude %s %s\n' "$1" "$2" >>"$tmp/log/claude"; }
+        register_antigravity_mcp_server() { printf 'agy %s\n' "$1" >>"$tmp/log/agy"; }
+        enable_project_mcp_server() { printf 'project %s %s\n' "$1" "$2" >>"$tmp/log/project"; }
+        mcp_package() { printf 'dummy-omnigraph-mcp\n'; }
+        has_cmd() { [[ "$1" == npm ]]; }
+        mcp_has_server() { return "${OMNI_HAS_USER_SCOPE:-1}"; }
+        install_omnigraph_client 2>&1
+        printf 'state=%s recorded=[%s]\n' "${INSTALL_SCRIPT_STATE:-}" "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    )
+}
+
+if it "omnigraph-client approves both project servers of this checkout"; then
+    # A tracked .mcp.json cannot approve itself, and the repo the plan pins
+    # servers for is the checkout being installed, not a clone elsewhere.
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{"mcpServers":{"omnigraph":{},"autoos-agent":{}}}\n' >"$tmp/repo/.mcp.json"
+    out="$(omni_client_run "$tmp")"
+    problems=""
+    [[ "$(cat "$tmp/log/project" 2>/dev/null | tr '\n' '|')" == "project $tmp/repo omnigraph|project $tmp/repo autoos-agent|" ]] \
+        || problems+="[approved servers: $(cat "$tmp/log/project" 2>/dev/null || echo none)] "
+    [[ ! -e "$tmp/repo/.claude/settings.local.json" ]] || problems+="[the scratch repo was written to by the real helper] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "omnigraph-client names a missing .mcp.json instead of approving nothing"; then
+    tmp="$(mktemp -d)"
+    out="$(OMNI_URL='https://graph.example.invalid' omni_client_run "$tmp")"
+    problems=""
+    [[ "$out" == *".mcp.json"* ]] || problems+="[nothing named the missing file: $(tail -n 3 <<<"$out")] "
+    [[ ! -e "$tmp/log/project" ]] || problems+="[a server was approved with no .mcp.json to pin it in] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "omnigraph-client only warns about a user-scope omnigraph, it never registers one"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{}\n' >"$tmp/repo/.mcp.json"
+    out="$(OMNI_HAS_USER_SCOPE=0 omni_client_run "$tmp")"
+    problems=""
+    [[ "$out" == *"user-scope"* && "$out" == *"claude mcp remove omnigraph"* ]] \
+        || problems+="[the shadowing entry was not called out: $(tail -n 4 <<<"$out")] "
+    [[ ! -e "$tmp/log/claude" ]] || problems+="[a user-scope omnigraph was registered anyway] "
+    [[ "$out" != *"recorded: omnigraph-client"* ]] || problems+="[naming a user's own entry is not a failure] "
+    # And with no such entry, nothing is complained about.
+    out="$(omni_client_run "$tmp")"
+    [[ "$out" == *"user-scope"* ]] && problems+="[warned about a user-scope entry that does not exist] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "omnigraph-client reports the retired homelab entry as part of the wiring"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{}\n' >"$tmp/repo/.mcp.json"
+    omni_client_run "$tmp" >/dev/null
+    problems=""
+    [[ -e "$tmp/log/homelab" ]] || problems+="[report_stale_homelab_mcp_entry never ran] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "omnigraph-client: with no server configured it still reports but writes no bridge config"; then
+    # The four repo-scope duties (approve the project servers, name a shadowing
+    # user entry, report the retired homelab one) do not depend on a URL, so a
+    # machine that skipped the prompt still gets them. The entry that CARRIES
+    # the URL and token stays behind the gate: A3's "nothing configured, write
+    # nothing" invariant, which also keeps a guessed host out of a public repo.
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{}\n' >"$tmp/repo/.mcp.json"
+    out="$(OMNI_URL='' omni_client_run "$tmp")"
+    problems=""
+    [[ "$out" == *"state=skipped"* ]] || problems+="[no server configured, yet the step reported work: $(tail -n 3 <<<"$out")] "
+    [[ -e "$tmp/log/project" ]] || problems+="[the project servers were not approved on a blank-URL machine] "
+    [[ -e "$tmp/log/homelab" ]] || problems+="[the retired entry was not reported on a blank-URL machine] "
+    for absent in env agy bridge wrapper; do
+        [[ ! -e "$tmp/log/$absent" ]] || problems+="[a $absent artifact was written with no server configured] "
+    done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# The four mcp-* servers are catalog postInstalls in their own right (each with
+# its own profile and requires), so nothing calls them from another component —
+# a second caller would double-run them and record one broken wiring twice.
+# run_post_install contains a non-zero step, so each keeps failing on its own.
+if it "no installer calls the mcp-* postInstalls from another component"; then
+    ok=1
+    for fn in install_agent_skill_links install_omnigraph_client; do
+        body="$(awk -v f="$fn" '$0 ~ "^"f"\\(\\) \\{"{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+        for sub in install_mcp_graphify install_mcp_serena install_mcp_playwright install_mcp_context7; do
+            if grep -q "^[[:space:]]*$sub" <<<"$body"; then
+                ok=0; echo "$fn calls $sub (it belongs to the $sub component)" >&2
+            fi
+        done
+    done
+    if (( ok )); then pass; else fail "an mcp-* postInstall is still called from another component"; fi
+fi
+
+if it "agent-skills: the catalog entry is a tombstone and names its successors"; then
+    # A7: the retirement moves from a function that prints a line to the catalog
+    # that carries the fact. Every field an installer needed is gone with the
+    # installer; the note and the successor ids are what the run prints and plans.
+    # Windows is retired too (its clone bit is gone), but it has no
+    # agent-skill-links/omnigraph-client twin, so only the four mcp-* components
+    # inherit the work there - hence a per-platform successor list.
+    out="$(python3 - <<'PY'
+import json, sys
+successors = {
+    "catalog/linux.json": ["agent-skill-links", "omnigraph-client", "mcp-graphify",
+                           "mcp-serena", "mcp-playwright", "mcp-context7"],
+    "catalog/macos.json": ["agent-skill-links", "omnigraph-client", "mcp-graphify",
+                           "mcp-serena", "mcp-playwright", "mcp-context7"],
+    "catalog/windows.json": ["mcp-graphify", "mcp-serena", "mcp-playwright", "mcp-context7"],
+}
+problems = []
+for f, want in successors.items():
+    data = json.load(open(f, encoding="utf-8"))
+    found = [c for g in data["categories"] for c in g["components"] if c.get("id") == "agent-skills"]
+    if len(found) != 1:
+        problems.append("%s: %d agent-skills entries" % (f, len(found))); continue
+    c = found[0]
+    ids = {x.get("id") for g in data["categories"] for x in g["components"]}
+    retired = {x.get("id") for g in data["categories"] for x in g["components"]
+               if x.get("tombstone") is True}
+    if c.get("tombstone") is not True:
+        problems.append(f + ": 'tombstone' is %r, expected the boolean true" % (c.get("tombstone"),))
+    if not str(c.get("note") or "").strip():
+        problems.append(f + ": a tombstone with no note prints an empty skip line")
+    if c.get("replaced_by") != want:
+        problems.append("%s: replaced_by is %r, expected %r" % (f, c.get("replaced_by"), want))
+    for r in c.get("replaced_by") or []:
+        if r not in ids:
+            problems.append("%s: replaced_by names unknown component '%s'" % (f, r))
+        if r in retired:
+            problems.append("%s: replaced_by names the tombstone '%s'" % (f, r))
+    # A profile pre-selects what should get installed; a retired id installs
+    # nothing, so it belongs to none.
+    if c.get("profiles"):
+        problems.append(f + ": still pre-ticked by %r" % (c.get("profiles"),))
+    # Nothing installs, so nothing runs an installer, asks a question or waits on
+    # a package: these four only mean something for something that does.
+    for dead in ("postInstall", "prompt", "requires", "verify"):
+        if c.get(dead):
+            problems.append("%s: a tombstone still carries %s (%r)" % (f, dead, c.get(dead)))
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+)" && catalog_validate catalog/linux.json >/dev/null 2>&1 && catalog_validate catalog/macos.json >/dev/null 2>&1 \
+    && catalog_validate catalog/windows.json >/dev/null 2>&1 \
+    && pass || fail "agent-skills tombstone: ${out:0:400}"
+fi
+
+if it "agent-skills: the Windows installer never clones the retired repo"; then
+    # The clone went with the retirement: the MCP servers are declared by this
+    # checkout's own .mcp.json, so a Windows run must not create or update a
+    # Documents\Code\agent-skills copy. A machine that ran the old installer
+    # keeps its checkout untouched, and no code path may name its git URL.
+    # .psm1 keeps CRLF in the working copy, so strip \r BEFORE awk or the
+    # end-of-function anchor (^\}$) never matches and the "body" swallows the rest
+    # of the file (LazyVim's own git clone included).
+    fn="$(tr -d '\r' < lib/windows/AutoOS.Install.psm1 | awk '/^function Install-AutoOSAgentSkills \{/{on=1} on{print} on && /^\}$/{exit}')"
+    ok=1
+    if grep -qE "agent-skills\.git|Ch3fUlrich/agent-skills" <<<"$fn"; then
+        ok=0; echo "Install-AutoOSAgentSkills still names the agent-skills clone URL" >&2
+    fi
+    if grep -qE "Invoke-AutoOSProcess.*'git'|'git'.*(clone|pull)" <<<"$fn"; then
+        ok=0; echo "Install-AutoOSAgentSkills still runs git clone/pull" >&2
+    fi
+    # Code, not prose: a comment may still explain the retired clone, but no
+    # statement may build or write into the old Documents\Code\agent-skills path.
+    if grep -qE "(Join-Path|New-Item|Invoke-AutoOSProcess).*agent-skills" <<<"$fn"; then
+        ok=0; echo "Install-AutoOSAgentSkills still writes into the old clone path" >&2
+    fi
+    if (( ok )); then pass; else fail "the Windows installer still clones agent-skills"; fi
+fi
+
+if it "agent-skills: the retirement leaves no installer behind"; then
+    # The pointer function and its detection branch existed to answer "what does
+    # the retired id do?" from inside the installer. The catalog carries that
+    # answer now and setup.sh's tombstone branch prints it, so both are dead code:
+    # an orphan function is a test fixture, not a feature, and a second home for a
+    # fact the catalog already holds.
+    ok=1
+    declare -F install_agent_skills >/dev/null \
+        && { ok=0; echo "install_agent_skills is still defined in lib/linux/install.sh" >&2; }
+    grep -q 'install_agent_skills' lib/linux/install.sh \
+        && { ok=0; echo "lib/linux/install.sh still names install_agent_skills" >&2; }
+    grep -qE '^[[:space:]]+agent-skills\)' lib/linux/install.sh \
+        && { ok=0; echo "custom_is_installed still has an agent-skills branch" >&2; }
+    grep -q '"postInstall": "install_agent_skills"' catalog/linux.json catalog/macos.json \
+        && { ok=0; echo "a catalog still points a postInstall at it" >&2; }
+    if (( ok )); then pass; else fail "the retired id left code behind"; fi
+fi
+
+if it "agent-skills: detection never reports the retired id installed"; then
+    # Detection is stubbed to "everything on this machine is here" (AGENTS.md §5:
+    # synthetic system objects, never the live machine) — `custom_is_installed`
+    # for the custom rows and the python3 probe stub of
+    # tests/linux/13-end-to-end-dry-run-only.sh:224 for the package-manager ones,
+    # so no dpkg or snap is read and no live probe is worth 10 s of every run.
+    # The retired row is the one that must still come back NOT installed: a ✓
+    # would advertise machinery AutoOS no longer provides, in the "Installed
+    # apps" line, in the plan's "already installed" note and in the saved state
+    # alike.
+    stub_bin="$(mktemp -d)"
+    cat > "$stub_bin/python3" <<'EOS'
+#!/usr/bin/env bash
+[[ "${1:-}" == "-" ]] || exit 1
+printf 'installed\n'
+EOS
+    chmod +x "$stub_bin/python3"
+    out="$(
+        catalog_load catalog/linux.json x64 0
+        i="$(catalog_index_of agent-skills)"
+        j="$(catalog_index_of agent-skill-links)"
+        custom_is_installed() { return 0; }
+        PATH="$stub_bin:$PATH" catalog_probe_installed
+        printf 'tombstone=%s ordinary=%s listed=%s flagged=%s\n' \
+            "${CAT_INSTALLED[i]:-}" "${CAT_INSTALLED[j]:-}" \
+            "$(catalog_installed_ids | tr ' ' '\n' | grep -cxF 'agent-skills' || true)" \
+            "$(catalog_is_tombstone "$i" && echo yes || echo no)"
+    )"
+    rm -rf "$stub_bin"
+    assert_eq "$out" "tombstone=0 ordinary=1 listed=0 flagged=yes"
+fi
+
+if it "route_detected_clis_to_gateway: a failing Claude routing step is recorded for the summary"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; ok=1
+    out="$( (
+        SYS_HOME="$tmp"; AUTOOS_ROOT="$tmp"; AUTOOS_DRY_RUN=0; AUTOOS_EXTRA_FAILURES=()
+        # A keys file of its own: the real configuration/api-keys.yml is never read.
+        AUTOOS_KEYS_FILE="$tmp/keys.yml"
+        unset OMNIROUTE_API_KEY AUTOOS_OMNIROUTE_KEY
+        claude() { return 0; }
+        has_cmd() { [[ "$1" == claude ]]; }
+        route_claude_to_gateway() { : >"$tmp/mark_route"; return 1; }
+        route_detected_clis_to_gateway >/dev/null 2>&1
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    ) 2>&1 )"
+    [[ -e "$tmp/mark_route" ]] || { ok=0; echo "the routing step never ran: [${out:0:300}]" >&2; }
+    [[ "$out" == *"recorded: claude-code"* ]] \
+        || { ok=0; echo "a failing Claude routing was not recorded: $(printf '%s\n' "$out" | grep '^recorded')" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "route_claude_to_gateway's failure was not recorded"; fi
+    fi
+fi
+
+# ─── OpenHands: repo skills mirrored per skill, idempotent settings writer ──
+# oh_setup_run <home> <repo> [fn]: setup_openhands_config (or `fn`) in a hermetic
+# subshell - scratch HOME and AUTOOS_ROOT, no gateway or provider key, no network
+# - with stdout and stderr merged. AUTOOS_KEYS_FILE points at a file that does not
+# exist so the repo's own keys file is never consulted.
+oh_setup_run() {
+    local home="$1" repo="$2" fn="${3:-setup_openhands_config}"
+    mkdir -p "$home"
+    (
+        SYS_HOME="$home"; AUTOOS_DRY_RUN=0
+        if [[ -n "$repo" ]]; then AUTOOS_ROOT="$repo"; else unset AUTOOS_ROOT; fi
+        unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY OMNIGRAPH_TOKEN
+        unset AUTOOS_OMNIROUTE_KEY LITELLM_MASTER_KEY AUTOOS_LITELLM_API_KEY
+        export AUTOOS_KEYS_FILE="$home/no-keys.yml"
+        curl() { return 6; }
+        "$fn"
+    ) 2>&1
+}
+
+# oh_skill_repo <repo>: a scratch AUTOOS_ROOT with two skills (alpha, beta) and
+# one directory without a SKILL.md (nofile) that is not a skill.
+oh_skill_repo() {
+    local repo="$1" n
+    for n in alpha beta; do
+        mkdir -p "$repo/.agents/skills/$n"
+        printf -- '---\nname: %s\ndescription: demo\n---\n' "$n" >"$repo/.agents/skills/$n/SKILL.md"
+    done
+    mkdir -p "$repo/.agents/skills/nofile"
+    printf 'not a skill\n' >"$repo/.agents/skills/nofile/README.md"
+}
+
+if it "openhands: links every repo skill into ~/.openhands/skills"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    dest="$tmp/home/.openhands/skills"; problems=""
+    { [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is not a real directory] "; }
+    for n in alpha beta; do
+        [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
+            || problems+="[$n is not a link to the repo skill (got: $(readlink "$dest/$n" 2>/dev/null || echo none))] "
+        [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
+        [[ "$out" == *"linked $n"* ]] || problems+="[no 'linked $n' line] "
+    done
+    { [[ ! -e "$dest/nofile" && ! -L "$dest/nofile" ]] || problems+="[nofile (no SKILL.md) was linked] "; }
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a second run reports skipped and changes nothing"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    oh_setup_run "$tmp/home" "$tmp/repo" >/dev/null
+    dest="$tmp/home/.openhands/skills"
+    before="$(stat -c '%y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    after="$(stat -c '%y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
+    problems=""
+    [[ "$before" == "$after" ]] || problems+="[the skills directory or a link changed: $before -> $after] "
+    grep -Eq '(^|[^[:alnum:]])(linked|repointed) [a-z]' <<<"$out" && problems+="[second run printed a linked/repointed line] "
+    [[ "$out" == *skipped* ]] || problems+="[second run never says skipped] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: keeps a user's own skill"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"
+    mkdir -p "$dest/alpha" "$dest/mine"
+    printf 'my own alpha\n' >"$dest/alpha/SKILL.md"
+    printf 'my own skill\n'  >"$dest/mine/SKILL.md"
+    ln -s /nonexistent-user-skill "$dest/foreign"
+    snap() { ( cd "$dest" && find alpha mine -type f -exec sha256sum {} + | sort; readlink foreign; ls -A ) ; }
+    before="$(snap)"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    after="$(snap)"
+    problems=""
+    [[ -d "$dest/alpha" && ! -L "$dest/alpha" ]] || problems+="[the user's own alpha is no longer a real directory] "
+    [[ "$(readlink "$dest/beta" 2>/dev/null)" == "$tmp/repo/.agents/skills/beta" ]] || problems+="[beta was not linked next to the user's skills] "
+    # beta is the one new entry: nothing else may differ from before.
+    [[ "$(grep -v '^beta$' <<<"$after")" == "$before" ]] || problems+="[the user's skills changed: $before -> $after] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: repairs a dangling link into the repo"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    # Ours: the exact shape link_skill_dirs creates (<checkout>/.agents/skills/<name>)
+    # into a checkout that has since moved or been renamed, so it dangles.
+    ln -s "$tmp/moved-checkout/.agents/skills/alpha" "$dest/alpha"
+    ln -s /nonexistent-elsewhere/beta "$dest/beta"                 # not ours, dangling: hands off
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/skills/alpha" ]] || problems+="[alpha still points at $(readlink "$dest/alpha")] "
+    [[ -f "$dest/alpha/SKILL.md" ]] || problems+="[alpha does not resolve after the repair] "
+    [[ "$(readlink "$dest/beta")" == "/nonexistent-elsewhere/beta" ]] || problems+="[a foreign dangling link was rewritten to $(readlink "$dest/beta")] "
+    [[ "$out" == *"repointed alpha"* ]] || problems+="[no 'repointed alpha' line] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# Only a link this function made is ours (AGENTS.md hard rule 4): it dangles AND
+# has the exact shape .../.agents/skills/<name> for the same skill. A live link,
+# or a dangling one of another shape, is the user's and stays as it is - even
+# when it points inside the repo's own .agents directory.
+if it "openhands: a live link of your own into .agents/custom is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest" "$tmp/repo/.agents/custom/alpha"
+    printf 'my own alpha\n' >"$tmp/repo/.agents/custom/alpha/SKILL.md"
+    ln -s "$tmp/repo/.agents/custom/alpha" "$dest/alpha"           # live, inside the repo's .agents, not our shape
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/custom/alpha" ]] || problems+="[the user's live link now points at $(readlink "$dest/alpha")] "
+    [[ "$(cat "$dest/alpha/SKILL.md" 2>/dev/null)" == "my own alpha" ]] || problems+="[alpha no longer resolves to the user's own skill] "
+    [[ "$out" != *"repointed alpha"* ]] || problems+="[the live link was reported as repointed] "
+    [[ "$out" == *"kept $dest/alpha"* ]] || problems+="[no 'kept ...alpha' line: the user is not told it was left alone] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/repo/.agents/skills/beta" ]] || problems+="[beta was not linked next to the user's link] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a live link into another checkout's skills is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    # Another checkout with the same skills layout. One sits beside this repo,
+    # one is nested under this repo's own .agents directory (a worktree kept
+    # there): both are live and both have the shape we would create.
+    oh_skill_repo "$tmp/other"
+    oh_skill_repo "$tmp/repo/.agents/nested"
+    ln -s "$tmp/repo/.agents/nested/.agents/skills/alpha" "$dest/alpha"
+    ln -s "$tmp/other/.agents/skills/beta" "$dest/beta"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/nested/.agents/skills/alpha" ]] || problems+="[the link into the nested checkout now points at $(readlink "$dest/alpha")] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/other/.agents/skills/beta" ]] || problems+="[the link into the other checkout now points at $(readlink "$dest/beta")] "
+    [[ "$out" != *"repointed"* ]] || problems+="[a live link was reported as repointed] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a dangling link of another shape is kept"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
+    ln -s /nonexistent/other/alpha "$dest/alpha"                    # dangling, outside the repo
+    ln -s "$tmp/repo/.agents/skills/beta-renamed" "$dest/beta"      # dangling, inside the repo, not the shape of beta
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$dest/alpha")" == "/nonexistent/other/alpha" ]] || problems+="[the dangling link outside the repo now points at $(readlink "$dest/alpha")] "
+    [[ "$(readlink "$dest/beta")" == "$tmp/repo/.agents/skills/beta-renamed" ]] || problems+="[the dangling link of another shape now points at $(readlink "$dest/beta")] "
+    [[ "$out" != *"repointed"* ]] || problems+="[a link of another shape was reported as repointed] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: an existing whole-dir symlink is not written through"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/clone-skills" "$tmp/home/.openhands"
+    ln -s "$tmp/clone-skills" "$tmp/home/.openhands/skills"     # the old whole-dir layout
+    repo_before="$(ls -A "$tmp/repo/.agents/skills")"
+    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$(readlink "$tmp/home/.openhands/skills")" == "$tmp/clone-skills" ]] || problems+="[the whole-dir link was changed] "
+    [[ -z "$(ls -A "$tmp/clone-skills")" ]] || problems+="[links were written through it into the clone: $(ls -A "$tmp/clone-skills" | tr '\n' ' ')] "
+    [[ "$(ls -A "$tmp/repo/.agents/skills")" == "$repo_before" ]] || problems+="[the repo's skills directory gained entries] "
+    [[ "$(grep -c 'rm ' <<<"$out")" == 1 ]] || problems+="[expected one warning naming the rm command, got $(grep -c 'rm ' <<<"$out")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a dry run links nothing"; then
+    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
+    out="$( ( AUTOOS_DRY_RUN=1; link_skill_dirs "$tmp/repo/.agents/skills" "$tmp/home/.openhands/skills" ) 2>&1 )"
+    problems=""
+    [[ ! -e "$tmp/home" ]] || problems+="[a dry run created $tmp/home] "
+    [[ "$out" == *"would link"* ]] || problems+="[no 'would link' line: $out] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: second run of the settings writer takes no backup and reports unchanged"; then
+    tmp="$(mktemp -d)"
+    oh="$tmp/home/.openhands"
+    # Name, size and mtime of every backup: a bare count cannot tell a skipped
+    # second run from one that overwrote a same-second backup.
+    oh_backups() { find "$oh" -maxdepth 1 -name 'settings.json.autoos-backup-*' -printf '%f %s %T@\n' | sort; }
+    oh_setup_run "$tmp/home" "" >/dev/null
+    b1="$(oh_backups)"
+    sum1="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    prof1="$(stat -c '%y' "$oh/profiles/openrouter-free.json")"
+    out="$(oh_setup_run "$tmp/home" "")"
+    b2="$(oh_backups)"
+    sum2="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    prof2="$(stat -c '%y' "$oh/profiles/openrouter-free.json")"
+    problems=""
+    [[ "$b1" == "$b2" ]] || problems+="[the second run took or overwrote a settings.json backup: {$b1} -> {$b2}] "
+    [[ "$sum1" == "$sum2" ]] || problems+="[the second run rewrote settings.json] "
+    [[ "$prof1" == "$prof2" ]] || problems+="[the second run rewrote an identical profile] "
+    [[ "$out" == *unchanged* ]] || problems+="[the second run never says unchanged] "
+    [[ "$out" != *"written to"* ]] || problems+="[the second run still says 'written to'] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a BOM'd settings.json keeps the user's keys"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/home/.openhands"
+    printf '\xef\xbb\xbf{"custom_user_key": "keep-me", "schema_version": 2}' >"$tmp/home/.openhands/settings.json"
+    oh_setup_run "$tmp/home" "" >/dev/null
+    got="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8-sig")); print(d.get("custom_user_key"), "agent_settings" in d)' "$tmp/home/.openhands/settings.json" 2>&1)"
+    rm -rf "$tmp"
+    assert_eq "$got" "keep-me True"
+fi
+
+if it "openhands: a backup of settings.json never overwrites an earlier one"; then
+    tmp="$(mktemp -d)"
+    oh="$tmp/home/.openhands"; mkdir -p "$oh"
+    seed1='{"user_key": "first original"}'
+    seed2='{"user_key": "second original"}'
+    printf '%s' "$seed1" >"$oh/settings.json"
+    oh_setup_run "$tmp/home" "" >/dev/null
+    printf '%s' "$seed2" >"$oh/settings.json"
+    oh_setup_run "$tmp/home" "" >/dev/null
+    have1=0; have2=0; b=""
+    for b in "$oh"/settings.json.autoos-backup-*; do
+        [[ -f "$b" ]] || continue
+        [[ "$(cat "$b")" == "$seed1" ]] && have1=1
+        [[ "$(cat "$b")" == "$seed2" ]] && have2=1
+    done
+    rm -rf "$tmp"
+    if (( have1 && have2 )); then pass
+    else fail "a backup holding the user's file was overwritten (first original kept: $have1, second original kept: $have2)"; fi
+fi
+
+# A python step that fails writes nothing, and the function must say so instead
+# of printing its success line. python3 is stubbed in a subshell (the function
+# lookup wins over PATH), failing only the one call under test and passing the
+# rest through to the real interpreter.
+if it "openhands: a failing settings writer is reported, not called written"; then
+    tmp="$(mktemp -d)"
+    oh="$tmp/home/.openhands"; mkdir -p "$oh"
+    printf '%s' '{"user_key": "mine"}' >"$oh/settings.json"
+    before="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    out="$(
+        python3() {
+            # The settings/profiles script: "python3 - <openhands dir> <secrets> <models>" on stdin.
+            if [[ "${1:-}" == "-" && "${2:-}" == */.openhands ]]; then
+                cat >/dev/null; echo "stub: the settings script failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" ""
+    )"
+    after="$(sha256sum "$oh/settings.json" | cut -d' ' -f1)"
+    problems=""
+    [[ "$before" == "$after" ]] || problems+="[settings.json changed although its writer failed] "
+    ! compgen -G "$oh/settings.json.autoos-backup-*" >/dev/null || problems+="[a backup was taken for a file that was not written] "
+    [[ "$out" == *"not written to $oh/settings.json"* ]] || problems+="[no warning naming $oh/settings.json, output ends: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"configuration and profiles written to"* ]] || problems+="[the success line was printed after the writer failed] "
+    [[ "$out" != *"configuration unchanged"* ]] || problems+="[the 'unchanged' line was printed after the writer failed] "
+    [[ "$out" != *"agent-harness openhands: "* ]] || problems+="[the agent harness ran after the writer failed and may have created settings.json content of its own] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "openhands: a failing agent harness is reported, not called written"; then
+    tmp="$(mktemp -d)"
+    out="$(
+        python3() {
+            if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+                echo "stub: the harness failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" ""
+    )"
+    problems=""
+    [[ "$out" == *"agent harness not applied to OpenHands (exit 1)"* ]] || problems+="[no warning for the failed agent harness, output ends: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"configuration and profiles written to"* ]] || problems+="[the success line was printed after the agent harness failed] "
+    [[ "$out" != *"configuration unchanged"* ]] || problems+="[the 'unchanged' line was printed after the agent harness failed] "
+    [[ "$out" == *"only partly applied"* ]] || problems+="[the final message does not say the configuration is partial, output ends: $(tail -n 3 <<<"$out")] "
+    [[ -f "$tmp/home/.openhands/settings.json" ]] || problems+="[the settings writer itself no longer ran] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# A warning alone is not a result: setup.sh folds autoos_record_failure ids into
+# the summary, and an unwarned refusal leaves nothing to fold, so the component
+# still reads "installed" while its harness was never applied. Both writers take
+# their id from run_post_install (AUTOOS_POST_COMPONENT), because one function
+# serves two catalog ids for OpenCode.
+if it "a refused agent harness records OpenHands as failed"; then
+    tmp="$(mktemp -d)"
+    oh_report_recorded() {
+        run_post_install setup_openhands_config openhands
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    }
+    out="$(
+        python3() {
+            if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+                echo "stub: the harness failed" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        oh_setup_run "$tmp/home" "" oh_report_recorded
+    )"
+    if [[ "$out" == *"recorded: openhands"* ]]; then
+        pass
+    else
+        fail "the refused harness was not recorded: [$(tail -n 3 <<<"$out")]"
+    fi
+    rm -rf "$tmp"
+fi
+
+if it "a refused agent harness records OpenCode under the id being installed, once"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    oc="$tmp/.config/opencode"; mkdir -p "$oc"
+    printf '{"model": "anthropic/mine"}\n' >"$oc/opencode.json"
+    oc_report_recorded() {
+        # Two config files, so the recorder runs twice for one component: the id
+        # must still be listed once, or the fold counts one component twice.
+        run_post_install setup_opencode_config opencode-cli
+        printf 'recorded: %s\n' "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    }
+    out="$(
+        python3() {
+            if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+                echo "agent-harness opencode: left alone, $* is a symlink" >&2; return 1
+            fi
+            command python3 "$@"
+        }
+        ( SYS_HOME="$tmp" AUTOOS_DRY_RUN=0 AUTOOS_ROOT="$ROOT"
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          opencode_is_v2() { return 1; }
+          oc_report_recorded ) 2>&1
+    )"
+    problems=""
+    [[ "$out" == *"recorded: opencode-cli"* ]] || problems+="[the refused harness was not recorded: $(tail -n 3 <<<"$out")] "
+    [[ "$out" != *"opencode-cli opencode-cli"* ]] || problems+="[the id was recorded twice] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "custom_is_installed detects a populated native CAO home"; then
+    tmp="$(mktemp -d)"
+    (
+        SYS_HOME="$tmp"
+        mkdir -p "$tmp/.cao/db"
+        custom_is_installed wsl-agent-home
+    )
+    rc_full=$?
+    (
+        SYS_HOME="$tmp"
+        rm -rf "$tmp/.cao"
+        custom_is_installed wsl-agent-home
+    )
+    rc_empty=$?
+    rm -rf "$tmp"
+    if [[ $rc_full -eq 0 && $rc_empty -ne 0 ]]; then pass
+    else fail "rc_full=$rc_full rc_empty=$rc_empty"; fi
+fi
+
+if it "setup_wsl_agent_home is a no-op off WSL and dry-runnable on WSL"; then
+    tmp="$(mktemp -d)"
+    ( SYS_HOME="$tmp" SYS_IS_WSL=0 AUTOOS_DRY_RUN=0 setup_wsl_agent_home >/dev/null 2>&1 )
+    rc_off=$?
+    [[ -e "$tmp/.bashrc" ]] && rc_off=99
+    ( SYS_HOME="$tmp" SYS_IS_WSL=1 AUTOOS_DRY_RUN=1 setup_wsl_agent_home >/dev/null 2>&1 )
+    rc_dry=$?
+    [[ -e "$tmp/.bashrc" ]] && rc_dry=99
+    rm -rf "$tmp"
+    if [[ $rc_off -eq 0 && $rc_dry -eq 0 ]]; then pass
+    else fail "rc_off=$rc_off rc_dry=$rc_dry"; fi
+fi
+
+if it "backup collision: CAO relocation preserves existing same-second backups"; then
+    tmp="$(mktemp -d)"
+    legacy="$tmp/.aws/cli-agent-orchestrator"
+    base="$legacy.backup-20260101-000000"
+    mkdir -p "$legacy/db" "$base" "$tmp/bin"
+    printf 'first\n' >"$legacy/db/state"
+    printf 'original backup\n' >"$base/marker"
+    printf '#!/bin/sh\nprintf "%%s\\n" 20260101-000000\n' >"$tmp/bin/date"
+    printf '#!/bin/sh\nexit 1\n' >"$tmp/bin/python3"
+    chmod +x "$tmp/bin/date" "$tmp/bin/python3"
+    (
+        PATH="$tmp/bin:$PATH"
+        SYS_HOME="$tmp"
+        SYS_IS_WSL=1
+        AUTOOS_DRY_RUN=0
+        setup_wsl_agent_home >/dev/null
+    )
+    rc_first=$?
+    printf 'second\n' >"$legacy/db/state"
+    (
+        PATH="$tmp/bin:$PATH"
+        SYS_HOME="$tmp"
+        SYS_IS_WSL=1
+        AUTOOS_DRY_RUN=0
+        setup_wsl_agent_home >/dev/null
+    )
+    rc_second=$?
+    ok=1
+    [[ $rc_first -eq 0 && $rc_second -eq 0 ]] || { ok=0; echo "relocation failed: first=$rc_first second=$rc_second" >&2; }
+    [[ "$(cat "$base/marker" 2>/dev/null)" == 'original backup' ]] || { ok=0; echo "existing backup was changed" >&2; }
+    [[ "$(cat "$base-1/db/state" 2>/dev/null)" == first ]] || { ok=0; echo "first backup is missing or wrong" >&2; }
+    [[ "$(cat "$base-2/db/state" 2>/dev/null)" == second ]] || { ok=0; echo "second backup is missing or wrong" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "CAO relocation overwrote or nested a same-second backup"; fi
+fi
+
+if it "backup collision: a failed CAO backup copy leaves no partial backup and does not abort the install"; then
+    tmp="$(mktemp -d)"
+    legacy="$tmp/.aws/cli-agent-orchestrator"
+    mkdir -p "$legacy/db" "$tmp/bin"
+    printf 'live\n' >"$legacy/db/state"
+    printf '#!/bin/sh\nprintf "%%s\\n" 20260101-000000\n' >"$tmp/bin/date"
+    printf '#!/bin/sh\nexit 1\n' >"$tmp/bin/python3"
+    # cp stand-in: leaves a partial destination behind, then fails.
+    printf '#!/bin/sh\nfor a; do last="$a"; done\nmkdir -p "$last/partial"\nexit 1\n' >"$tmp/bin/cp"
+    chmod +x "$tmp/bin/date" "$tmp/bin/python3" "$tmp/bin/cp"
+    (
+        PATH="$tmp/bin:$PATH"
+        SYS_HOME="$tmp"
+        SYS_IS_WSL=1
+        AUTOOS_DRY_RUN=0
+        setup_wsl_agent_home >/dev/null 2>&1
+    )
+    rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "rc=$rc (a failed backup must not abort the install queue)" >&2; }
+    [[ ! -e "$legacy.backup-20260101-000000" ]] || { ok=0; echo "partial backup left behind" >&2; }
+    [[ "$(cat "$legacy/db/state" 2>/dev/null)" == live ]] || { ok=0; echo "legacy state changed" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "failed CAO backup left a partial copy or aborted"; fi
+fi
+
+# Item 4 (rv2): the FIFO probe in setup_wsl_agent_home interpolated the CAO
+# path into Python SOURCE (python3 -c "import os; os.mkfifo('$cao_legacy/...')").
+# A CAO home whose path contained a single quote made that a SyntaxError, the
+# probe "failed", and a perfectly good native ext4 home was falsely relocated:
+# live state moved and a backup taken on a host where FIFOs work fine. The path
+# now goes in as argv, so the shell never parses it and Python never sees it as
+# source.
+if it "setup_wsl_agent_home does not falsely relocate a CAO home whose path contains a single quote"; then
+    tmp="$(mktemp -d)"
+    home="$tmp/it's-here"
+    legacy="$home/.aws/cli-agent-orchestrator"
+    mkdir -p "$legacy/db"
+    printf 'live\n' >"$legacy/db/state"
+    (
+        SYS_HOME="$home"
+        SYS_IS_WSL=1
+        AUTOOS_DRY_RUN=0
+        setup_wsl_agent_home >/dev/null 2>&1
+    )
+    rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$(cat "$legacy/db/state" 2>/dev/null)" == live ]] || { ok=0; echo "legacy state was moved or changed" >&2; }
+    n_bak="$(find "$home/.aws" -maxdepth 1 -name 'cli-agent-orchestrator.backup-*' 2>/dev/null | wc -l | tr -d ' ')"
+    [[ "$n_bak" == 0 ]] || { ok=0; echo "a false relocation took $n_bak backup(s)" >&2; }
+    [[ ! -e "$legacy/.autoos-fifo-probe" ]] || { ok=0; echo "the FIFO probe was left behind" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "a single quote in the CAO path caused a false relocation"; fi
+fi
+
+# ─── Skill targets: the agent-skill-links component ─────────────────────────
+# A7b moved this duty out of the retired agent-skills step: linking this
+# checkout's .agents/skills into every client's skills directory is its own
+# component, install_agent_skill_links. One hermetic runner for the whole block —
+# scratch SYS_HOME and AUTOOS_ROOT, codex present or absent on request, and the
+# repo's own keys file never consulted.
+# asl_run <home> <repo> [dry] [codex] -> the step's output plus its state line.
+asl_run() {
+    local home="$1" repo="$2" dry="${3:-0}" codex="${4:-0}"
+    (
+        SYS_HOME="$home" AUTOOS_ROOT="$repo" AUTOOS_DRY_RUN="$dry"
+        AUTOOS_KEYS_FILE="$home/no-keys.yml"
+        AUTOOS_EXTRA_FAILURES=()
+        has_cmd() { [[ "$codex" == 1 && "$1" == codex ]]; }
+        install_agent_skill_links 2>&1
+        printf 'state=%s recorded=[%s]\n' "${INSTALL_SCRIPT_STATE:-}" "${AUTOOS_EXTRA_FAILURES[*]:-}"
+    )
+}
+
+# asl_gate <home> <repo> [codex]: detection's verdict for the id. Detection is
+# the gate setup.sh runs, so every case that cares about "already in place"
+# asks it, not the writer's private helper.
+asl_gate() {
+    local home="$1" repo="$2" codex="${3:-0}"
+    (
+        SYS_HOME="$home" AUTOOS_ROOT="$repo" AUTOOS_DRY_RUN=0
+        has_cmd() { [[ "$codex" == 1 && "$1" == codex ]]; }
+        custom_is_installed agent-skill-links
+    )
+}
+
+if it "agent-skill-links: does NOT clone the retired agent-skills repo"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/home/Documents/code/agent-skills/skills/old-skill"
+    printf 'old clone\n' >"$tmp/home/Documents/code/agent-skills/skills/old-skill/README.md"
+    clone_flag="$tmp/clone_flag"
+    out="$( (
+        SYS_HOME="$tmp/home" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+        clone_or_update() { echo called >"$clone_flag"; }
+        install_agent_skill_links 2>&1
+    ) )"
+    problems=""
+    [[ ! -f "$clone_flag" ]] || problems+="[clone_or_update was called (nothing may clone)] "
+    [[ -f "$tmp/home/Documents/code/agent-skills/skills/old-skill/README.md" ]] \
+        || problems+="[the retired clone was modified] "
+    # Proof the step really ran (and from the checkout, not a clone): a step that
+    # does not exist fails no assertion above.
+    [[ -f "$tmp/home/.agents/skills/alpha/SKILL.md" ]] \
+        || problems+="[nothing was linked, so nothing was proven about cloning]"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: links every skill into Antigravity, Claude Code, the project dir and ~/.agents"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    out="$(asl_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    for dest in "$tmp/home/.gemini/config/skills" "$tmp/home/.claude/skills" "$tmp/repo/.claude/skills"; do
+        for n in alpha beta; do
+            [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through $dest] "
+        done
+    done
+    dest="$tmp/home/.agents/skills"
+    { [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is missing or a symlink] "; }
+    for n in alpha beta; do
+        [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
+            || problems+="[$n not linked into $dest (got: $(readlink "$dest/$n" 2>/dev/null || echo none))] "
+        [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
+    done
+    [[ ! -e "$dest/nofile" ]] || problems+="[nofile (no SKILL.md) was linked into $dest] "
+    [[ ! -d "$tmp/home/.codex/skills" ]] || problems+="[.codex/skills was created even though codex is not present] "
+    [[ "$out" == *"state="* ]] || problems+="[the step printed no state line: $(tail -n 2 <<<"$out")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: the vendored .agents/skills wins over the retired clone"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/home/Documents/code/agent-skills/skills/old-skill"
+    printf -- '---\nname: old-skill\ndescription: demo\n---\n' \
+        >"$tmp/home/Documents/code/agent-skills/skills/old-skill/SKILL.md"
+    out="$(asl_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ -f "$tmp/home/.claude/skills/alpha/SKILL.md" ]] || problems+="[the repo skills did not link] "
+    [[ ! -e "$tmp/home/.claude/skills/old-skill" ]] || problems+="[the retired clone's skill was linked too] "
+    [[ "$(AUTOOS_ROOT="$tmp/repo" autoos_skills_source)" == "$tmp/repo/.agents/skills" ]] \
+        || problems+="[autoos_skills_source did not name the vendored dir] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: links into ~/.codex/skills when codex is installed"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    out="$(asl_run "$tmp/home" "$tmp/repo" 0 1)"
+    problems=""
+    dest="$tmp/home/.codex/skills"
+    { [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is missing or a symlink] "; }
+    for n in alpha beta; do
+        [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
+            || problems+="[$n not linked into $dest] "
+        [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
+    done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: creates no ~/.codex when codex is absent"; then
+    # Creating a directory for a tool the machine does not have is worse than
+    # doing nothing: ~/.codex is only touched when it already exists or codex
+    # is on PATH (and the gate must not count a dest it never writes).
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    out="$(asl_run "$tmp/home" "$tmp/repo" 0 0)"
+    problems=""
+    [[ -e "$tmp/home/.codex" ]] && problems+="[~/.codex was created without codex] "
+    [[ -L "$tmp/home/.agents/skills/alpha" ]] || problems+="[~/.agents/skills not linked, so the run did not reach the step] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: second run reports skipped and touches nothing"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/home/.codex"
+    asl_run "$tmp/home" "$tmp/repo" 0 1 >/dev/null
+    dest="$tmp/home/.agents/skills"
+    before="$(stat -c '%Y' "$dest"; readlink "$dest/alpha" "$dest/beta"; readlink "$tmp/home/.gemini/config/skills/alpha")"
+    problems=""
+    # Detection is asked with the same codex answer as the run it gates.
+    asl_gate "$tmp/home" "$tmp/repo" 1 || problems+="[detection still says not installed] "
+    out="$(asl_run "$tmp/home" "$tmp/repo" 0 1)"
+    after="$(stat -c '%Y' "$dest"; readlink "$dest/alpha" "$dest/beta"; readlink "$tmp/home/.gemini/config/skills/alpha")"
+    problems=""
+    [[ "$before" == "$after" ]] || problems+="[the skills directory or a link changed] "
+    grep -Eq '(^|[^[:alnum:]])(linked|repointed) (alpha|beta)\b' <<<"$out" && problems+="[second run printed a linked/repointed line] "
+    grep -qi 'skills linked' <<<"$out" && problems+="[second run claimed to link skills: $(tail -n 3 <<<"$out")] "
+    [[ "$out" == *"state=skipped"* ]] || problems+="[second run did not report skipped: $(tail -n 3 <<<"$out")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: keeps a user's own skill in ~/.agents/skills"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/home/.agents/skills/alpha" "$tmp/home/.agents/skills/mine"
+    printf 'my own alpha\n' >"$tmp/home/.agents/skills/alpha/SKILL.md"
+    printf 'my own skill\n'  >"$tmp/home/.agents/skills/mine/SKILL.md"
+    snap() { ( cd "$tmp/home/.agents/skills" && find alpha mine -type f -exec sha256sum {} + | sort; ls -A ); }
+    before="$(snap)"
+    asl_run "$tmp/home" "$tmp/repo" >/dev/null
+    after="$(snap)"
+    problems=""
+    [[ -d "$tmp/home/.agents/skills/alpha" && ! -L "$tmp/home/.agents/skills/alpha" ]] \
+        || problems+="[the user's own alpha is no longer a real directory] "
+    [[ "$(readlink "$tmp/home/.agents/skills/beta" 2>/dev/null)" == "$tmp/repo/.agents/skills/beta" ]] \
+        || problems+="[beta was not linked next to the user's skills] "
+    [[ "$(grep -v '^beta$' <<<"$after")" == "$before" ]] || problems+="[the user's skills changed] "
+    asl_gate "$tmp/home" "$tmp/repo" || problems+="[a user's own dir is counted as missing work]"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: a whole-directory skills symlink of yours is settled, not missing work"; then
+    # AGENTS.md 8: a whole-dir symlink from the old layout is left with ONE
+    # warning. Writing through it would put our links inside a directory of yours,
+    # and counting it as missing work would make every later run report the
+    # component as installed while it in fact did nothing.
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    for n in alpha beta; do
+        mkdir -p "$tmp/yours/$n"
+        printf -- '---\nname: %s\ndescription: mine\n---\n' "$n" >"$tmp/yours/$n/SKILL.md"
+    done
+    mkdir -p "$tmp/home/.agents"
+    ln -s "$tmp/yours" "$tmp/home/.agents/skills"
+    before="$(readlink "$tmp/home/.agents/skills"; ls -A "$tmp/yours" | sort | tr '\n' ' ')"
+    out="$(asl_run "$tmp/home" "$tmp/repo")"
+    after="$(readlink "$tmp/home/.agents/skills"; ls -A "$tmp/yours" | sort | tr '\n' ' ')"
+    problems=""
+    [[ "$before" == "$after" ]] || problems+="[AutoOS wrote through the user's whole-directory symlink] "
+    [[ "$out" == *"is a symlink"* ]] || problems+="[nothing warned about it: $(tail -n 3 <<<"$out")] "
+    [[ "$out" == *"recorded=[]"* ]] || problems+="[a directory of yours being kept is recorded as a failure] "
+    asl_gate "$tmp/home" "$tmp/repo" || problems+="[a destination that is yours counts as missing work] "
+    # One refused directory is not a reason to stop the other clients.
+    [[ -L "$tmp/home/.claude/skills/alpha" ]] || problems+="[the other client dirs were not linked] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: a dry run links nothing and says so"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/home/.codex"
+    out="$(asl_run "$tmp/home" "$tmp/repo" 1 1)"
+    problems=""
+    [[ ! -e "$tmp/home/.gemini" ]] || problems+="[dry run created $tmp/home/.gemini] "
+    [[ ! -e "$tmp/home/.claude" ]] || problems+="[dry run created $tmp/home/.claude] "
+    [[ ! -e "$tmp/home/.agents" ]] || problems+="[dry run created $tmp/home/.agents] "
+    [[ ! -e "$tmp/home/.codex/skills" ]] || problems+="[dry run created $tmp/home/.codex/skills] "
+    [[ ! -e "$tmp/repo/.claude/skills" ]] || problems+="[dry run wrote into the checkout] "
+    [[ "$out" == *"would link"* ]] || problems+="[the dry run made no announcement: $(tail -n 3 <<<"$out")] "
+    [[ "$out" == *"state=skipped"* ]] || problems+="[a dry run reported installed work: $(tail -n 3 <<<"$out")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: detection says installed only when every client dir is filled"; then
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/home/.codex"
+    ok=1
+    asl_gate "$tmp/home" "$tmp/repo" 1 && { ok=0; echo "an empty machine was detected as installed" >&2; }
+    asl_run "$tmp/home" "$tmp/repo" 0 1 >/dev/null
+    asl_gate "$tmp/home" "$tmp/repo" 1 || { ok=0; echo "a fully linked machine was not detected" >&2; }
+    # A missing skill in ONE client dir is still missing work: that client would
+    # see no skills at all.
+    rm -f "$tmp/home/.claude/skills/beta"
+    asl_gate "$tmp/home" "$tmp/repo" 1 && { ok=0; echo "a client dir missing a skill was detected as installed" >&2; }
+    ln -sfn "$tmp/repo/.agents/skills/beta" "$tmp/home/.claude/skills/beta"
+    # A dest that is not ours at all (the user's own directory) is settled work.
+    rm -rf "$tmp/home/.agents/skills/alpha"
+    mkdir -p "$tmp/home/.agents/skills/alpha"
+    printf -- '---\nname: alpha\ndescription: mine\n---\n' >"$tmp/home/.agents/skills/alpha/SKILL.md"
+    asl_gate "$tmp/home" "$tmp/repo" 1 || { ok=0; echo "the user's own skill dir counted as missing work" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "detection disagrees with what the linker writes"; fi
+fi
+
+if it "agent-skill-links: a moved checkout leaves a dangling link and detection notices"; then
+    # The repair rule lives in link_skill_dirs (repoint only our own dangling
+    # link). Detection has to reach it: a gate that calls a dangling link
+    # "installed" would skip the moved-checkout repair forever.
+    tmp="$(mktemp -d)"
+    oh_skill_repo "$tmp/repo"
+    mkdir -p "$tmp/home/.codex"
+    asl_run "$tmp/home" "$tmp/repo" 0 1 >/dev/null
+    mv "$tmp/repo" "$tmp/repo-moved"
+    problems=""
+    asl_gate "$tmp/home" "$tmp/repo-moved" 1 && problems+="[a dangling AutoOS link was detected as installed] "
+    out="$(asl_run "$tmp/home" "$tmp/repo-moved" 0 1)"
+    problems=""
+    [[ -f "$tmp/home/.agents/skills/alpha/SKILL.md" ]] || problems+="[the dangling ~/.agents link was not repointed] "
+    [[ -f "$tmp/home/.gemini/config/skills/alpha/SKILL.md" ]] || problems+="[the dangling ~/.gemini link was not repointed] "
+    [[ "$out" == *"repointed"* ]] || problems+="[the repair was not announced: $(tail -n 3 <<<"$out")] "
+    asl_gate "$tmp/home" "$tmp/repo-moved" 1 || problems+="[still not installed after the repair]"
+    rm -rf "$tmp" "$tmp/repo-moved"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: links into the retired agent-skills clone are retargeted, live or dangling, with a record; =0, foreign and failed cases keep the link (Q-018)"; then
+    # Operator Q-018 (2026-09-28): setup moves links into the retired clone -
+    # exactly $SYS_HOME/Documents/{Code,code}/agent-skills/skills/<name>, the path
+    # autoos_skills_source used - live or dangling (the clone is what gets
+    # deleted). The record is written only after a successful move and names the
+    # literal readlink value; the target is never touched. A user's own checkout
+    # that merely ends in agent-skills/skills/<name> is theirs. =0 opts out.
+    problems=""
+    for mode in live dangling optout foreign lnfail; do
+        tmp="$(mktemp -d)"
+        home="$tmp/home"
+        oh_skill_repo "$tmp/repo"
+        old="$home/Documents/code/agent-skills/skills/alpha"
+        [[ "$mode" == foreign ]] && old="$home/my/agent-skills/skills/alpha"
+        mkdir -p "$old" "$home/.claude/skills"
+        ln -s "$old" "$home/.claude/skills/alpha"
+        [[ "$mode" == dangling ]] && rm -rf "$home/Documents/code/agent-skills"
+        [[ "$mode" == lnfail ]] && chmod 555 "$home/.claude/skills"
+        (
+            unset AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+            [[ "$mode" == optout ]] && export AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0
+            asl_run "$home" "$tmp/repo" >/dev/null
+            got="$(readlink "$home/.claude/skills/alpha")"
+            records=("$home"/.claude/skills.autoos-backup-*)
+            case "$mode" in
+                live|dangling)
+                    [[ "$got" == "$tmp/repo/.agents/skills/alpha" ]] || echo "[$mode: alpha points at $got]"
+                    [[ -f "${records[0]}" ]] && grep -qxF "$home/.claude/skills/alpha -> $old" "${records[0]}" \
+                        || echo "[$mode: no record naming the literal old target]"
+                    asl_gate "$home" "$tmp/repo" || echo "[$mode: not installed after the retarget]"
+                    asl_run "$home" "$tmp/repo" >/dev/null
+                    n=$(ls -d "$home"/.claude/skills.autoos-backup-* 2>/dev/null | wc -l)
+                    [[ "$n" == 1 ]] || echo "[$mode: second run left $n records]"
+                    ;;
+                *)
+                    [[ "$got" == "$old" ]] || echo "[$mode: alpha was moved to $got]"
+                    [[ ! -e "${records[0]}" ]] || echo "[$mode: a record was written]"
+                    ;;
+            esac
+            if [[ "$mode" != dangling && ! -d "$old" ]]; then echo "[$mode: the old target was deleted]"; fi
+        ) >"$tmp/out" 2>&1
+        problems+="$(grep '^\[' "$tmp/out")"
+        chmod 755 "$home/.claude/skills" 2>/dev/null
+        rm -rf "$tmp"
+    done
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links: the linker and detection read one destination list"; then
+    # One fact, one home: the gate must check exactly what the writer writes, or
+    # a machine is told it is finished while a client directory is still empty.
+    # .codex/skills is the conditional entry, so it must appear in the list too.
+    linker="$(awk '/^install_agent_skill_links\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    gate="$(awk '/^agent_skill_links_current\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    dests="$(awk '/^agent_skill_link_dests\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    ok=1
+    grep -q 'agent_skill_link_dests' <<<"$linker" || { ok=0; echo "install_agent_skill_links does not read agent_skill_link_dests" >&2; }
+    grep -q 'agent_skill_link_dests' <<<"$gate"   || { ok=0; echo "agent_skill_links_current does not read agent_skill_link_dests" >&2; }
+    for body in "$linker" "$gate"; do
+        grep -q '\.gemini/config/skills' <<<"$body" && { ok=0; echo "a destination is hardcoded outside the list" >&2; }
+    done
+    for want in '.gemini/config/skills' '.claude/skills' '.agents/skills' '.codex/skills'; do
+        grep -qF -- "$want" <<<"$dests" || { ok=0; echo "the destination list does not name $want" >&2; }
+    done
+    if (( ok )); then pass; else fail "the skill destinations have more than one home"; fi
+fi
+
+if it "agent-skill-links: linux and macos carry the component and the catalogs still validate"; then
+    out="$(python3 - <<'PY'
+import json, sys
+want = {
+    "id": "agent-skill-links", "provider": "custom", "package": "agent-skill-links",
+    "postInstall": "install_agent_skill_links",
+    "profiles": ["workstation", "ai-coding"],
+}
+problems = []
+for f in ("catalog/linux.json", "catalog/macos.json"):
+    data = json.load(open(f, encoding="utf-8"))
+    found = [c for g in data["categories"] for c in g["components"] if c.get("id") == "agent-skill-links"]
+    if len(found) != 1:
+        problems.append(f + ": " + str(len(found)) + " entries"); continue
+    c = found[0]
+    for k, v in want.items():
+        if c.get(k) != v:
+            problems.append("%s: %s is %r, expected %r" % (f, k, c.get(k), v))
+    # Linking a directory of markdown needs no package manager: `requires` here
+    # would drag git and nodejs into a skills-only run.
+    if c.get("requires"):
+        problems.append(f + ": the skill links require nothing — git and nodejs are not their business")
+    if c.get("homepage") != "https://github.com/Ch3fUlrich/AutoOS":
+        problems.append(f + ": homepage is not the repo the skills live in")
+    if c.get("prompt"):
+        problems.append(f + ": the skill links ask no question — omnigraph_url belongs to the omnigraph components")
+    if len(c.get("description", "")) > 70:
+        problems.append(f + ": description longer than 70 chars")
+# Windows is another lane's work; the id must not appear there yet.
+win = json.load(open("catalog/windows.json", encoding="utf-8"))
+if any(c.get("id") == "agent-skill-links" for g in win["categories"] for c in g["components"]):
+    problems.append("catalog/windows.json: the component is not built on Windows in this lane")
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+)" && catalog_validate catalog/linux.json >/dev/null 2>&1 && catalog_validate catalog/macos.json >/dev/null 2>&1 \
+    && pass || fail "catalog entry: ${out:0:400}"
+fi
+
+if it "the rehomed postInstalls name functions that exist"; then
+    # postInstall is not schema-validated: run_post_install only warns when the
+    # named function is missing, so a typo silently installs nothing.
+    ok=1
+    for fn in install_agent_skill_links install_omnigraph_client; do
+        declare -F "$fn" >/dev/null || { ok=0; echo "$fn is not defined in lib/linux/install.sh" >&2; }
+    done
+    if (( ok )); then pass; else fail "a catalogued postInstall names no function"; fi
+fi
+
+# ─── keys-file lookup order (autoos_api_keys_conf) ──────────────────────────
+#
+# Each case asserts on the path the helper PRINTS, not on the file it created:
+# every tier's file exists in every sandbox, so cat-ing one of them proves only
+# that the test wrote it. The choice is the whole behaviour under test.
+# All the values are dummies; nothing here reads a real key.
+
+# oh_keys_conf <sandbox dir> -> prints the helper's verdict, returns its rc
+oh_keys_conf() {
+    (
+        SYS_HOME="$1"
+        AUTOOS_ROOT="$1"
+        source lib/linux/install.sh
+        autoos_api_keys_conf
+    )
+}
+
+if it "keys order: ~/.config/autoos/api_keys.conf beats the agent-skills legacy file"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/.config/autoos" "$tmp/configuration" "$tmp/Documents/code/agent-skills/secrets"
+    printf 'omniroute=from_user_config\n' >"$tmp/.config/autoos/api_keys.conf"
+    printf 'omniroute: from_repo_yml\n'  >"$tmp/configuration/api-keys.yml"
+    printf 'omniroute=from_clone\n'      >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    got="$(oh_keys_conf "$tmp")"; rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$got" == *".config/autoos/api_keys.conf" ]]; then pass
+    else fail "picked [$got] rc=$rc, expected the user-scope file"; fi
+fi
+
+if it "keys order: repo api-keys.yml is used before the agent-skills clone"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/configuration" "$tmp/Documents/code/agent-skills/secrets"
+    printf 'omniroute: from_repo_yml\n' >"$tmp/configuration/api-keys.yml"
+    printf 'omniroute=from_clone\n'     >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    got="$(oh_keys_conf "$tmp")"; rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$got" == *"configuration/api-keys.yml" ]]; then pass
+    else fail "picked [$got] rc=$rc, expected the repo's api-keys.yml"; fi
+fi
+
+if it "keys order: the agent-skills clone file is still the last tier"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/Documents/code/agent-skills/secrets"
+    printf 'omniroute=from_clone\n' >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    got="$(oh_keys_conf "$tmp")"; rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$got" == *"agent-skills/secrets/api_keys.conf" ]]; then pass
+    else fail "picked [$got] rc=$rc, expected the retired clone's file"; fi
+fi
+
+if it "keys order: no file anywhere, so no agent-skills path is invented"; then
+    tmp="$(mktemp -d)"
+    got="$(oh_keys_conf "$tmp")"; rc=$?
+    # Positive control in the same sandbox: an empty rc-only failure is what a
+    # helper that does not exist at all looks like, so the sandbox has to be
+    # able to produce a hit.
+    mkdir -p "$tmp/.config/autoos"
+    printf 'omniroute=from_user_config\n' >"$tmp/.config/autoos/api_keys.conf"
+    found="$(oh_keys_conf "$tmp")"; frc=$?
+    rm -rf "$tmp"
+    if [[ $rc -ne 0 && -z "$got" && $frc -eq 0 && "$found" == *".config/autoos/api_keys.conf" ]]; then pass
+    else fail "empty=${rc} [${got}] then control=${frc} [${found}]: expected a miss and then a hit"; fi
+fi
+
+if it "keys order: AUTOOS_KEYS_FILE overrides the search without touching agent-skills"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/elsewhere" "$tmp/Documents/code/agent-skills/secrets"
+    printf 'omniroute: from_override\n' >"$tmp/elsewhere/keys.yml"
+    printf 'omniroute=from_clone\n'     >"$tmp/Documents/code/agent-skills/secrets/api_keys.conf"
+    got="$(
+        SYS_HOME="$tmp" AUTOOS_ROOT="$tmp" AUTOOS_KEYS_FILE="$tmp/elsewhere/keys.yml"
+        source lib/linux/install.sh
+        autoos_api_keys_conf
+    )"; rc=$?
+    rm -rf "$tmp"
+    if [[ $rc -eq 0 && "$got" == "$tmp/elsewhere/keys.yml" ]]; then pass
+    else fail "picked [$got] rc=$rc, expected the override path"; fi
+fi
+
+# The python half of the same fact: one parser, tested on its own. Wired here
+# because tests/test_suite_wiring.py refuses a unit-test file no harness runs.
+if it "keys parser: tools/keys_file.py unit tests pass (no agent-skills reader)"; then
+    if ! has_cmd python3; then
+        skip "python3 not found"
+    else
+        out="$(python3 tests/test_keys_file.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    fi
+fi
+
+# ─── graphify: the pinned uv tool install and what sits in its way ─────────
+# ~/.local/bin/graphify-mcp used to be a link AutoOS created, pointing at this
+# checkout's Docker wrapper. `uv tool install` now owns that path (spec D13), so the
+# step's job inverted: classify what is there and remove ONLY what AutoOS or the
+# retired agent-skills clone put there, then hand the caller the verdict it decides
+# on. The verdict is published in GRAPHIFY_LINK_STATE:
+#   free      nothing at the path — install away
+#   removed   a recognised link was deleted — install away
+#   uv        uv's own tool link — usable, and --force may replace it
+#   blocked   the user's own file or link — never touched, never --force over it
+#
+# gfy_repo_skeleton <tmp>: a checkout with the wrapper the old step linked to.
+gfy_repo_skeleton() {
+    mkdir -p "$1/repo/infra/mcp-servers/bin" "$1/.local/bin"
+    printf '#!/bin/sh\nexit 0\n' >"$1/repo/infra/mcp-servers/bin/graphify-mcp"
+    chmod +x "$1/repo/infra/mcp-servers/bin/graphify-mcp"
+}
+
+# gfy_uv <uv args...>: the one fake uv every graphify test drives, shaped like the
+# real tool measured on uv 0.12.18 (the host this was found on has graphifyy
+# installed by it):
+#   tool dir          prints the tools dir
+#   tool list         prints "<dist> v<version>" then one "- <exe>" line per command,
+#                     or "No tools installed" when nothing is
+#   tool install SPEC records SPEC's version and writes the tool's executable into
+#                     its own tools dir plus the shim link at .local/bin/graphify-mcp
+# and — the part every parser in install.sh was broken by — it colourises stdout on
+# uv's own precedence: `--color never` wins, then NO_COLOR, then FORCE_COLOR /
+# CLICOLOR_FORCE forcing it on with no tty at all, then a tty. The escapes are the
+# measured ones: cyan around `tool dir`, bold around the version line.
+#
+# The subshell that calls it configures it through globals:
+#   gfy_uv_log     append every argv here
+#   gfy_uv_state   file holding the installed version (absent = nothing installed)
+#   gfy_uv_name    distribution name (default graphifyy)
+#   gfy_uv_tools   uv's tools dir (default $SYS_HOME/uvtools)
+#   gfy_uv_install "fail" = the outage: install exits 1 and writes nothing
+gfy_uv() {
+    local argv="$*" colour=0 v ver=""
+    local dir="${gfy_uv_tools:-$SYS_HOME/uvtools}" name="${gfy_uv_name:-graphifyy}"
+    if [[ "$argv" == *"--color never"* || "$argv" == *"--color=never"* ]]; then
+        colour=0
+    elif [[ -n "${NO_COLOR:-}" ]]; then
+        colour=0
+    elif [[ -n "${FORCE_COLOR:-}" || -n "${CLICOLOR_FORCE:-}" ]]; then
+        colour=1
+    elif [[ -t 1 ]]; then
+        colour=1
+    fi
+    [[ -z "${gfy_uv_log:-}" ]] || printf '%s\n' "$argv" >>"$gfy_uv_log"
+    # uv's global --color flag is not the subcommand: real uv still runs `tool dir`
+    # behind it, so the fake drops it (and its value) before dispatching.
+    if [[ "${1:-}" == "--color" ]]; then shift 2; elif [[ "${1:-}" == --color=* ]]; then shift; fi
+    if [[ "${1:-} ${2:-}" == "tool install"* ]]; then
+        if [[ "${gfy_uv_install:-ok}" == fail ]]; then
+            printf 'error: failed to fetch the package index\n' >&2
+            return 1
+        fi
+        ver="${*: -1}"; ver="${ver##*==}"
+        [[ -n "${gfy_uv_state:-}" ]] && printf '%s' "$ver" >"$gfy_uv_state"
+        mkdir -p "$SYS_HOME/.local/bin" "$dir/$name/bin"
+        printf '#!/bin/sh\nexit 0\n' >"$dir/$name/bin/graphify-mcp"
+        chmod +x "$dir/$name/bin/graphify-mcp"
+        ln -sfn "$dir/$name/bin/graphify-mcp" "$SYS_HOME/.local/bin/graphify-mcp"
+        return 0
+    fi
+    case "${1:-} ${2:-}" in
+        "tool dir")
+            if (( colour )); then printf '\033[36m%s\033[39m\n' "$dir"
+            else printf '%s\n' "$dir"; fi ;;
+        "tool list")
+            [[ -n "${gfy_uv_state:-}" && -s "${gfy_uv_state}" ]] && v="$(cat "$gfy_uv_state" 2>/dev/null || true)"
+            if [[ -z "${v:-}" ]]; then
+                printf 'No tools installed\n'
+            elif (( colour )); then
+                printf '\033[1m%s v%s\033[0m\n- graphify\n- graphify-mcp\n' "$name" "$v"
+            else
+                printf '%s v%s\n- graphify\n- graphify-mcp\n' "$name" "$v"
+            fi ;;
+    esac
+    return 0
+}
+
+# gfy_link_shape <tmp> <shape>: put ~/.local/bin/graphify-mcp in that shape.
+#   cloned     a link into the retired agent-skills clone (live or dangling)
+#   wrapper    a link into this checkout's infra/mcp-servers/bin wrapper
+#   ownfile    the user's own regular file
+#   ownlink    the user's own link to somewhere else entirely
+#   uvtool     uv's own tool link (target under the uv tools dir)
+gfy_link_shape() {
+    local tmp="$1" shape="$2"
+    case "$shape" in
+        cloned) mkdir -p "$tmp/uvtools/graphifyy/bin"
+                ln -sfn "$tmp/Documents/code/agent-skills/infra/mcp-servers/bin/graphify-mcp" \
+                    "$tmp/.local/bin/graphify-mcp" ;;
+        wrapper) ln -sfn "$tmp/repo/infra/mcp-servers/bin/graphify-mcp" \
+                    "$tmp/.local/bin/graphify-mcp" ;;
+        ownfile) printf '#!/bin/sh\nexit 0\n' >"$tmp/.local/bin/graphify-mcp"
+                chmod +x "$tmp/.local/bin/graphify-mcp" ;;
+        ownlink) mkdir -p "$tmp/other"
+                printf '#!/bin/sh\nexit 0\n' >"$tmp/other/graphify-mcp"
+                chmod +x "$tmp/other/graphify-mcp"
+                ln -sfn "$tmp/other/graphify-mcp" "$tmp/.local/bin/graphify-mcp" ;;
+        uvtool) mkdir -p "$tmp/uvtools/graphifyy/bin"
+                printf '#!/bin/sh\nexit 0\n' >"$tmp/uvtools/graphifyy/bin/graphify-mcp"
+                ln -sfn "$tmp/uvtools/graphifyy/bin/graphify-mcp" \
+                    "$tmp/.local/bin/graphify-mcp" ;;
+    esac
+}
+
+# gfy_link_run <tmp> <dry>: the verdict, with the step's own report in front of it.
+# A caller that wants the host's view prefixes the call with FORCE_COLOR=3 — bash
+# puts that in the driver's environment, and the subshell below inherits it.
+gfy_link_run() {
+    (
+        SYS_HOME="$1" AUTOOS_ROOT="$1/repo" AUTOOS_DRY_RUN="$2"
+        uv() { gfy_uv "$@"; }
+        graphify_mcp_link_prepare 2>&1
+        printf 'STATE=%s\n' "${GRAPHIFY_LINK_STATE:-unset}"
+    )
+}
+
+if it "graphify link prepare frees a path with nothing in it"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    out="$(gfy_link_run "$tmp" 0)"
+    problems=""
+    [[ "$out" == *STATE=free* ]] || problems+="[verdict: $(tail -n 1 <<<"$out")] "
+    [[ -e "$tmp/.local/bin/graphify-mcp" ]] && problems+="[the step created a link itself] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify link prepare removes the agent-skills link and reports it"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" cloned
+    out="$(gfy_link_run "$tmp" 0)"
+    problems=""
+    [[ "$out" == *STATE=removed* ]] || problems+="[verdict: $(tail -n 1 <<<"$out")] "
+    [[ -e "$tmp/.local/bin/graphify-mcp" || -L "$tmp/.local/bin/graphify-mcp" ]] \
+        && problems+="[the agent-skills link is still there]"
+    [[ "$out" == *"removed"* ]] || problems+="[nothing reported the removal: $(head -n 1 <<<"$out")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify link prepare removes the link to this checkout's docker wrapper"; then
+    # The wrapper needs a built graphify-mcp:latest image and a docker daemon; D18
+    # wants clients off Docker, and the link in the way blocks uv's own shim.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" wrapper
+    out="$(gfy_link_run "$tmp" 0)"
+    problems=""
+    [[ "$out" == *STATE=removed* ]] || problems+="[verdict: $(tail -n 1 <<<"$out")] "
+    [[ -L "$tmp/.local/bin/graphify-mcp" ]] && problems+="[the wrapper link is still there] "
+    [[ -x "$tmp/repo/infra/mcp-servers/bin/graphify-mcp" ]] \
+        || problems+="[it deleted the tracked wrapper instead of the link] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify link prepare leaves the user's own file and blocks the install"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" ownfile
+    out="$(gfy_link_run "$tmp" 0)"
+    problems=""
+    [[ "$out" == *STATE=blocked* ]] || problems+="[verdict: $(tail -n 1 <<<"$out")] "
+    [[ "$out" == *"alone"* ]] || problems+="[nothing named it: $(head -n 1 <<<"$out")] "
+    [[ -f "$tmp/.local/bin/graphify-mcp" && ! -L "$tmp/.local/bin/graphify-mcp" ]] \
+        || problems+="[the user's file was touched]"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify link prepare leaves the user's own symlink to another target alone"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" ownlink
+    out="$(gfy_link_run "$tmp" 0)"
+    got="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo none)"
+    rm -rf "$tmp"
+    if [[ "$out" == *STATE=blocked* && "$got" == */other/graphify-mcp ]]; then pass
+    else fail "verdict=$(tail -n 1 <<<"$out") link=$got"; fi
+fi
+
+if it "graphify link prepare knows uv's own tool link is not the user's file"; then
+    # After a successful install the link is uv's, pointing into its tools dir.
+    # Mistaking it for a user file would refuse every later update.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" uvtool
+    out="$(gfy_link_run "$tmp" 0)"
+    got="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo none)"
+    rm -rf "$tmp"
+    if [[ "$out" == *STATE=uv* && "$got" == */uvtools/graphifyy/bin/graphify-mcp ]]; then pass
+    else fail "verdict=$(tail -n 1 <<<"$out") link=$got"; fi
+fi
+
+if it "graphify link prepare reads uv's own link on a host that forces colour"; then
+    # The regression (measured on uv 0.12.18 with FORCE_COLOR=3 in the environment):
+    # `uv tool dir` prints its path wrapped in \033[36m…\033[39m, so the prefix match
+    # above failed against uv's own shim, called it "the user's file", and made the
+    # step refuse. The verdict must not depend on the host's colour preference.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" uvtool
+    out="$(FORCE_COLOR=3 gfy_link_run "$tmp" 0)"
+    got="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo none)"
+    rm -rf "$tmp"
+    if [[ "$out" == *STATE=uv* && "$got" == */uvtools/graphifyy/bin/graphify-mcp ]]; then pass
+    else fail "verdict=$(tail -n 1 <<<"$out") link=$got"; fi
+fi
+
+if it "graphify link prepare still blocks the user's own link when uv is coloured"; then
+    # Colour must not turn the classifier into a rubber stamp: a link into somewhere
+    # that is not uv's tools dir is still the user's, escapes or no escapes.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" ownlink
+    out="$(FORCE_COLOR=3 gfy_link_run "$tmp" 0)"
+    got="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo none)"
+    rm -rf "$tmp"
+    if [[ "$out" == *STATE=blocked* && "$got" == */other/graphify-mcp ]]; then pass
+    else fail "verdict=$(tail -n 1 <<<"$out") link=$got"; fi
+fi
+
+if it "graphify link prepare removes an agent-skills link whose clone is gone"; then
+    # The realistic migration case: the user deleted the retired clone, which
+    # leaves ~/.local/bin/graphify-mcp dangling. Resolving it is not possible and
+    # not needed — the target still names where it came from.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" cloned
+    rm -rf "$tmp/Documents"
+    out="$(gfy_link_run "$tmp" 0)"
+    got="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo absent)"
+    rm -rf "$tmp"
+    if [[ "$out" == *STATE=removed* && "$got" == absent ]]; then pass
+    else fail "verdict=$(tail -n 1 <<<"$out") link=$got"; fi
+fi
+
+if it "graphify link prepare announces the verdict a real run then acts on"; then
+    # A dry run that reads the link differently from the live branch reports
+    # "removed" for a link the next run calls the user's own, or the reverse. Both
+    # branches therefore reach the same verdict for every shape, and the dry run
+    # touches nothing at all.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    problems=""
+    for shape in free cloned wrapper ownfile ownlink uvtool; do
+        rm -f "$tmp/.local/bin/graphify-mcp"
+        [[ "$shape" == free ]] || gfy_link_shape "$tmp" "$shape"
+        # The link shape is what the driver creates; GRAPHIFY_LINK_STATE is what
+        # the installer decides. Two shapes per verdict (the clone's link and the
+        # wrapper's are both recognised leftovers), so the map is explicit.
+        case "$shape" in
+            free) want=free ;;
+            cloned | wrapper) want=removed ;;
+            ownfile | ownlink) want=blocked ;;
+            uvtool) want=uv ;;
+        esac
+        before="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo absent)"
+        dry="$(gfy_link_run "$tmp" 1)"
+        after_dry="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo absent)"
+        live="$(gfy_link_run "$tmp" 0)"
+        [[ "$before" == "$after_dry" ]] || problems+="[$shape: the dry run touched the link] "
+        [[ "$dry" == *"STATE=$want"* ]] || problems+="[$shape: the dry run says $(tail -n 1 <<<"$dry")] "
+        [[ "$live" == *"STATE=$want"* ]] || problems+="[$shape: the real run says $(tail -n 1 <<<"$live")] "
+        case "$shape" in
+            ownfile) [[ -f "$tmp/.local/bin/graphify-mcp" && ! -L "$tmp/.local/bin/graphify-mcp" ]] \
+                        || problems+="[the user's file was replaced] " ;;
+            ownlink) [[ "$(readlink "$tmp/.local/bin/graphify-mcp")" == "$tmp/other/graphify-mcp" ]] \
+                        || problems+="[the user's link was removed] " ;;
+            uvtool)  [[ "$(readlink "$tmp/.local/bin/graphify-mcp")" == "$tmp/uvtools/graphifyy/bin/graphify-mcp" ]] \
+                        || problems+="[uv's own link was removed] " ;;
+            cloned | wrapper) [[ ! -e "$tmp/.local/bin/graphify-mcp" && ! -L "$tmp/.local/bin/graphify-mcp" ]] \
+                        || problems+="[$shape: the recognised link survived] " ;;
+        esac
+    done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# gfy_tool_run <tmp> <have> <dry> <log> <state-file>: install_graphify_tool against a
+# fake uv. The fake records every argv in <log> and keeps the installed version in
+# <state-file>, so `tool list` after an install reports what was just installed — a
+# second run meets the real tool's contract instead of a frozen answer. <have> seeds
+# that file only when it does not exist yet: a caller that runs twice wants the
+# second run to read the first one's result. The pin and the distribution name come
+# from the catalog, never from this file. The step's exit code is the last line,
+# because what a coloured host broke was the exit code, not only the wording.
+gfy_tool_run() {
+    local tmp="$1" have="$2" dry="$3" log="$4" state="$5"
+    local name pin
+    name="$(mcp_package graphify | sed -e 's/\[.*//' -e 's/==.*//')"
+    pin="$(mcp_package graphify | sed -e 's/.*==//')"
+    [[ -f "$state" ]] || printf '%s' "$have" >"$state"
+    (
+        SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN="$dry"
+        gfy_uv_log="$log" gfy_uv_state="$state" gfy_uv_name="$name"
+        uv() { gfy_uv "$@"; }
+        install_graphify_tool 2>&1
+        printf 'RC=%s\n' "$?"
+    )
+}
+
+if it "graphify tool install: nothing installed installs the pin without --force"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    out="$(gfy_tool_run "$tmp" "" 0 "$log" "$state")"
+    pin="$(mcp_package graphify)"
+    problems=""
+    # Two calls: the version read and the install. Matched anywhere in the line,
+    # because the parsed one carries uv's global --color flag in front of it.
+    [[ "$(grep -c 'tool ' "$log")" == "2" ]] \
+        || problems+="[uv calls: $(tr '\n' '|' <"$log")] "
+    grep -qxF "tool install $pin" "$log" \
+        || problems+="[planned: $(tr '\n' '|' <"$log"), expected: tool install $pin] "
+    [[ "$out" == *"installed"* ]] || problems+="[nothing said installed: $out] "
+    [[ "$out" != *"skipped"* ]] || problems+="[called it skipped: $out] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify tool install: the pinned version already installed reports skipped"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    pin="$(mcp_package graphify | sed -e 's/.*==//')"
+    out="$(gfy_tool_run "$tmp" "$pin" 0 "$log" "$state")"
+    problems=""
+    grep -q '^tool install' "$log" && problems+="[re-installed anyway: $(tr '\n' '|' <"$log")] "
+    [[ "$out" == *"skipped"* ]] || problems+="[nothing said skipped: $out] "
+    [[ "$out" != *"installed"* ]] || problems+="[called it installed: $out] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify tool install: another version installs with --force and reports updated"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    pin_pkg="$(mcp_package graphify)"
+    out="$(gfy_tool_run "$tmp" "0.0.1-other" 0 "$log" "$state")"
+    problems=""
+    grep -qxF "tool install --force $pin_pkg" "$log" \
+        || problems+="[planned: $(tr '\n' '|' <"$log"), expected: tool install --force $pin_pkg] "
+    [[ "$out" == *"updated"* ]] || problems+="[nothing said updated: $out] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify tool install: the second run reports skipped, not installed"; then
+    # The acceptance bar for every installer in this repo, driven through the two
+    # real calls rather than a seeded state: the first installs, the fake uv
+    # records the version it was given, the second must read it back and stop.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    first="$(gfy_tool_run "$tmp" "" 0 "$log" "$state")"
+    second="$(gfy_tool_run "$tmp" "" 0 "$log" "$state")"
+    installs="$(grep -c '^tool install' "$log" || true)"
+    problems=""
+    [[ "$first" == *"installed"* ]] || problems+="[the first run did not say installed: $first] "
+    [[ "$second" == *"skipped"* ]] || problems+="[the second run did not say skipped: $second] "
+    [[ "$second" != *"installed"* ]] || problems+="[the second run said installed: $second] "
+    [[ "$installs" == "1" ]] || problems+="[$installs installs ran, expected 1] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify tool install: never force over a graphify-mcp the user owns"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" ownfile
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    out="$(gfy_tool_run "$tmp" "" 0 "$log" "$state")"
+    problems=""
+    grep -q '^tool install' "$log" && problems+="[installed over the user's file: $(tr '\n' '|' <"$log")] "
+    grep -q -- '--force' "$log" && problems+="[forced over the user's file] "
+    [[ "$out" == *"alone"* ]] || problems+="[nothing said it was left alone: $out] "
+    [[ -f "$tmp/.local/bin/graphify-mcp" && ! -L "$tmp/.local/bin/graphify-mcp" ]] \
+        || problems+="[the user's file is gone]"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify tool install: a stale agent-skills link is cleared, then the pin installs"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" cloned
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    pin_pkg="$(mcp_package graphify)"
+    out="$(gfy_tool_run "$tmp" "" 0 "$log" "$state")"
+    problems=""
+    # uv writes its own link at that path when it installs, so what must be gone is
+    # the link into the retired clone — not every file named graphify-mcp.
+    got="$(readlink "$tmp/.local/bin/graphify-mcp" 2>/dev/null || echo absent)"
+    [[ "$got" == *"/agent-skills/"* ]] && problems+="[the agent-skills link survived: $got] "
+    grep -qxF "tool install $pin_pkg" "$log" \
+        || problems+="[no install ran: $(tr '\n' '|' <"$log")] "
+    [[ "$out" == *"removed"* ]] || problems+="[the removal went unreported: $out] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify tool install: uv's own link lets the update force past it"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" uvtool
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    pin_pkg="$(mcp_package graphify)"
+    out="$(gfy_tool_run "$tmp" "0.0.1-other" 0 "$log" "$state")"
+    problems=""
+    grep -qxF "tool install --force $pin_pkg" "$log" \
+        || problems+="[planned: $(tr '\n' '|' <"$log")] "
+    [[ "$out" == *"updated"* ]] || problems+="[nothing said updated: $out] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify tool install: no uv on PATH is named, not a silent pass"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    out="$(
+        SYS_HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+        has_cmd() { [[ "$1" != uv ]]; }
+        install_graphify_tool 2>&1
+    )"
+    if [[ "$out" == *"uv"* ]]; then pass; else fail "nothing named the missing uv: $out"; fi
+fi
+
+if it "graphify tool install: the dry run names the action the real run takes"; then
+    # The plan the user reads has to be the run they get: for every version the fake
+    # uv reports, the same verdict word appears in the dry run and in the real run,
+    # and the dry run never asks uv to install anything.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    pin_pkg="$(mcp_package graphify)"
+    pin="$(mcp_package graphify | sed -e 's/.*==//')"
+    problems=""
+    for have in "" "0.0.1-other" "$pin"; do
+        : >"$log"
+        # Each case starts from an empty bin dir and an empty uv receipt, so the
+        # version below is the only thing that decides --force — not the link or
+        # the install the previous case left behind.
+        rm -f "$tmp/.local/bin/graphify-mcp" "$state"
+        dry="$(gfy_tool_run "$tmp" "$have" 1 "$log" "$state")"
+        grep -q '^tool install' "$log" && problems+="[the dry run installed for have=$have] "
+        live="$(gfy_tool_run "$tmp" "$have" 0 "$log" "$state")"
+        # One verb decides both branches: install / update / skip. The dry run
+        # prefixes it with "would", the real run reports it in the past tense.
+        case "$have" in
+            "") stem=install ;;
+            "$pin") stem=skipped ;;
+            *) stem=updat ;;
+        esac
+        [[ "$dry" == *"$stem"* ]] || problems+="[have=$have, dry run: $dry] "
+        [[ "$live" == *"$stem"* ]] || problems+="[have=$have, real run: $live] "
+        case "$have" in
+            "") grep -qxF "tool install $pin_pkg" "$log" \
+                    || problems+="[live plan for a fresh host: $(tr '\n' '|' <"$log")] " ;;
+            "$pin") grep -q '^tool install' "$log" \
+                    && problems+="[re-installed although pinned: $(tr '\n' '|' <"$log")] " ;;
+            *) grep -qxF "tool install --force $pin_pkg" "$log" \
+                    || problems+="[no --force for have=$have: $(tr '\n' '|' <"$log")] " ;;
+        esac
+    done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+
+# ─── uv's colours must not decide what AutoOS recognises ───────────────────
+# Measured on uv 0.12.18, the version that ships the tool this step pins. On a host
+# with FORCE_COLOR=3 in the environment — which is what CI containers, some
+# dotfiles' terminal setup, and any wrapper that believes stdout is a tty produce:
+#   uv tool dir   -> "\033[36m/home/<u>/.local/share/uv/tools\033[39m"
+#   uv tool list  -> "\033[1mgraphifyy v0.9.63\033[0m" then the "- <exe>" lines
+# Both are parsed here — the first to recognise uv's own shim, the second to read the
+# installed version — and a coloured match matches nothing: the shim reads as the
+# user's own file (so the step refuses and the whole dry run exits 1) and the version
+# reads as nothing installed (so the pin "installs" on every run). gfy_uv above emits
+# those escapes unless argv carries --color never, so these tests are the real
+# contract, not a convenience fake.
+
+if it "graphify tool install: uv's own shim stays uv's and the pin is skipped when uv is coloured"; then
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" uvtool
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    pin="$(mcp_package graphify | sed -e 's/.*==//')"
+    out="$(FORCE_COLOR=3 gfy_tool_run "$tmp" "$pin" 0 "$log" "$state")"
+    problems=""
+    grep -q '^tool install' "$log" && problems+="[reinstalled although pinned: $(tr '\n' '|' <"$log")] "
+    [[ "$out" == *"skipped"* ]] || problems+="[nothing said skipped: $out] "
+    [[ "$out" != *"yours to move"* ]] || problems+="[called uv's own shim the user's file] "
+    [[ "$out" == *RC=0* ]] || problems+="[the step failed: $out] "
+    [[ -L "$tmp/.local/bin/graphify-mcp" ]] || problems+="[uv's link was not kept] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify tool install: a coloured uv still gives the dry run exit 0"; then
+    # The failure the operator met: setup.sh --profile ai-coding|workstation
+    # --dry-run exiting 1 on a machine that had the tool installed once.
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" uvtool
+    log="$tmp/uv.log"; : >"$log"; state="$tmp/uv.version"
+    pin="$(mcp_package graphify | sed -e 's/.*==//')"
+    out="$(FORCE_COLOR=3 gfy_tool_run "$tmp" "$pin" 1 "$log" "$state")"
+    problems=""
+    [[ "$out" == *RC=0* ]] || problems+="[the dry run exited non-zero: $out] "
+    [[ "$out" == *"skipped"* ]] || problems+="[the plan did not read as a skip: $out] "
+    grep -q 'tool install' "$log" && problems+="[the dry run installed: $(tr '\n' '|' <"$log")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "graphify reads the pinned version out of a coloured uv tool list"; then
+    # The parser on its own, because "skipped" and "installed every run" are the two
+    # answers this line decides between.
+    tmp="$(mktemp -d)"
+    pin="$(mcp_package graphify | sed -e 's/.*==//')"
+    name="$(mcp_package graphify | sed -e 's/\[.*//' -e 's/==.*//')"
+    printf '%s' "$pin" >"$tmp/uv.version"
+    ver="$(
+        SYS_HOME="$tmp" gfy_uv_state="$tmp/uv.version" gfy_uv_name="$name"
+        FORCE_COLOR=3
+        uv() { gfy_uv "$@"; }
+        graphify_installed_version "$name"
+    )"
+    rm -rf "$tmp"
+    assert_eq "$ver" "$pin"
+fi
+
+if it "every uv call whose output install.sh parses runs colour-free"; then
+    # The structural half of the fix: a later `$(uv …)` added beside these two would
+    # re-introduce the same host-dependent classification, and no test below would
+    # notice. Grep catches it at review time instead.
+    bad="$(grep -rnE '(\$\(|< *\()[[:space:]]*uv[[:space:]]' lib/linux/*.sh || true)"
+    if [[ -z "$bad" ]]; then pass
+    else fail "uv output parsed without --color never: $bad"; fi
+fi
+
+
+# ─── keys and skills source reach the writer that actually runs ───
+# These drive setup_opencode_config (the postInstall path), not
+# _opencode_merge_config on its own: the harness merge and the skills-source
+# lookup live in the loop around it, and a candidate file the inline reader
+# cannot parse is a key that silently never arrives — which reads on the
+# machine exactly like a machine with no keys.
+#
+# Dummy values only: a test never touches a real key file, and an inherited
+# real key would pass the assertion for the wrong reason, so the key env vars
+# are unset in every subshell below.
+
+# <scratch home> — runs the real writer with no skills source and no keys file.
+oh_opencode_run() {
+    local home="$1" root="$2"
+    ( SYS_HOME="$home" AUTOOS_ROOT="$root" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      setup_opencode_config >/dev/null 2>&1 )
+}
+
+if it "opencode: api-keys.yml (the repo keys file, not agent-skills) is parsed"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo/configuration"
+    printf 'openrouter: DUMMY-KEY-FOR-TESTS\n' >"$tmp/repo/configuration/api-keys.yml"
+    oh_opencode_run "$tmp/home" "$tmp/repo"
+    out="$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+print('yes' if 'openrouter' in d.get('provider', {}) else 'no')
+" "$tmp/home/.config/opencode/config.json" 2>/dev/null || echo unreadable)"
+    rm -rf "$tmp"
+    if [[ "$out" == "yes" ]]; then pass
+    else fail "the openrouter provider is missing (config says: $out) — api-keys.yml was never read"; fi
+    fi
+fi
+
+if it "opencode: an api-keys.yml REPLACE placeholder is never treated as a key"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo/configuration"
+    printf 'openrouter: REPLACE_WITH_YOUR_KEY\n' >"$tmp/repo/configuration/api-keys.yml"
+    oh_opencode_run "$tmp/home" "$tmp/repo"
+    out="$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+print('yes' if 'openrouter' in d.get('provider', {}) else 'no')
+" "$tmp/home/.config/opencode/config.json" 2>/dev/null || echo unreadable)"
+    rm -rf "$tmp"
+    if [[ "$out" == "no" ]]; then pass
+    else fail "a placeholder key was written into the config as if it were real"; fi
+    fi
+fi
+
+if it "opencode: the agent harness gets this checkout's .agents/skills, not agent-skills"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo/.agents/skills/x"
+    printf -- '---\nname: x\ndescription: x\n---\n' >"$tmp/repo/.agents/skills/x/SKILL.md"
+    src_flag="$tmp/skills-source"; : >"$src_flag"
+    ( SYS_HOME="$tmp/home" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      src_flag="$src_flag"
+      python3() {
+          if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+              local prev="" a
+              for a in "$@"; do
+                  [[ "$prev" == "--skills-source" ]] && printf '%s\n' "$a" >>"$src_flag"
+                  prev="$a"
+              done
+              return 0
+          fi
+          command python3 "$@"
+      }
+      setup_opencode_config >/dev/null 2>&1 )
+    got="$(head -n 1 "$src_flag" 2>/dev/null || true)"
+    calls="$(wc -l <"$src_flag" 2>/dev/null | tr -d ' ')"
+    rm -rf "$tmp"
+    if [[ "$calls" == "0" ]]; then fail "the agent harness was never invoked — the test proves nothing"
+    elif [[ "$got" == */.agents/skills ]]; then pass
+    else fail "harness got [$got], expected the checkout's .agents/skills"; fi
+    fi
+fi
+
+if it "opencode: no agent-skills path is invented when there is no skills source"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    src_flag="$tmp/skills-source"; : >"$src_flag"
+    ( SYS_HOME="$tmp/home" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      src_flag="$src_flag"
+      python3() {
+          if [[ "${1:-}" == */lib/agent_harness.py ]]; then
+              local prev="" a
+              for a in "$@"; do
+                  [[ "$prev" == "--skills-source" ]] && printf '%s\n' "$a" >>"$src_flag"
+                  prev="$a"
+              done
+              return 0
+          fi
+          command python3 "$@"
+      }
+      setup_opencode_config >/dev/null 2>&1 )
+    got="$(head -n 1 "$src_flag" 2>/dev/null || true)"
+    calls="$(wc -l <"$src_flag" 2>/dev/null | tr -d ' ')"
+    rm -rf "$tmp"
+    if [[ "$calls" == "0" ]]; then fail "the agent harness was never invoked — the test proves nothing"
+    elif [[ -z "$got" ]]; then pass
+    else fail "harness was handed a skills source that does not exist: [$got]"; fi
+    fi
+fi
+
+
+# A machine mid-migration: this checkout has no vendored .agents/skills yet
+# (an AutoOS clone older than the subtree) but the retired agent-skills clone
+# is still on disk. Every skills link — user scope AND the per-client
+# directories — has to come from that one fallback, or the same run both
+# links ~/.agents/skills and silently skips Antigravity and Claude Code.
+oh_clone_only() {
+    local home="$1"
+    mkdir -p "$home/Documents/code/agent-skills/skills/gamma"
+    printf -- '---\nname: gamma\ndescription: demo\n---\n' \
+        >"$home/Documents/code/agent-skills/skills/gamma/SKILL.md"
+}
+
+if it "agent-skill-links links the retired clone's skills into every client dir"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{"mcpServers":{}}' >"$tmp/repo/.mcp.json"
+    oh_clone_only "$tmp/home"
+    asl_run "$tmp/home" "$tmp/repo" >/dev/null
+    problems=""
+    for dest in "$tmp/home/.claude/skills" "$tmp/home/.gemini/config/skills" "$tmp/home/.agents/skills"; do
+        [[ -L "$dest/gamma" && "$(readlink "$dest/gamma")" == *"/agent-skills/skills/gamma" ]] \
+            || problems+="[gamma not linked from the clone into $dest] "
+    done
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "agent-skill-links names it when there is no skills source at all"; then
+    tmp="$(mktemp -d)"
+    mkdir -p "$tmp/repo"
+    printf '{"mcpServers":{}}' >"$tmp/repo/.mcp.json"
+    out="$(asl_run "$tmp/home" "$tmp/repo")"
+    problems=""
+    [[ "$out" == *"no skills to link"* ]] \
+        || problems+="[nothing named the missing skills source — $(tail -n 2 <<<"$out")] "
+    [[ ! -d "$tmp/home/.claude/skills" ]] || problems+="[an empty ~/.claude/skills was created for nothing] "
+    [[ ! -d "$tmp/home/.gemini/config/skills" ]] || problems+="[an empty ~/.gemini/config/skills was created for nothing] "
+    [[ ! -d "$tmp/repo/.claude/skills" ]] || problems+="[an empty project .claude/skills was created for nothing] "
+    asl_gate "$tmp/home" "$tmp/repo" && problems+="[a machine with no skills source is detected as done] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+# ─── graphify registration: the installed tool, not an on-demand uv run ────
+# gfy_register_run <tmp>: install_mcp_graphify against a fake uv (installs nothing
+# real) and a fake claude that records its argv and behaves like the CLI for
+# `mcp list` (nothing registered yet) and `mcp add` (records and succeeds).
+gfy_register_run() {
+    local tmp="$1" log="$2"
+    (
+        SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+        # No gfy_uv_state: nothing is ever installed here, so every run takes the
+        # install branch and real uv's own writes (the executable plus the shim link
+        # into its tools dir) are what the registration is allowed to name.
+        uv() { gfy_uv "$@"; }
+        claude() {
+            printf 'claude %s\n' "$*" >>"$log"
+            return 0
+        }
+        install_mcp_graphify 2>&1
+    )
+}
+
+if it "graphify registers the pinned installed tool for Claude Code and Antigravity"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    out="$(gfy_register_run "$tmp" "$log")"
+    problems=""
+    grep -qxF 'claude mcp add --scope user graphify -- graphify-mcp graphify-out/graph.json' "$log" \
+        || problems+="[claude got: $(tr '\n' '|' <"$log")] "
+    grep -q -- '--with' "$log" && problems+="[still an on-demand uv run: $(tr '\n' '|' <"$log")] "
+    got="$(python3 -c "
+import json, sys
+e = json.load(open(sys.argv[1], encoding='utf-8'))['mcpServers']['graphify']
+print(e['command'], '|', json.dumps(e['args']))
+" "$tmp/.gemini/config/mcp_config.json" 2>/dev/null || echo unreadable)"
+    [[ "$got" == 'graphify-mcp | ["${workspaceFolder}/graphify-out/graph.json"]' ]] \
+        || problems+="[antigravity spec: $got] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify registers once: the second run says skipped and already configured"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"; state="$tmp/uv.version"; : >"$state"
+    first="$(
+        SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+        gfy_uv_state="$state"
+        uv() { gfy_uv "$@"; }
+        claude() { return 0; }
+        install_mcp_graphify 2>&1
+    )"
+    second="$(
+        SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+        gfy_uv_state="$state"
+        uv() { gfy_uv "$@"; }
+        claude() {
+            [[ "${1:-} ${2:-}" == "mcp list" ]] && printf 'graphify: command - ✓\n'
+            return 0
+        }
+        install_mcp_graphify 2>&1
+    )"
+    problems=""
+    [[ "$first" == *"installed"* ]] || problems+="[first run did not report an install: $first] "
+    [[ "$second" == *"skipped"* ]] || problems+="[second run did not say skipped: $second] "
+    [[ "$second" != *"installed"* ]] || problems+="[second run said installed: $second] "
+    [[ "$second" == *"already registered"* || "$second" == *"already configured"* ]] \
+        || problems+="[second run re-registered the clients: $second] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+# ─── A4b: a user-scope homelab entry that points into the retired clone ─────
+# homelab is not an AutoOS component (spec D14), and the operator deferred its
+# MCP switch (2026-09-28): NO step may remove the user-scope 'homelab' entry. All
+# that is done is report a recognised leftover of the retired tree — an entry whose
+# PYTHONPATH or args name agent-skills — and leave it exactly where it is. No
+# backup, no claude call, no file write, no recorded failure.
+#
+# hl_cfg_write <tmp> <json mcpServers block>: write a Claude user config.
+hl_cfg_write() {
+    local tmp="$1" body="$2"
+    mkdir -p "$tmp"
+    printf '{"mcpServers":%s,"firstTimeRun":true}\n' "$body" >"$tmp/.claude.json"
+}
+
+# hl_report_run <tmp> <dry>: the report-only check on a scratch home, with a claude
+# stub that records its argv (the check must never reach it) and a backup_file stub
+# that records the attempt (the check must never make one).
+hl_report_run() {
+    local tmp="$1" dry="${2:-0}"
+    (
+        SYS_HOME="$tmp" HOME="$tmp" AUTOOS_DRY_RUN="$dry"
+        unset CLAUDE_CONFIG_DIR
+        claude() {
+            printf 'claude %s\n' "$*" >>"$tmp/claude.log"
+            return 0
+        }
+        backup_file() {
+            printf 'backup %s\n' "$1" >>"$tmp/backup.log"
+            return 1
+        }
+        report_stale_homelab_mcp_entry 2>&1
+    )
+}
+
+# hl_untouched <tmp> <before>: the user config is byte-for-byte what it was.
+hl_untouched() {
+    local tmp="$1" before="$2"
+    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || return 1
+    [[ -s "$tmp/claude.log" ]] && return 1
+    [[ -s "$tmp/backup.log" ]] && return 1
+    compgen -G "$tmp/.claude.json.autoos-backup-*" >/dev/null && return 1
+    return 0
+}
+
+if it "homelab: the removal code path is gone from lib/"; then
+    # Operator decision 2026-09-28: the entry is never removed. A leftover
+    # `claude mcp remove homelab` or a dead remove_* helper would still be
+    # reachable by hand, so the whole path must go, not just its caller.
+    problems=""
+    grep -q 'mcp remove homelab' lib/linux/install.sh \
+        && problems+="[lib/ still runs claude mcp remove homelab] "
+    grep -q 'remove_stale_homelab_mcp_entry' lib/linux/install.sh \
+        && problems+="[the removing helper is still there under its old name] "
+    grep -q 'report_stale_homelab_mcp_entry' lib/linux/install.sh \
+        || problems+="[nothing reports the recognised leftover] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "homelab: a recognised stale entry is reported and left exactly as it was"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    hl_cfg_write "$tmp" '{"homelab":{"type":"stdio","command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}},"serena":{"command":"uvx" }}'
+    before="$(cat "$tmp/.claude.json")"
+    out="$(hl_report_run "$tmp" 0)"
+    problems=""
+    [[ "$out" == *"still points into the retired agent-skills tree"* ]] \
+        || problems+="[nothing named the retired tree: $out] "
+    [[ "$out" == *"left in place"* ]] \
+        || problems+="[nothing said it stays: $out] "
+    [[ "$out" != *"removed"* ]] || problems+="[claimed a removal: $out] "
+    hl_untouched "$tmp" "$before" \
+        || problems+="[the user config, claude or a backup was touched: $(cat "$tmp/claude.log" "$tmp/backup.log" 2>/dev/null | tr '\n' '|')$(ls "$tmp")]"
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "homelab: the report is the same in a dry run and a live run, and writes nothing"; then
+    # Read-only by construction, so there is no third behaviour to announce.
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    hl_cfg_write "$tmp" '{"homelab":{"command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}}}'
+    before="$(cat "$tmp/.claude.json")"
+    dry="$(hl_report_run "$tmp" 1)"
+    live="$(hl_report_run "$tmp" 0)"
+    problems=""
+    [[ "$dry" == *"still points into the retired agent-skills tree"* ]] \
+        || problems+="[the dry run said nothing: $dry] "
+    [[ "$live" == "$dry" ]] || problems+="[dry and live differ: [$dry] vs [$live]] "
+    hl_untouched "$tmp" "$before" \
+        || problems+="[a run wrote to the config or the disk] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "homelab: an agent-skills path in the args is recognised just like PYTHONPATH"; then
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    hl_cfg_write "$tmp" '{"homelab":{"command":"python","args":["/home/u/Documents/code/agent-skills/mcp/homelab/server.py"]}}'
+    out="$(homelab_user_entry "$tmp/.claude.json")"
+    if [[ "$out" == "agent-skills" ]]; then pass
+    else fail "expected agent-skills, got [$out]"; fi
+    rm -rf "$tmp"
+fi
+
+if it "homelab: a second run reports it again — nothing changed in between"; then
+    # The old shape converged to "skipped" because the first run fixed the
+    # machine. A report that stays put on a still-stale entry is the point: the
+    # line must not silently age out just because a run already said it.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    hl_cfg_write "$tmp" '{"homelab":{"command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}}}'
+    before="$(cat "$tmp/.claude.json")"
+    first="$(hl_report_run "$tmp" 0)"
+    second="$(hl_report_run "$tmp" 0)"
+    problems=""
+    [[ "$first" == *"agent-skills"* ]] || problems+="[the first run said nothing: $first] "
+    [[ "$second" == "$first" ]] || problems+="[the second run differed: $second] "
+    hl_untouched "$tmp" "$before" || problems+="[a run touched the config] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "homelab: an entry that is not an agent-skills leftover is untouched and unsaid"; then
+    # The user's own homelab server: same name, nothing in it AutoOS recognises.
+    # Neither removed nor commented on — the report is only about AutoOS's own
+    # leftover, and a line naming a working server on every run is noise.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    hl_cfg_write "$tmp" '{"homelab":{"command":"docker","args":["run","-i","--rm","homelab-mcp:latest"],"env":{"HOMELAB_CONFIG":"/home/u/h.yaml"}}}'
+    before="$(cat "$tmp/.claude.json")"
+    out="$(hl_report_run "$tmp" 0)"
+    problems=""
+    [[ "$out" != *homelab* ]] || problems+="[said something about the user's entry: $out] "
+    hl_untouched "$tmp" "$before" || problems+="[the config was touched] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "homelab: no user-scope entry says nothing"; then
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    hl_cfg_write "$tmp" '{"serena":{"command":"uvx"}}'
+    before="$(cat "$tmp/.claude.json")"
+    out="$(hl_report_run "$tmp" 0)"
+    problems=""
+    [[ "$out" != *homelab* ]] || problems+="[invented a line for an absent entry: $out] "
+    hl_untouched "$tmp" "$before" || problems+="[the config was touched] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "homelab: a config outside this run's home is not reported on"; then
+    # The claude CLI reads $HOME, but the home this run configures is $SYS_HOME.
+    # When the two differ - setup under sudo, or a harness that fakes SYS_HOME and
+    # leaves HOME at the operator's real one - the file the resolver names belongs
+    # to somebody else's session. Nothing is written to it, and a line about it
+    # would describe a config this run was never pointed at, so: say nothing.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    run_home="$tmp/run"; cfg_home="$tmp/cfg"
+    mkdir -p "$run_home"
+    hl_cfg_write "$cfg_home" '{"homelab":{"command":"python","args":["-m","homelab_mcp"],"env":{"PYTHONPATH":"/home/u/Documents/code/agent-skills/mcp/homelab"}}}'
+    before="$(cat "$cfg_home/.claude.json")"
+    out="$( (
+        SYS_HOME="$run_home" HOME="$cfg_home" AUTOOS_DRY_RUN=0
+        unset CLAUDE_CONFIG_DIR
+        claude() { printf 'claude %s\n' "$*" >>"$tmp/claude.log"; return 0; }
+        backup_file() { printf 'backup %s\n' "$1" >>"$tmp/backup.log"; return 1; }
+        report_stale_homelab_mcp_entry 2>&1
+    ) )"
+    problems=""
+    [[ "$out" != *homelab* ]] || problems+="[reported on a config outside this run's home: $out] "
+    [[ "$(cat "$cfg_home/.claude.json")" == "$before" ]] || problems+="[the config outside this run's home was rewritten] "
+    grep -q 'mcp remove' "$tmp/claude.log" && problems+="[ran claude against a config outside this run's home] "
+    ls "$cfg_home"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[backed up a file outside this run's home] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "homelab: a project-scoped entry of that name is not the user scope"; then
+    # ~/.claude.json also carries per-project servers. Those belong to the repo's
+    # own .mcp.json approval, never to a user-scope check.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; : >"$tmp/claude.log"
+    printf '%s\n' '{"mcpServers":{},"projects":{"/home/u/repo":{"mcpServers":{"homelab":{"command":"python","args":["/home/u/Documents/code/agent-skills/mcp/homelab/server.py"]}}}}}' \
+        >"$tmp/.claude.json"
+    before="$(cat "$tmp/.claude.json")"
+    out="$(hl_report_run "$tmp" 0)"
+    problems=""
+    [[ "$out" != *homelab* ]] || problems+="[reported on a project-scope entry: $out] "
+    hl_untouched "$tmp" "$before" || problems+="[the project-scoped entry was touched] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "homelab: the report runs once, from the omnigraph component"; then
+    # An orphan function nothing calls is a test fixture, not a feature: naming
+    # the leftover belongs with the omnigraph wiring it shares a reason with
+    # (A7b: install_omnigraph_client), and exactly once — a second caller would
+    # print the line twice per run. The body is taken whole; a fixed window of
+    # lines would miss the call as the function grows.
+    body="$(awk '/^install_omnigraph_client\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    links="$(awk '/^install_agent_skill_links\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    calls="$(grep -c 'report_stale_homelab_mcp_entry' <<<"$body" || true)"
+    total="$(grep -cE '^[[:space:]]+report_stale_homelab_mcp_entry$' lib/linux/install.sh || true)"
+    problems=""
+    [[ "$calls" == "1" ]] || problems+="[install_omnigraph_client calls it $calls times] "
+    grep -q 'report_stale_homelab_mcp_entry' <<<"$links" && problems+="[the skills linker calls it too] "
+    [[ "$total" == "1" ]] || problems+="[$total call sites in lib/linux/install.sh] "
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+fi
+
+if it "homelab: lib/ never names the retired tree's path or an agent-skills version"; then
+    # Same discipline as the package pins: the match is on the /agent-skills/
+    # path segment shape, not on a hardcoded home or clone location.
+    bad=""
+    grep -n 'Documents/[Cc]ode/agent-skills/mcp' lib/linux/install.sh >/dev/null 2>&1 && bad="a hardcoded clone path"
+    if [[ -z "$bad" ]]; then pass; else fail "$bad"; fi
+fi
+
+# ─── A4 review fix: register graphify only over an installed tool ────────────
+# install_mcp_graphify registered Claude Code and Antigravity whatever
+# install_graphify_tool answered, so a machine with no uv, an outage during
+# `uv tool install`, or the user's own file in the tool bin path got a
+# `graphify-mcp` entry for a command that does not exist — and because
+# register_mcp_server leaves a name it already sees alone, every later run
+# reported "already registered" over the broken entry instead of repairing it.
+# Two things follow: nothing registers until the pinned tool resolves, and an
+# entry AutoOS recognises as its own previous form is replaced, once.
+#
+# gfy_claude <log> <cfg> <claude args...>: the claude CLI's user-scope MCP
+# commands against a real JSON file the way the CLI keeps one — `mcp add` refuses
+# a name that already exists, `mcp remove` refuses a name that does not, `mcp
+# list` prints the "name: command - status" lines mcp_has_server parses. The stub
+# is this faithful because the repair is only proven by an add that fails when the
+# stale entry is still in the way.
+gfy_claude() {
+    local log="$1" cfg="$2"; shift 2
+    printf 'claude %s\n' "$*" >>"$log"
+    case "${1:-} ${2:-}" in
+        "mcp list")
+            python3 - "$cfg" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(0)
+for name, entry in (data.get("mcpServers") or {}).items():
+    command = entry.get("command", "") if isinstance(entry, dict) else ""
+    print("%s: %s - \u2713" % (name, command))
+PY
+            return 0 ;;
+        "mcp add")
+            local name="${5:-}"
+            [[ "${6:-}" == "--" ]] || return 2
+            python3 - "$cfg" "$name" "${@:7}" <<'PY'
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+argv = sys.argv[3:]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, ValueError):
+    data = {}
+servers = data.setdefault("mcpServers", {})
+if name in servers:
+    print("MCP server %s already exists in user scope." % name, file=sys.stderr)
+    sys.exit(1)
+servers[name] = {"type": "stdio", "command": argv[0], "args": list(argv[1:]), "env": {}}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+PY
+            return $? ;;
+        "mcp remove")
+            python3 - "$cfg" "${3:-}" <<'PY'
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+except (OSError, ValueError):
+    sys.exit(1)
+if name not in (data.get("mcpServers") or {}):
+    print("No MCP server found in user scope: %s" % name, file=sys.stderr)
+    sys.exit(1)
+data["mcpServers"].pop(name)
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+PY
+            return $? ;;
+    esac
+    return 0
+}
+
+# gfy_wire_run <tmp> <verdict> [dry]: install_mcp_graphify against a fake uv and a
+# fake claude that owns $tmp/.claude.json. <verdict> is what `uv tool install` does:
+#   ok    writes the tool into uv's own bin dir and its link at
+#         ~/.local/bin/graphify-mcp, and records the version it was given (so a
+#         second run reads the pin back and skips, as the real tool does)
+#   fail  exits 1 with nothing written — the network outage, or uv refusing
+# Anything the caller wants in place before the run (the user's own file at the
+# bin path, a seeded user-scope entry) is set up by the caller. The claude log is
+# never truncated here, so a caller can count the calls across two runs.
+gfy_wire_run() {
+    local tmp="$1" verdict="$2" dry="${3:-0}"
+    local log="$tmp/claude.log" cfg="$tmp/.claude.json" state="$tmp/uv.version"
+    (
+        SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN="$dry"
+        unset CLAUDE_CONFIG_DIR
+        gfy_uv_state="$state" gfy_uv_install="$verdict"
+        uv() { gfy_uv "$@"; }
+        claude() { gfy_claude "$log" "$cfg" "$@"; }
+        install_mcp_graphify 2>&1
+        printf 'RC=%s\n' "$?"
+    )
+}
+
+# gfy_wire_entry <tmp>: the graphify block of the fake config, "command|args json".
+gfy_wire_entry() {
+    python3 - "$1" <<'PY' 2>/dev/null || echo missing
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as fh:
+    entry = (json.load(fh).get("mcpServers") or {}).get("graphify")
+print("%s | %s" % (entry["command"], json.dumps(entry.get("args", []))))
+PY
+}
+
+if it "graphify registers neither client when the pinned tool install failed"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    out="$(gfy_wire_run "$tmp" fail)"
+    problems=""
+    [[ "$out" == *RC=1* ]] || problems+="[the step reported success: $(tail -n 1 <<<"$out")] "
+    grep -q 'mcp add' "$log" && problems+="[registered a command with no binary: $(tr '\n' '|' <"$log")] "
+    [[ -e "$tmp/.gemini/config/mcp_config.json" ]] && problems+="[wrote the Antigravity config anyway] "
+    [[ "$out" == *"not registered"* ]] || problems+="[nothing named the refusal: $out] "
+    [[ -e "$tmp/.claude.json" ]] && problems+="[touched the user claude config] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify registers neither client when the tool bin path is the user's own"; then
+    # The blocked link: AutoOS never replaces the file at ~/.local/bin/graphify-mcp,
+    # so it never gets a graphify-mcp to point the clients at either.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    gfy_link_shape "$tmp" ownfile
+    log="$tmp/claude.log"; : >"$log"
+    before="$(cat "$tmp/.local/bin/graphify-mcp")"
+    out="$(gfy_wire_run "$tmp" ok)"
+    problems=""
+    [[ "$out" == *RC=1* ]] || problems+="[the step reported success: $(tail -n 1 <<<"$out")] "
+    grep -q 'mcp add' "$log" && problems+="[registered over the user's file: $(tr '\n' '|' <"$log")] "
+    [[ -e "$tmp/.gemini/config/mcp_config.json" ]] && problems+="[wrote the Antigravity config anyway] "
+    [[ "$out" == *"alone"* ]] || problems+="[nothing said the file is left alone: $out] "
+    [[ "$(cat "$tmp/.local/bin/graphify-mcp")" == "$before" && ! -L "$tmp/.local/bin/graphify-mcp" ]] \
+        || problems+="[the user's file was touched] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify registers both clients once the pinned tool resolves"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    out="$(gfy_wire_run "$tmp" ok)"
+    problems=""
+    [[ "$out" == *RC=0* ]] || problems+="[a good install reported failure: $out] "
+    grep -qxF 'claude mcp add --scope user graphify -- graphify-mcp graphify-out/graph.json' "$log" \
+        || problems+="[claude got: $(tr '\n' '|' <"$log")] "
+    [[ "$(gfy_wire_entry "$tmp/.claude.json")" == \
+        'graphify-mcp | ["graphify-out/graph.json"]' ]] \
+        || problems+="[the user-scope entry: $(gfy_wire_entry "$tmp/.claude.json")] "
+    got="$(python3 -c "
+import json, sys
+e = json.load(open(sys.argv[1], encoding='utf-8'))['mcpServers']['graphify']
+print(e['command'], '|', json.dumps(e['args']))
+" "$tmp/.gemini/config/mcp_config.json" 2>/dev/null || echo unreadable)"
+    [[ "$got" == 'graphify-mcp | ["${workspaceFolder}/graphify-out/graph.json"]' ]] \
+        || problems+="[antigravity spec: $got] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify repairs the uv run --with entry AutoOS wrote before"; then
+    # The upgrade path: every machine an older AutoOS wired has this entry, and
+    # register_mcp_server would keep reporting it "already registered" forever, so
+    # the pinned tool would never reach the client that actually runs it.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    hl_cfg_write "$tmp" '{"graphify":{"type":"stdio","command":"uv","args":["--quiet","run","--with","graphifyy[mcp]==0.0.1-old","python","-m","graphify.serve","graphify-out/graph.json"]},"serena":{"command":"uvx"}}'
+    out="$(gfy_wire_run "$tmp" ok)"
+    problems=""
+    [[ "$out" == *RC=0* ]] || problems+="[the repair reported failure: $(tail -n 1 <<<"$out")] "
+    grep -qxF 'claude mcp remove graphify --scope user' "$log" \
+        || problems+="[the stale entry was never removed: $(tr '\n' '|' <"$log")] "
+    [[ "$(grep -n 'mcp remove' "$log" | cut -d: -f1)" -lt \
+       "$(grep -n 'mcp add --scope user graphify' "$log" | cut -d: -f1)" ]] \
+        || problems+="[added before removing the stale entry: $(tr '\n' '|' <"$log")] "
+    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 \
+        || problems+="[the user config was rewritten with no backup] "
+    [[ "$(gfy_wire_entry "$tmp/.claude.json")" == \
+        'graphify-mcp | ["graphify-out/graph.json"]' ]] \
+        || problems+="[the entry after the repair: $(gfy_wire_entry "$tmp/.claude.json")] "
+    kept="$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1], encoding='utf-8'))
+print(','.join(sorted(d.get('mcpServers', {})) + ['firstTimeRun' if 'firstTimeRun' in d else 'LOST']))
+" "$tmp/.claude.json" 2>/dev/null || echo unreadable)"
+    [[ "$kept" == "graphify,serena,firstTimeRun" ]] \
+        || problems+="[the config lost or kept the wrong keys: $kept] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify repairs its own graphify-mcp entry that no longer resolves"; then
+    # A checkout moved or was deleted, leaving an absolute graphify-mcp path that
+    # answers to nothing. The bare pinned-tool form is what the installer writes now.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    hl_cfg_write "$tmp" '{"graphify":{"type":"stdio","command":"/home/u/old-checkout/infra/mcp-servers/bin/graphify-mcp","args":["graphify-out/graph.json"]}}'
+    out="$(gfy_wire_run "$tmp" ok)"
+    problems=""
+    [[ "$out" == *RC=0* ]] || problems+="[the repair reported failure: $(tail -n 1 <<<"$out")] "
+    grep -qxF 'claude mcp remove graphify --scope user' "$log" \
+        || problems+="[the dead entry was never removed: $(tr '\n' '|' <"$log")] "
+    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 \
+        || problems+="[the user config was rewritten with no backup] "
+    [[ "$(gfy_wire_entry "$tmp/.claude.json")" == \
+        'graphify-mcp | ["graphify-out/graph.json"]' ]] \
+        || problems+="[the entry after the repair: $(gfy_wire_entry "$tmp/.claude.json")] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify leaves a user-defined graphify entry alone" ; then
+    # Same name, nothing AutoOS wrote: a docker server, or the old uv run shape with
+    # an env block of the user's. Removing either deletes a working server.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    hl_cfg_write "$tmp" '{"graphify":{"type":"stdio","command":"docker","args":["run","-i","--rm","my-graphify:latest"],"env":{"TOKEN":"DUMMY-SECRET-FOR-TESTS"}},"serena":{"command":"uvx"}}'
+    before="$(cat "$tmp/.claude.json")"
+    out="$(gfy_wire_run "$tmp" ok)"
+    problems=""
+    grep -q 'mcp remove' "$log" && problems+="[removed the user's entry: $(tr '\n' '|' <"$log")] "
+    ls "$tmp"/.claude.json.autoos-backup-* >/dev/null 2>&1 && problems+="[a backup of a file it never changed] "
+    [[ "$(cat "$tmp/.claude.json")" == "$before" ]] || problems+="[the config was rewritten] "
+    [[ "$out" == *"alone"* ]] || problems+="[nothing said it was left alone: $out] "
+    [[ "$out" != *DUMMY-SECRET-FOR-TESTS* ]] || problems+="[printed the entry args, which may hold a token] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify repairs once: the second run registers nothing new"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    first="$(gfy_wire_run "$tmp" ok)"
+    calls_first="$(grep -cE 'claude mcp (add|remove)' "$log" || true)"
+    second="$(gfy_wire_run "$tmp" ok)"
+    calls="$(grep -cE 'claude mcp (add|remove)' "$log" || true)"
+    n_backups="$(ls "$tmp"/.claude.json.autoos-backup-* 2>/dev/null | wc -l | tr -d ' ')"
+    problems=""
+    [[ "$first" == *RC=0* && "$second" == *RC=0* ]] \
+        || problems+="[a run reported failure: ${first##*RC=} | ${second##*RC=}] "
+    [[ "$second" == *"skipped"* ]] || problems+="[the second run did not say skipped: $second] "
+    [[ "$second" != *"installed"* ]] || problems+="[the second run said installed: $second] "
+    [[ "$calls" == "$calls_first" ]] \
+        || problems+="[the second run wrote a client config again: $(tr '\n' '|' <"$log")] "
+    [[ "$n_backups" == "0" ]] || problems+="[$n_backups backups on a config AutoOS itself wrote] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify dry run announces the tool form without installing or writing"; then
+    # The plan a user reads must be the run they get: a dry run has no installed
+    # binary yet, so it announces rather than refusing, and touches no config.
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    out="$(gfy_wire_run "$tmp" ok 1)"
+    problems=""
+    [[ "$out" == *RC=0* ]] || problems+="[the dry run reported failure: $(tail -n 1 <<<"$out")] "
+    [[ "$out" == *"would run: claude mcp add --scope user graphify -- graphify-mcp graphify-out/graph.json"* ]] \
+        || problems+="[the claude plan is missing: $out] "
+    [[ "$out" == *"would merge 'graphify' into Antigravity"* ]] \
+        || problems+="[the Antigravity plan is missing: $out] "
+    grep -qE 'claude mcp (add|remove)' "$log" && problems+="[the dry run wrote a client config: $(tr '\n' '|' <"$log")] "
+    [[ -e "$tmp/.claude.json" ]] && problems+="[the dry run wrote the user config] "
+    [[ -e "$tmp/.gemini/config/mcp_config.json" ]] && problems+="[the dry run wrote the Antigravity config] "
+    [[ -e "$tmp/.local/bin/graphify-mcp" ]] && problems+="[the dry run installed the tool] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify registration runs on the gate that decides it"; then
+    # The gate lives in install_mcp_graphify, not in a helper nothing calls.
+    if awk '/^install_mcp_graphify\(\)/,/^}/' lib/linux/install.sh |
+            grep -q "install_graphify_tool"; then pass
+    else fail "install_mcp_graphify no longer gates registration on install_graphify_tool"; fi
+fi
+
+# ─── A4 CI fix: a dry run on a machine that has no uv yet ───────────────────
+# The pipeline plans uv and mcp-graphify in the same run, so on a fresh host — and
+# on every CI runner — a dry run reaches this step with uv only *planned*, never
+# installed. Refusing there made the plan itself exit 1 (CI 36360904338: "a dry run
+# executes no commands at all"), while the run it described would have succeeded.
+# The dry run must therefore announce the tool it would install; the live run keeps
+# refusing, because then the absence is real.
+#
+# gfy_nouv_run <tmp> <dry>: install_mcp_graphify with no uv anywhere. has_cmd is
+# stubbed rather than the PATH trimmed, so a runner image that happens to ship uv
+# still exercises the missing-uv branch, and every other command — the claude stub
+# below, python3 — is found as usual.
+gfy_nouv_run() {
+    local tmp="$1" dry="$2"
+    local log="$tmp/claude.log" cfg="$tmp/.claude.json"
+    (
+        SYS_HOME="$tmp" HOME="$tmp" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN="$dry"
+        unset CLAUDE_CONFIG_DIR
+        has_cmd() {
+            if [[ "$1" == uv ]]; then return 1; fi
+            command -v -- "$1" >/dev/null 2>&1
+        }
+        claude() { gfy_claude "$log" "$cfg" "$@"; }
+        install_mcp_graphify 2>&1
+        printf 'RC=%s\n' "$?"
+    )
+}
+
+if it "graphify dry run with no uv plans the tool and exits 0, the live run still refuses"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    dry="$(gfy_nouv_run "$tmp" 1)"
+    problems=""
+    [[ "$dry" == *RC=0* ]] || problems+="[the dry run failed the plan: $(tail -n 1 <<<"$dry")] "
+    [[ "$dry" == *"would install the pinned graphify tool"* ]] \
+        || problems+="[no plan for the tool: $dry] "
+    [[ "$dry" == *"uv component"* ]] \
+        || problems+="[nothing said where uv comes from: $dry] "
+    # The rest of the plan is unchanged: the clients still hear what they would get.
+    [[ "$dry" == *"would run: claude mcp add --scope user graphify -- graphify-mcp graphify-out/graph.json"* ]] \
+        || problems+="[the claude plan is missing: $dry] "
+    [[ "$dry" == *"would merge 'graphify' into Antigravity"* ]] \
+        || problems+="[the Antigravity plan is missing: $dry] "
+    grep -qE 'claude mcp (add|remove)' "$log" && problems+="[the dry run registered a client: $(tr '\n' '|' <"$log")] "
+    [[ -e "$tmp/.claude.json" ]] && problems+="[the dry run wrote the user config] "
+    [[ -e "$tmp/.gemini/config/mcp_config.json" ]] && problems+="[the dry run wrote the Antigravity config] "
+    [[ -e "$tmp/.local/bin/graphify-mcp" ]] && problems+="[the dry run installed the tool] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi
+
+if it "graphify with no uv still fails the live run and registers nothing"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    tmp="$(mktemp -d)"; gfy_repo_skeleton "$tmp"
+    log="$tmp/claude.log"; : >"$log"
+    live="$(gfy_nouv_run "$tmp" 0)"
+    problems=""
+    [[ "$live" == *RC=1* ]] || problems+="[a live run with no uv reported success: $(tail -n 1 <<<"$live")] "
+    [[ "$live" == *"uv"* ]] || problems+="[nothing named the missing uv: $live] "
+    [[ "$live" == *"not registered"* ]] || problems+="[nothing named the refusal: $live] "
+    grep -qE 'claude mcp (add|remove)' "$log" && problems+="[registered a command with no binary: $(tr '\n' '|' <"$log")] "
+    [[ -e "$tmp/.claude.json" ]] && problems+="[touched the user claude config] "
+    [[ -e "$tmp/.gemini/config/mcp_config.json" ]] && problems+="[wrote the Antigravity config anyway] "
+    [[ -e "$tmp/.local/bin/graphify-mcp" ]] && problems+="[the step created the tool path itself] "
+    rm -rf "$tmp"
+    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
+    fi
+fi

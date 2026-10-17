@@ -1,0 +1,23 @@
+# AutoOS: LiteLLM fallback proxy as a systemd --user service (template).
+# Rendered and installed by register-autostart.sh, which fills in this
+# checkout's path and the machine's PATH. Opt-in only.
+#
+# Loopback only (127.0.0.1:4000): the proxied gateway is OmniRoute; LiteLLM
+# is the local manual fallback. Its own auth: LITELLM_MASTER_KEY. The starter
+# reads configuration/litellm/.env literally and execs litellm, so a restart
+# of this unit always picks up rotated keys.
+[Unit]
+Description=AutoOS LiteLLM fallback proxy (127.0.0.1:4000)
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=@REPO@/configuration/litellm/.env
+
+[Service]
+Type=simple
+Environment=PATH=@PATH@
+ExecStart=@REPO@/configuration/litellm/start-litellm.sh --foreground
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

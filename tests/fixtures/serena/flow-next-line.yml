@@ -1,0 +1,2 @@
+excluded_tools:
+  [read_file, my_tool]

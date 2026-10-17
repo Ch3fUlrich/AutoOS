@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "id": "ce5daaa5-e292-40ae-b848-d67226d63346",
+  "name": "claude-haiku",
+  "revision": 1,
+  "mcp_server_refs": null,
+  "agent_kind": "acp",
+  "acp_server": "claude-code",
+  "acp_model": "haiku",
+  "acp_session_mode": null,
+  "acp_prompt_timeout": 1800.0,
+  "acp_startup_timeout": 90.0,
+  "acp_command": null,
+  "acp_args": null
+}

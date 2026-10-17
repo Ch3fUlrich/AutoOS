@@ -1,0 +1,25 @@
+# Stop the newest agent-run scope when memory runs out, and nothing else.
+# Driven by the timer next to this file; it has no [Install] section of its own.
+#
+# Oneshell on purpose: memguard either has work to do (one `systemctl --user
+# stop`) or exits 0 immediately, and a timer that fires every 10s must not pile
+# up instances. It also re-checks MemAvailable itself, so a run at full memory
+# really is a no-op rather than a load spike.
+#
+# ExecStart names the INSTALLED copy (%h = the user's home), not the checkout
+# this file was rendered in: a repository that is moved, renamed or deleted
+# must not leave a timer with a dead ExecStart. install_memguard copies
+# memguard.sh there (mode 0755, cmp-based) before the units are written.
+#
+# StandardOutput/StandardError: without these the guard's single explanatory
+# line never reaches the journal, and `journalctl --user -u memguard` — the
+# command the troubleshooting docs tell you to run — shows nothing at all.
+[Unit]
+Description=Stop the newest agent run below the memory floor
+Documentation=file://@APPROOT@/docs/ai/memory-guard.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/autoos/memguard.sh
+StandardOutput=journal
+StandardError=journal

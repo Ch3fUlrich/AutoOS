@@ -1,0 +1,7 @@
+# top comment
+other_key: 1
+excluded_tools:
+- read_file
+- my_tool
+# trailing comment
+last_key: x

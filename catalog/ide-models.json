@@ -1,0 +1,550 @@
+{
+  "$comment": "generated from catalog/ai-registry.json - do not edit",
+  "models": [
+    {
+      "id": "l1-orchestrator",
+      "name": "L1 · l1-orchestrator · 1M",
+      "context": 1000000,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ],
+        "litellm": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l1-orchestrator-clean",
+      "name": "L1 · l1-orchestrator-clean · 1M",
+      "context": 1000000,
+      "output": 32768,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l1-orchestrator-paid",
+      "name": "L1 · l1-orchestrator-paid · 1M",
+      "context": 1000000,
+      "output": 32768,
+      "surfaces": {
+        "litellm": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l1-orchestrator-free-only",
+      "name": "L1 · l1-orchestrator-free-only · 1M",
+      "context": 1000000,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ],
+        "litellm": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l2-worker",
+      "name": "L2 · l2-worker · 128k",
+      "context": 131072,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ],
+        "litellm": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l2-worker-clean",
+      "name": "L2 · l2-worker-clean · 128k",
+      "context": 128000,
+      "output": 32768,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l2-worker-paid",
+      "name": "L2 · l2-worker-paid · 128k",
+      "context": 131072,
+      "output": 32768,
+      "surfaces": {
+        "litellm": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l2-worker-free-only",
+      "name": "L2 · l2-worker-free-only · 128k",
+      "context": 131072,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ],
+        "litellm": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l2-orchestrator",
+      "name": "L2 · l2-orchestrator · 1M",
+      "context": 1048576,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l2-orchestrator-clean",
+      "name": "L2 · l2-orchestrator-clean · 1M",
+      "context": 1048576,
+      "output": 32768,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l2-worker-1m",
+      "name": "L2 · l2-worker-1m · 1M",
+      "context": 1048576,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l3-driver",
+      "name": "L3 · l3-driver · 128k",
+      "context": 128000,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ],
+        "litellm": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l3-driver-clean",
+      "name": "L3 · l3-driver-clean · 128k",
+      "context": 128000,
+      "output": 16384,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l3-driver-paid",
+      "name": "L3 · l3-driver-paid · 128k",
+      "context": 131072,
+      "output": 16384,
+      "surfaces": {
+        "litellm": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l3-driver-free-only",
+      "name": "L3 · l3-driver-free-only · 128k",
+      "context": 131072,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ],
+        "litellm": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l3-driver-1m",
+      "name": "L3 · l3-driver-1m · 1M",
+      "context": 1000000,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l3-driver-256k",
+      "name": "L3 · l3-driver-256k · 256k",
+      "context": 256000,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "l3-implementer",
+      "name": "L3 · l3-implementer · 128k",
+      "context": 128000,
+      "output": 8192,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l3-implementer-clean",
+      "name": "L3 · l3-implementer-clean · 128k",
+      "context": 128000,
+      "output": 8192,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l3-researcher",
+      "name": "L3 · l3-researcher · 1M",
+      "context": 1000000,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l3-researcher-clean",
+      "name": "L3 · l3-researcher-clean · 1M",
+      "context": 1000000,
+      "output": 32768,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l3-review-diff",
+      "name": "L3 · l3-review-diff · 128k",
+      "context": 131072,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l3-review-tests",
+      "name": "L3 · l3-review-tests · 1M",
+      "context": 1048576,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l3-review-codebase",
+      "name": "L3 · l3-review-codebase · 1M",
+      "context": 1000000,
+      "output": 16384,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "t4-rag",
+      "name": "t4-rag · 128k (cohere trial)",
+      "context": 131072,
+      "output": 4096,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ],
+        "litellm": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "l2-researcher",
+      "name": "L2 · l2-researcher · 128k",
+      "context": 131072,
+      "output": 8192,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ],
+        "litellm": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "name": "Gemini 3.8 Flash · 1M (free→credit)",
+      "context": 1048576,
+      "output": 65536,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "or-nemotron-3-super-free",
+      "name": "Nemotron-3-Super-120B via OpenRouter :free",
+      "context": 262144,
+      "output": 235929,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "or-north-mini-code-free",
+      "name": "North-Mini-Code via OpenRouter :free",
+      "context": 256000,
+      "output": 64000,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "or-laguna-s-2.1-free",
+      "name": "Laguna-S-2.1 via OpenRouter :free",
+      "context": 262144,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "ovh-qwen3.8-27b",
+      "name": "Qwen3.8-27B via OVH (credit)",
+      "context": 128000,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "vertex-gemini-3.8-flash",
+      "name": "Gemini-3.8-Flash via Vertex (credit)",
+      "context": 1048576,
+      "output": 65536,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "mimo-v2.6-flash",
+      "name": "Xiaomi MiMo v2.6 Flash · 1M",
+      "context": 1048576,
+      "output": 65536,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "mimo-v2.6-pro",
+      "name": "Xiaomi MiMo v2.6 Pro · 1M",
+      "context": 1048576,
+      "output": 65536,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed",
+          "openhands"
+        ]
+      }
+    },
+    {
+      "id": "auto/smart",
+      "name": "bootstrap: auto smart (no combo needed)",
+      "context": 131072,
+      "output": 32768,
+      "reasoning_effort": "xhigh",
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "auto",
+      "name": "bootstrap: auto balanced",
+      "context": 131072,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "auto/cheap",
+      "name": "bootstrap: auto cheapest",
+      "context": 131072,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    }
+  ]
+}

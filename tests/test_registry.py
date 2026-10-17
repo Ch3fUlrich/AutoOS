@@ -1,0 +1,4910 @@
+#!/usr/bin/env python3
+"""Unit tests for tools/registry.py (routing v2 spec section 3.1, task A3).
+
+Path-independent: everything is anchored on ROOT = Path(__file__).resolve().parent.parent,
+never on the current working directory or a hard-coded home path (this repo is public,
+AGENTS.md rule 1).
+
+Stdlib-only, no jsonschema dependency (matching every other suite in this repo): the
+"required keys" check the tool performs is a small hand-rolled structural walk of
+catalog/ai-registry.schema.json's own `required` arrays, not a real validator.
+
+Run directly (`python3 tests/test_registry.py`), never via `unittest discover` - the
+suite has to be runnable on a machine where nothing is installed (AGENTS.md section 5).
+"""
+from __future__ import annotations
+
+import copy
+import fnmatch
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+REGISTRY_PATH = ROOT / "catalog" / "ai-registry.json"
+REGISTRY_TOOL = ROOT / "tools" / "registry.py"
+GOLDEN_LEGACY_MODELS_PATH = ROOT / "tests" / "fixtures" / "legacy-models.golden.json"
+
+
+def _load_tool():
+    """Import tools/registry.py by path (its name is not a valid module identifier)."""
+    spec = importlib.util.spec_from_file_location("autoos_registry", REGISTRY_TOOL)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+registry = _load_tool()
+
+
+def _load_resolver():
+    """Import tools/autoos_resolver.py the same way: the usable-legs invariant
+    asks the resolver's own context check rather than restating it. The resolver
+    does `from registry import ...` itself, so tools/ has to be on sys.path."""
+    if str(ROOT / "tools") not in sys.path:
+        sys.path.insert(0, str(ROOT / "tools"))
+    path = ROOT / "tools" / "autoos_resolver.py"
+    spec = importlib.util.spec_from_file_location("autoos_resolver_tool", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+resolver = _load_resolver()
+
+
+def load_registry() -> dict:
+    with REGISTRY_PATH.open(encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def mutated() -> dict:
+    return copy.deepcopy(load_registry())
+
+
+# The allowed keys of a providers.<id>.limits.<model> entry, matching
+# catalog/ai-registry.schema.json $defs.provider_limits.
+ALLOWED_LIMIT_KEYS = {"rpm", "rpd", "tpm", "tpd", "plan_available", "source"}
+
+
+def live_legs(reg: dict, route_id: str) -> list:
+    """The legs of `route_id` the gateway could actually answer: not flagged
+    unavailable, not client-bound, not denied by policy.leg_rules (those are all
+    `gateway_legs`'s job) and not dead on the plan (0 rpm / plan_available
+    false). One helper for the route-liveness invariant and for every test that
+    wants to say "this route has N live legs", so the two can never drift."""
+    route = reg["routes"][route_id]
+    return [leg for leg in registry.gateway_legs(route, reg)
+            if not registry.plan_dead_reasons(*registry.resolve_leg(leg, reg),
+                                              registry=reg)]
+
+
+class RealRegistryTests(unittest.TestCase):
+    """The committed registry passes the real checker (exit 0 through the CLI)."""
+
+    def test_check_registry_reports_no_problems(self):
+        self.assertEqual(registry.check_registry(load_registry()), [])
+
+    def test_cli_check_exits_zero_and_prints_ok(self):
+        proc = subprocess.run(
+            [sys.executable, str(REGISTRY_TOOL), "check"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        # PRIV2: any privacy_exemption_lines() "info:" line(s) print first
+        # (l1-orchestrator-clean today), then the ok line, always last.
+        self.assertRegex(
+            proc.stdout,
+            r"^(info: .*\n)*ok: registry \d{4}-\d{2}-\d{2}, \d+ routes, \d+ models, \d+ providers\n$")
+
+    def test_cli_validate_succeeds(self):
+        proc = subprocess.run(
+            [sys.executable, str(REGISTRY_TOOL), "validate"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=180,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("ok: registry", proc.stdout)
+
+
+class ResolveLegTests(unittest.TestCase):
+    """resolve_leg splits at the FIRST '/', accepting a provider key or omniroute_id."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_provider_key_prefix(self):
+        self.assertEqual(registry.resolve_leg("mistral/mistral-small-latest", self.reg),
+                         ("mistral", "mistral-small-latest"))
+
+    def test_omniroute_id_prefix_resolves_to_the_provider_key(self):
+        self.assertEqual(registry.resolve_leg("opencode-zen/deepseek-v4.1-flash", self.reg),
+                         ("zen", "deepseek-v4.1-flash"))
+        self.assertEqual(registry.resolve_leg("gemini/gemini-3.8-flash", self.reg),
+                         ("google_ai_studio", "gemini-3.8-flash"))
+
+    def test_only_the_first_slash_splits(self):
+        self.assertEqual(
+            registry.resolve_leg("openrouter/meta/muse-spark-1.3-contributor", self.reg),
+            ("openrouter", "meta/muse-spark-1.3-contributor"))
+
+    def test_unknown_provider_raises_value_error_naming_the_leg(self):
+        with self.assertRaises(ValueError) as ctx:
+            registry.resolve_leg("ghost-provider/gpt", self.reg)
+        self.assertIn("ghost-provider/gpt", str(ctx.exception))
+
+    def test_unknown_model_raises_value_error_naming_the_leg(self):
+        with self.assertRaises(ValueError) as ctx:
+            registry.resolve_leg("mistral/not-a-model", self.reg)
+        self.assertIn("mistral/not-a-model", str(ctx.exception))
+
+
+class RegistryRefTests(unittest.TestCase):
+    """registry_ref() is gateway_ref()'s inverse (FREEKEYS-2e). combos.json
+    carries the RENDERED refs, so a consumer that reads that file and resolves a
+    provider out of it (`sync-router-tiers.py --combos`, which writes config.yaml)
+    sees `scw/*` - scaleway's declared model_prefix - and resolves nothing: the
+    leg silently loses its LiteLLM transport and its env key."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_a_gateway_namespace_comes_back_to_its_provider(self):
+        self.assertEqual(
+            registry.registry_ref("scw/mistral-small-3.2-24b-instruct-2506", self.reg),
+            "scaleway/mistral-small-3.2-24b-instruct-2506")
+
+    def test_a_provider_id_namespace_is_left_alone(self):
+        self.assertEqual(
+            registry.registry_ref("nebius/zai-org/GLM-5.2", self.reg),
+            "nebius/zai-org/GLM-5.2")
+
+    def test_an_unknown_namespace_is_left_alone(self):
+        # Inventing a provider for a ref the registry does not know would hide a
+        # malformed render; rule 1 reports it instead.
+        self.assertEqual(registry.registry_ref("ghost/x", self.reg), "ghost/x")
+
+    def test_every_rendered_combo_ref_lands_on_a_real_provider(self):
+        """The property over the shipped files: after the inverse rewrite, every
+        namespace in combos.json is a provider id or a provider's omniroute_id
+        (`gemini/*`, google_ai_studio's gateway id, which resolve_leg accepts as
+        is), so both render paths resolve the same transport for the same leg."""
+        combos = json.loads((ROOT / "configuration" / "omniroute" / "combos.json")
+                            .read_text(encoding="utf-8"))
+        known = set(registry._section(self.reg, "providers"))
+        known |= {p.get("omniroute_id") for p in
+                  registry._section(self.reg, "providers").values()
+                  if isinstance(p, dict) and p.get("omniroute_id")}
+        unresolved = sorted({ref.split("/", 1)[0]
+                             for c in combos["combos"] for ref in c["models"]
+                             if registry.registry_ref(ref, self.reg).split("/", 1)[0]
+                             not in known})
+        self.assertEqual(unresolved, [])
+
+
+class GatewayRefTests(unittest.TestCase):
+    """AGYID/AGYCANON: gateway_ref() is the one translation point between a
+    registry leg and the id the OmniRoute catalog actually serves. A provider
+    that declares model_prefix (scaleway -> scw) is rewritten; every other leg
+    is returned unchanged, and the registry's own spelling never moves.
+    antigravity's prefix was retired to null 2026-09-30 (AGYCANON): the live
+    catalog flipped back to canonical antigravity/* ids."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_model_prefix_is_applied(self):
+        self.assertEqual(
+            registry.gateway_ref("scaleway/mistral-small-3.2-24b-instruct-2506",
+                                 self.reg),
+            "scw/mistral-small-3.2-24b-instruct-2506")
+
+    def test_antigravity_model_prefix_is_declared(self):
+        # AGYCANON 2026-09-30 retired the prefix; the operator's CLAUDE55
+        # order (2026-10-05) re-declared it: the live catalog serves canonical
+        # agy/* again (the 4-6 generation is retired upstream), so
+        # gateway_ref() rewrites this provider's legs to agy/*.
+        self.assertEqual(self.reg["providers"]["antigravity"]["model_prefix"], "agy")
+        self.assertEqual(
+            registry.gateway_ref("antigravity/claude-opus-5-5-medium", self.reg),
+            "agy/claude-opus-5-5-medium")
+
+    def test_provider_without_model_prefix_is_unchanged(self):
+        self.assertEqual(
+            registry.gateway_ref("mistral/mistral-small-latest", self.reg),
+            "mistral/mistral-small-latest")
+
+    def test_unresolvable_leg_is_unchanged(self):
+        self.assertEqual(registry.gateway_ref("ghost/x", self.reg), "ghost/x")
+
+    def test_non_string_leg_is_unchanged(self):
+        self.assertIsNone(registry.gateway_ref(None, self.reg))
+
+    def test_registry_leg_spelling_is_untouched(self):
+        # The provider still answers to its own id; only the gateway ref moves.
+        self.assertEqual(
+            registry.resolve_leg("antigravity/claude-opus-4-6-thinking", self.reg),
+            ("antigravity", "claude-opus-4-6-thinking"))
+
+    def test_provider_omni_id_is_still_antigravity(self):
+        # apply.sh finds/registers the provider connection by omniroute_id
+        # (apply.sh ~90-144) - the model_prefix change must not touch it.
+        self.assertEqual(self.reg["providers"]["antigravity"]["omniroute_id"],
+                         "antigravity")
+
+
+class RuleOneLegResolutionTests(unittest.TestCase):
+    """Rule 1: every route leg resolves to a providers x models pair."""
+
+    def test_unknown_leg_is_flagged(self):
+        reg = mutated()
+        reg["routes"]["l3-driver-clean"]["legs"].append("ghost-provider/ghost-model")
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("l3-driver-clean" in p and "ghost-provider/ghost-model" in p
+                            for p in problems), problems)
+
+
+class RuleTwoIdUniquenessTests(unittest.TestCase):
+    """Rule 2: ids unique within and across providers/models/clients (routes exempt)."""
+
+    def test_duplicate_id_across_providers_and_models_is_flagged(self):
+        reg = mutated()
+        reg["models"]["muse-spark"]["id"] = "zen"  # 'zen' is also a provider id
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("duplicate" in p and "zen" in p for p in problems), problems)
+
+    def test_duplicate_id_within_a_section_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["groq"]["id"] = "zen"
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("duplicate" in p and "zen" in p for p in problems), problems)
+
+    def test_route_sharing_a_model_id_is_not_flagged(self):
+        # Open choice 11: routes.gemini-3.8-flash shares its id with
+        # models.gemini-3.8-flash by convention and must not be reported.
+        problems = registry.check_registry(load_registry())
+        self.assertFalse(any("duplicate" in p and "gemini" in p for p in problems), problems)
+
+
+class RuleThreePrivacyTests(unittest.TestCase):
+    """Rule 3: -clean routes only use available legs whose provider does not train.
+
+    MISTRALFIX (2026-09-28) re-derived the leg these tests dirty: the route's
+    mistral leg is gone (0 rpm on the plan), so they now flip the provider of
+    the leg that actually heads `l2-worker-clean` on this base —
+    deepseek/deepseek-flash — which is the head the privacy rule exists to keep
+    clean.
+
+    D657-D2 (2026-10-08) re-cut the chains: every `-clean` route now heads
+    `vertex/gemini-3.8-flash`, whose leg prefix is that provider's omniroute_id,
+    not its registry key (`vertex_ai`). The leg is therefore resolved with
+    `registry.resolve_leg()` rather than split on the slash — dirtying a
+    provider row that does not exist would test nothing.
+    """
+
+    def setUp(self):
+        reg = load_registry()
+        self.leg = reg["routes"]["l2-worker-clean"]["legs"][0]
+        self.provider, self.model = registry.resolve_leg(self.leg, reg)
+
+    def test_clean_route_with_a_training_leg_is_flagged(self):
+        reg = mutated()
+        reg["providers"][self.provider]["trains_on_prompts"] = True
+        problems = registry.check_registry(reg)
+        self.assertIn("privacy: l2-worker-clean leg %s trains on prompts"
+                      % self.leg, problems)
+
+    def test_allow_training_does_not_exempt_the_route(self):
+        # review-a3: spec 3.1 has no allow_training escape; a clean route that
+        # carries one is still checked (fail closed).
+        reg = mutated()
+        reg["providers"][self.provider]["trains_on_prompts"] = True
+        reg["routes"]["l2-worker-clean"]["allow_training"] = True
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("privacy: l2-worker-clean" in p for p in problems), problems)
+
+    def test_unavailable_leg_of_a_clean_route_is_still_checked(self):
+        # PRIV2, 2026-09-26 (supersedes the old review-a3 "not checked"
+        # behaviour): the gateway does not consult unavailable_legs/
+        # available:false, so rule 3 must not either. D657-D2 2026-10-08: the
+        # clean routes' head is now vertex/gemini-3.8-flash (deepseek/deepseek-
+        # flash left every chain under spec SS8), so gate the route's own head.
+        reg = mutated()
+        reg["providers"][self.provider]["trains_on_prompts"] = True
+        reg["routes"]["l2-worker-clean"].setdefault("unavailable_legs", {})[
+            self.leg] = {"available": False}
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy: l2-worker-clean" in p
+                and self.leg in p
+                for p in problems), problems)
+
+    def test_unknown_trains_on_prompts_is_flagged(self):
+        # review-a3: a null/missing trains_on_prompts is unverified, not clean.
+        reg = mutated()
+        reg["providers"][self.provider]["trains_on_prompts"] = None
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("privacy: l2-worker-clean" in p for p in problems), problems)
+
+    def test_clean_route_with_a_free_tier_leg_is_flagged(self):
+        # PRIV brief 2026-09-26: a free-tier provider is never private-safe,
+        # even one whose own trains_on_prompts is false (the found bug: a
+        # free pool was treated as "clean" because only trains_on_prompts
+        # was checked, never tier).
+        reg = mutated()
+        reg["providers"][self.provider]["tier"] = "free"
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy: l2-worker-clean" in p and self.leg in p
+                for p in problems), problems)
+
+    def test_clean_route_with_a_training_model_override_is_flagged(self):
+        # A model-level trains_on_prompts: true overrides an otherwise-clean
+        # paid provider (mistral-code-latest's real-world case).
+        reg = mutated()
+        reg["models"][self.model]["trains_on_prompts"] = True
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy: l2-worker-clean" in p and self.leg in p
+                for p in problems), problems)
+
+
+class PrivateSafeTests(unittest.TestCase):
+    """private_safe(): the single predicate rule 3 and the resolver's privacy
+    filter both use (PRIV brief, 2026-09-26 operator finding "Free first,
+    private never"). A leg is private-safe only when its provider tier is
+    not "free", the provider's trains_on_prompts is exactly False, and the
+    model does not carry its own trains_on_prompts: true (missing means
+    inherit the provider)."""
+
+    def reg(self, provider_extra=None, model_extra=None):
+        provider = {"id": "p", "tier": "paid", "trains_on_prompts": False}
+        provider.update(provider_extra or {})
+        model = {"id": "m"}
+        model.update(model_extra or {})
+        return {"providers": {"p": provider}, "models": {"m": model}}
+
+    def test_free_provider_is_not_safe(self):
+        safe, reason = registry.private_safe("p", "m", self.reg(provider_extra={"tier": "free"}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_training_provider_is_not_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(provider_extra={"trains_on_prompts": True}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_training_model_on_a_clean_provider_is_not_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(model_extra={"trains_on_prompts": True}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_clean_paid_leg_is_safe(self):
+        safe, reason = registry.private_safe("p", "m", self.reg())
+        self.assertTrue(safe)
+        self.assertIsNone(reason)
+
+    def test_missing_provider_trains_on_prompts_is_not_safe(self):
+        reg = self.reg()
+        del reg["providers"]["p"]["trains_on_prompts"]
+        safe, reason = registry.private_safe("p", "m", reg)
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_unknown_provider_is_not_safe(self):
+        safe, reason = registry.private_safe("ghost", "m", self.reg())
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_unknown_model_is_not_safe(self):
+        safe, reason = registry.private_safe("p", "ghost", self.reg())
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+
+class RuleFourPrivateHostTests(unittest.TestCase):
+    """Rule 4: api_base / direct.base_url hold only public vendor endpoints."""
+
+    def test_private_ip_provider_api_base_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["zen"]["api_base"] = "http://10.0.0.5:8080/v1"
+        problems = registry.check_registry(reg)
+        self.assertIn("private host: providers.zen.api_base http://10.0.0.5:8080/v1",
+                      problems)
+
+    def test_loopback_in_direct_base_url_is_allowed(self):
+        problems = registry.check_registry(load_registry())
+        self.assertFalse(any("ollama-qwen2.5-coder" in p for p in problems), problems)
+
+    def test_loopback_in_provider_api_base_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["cheapinference"]["api_base"] = "http://127.0.0.1:8000/v1"
+        problems = registry.check_registry(reg)
+        self.assertIn(
+            "private host: providers.cheapinference.api_base http://127.0.0.1:8000/v1",
+            problems)
+
+    def test_loopback_alias_localhost_in_provider_api_base_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["zen"]["api_base"] = "http://localhost:8000/v1"
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("private host: providers.zen.api_base" in p for p in problems),
+                        problems)
+
+    def test_userinfo_is_flagged_even_over_https(self):
+        reg = mutated()
+        reg["providers"]["zen"]["api_base"] = "https://placeholder@api.example.com/v1"
+        problems = registry.check_registry(reg)
+        self.assertIn(
+            "private host: providers.zen.api_base https://placeholder@api.example.com/v1",
+            problems)
+
+    def test_private_suffix_host_in_direct_base_url_is_flagged(self):
+        reg = mutated()
+        reg["models"]["muse-spark"]["direct"]["base_url"] = "https://gpu-box.lan/v1"
+        problems = registry.check_registry(reg)
+        self.assertIn("private host: models.muse-spark.direct.base_url https://gpu-box.lan/v1",
+                      problems)
+
+    def test_plain_http_public_host_is_flagged(self):
+        reg = mutated()
+        reg["models"]["muse-spark"]["direct"]["base_url"] = "http://api.meta.ai/v1"
+        problems = registry.check_registry(reg)
+        self.assertIn("private host: models.muse-spark.direct.base_url http://api.meta.ai/v1",
+                      problems)
+
+
+class RuleFiveDatedValueTests(unittest.TestCase):
+    """Rule 5: no date-like value outside source/verified/version or a comment."""
+
+    def test_dated_display_name_is_flagged(self):
+        reg = mutated()
+        reg["models"]["muse-spark"]["display_name"] = "2026-01-01"
+        problems = registry.check_registry(reg)
+        self.assertIn("dated value: models.muse-spark.display_name", problems)
+
+    def test_dated_value_inside_a_comment_is_allowed(self):
+        reg = mutated()
+        reg["models"]["muse-spark"]["$comment"] = "measured 2026-01-01"
+        problems = registry.check_registry(reg)
+        self.assertFalse(any("dated value" in p and "muse-spark" in p for p in problems),
+                         problems)
+
+    def test_source_and_verified_keys_may_hold_dates(self):
+        # policy.handoff_caps.*.source and provider windows[].verified carry dates.
+        problems = registry.check_registry(load_registry())
+        self.assertEqual([p for p in problems if p.startswith("dated value")], [])
+
+
+class RuleSixRequiredKeyTests(unittest.TestCase):
+    """Rule 6: every schema-required key is present (hand-rolled walk)."""
+
+    def test_missing_provider_key_is_flagged(self):
+        reg = mutated()
+        del reg["providers"]["zen"]["trains_on_prompts"]
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("missing" in p and "providers.zen" in p for p in problems),
+                        problems)
+
+    def test_missing_model_key_is_flagged(self):
+        reg = mutated()
+        del reg["models"]["muse-spark"]["family"]
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("missing" in p and "models.muse-spark" in p for p in problems),
+                        problems)
+
+    def test_missing_policy_key_is_flagged(self):
+        reg = mutated()
+        del reg["policy"]["latency_seed"]
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("missing" in p and "policy" in p for p in problems), problems)
+
+
+class CliTests(unittest.TestCase):
+    """`check` and `validate` command-line behaviour (exit codes, messages)."""
+
+    def _run(self, *args):
+        return subprocess.run(
+            [sys.executable, str(REGISTRY_TOOL), *args],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=180,
+        )
+
+    def _write(self, reg):
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", prefix="registry-test-", delete=False, encoding="utf-8")
+        json.dump(reg, tmp)
+        tmp.close()
+        return tmp.name
+
+    def test_check_on_a_mutated_file_exits_one_and_prints_each_problem(self):
+        reg = mutated()
+        reg["providers"]["zen"]["api_base"] = "http://10.0.0.5:8080/v1"
+        path = self._write(reg)
+        try:
+            proc = self._run("check", "--registry", path)
+        finally:
+            Path(path).unlink()
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("private host: providers.zen.api_base", proc.stdout)
+
+class ModelLevelTierOverrideTests(unittest.TestCase):
+    """PRIV2 brief 2026-09-26: an optional models.<id>.tier overrides its
+    provider's tier in private_safe() -- needed for the zen provider (tier
+    "free") whose paid, direct-key opencode-zen/deepseek-v4.1-flash leg
+    (tests/run-tests.sh's own combos.json policy line: "Direct-key legs
+    (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
+    on the same key, so they stay") is not itself a free pool."""
+
+    def reg(self, provider_extra=None, model_extra=None):
+        provider = {"id": "p", "tier": "paid", "trains_on_prompts": False}
+        provider.update(provider_extra or {})
+        model = {"id": "m"}
+        model.update(model_extra or {})
+        return {"providers": {"p": provider}, "models": {"m": model}}
+
+    def test_model_tier_override_makes_a_free_provider_leg_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(provider_extra={"tier": "free"}, model_extra={"tier": "paid"}))
+        self.assertTrue(safe, reason)
+        self.assertIsNone(reason)
+
+    def test_model_tier_override_can_make_a_paid_provider_leg_unsafe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(model_extra={"tier": "free"}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_zen_deepseek_v4_1_flash_model_carries_a_paid_tier_override(self):
+        model = load_registry()["models"]["deepseek-v4.1-flash"]
+        self.assertEqual(model.get("tier"), "paid")
+        self.assertIn("$comment", model)
+
+    def test_zen_provider_itself_stays_free(self):
+        self.assertEqual(load_registry()["providers"]["zen"]["tier"], "free")
+
+    def test_zen_deepseek_leg_is_private_safe_via_the_model_override(self):
+        safe, reason = registry.private_safe("zen", "deepseek-v4.1-flash", load_registry())
+        self.assertTrue(safe, reason)
+
+
+class ModelLevelTrainingContributorTests(unittest.TestCase):
+    """PRIV2 brief 2026-09-26: the contributor model trains by contract
+    (tests/run-tests.sh's own combos.json policy line: "-contributor
+    (trains by contract) is banned in l2-worker-clean/l3-driver-clean") --
+    both the OpenRouter paid contributor leg and the Zen free
+    contributor-promo leg carry the model-level override, not just a
+    provider-level one."""
+
+    def test_openrouter_contributor_model_trains(self):
+        model = load_registry()["models"]["meta/muse-spark-1.3-contributor"]
+        self.assertIs(model.get("trains_on_prompts"), True)
+        self.assertIn("$comment", model)
+
+    def test_zen_free_contributor_model_trains(self):
+        model = load_registry()["models"]["muse-spark-1.3-contributor-free"]
+        self.assertIs(model.get("trains_on_prompts"), True)
+        self.assertIn("$comment", model)
+
+    def test_openrouter_contributor_leg_is_not_private_safe(self):
+        safe, reason = registry.private_safe(
+            "openrouter", "meta/muse-spark-1.3-contributor", load_registry())
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+
+class FailClosedPrivateSafeTests(unittest.TestCase):
+    """PRIV2 brief 2026-09-26: private_safe() fails closed on anything that
+    is not exactly the safe shape -- an unrecognised/missing effective tier,
+    or a model-level trains_on_prompts that is present but not exactly
+    `false` (null, 1, "no", 0, ...), is never treated as safe."""
+
+    def reg(self, provider_extra=None, model_extra=None):
+        provider = {"id": "p", "tier": "paid", "trains_on_prompts": False}
+        provider.update(provider_extra or {})
+        model = {"id": "m"}
+        model.update(model_extra or {})
+        return {"providers": {"p": provider}, "models": {"m": model}}
+
+    def test_effective_tier_missing_is_not_safe(self):
+        reg = self.reg()
+        del reg["providers"]["p"]["tier"]
+        safe, reason = registry.private_safe("p", "m", reg)
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_effective_tier_unrecognised_value_is_not_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(provider_extra={"tier": "beta"}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_model_trains_on_prompts_explicit_null_is_not_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(model_extra={"trains_on_prompts": None}))
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_model_trains_on_prompts_truthy_non_bool_is_not_safe(self):
+        for value in (1, "no", "false", 0):
+            with self.subTest(value=value):
+                safe, reason = registry.private_safe(
+                    "p", "m", self.reg(model_extra={"trains_on_prompts": value}))
+                self.assertFalse(safe, "value %r wrongly treated as safe" % (value,))
+
+    def test_model_trains_on_prompts_missing_key_is_still_safe(self):
+        safe, reason = registry.private_safe("p", "m", self.reg())
+        self.assertTrue(safe, reason)
+
+    def test_model_trains_on_prompts_exactly_false_is_still_safe(self):
+        safe, reason = registry.private_safe(
+            "p", "m", self.reg(model_extra={"trains_on_prompts": False}))
+        self.assertTrue(safe, reason)
+
+
+class CleanRouteExemptionTests(unittest.TestCase):
+    """PRIV2 brief 2026-09-26: rule 3 checks every leg of a -clean route,
+    including one flagged in unavailable_legs -- the OmniRoute gateway does
+    not consult that registry-only flag, and combos.json/apply.sh still
+    push the leg verbatim (tests/run-tests.sh's own "apply --dry-run" /
+    "provider registry drives apply" tests). The one documented exception is
+    registry.CLEAN_ROUTE_EXEMPTIONS -- l1-orchestrator-clean, which
+    deliberately carries the training OpenRouter contributor leg (the
+    spawner requires --allow-training to reach it) -- reported by
+    `check`/`validate` as an info line, never silently skipped and never a
+    check_registry() problem."""
+
+    def test_unavailable_leg_of_a_non_exempt_clean_route_is_now_checked(self):
+        # D657-D2 2026-10-08: l2-worker-clean heads vertex/gemini-3.8-flash, so
+        # dirty that leg's own provider row (registry key `vertex_ai`).
+        reg = mutated()
+        leg = reg["routes"]["l2-worker-clean"]["legs"][0]
+        provider, _model = registry.resolve_leg(leg, reg)
+        reg["providers"][provider]["trains_on_prompts"] = True
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy: l2-worker-clean" in p and leg in p
+                for p in problems), problems)
+
+    def test_t1_orchestrator_clean_is_in_the_exemption_table(self):
+        self.assertIn("l1-orchestrator-clean", registry.CLEAN_ROUTE_EXEMPTIONS)
+
+    def test_t1_orchestrator_clean_training_leg_is_not_a_check_registry_problem(self):
+        problems = registry.check_registry(load_registry())
+        self.assertFalse(any("l1-orchestrator-clean" in p for p in problems), problems)
+
+    def test_privacy_exemption_lines_names_the_route_and_a_reason(self):
+        lines = registry.privacy_exemption_lines(load_registry())
+        self.assertTrue(
+            any("l1-orchestrator-clean" in line and line.startswith("info:")
+                for line in lines), lines)
+
+    def test_check_cli_prints_the_exemption_info_line_and_still_exits_zero(self):
+        proc = subprocess.run(
+            [sys.executable, str(REGISTRY_TOOL), "check"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("l1-orchestrator-clean", proc.stdout)
+        self.assertIn("info:", proc.stdout)
+        self.assertIn("ok: registry", proc.stdout)
+
+
+class ReviewA3Tests(unittest.TestCase):
+    """Findings of the cross-family review of A3 (agy, 2026-09-26)."""
+
+    def test_route_id_colliding_with_a_provider_is_flagged(self):
+        reg = mutated()
+        route = copy.deepcopy(reg["routes"]["l2-worker-clean"])
+        route["id"] = "mistral"
+        reg["routes"]["mistral"] = route
+        self.assertTrue(any(p.startswith("duplicate id: mistral")
+                            for p in registry.check_registry(reg)))
+
+    def test_route_named_after_a_model_it_serves_is_allowed(self):
+        self.assertIn("deepseek-v4.1-flash", load_registry()["routes"])
+        self.assertIn("deepseek-v4.1-flash", load_registry()["models"])
+        self.assertEqual(registry.check_registry(load_registry()), [])
+
+    def test_route_named_after_a_model_it_does_not_serve_is_flagged(self):
+        reg = mutated()
+        route = copy.deepcopy(reg["routes"]["l2-worker-clean"])
+        route["id"] = "claude-opus-4-6"
+        reg["routes"]["claude-opus-4-6"] = route
+        self.assertTrue(any(p.startswith("duplicate id: claude-opus-4-6")
+                            for p in registry.check_registry(reg)))
+
+    def test_unresolved_unavailable_leg_is_flagged(self):
+        reg = mutated()
+        reg["routes"]["l1-orchestrator-clean"]["unavailable_legs"]["nope/nothing"] = {
+            "available": False}
+        self.assertIn("unresolved leg: routes.l1-orchestrator-clean leg nope/nothing",
+                      registry.check_registry(reg))
+
+    def test_single_label_host_is_private(self):
+        reg = mutated()
+        reg["providers"]["zen"]["api_base"] = "https://gpu-box/v1"
+        self.assertIn("private host: providers.zen.api_base https://gpu-box/v1",
+                      registry.check_registry(reg))
+
+    def test_ip_before_query_or_fragment_is_private(self):
+        for url in ("https://10.0.0.1?v1", "https://10.0.0.1#x"):
+            reg = mutated()
+            reg["providers"]["zen"]["api_base"] = url
+            self.assertIn("private host: providers.zen.api_base %s" % url,
+                          registry.check_registry(reg))
+
+    def test_dated_key_is_flagged(self):
+        reg = mutated()
+        reg["policy"]["latency_seed"]["2026-09-25"] = {"minutes": 1, "source": "default"}
+        self.assertTrue(any("dated key: policy.latency_seed.2026-09-25" in p
+                            for p in registry.check_registry(reg)))
+
+    def test_null_sections_report_instead_of_crashing(self):
+        for mutate in (lambda r: r["routes"]["l2-worker"].__setitem__("legs", None),
+                       lambda r: r.__setitem__("providers", None),
+                       lambda r: r.__setitem__("models", None)):
+            reg = mutated()
+            mutate(reg)
+            self.assertIsInstance(registry.check_registry(reg), list)
+
+
+class LegacyModelsTests(unittest.TestCase):
+    """tools/registry.py legacy_models(): the one projection of registry
+    models into the legacy llm-models entry shape (A5dfix) --
+    every installer read (lib/linux/install.sh x2, AutoOS.Install.psm1
+    embedded python) calls this instead of carrying its own copy. The
+    committed golden fixture tests/fixtures/legacy-models.golden.json pins
+    that shape: it is the deleted legacy models catalog's own "models"
+    list, copied verbatim in task A5e."""
+
+    def test_legacy_models_match_the_committed_golden_fixture_field_for_field(self):
+        with GOLDEN_LEGACY_MODELS_PATH.open(encoding="utf-8") as fh:
+            old = {m["id"]: m for m in json.load(fh)["models"]}
+        new = {m["id"]: m for m in registry.legacy_models(load_registry())}
+        self.assertEqual(set(new), set(old))
+        for mid, old_entry in sorted(old.items()):
+            self.assertEqual(new[mid], old_entry, mid)
+
+    def test_models_without_a_direct_block_are_excluded(self):
+        doc = {"models": {
+            "with-direct": {"id": "with-direct", "display_name": "D",
+                            "direct": {"provider": "meta", "model": "m"},
+                            "context_advertised": 1, "output_max": 1,
+                            "price_in": 0, "price_out": 0},
+            "no-direct": {"id": "no-direct", "display_name": "N",
+                          "context_advertised": 1, "output_max": 1,
+                          "price_in": 0, "price_out": 0},
+        }}
+        self.assertEqual([m["id"] for m in registry.legacy_models(doc)],
+                         ["with-direct"])
+
+    def test_openrouter_free_stays_first_in_the_generated_openrouter_map(self):
+        by_id = {m["id"]: m for m in registry.legacy_models(load_registry())}
+        openrouter_map = {m["openrouter_id"]: m for m in by_id.values()
+                          if m.get("openrouter_id")}
+        self.assertTrue(openrouter_map)
+        self.assertEqual(next(iter(openrouter_map.values()))["id"],
+                         "openrouter-free")
+
+    def test_default_for_is_projected(self):
+        by_id = {m["id"]: m for m in registry.legacy_models(load_registry())}
+        self.assertEqual(by_id["muse-spark"].get("default_for"), "muse_key")
+        self.assertEqual(by_id["ollama-qwen2.5-coder"].get("default_for"),
+                         "fallback")
+
+
+class UnavailableUntilTests(unittest.TestCase):
+    """Time-bounded unavailability (brief UNTIL, 2026-09-26; skill rule
+    R-gateway-12: a 429 with retryable:true but a multi-day reset is not
+    soon-retryable -- mark the entry unavailable till the reset, then let it
+    come back on its own instead of relying on someone hand-undoing an
+    ``available: false``).
+
+    One helper, registry.unavailable_now(entry, now), answers "is this
+    clients/providers/unavailable_legs entry unavailable at `now`":
+
+    - ``available: false`` with no ``unavailable_until`` is unavailable
+      forever (today's behaviour, unchanged);
+    - a future ``unavailable_until`` is unavailable until that instant;
+    - a past ``unavailable_until`` counts as available again -- the entry
+      self-heals, no hand edit to undo.
+    """
+
+    def dt(self, *args):
+        return datetime(*args, tzinfo=timezone.utc)
+
+    def test_available_false_without_an_until_stays_unavailable_forever(self):
+        entry = {"available": False}
+        self.assertTrue(registry.unavailable_now(entry, self.dt(2026, 9, 26)))
+        self.assertTrue(registry.unavailable_now(entry, self.dt(2030, 1, 1)))
+
+    def test_a_future_until_is_unavailable(self):
+        entry = {"unavailable_until": "2026-10-01T09:05:00Z"}
+        self.assertTrue(registry.unavailable_now(entry, self.dt(2026, 9, 26, 19, 17)))
+        self.assertTrue(registry.unavailable_now(
+            entry, self.dt(2026, 10, 1, 9, 4, 59)))
+
+    def test_a_past_until_counts_as_available_again(self):
+        entry = {"available": False, "unavailable_until": "2026-10-01T09:05:00Z"}
+        self.assertTrue(registry.unavailable_now(
+            entry, self.dt(2026, 10, 1, 9, 4, 59)))
+        self.assertFalse(registry.unavailable_now(
+            entry, self.dt(2026, 10, 1, 9, 5, 0)))
+        self.assertFalse(registry.unavailable_now(
+            entry, self.dt(2026, 12, 31)))
+
+    def test_no_flags_at_all_is_available(self):
+        self.assertFalse(registry.unavailable_now({}, self.dt(2026, 9, 26)))
+        self.assertFalse(registry.unavailable_now(None, self.dt(2026, 9, 26)))
+
+    def test_an_unparsable_until_fails_check_not_the_helper(self):
+        # The helper itself never raises (a resolver runs it against live
+        # state); the shape is a check-time problem, reported by rule 7.
+        entry = {"unavailable_until": "next tuesday"}
+        self.assertIs(registry.unavailable_now(entry, self.dt(2026, 9, 26)),
+                      False)
+
+
+class RuleSevenUnavailableUntilTests(unittest.TestCase):
+    """Rule 7: every ``unavailable_until`` value anywhere in the registry is
+    an ISO-8601 UTC timestamp. The key itself holds a date by design, so
+    rule 5 (no dated values) must exempt it; a value that does not parse is
+    a check failure, never a silent pass (an unparsable until would quietly
+    read as available forever -- the exact hand-edit-forgot-to-undo failure
+    this field exists to remove)."""
+
+    def test_an_unparsable_until_on_a_client_is_flagged(self):
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = "next tuesday"
+        problems = registry.check_registry(reg)
+        self.assertIn("bad unavailable_until: clients.agy 'next tuesday'",
+                      problems)
+
+    def test_an_unparsable_until_on_a_provider_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["openrouter"]["unavailable_until"] = "soon"
+        problems = registry.check_registry(reg)
+        self.assertIn("bad unavailable_until: providers.openrouter 'soon'",
+                      problems)
+
+    def test_an_unparsable_until_on_an_unavailable_leg_is_flagged(self):
+        # D657-D2 2026-10-08: the committed registry's remaining leg gates are
+        # on the routes that still declare a gated tail; l1-orchestrator-clean
+        # keeps its contributor tail gated, so dirty that entry.
+        reg = mutated()
+        reg["routes"]["l1-orchestrator-clean"]["unavailable_legs"][
+            "openrouter/meta/muse-spark-1.3-contributor"]["unavailable_until"] = "2026-13-01"
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(p.startswith(
+            "bad unavailable_until: routes.l1-orchestrator-clean.unavailable_legs."
+            "openrouter/meta/muse-spark-1.3-contributor") for p in problems), problems)
+
+    def test_a_non_string_until_is_flagged(self):
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = 1759258200
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(p.startswith("bad unavailable_until: clients.agy")
+                            for p in problems), problems)
+
+    def test_a_parsable_until_is_not_a_dated_value(self):
+        # Rule 5 exempts the key by name: "2026-10-01T09:05:00Z" matches
+        # DATE_RE, so only an explicit exemption keeps this quiet.
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        problems = registry.check_registry(reg)
+        self.assertFalse(any("dated" in p and "agy" in p for p in problems),
+                         problems)
+        self.assertFalse(any(p.startswith("bad unavailable_until")
+                             for p in problems), problems)
+
+    def test_an_explicit_zero_offset_is_rejected_too(self):
+        # UNTILfix: the schema's until_tag pattern is Z-only, so an explicit
+        # +00:00 must fail check even though it names the same instant. This
+        # was the one offset rule 7 used to let through.
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = (
+            "2026-10-01T09:05:00+00:00")
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(p.startswith("bad unavailable_until: clients.agy")
+                            for p in problems), problems)
+
+    def test_offsets_and_naive_timestamps_are_rejected(self):
+        # UTC only ("...Z"): an offset or a naive timestamp is ambiguous
+        # about which clock it means on a machine in another zone.
+        for value in ("2026-10-01T11:05:00+02:00", "2026-10-01T09:05:00"):
+            reg = mutated()
+            reg["clients"]["agy"]["unavailable_until"] = value
+            problems = registry.check_registry(reg)
+            self.assertTrue(any(p.startswith("bad unavailable_until: clients.agy")
+                                for p in problems), (value, problems))
+
+    def test_the_committed_schema_permits_the_field_on_all_three_surfaces(self):
+        # The schema carries additionalProperties: false on client, provider
+        # and unavailable_legs entries; it must name unavailable_until on all
+        # three, and the committed registry itself passes check with one set.
+        schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
+                            .read_text(encoding="utf-8"))
+        defs = schema["$defs"]
+        for surface in (defs["client"]["properties"],
+                        defs["provider"]["properties"],
+                        defs["route"]["properties"]["unavailable_legs"]
+                        ["additionalProperties"]["properties"]):
+            self.assertIn("unavailable_until", surface)
+        self.assertEqual(registry.check_registry(load_registry()), [])
+
+
+class RuleEightUnavailableUntilPairsAvailableTests(unittest.TestCase):
+    """Rule 8: an entry with ``unavailable_until`` must also carry ``available:
+    false``. Without the flag the resolver's re-probe note cannot fire after
+    the until expires (FUP 2026-09-27, measured on ``clients.agy``)."""
+
+    def test_committed_registry_passes_rule_8(self):
+        # agy now has both available: false and unavailable_until.
+        self.assertFalse(
+            any("entry with unavailable_until but no available: false"
+                in p for p in registry.check_registry(load_registry())),
+            "committed registry must not violate rule 8")
+
+    def test_missing_available_on_client_is_flagged(self):
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        reg["clients"]["agy"].pop("available", None)
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: clients.agy"
+                in p for p in problems),
+            problems)
+
+    def test_missing_available_on_a_provider_is_flagged(self):
+        reg = mutated()
+        # DSMAX 2026-09-27 switched openrouter off at the provider level, so
+        # drop that flag before asserting rule 8 fires on the missing one.
+        del reg["providers"]["openrouter"]["available"]
+        reg["providers"]["openrouter"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: providers.openrouter"
+                in p for p in problems),
+            problems)
+
+    def test_missing_available_on_unavailable_leg_is_flagged(self):
+        reg = mutated()
+        # D657-D2 2026-10-08: same gate as the rule-7 fixture — the route that
+        # still declares a gated tail.
+        leg = reg["routes"]["l1-orchestrator-clean"]["unavailable_legs"][
+            "openrouter/meta/muse-spark-1.3-contributor"]
+        del leg["available"]
+        leg["unavailable_until"] = "2026-10-01T09:05:00Z"
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: "
+                "routes.l1-orchestrator-clean.unavailable_legs."
+                "openrouter/meta/muse-spark-1.3-contributor" in p
+                for p in problems),
+            problems)
+
+    def test_available_true_with_unavailable_until_is_flagged_too(self):
+        # Explicit available: true is still not available: false, and the
+        # resolver needs the flag to emit the re-probe note.
+        reg = mutated()
+        reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
+        reg["clients"]["agy"]["available"] = True
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("entry with unavailable_until but no available: false: clients.agy"
+                in p for p in problems),
+            problems)
+
+
+class OpenRouterByokLegTests(unittest.TestCase):
+    """Operator 2026-09-27T13:5xZ measured the openrouter/openai/gpt-oss-120b
+    BYOK leg 200 on 3/3 trials and briefly un-gated it, but the L0 C change was
+    reverted the same day (a re-probe hit 401 credits exhausted), so l2-worker
+    keeps its `available: false` gate until the operator sets BYOK Prioritized
+    and a fresh probe passes. The per-leg allow rule is kept in place."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+        cls.t2_worker_legs = cls.reg["routes"]["l2-worker"]["legs"]
+
+    def test_leg_is_present_after_sambanova_gpt_oss_120b(self):
+        # TORDER-OR 2026-10-01 (openrouter NO credits -> :free only): paid
+        # openrouter/openai/gpt-oss-120b removed from l2-worker (was already
+        # unavailable/gated; combos clean).
+        # GROQRETIRED 2026-10-14: groq retired and purged from routes; neither
+        # l2-worker nor l3-driver carries the groq leg.
+        self.assertNotIn("openrouter/openai/gpt-oss-120b", self.t2_worker_legs)
+        self.assertNotIn("groq/openai/gpt-oss-120b", self.t2_worker_legs)
+        self.assertNotIn("groq/openai/gpt-oss-120b",
+                         self.reg["routes"]["l3-driver"]["legs"])
+
+    def test_leg_resolves_to_a_model(self):
+        # resolve_leg ignores route membership, so this pins the spelling only;
+        # the membership/order pin is the test above.
+        provider, model = registry.resolve_leg("openrouter/openai/gpt-oss-120b", self.reg)
+        self.assertEqual(provider, "openrouter")
+        self.assertEqual(model, "openai/gpt-oss-120b")
+
+    def test_a_sibling_spelling_with_no_model_entry_is_refused(self):
+        with self.assertRaises(ValueError):
+            registry.resolve_leg("openrouter/openai/gpt-oss-120b-nope", self.reg)
+
+    def test_t2_worker_gates_the_leg_until_byok_is_prioritized(self):
+        # TORDER-OR: paid leg removed (not gated) - :free only. No entry.
+        entry = (self.reg["routes"]["l2-worker"].get("unavailable_legs") or {}).get(
+            "openrouter/openai/gpt-oss-120b")
+        self.assertIsNone(entry, "paid openrouter leg should be removed, not gated")
+
+    def test_unavailable_entry_has_the_l0_comment(self):
+        # TORDER-OR: paid leg removed; provenance lives in TORDER-OR registry
+        # $comment + provider $comment (no credits -> :free only), not a gate.
+        # D657-D2 2026-10-08: l2-worker's chain is re-cut to probe-acked legs, so
+        # the morph/deepinfra provenance gates left with the legs it no longer
+        # declares. The $comment-provenance rule is pinned on a gate that is still
+        # shipped: routes.faik-gpt-6-sol carries its price note.
+        gated = self.reg["routes"]["faik-gpt-6-sol"]["unavailable_legs"]
+        leg = "freeaiapikey/openai/gpt-6-sol"
+        self.assertIn(leg, gated)
+        self.assertIn("price", (gated[leg].get("$comment") or "").lower())
+
+    def test_gated_leg_is_not_servable_in_any_route_listing_it(self):
+        # TORDER-OR: paid leg removed from every route (except t1-clean kept
+        # declared+gated so it stays omitted). No route lists it.
+        listing = [rid for rid, route in self.reg["routes"].items()
+                   if "openrouter/openai/gpt-oss-120b" in (route.get("legs") or [])]
+        self.assertEqual(listing, [])
+
+    def test_other_openrouter_legs_stay_denied(self):
+        # The BYOK allow is per-leg; the blanket deny-openrouter still gates
+        # every other openrouter leg (first match wins).
+        for leg in ("openrouter/google/gemini-3.8-flash",
+                    "openrouter/qwen/qwen3.8-235b"):
+            self.assertTrue(registry.leg_denied(leg, self.reg), leg)
+
+    def test_leg_rule_records_the_reverted_byok_answer(self):
+        # The allow rule survives the revert (a per-leg allow before the blanket
+        # deny-openrouter), but it carries the operator's 03:39Z answer note,
+        # not the reverted C measurement.
+        rules = self.reg["policy"]["leg_rules"]
+        rule = next(r for r in rules if r["id"] == "allow-openrouter-gpt-oss-byok")
+        self.assertIn("BYOK", rule["reason"])
+        self.assertNotIn("3/3", rule["reason"])
+        self.assertIn("2026-09-27T03:39Z", rule["source"])
+
+
+class LegRulesTests(unittest.TestCase):
+    """leg_rules policy gates (briefs/common.md Claude budget rules, encoded as
+    policy.leg_rules: ordered list of {"id", "match" (fnmatch), "allow" (bool),
+    "reason", "source"}; first match wins; no match = allowed.
+
+    A denied leg that routes.<id>.unavailable_legs already gates (available:false)
+    passes the check — the operator has already acknowledged it. A denied leg
+    that is still serving (not flagged in unavailable_legs) is an error naming
+    the rule that denied it.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_denied_serving_leg_fails_check_naming_the_rule(self):
+        """A leg matching a deny rule with no unavailable_legs gate is flagged."""
+        reg = mutated()
+        # openrouter/google/gemini-3.8-flash resolves (provider openrouter,
+        # model google/gemini-3.8-flash) and is denied by the deny-openrouter
+        # rule (no allow matches the plain, non-:free id). FREEWIRE 2026-09-30
+        # replaced groq/qwen/qwen3.8-27b as this fixture: that leg is now allowed
+        # by allow-groq-qwen3.8-27b, so it can no longer exercise a deny.
+        reg["routes"]["l2-worker"]["legs"].append("openrouter/google/gemini-3.8-flash")
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("leg_rules" in p and "openrouter/google/gemini-3.8-flash" in p for p in problems),
+            problems)
+
+    def test_denied_leg_gated_via_unavailable_legs_passes(self):
+        """A leg matching a deny rule that is already in unavailable_legs is not
+        flagged — the operator has already acknowledged it."""
+        reg = mutated()
+        reg["routes"]["l2-worker"]["legs"].append("openrouter/google/gemini-3.8-flash")
+        reg["routes"]["l2-worker"].setdefault("unavailable_legs", {})[
+            "openrouter/google/gemini-3.8-flash"] = {"available": False}
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "openrouter/google/gemini-3.8-flash" in p for p in problems),
+            problems)
+
+    def test_allowed_leg_passes_after_deny_rule(self):
+        """First-match-wins: an allow rule placed before a deny rule exempts."""
+        reg = mutated()
+        # deepseek/deepseek-flash resolves and should be allowed by an early
+        # allow rule before the *deepseek* deny
+        reg["routes"]["l2-worker"]["legs"].append("deepseek/deepseek-flash")
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "deepseek/deepseek-flash" in p for p in problems),
+            problems)
+
+    def test_leg_with_no_matching_rule_is_allowed(self):
+        """No match in any leg_rule = allowed (not flagged)."""
+        reg = mutated()
+        # mistral/leg exists and is not matched by any leg_rule
+        reg["routes"]["l2-worker"]["legs"].append("mistral/mistral-small-latest")
+        problems = registry.check_registry(reg)
+        self.assertFalse(
+            any("leg_rules" in p and "mistral/mistral-small-latest" in p for p in problems),
+            problems)
+
+    def test_rule_order_pins_the_budget_decisions(self):
+        """The committed rules decide each measured case (first match wins)."""
+        cases = {
+            # FREEWIRE 2026-09-30: allow-groq-gpt-oss / allow-groq-qwen3.8-27b
+            # now sit ABOVE deny-groq, so these three measured legs are allowed
+            # (single get_weather tool call each). Every other groq/* leg is
+            # still denied.
+            "groq/openai/gpt-oss-120b": True,
+            "groq/openai/gpt-oss-20b": True,
+            "groq/qwen/qwen3.8-27b": True,
+            "groq/llama-3.3-70b-versatile": False,   # no allow rule, deny-groq
+            "samba/gpt-oss-120b": True,
+            # operator 2026-09-27T07:3xZ: zen allowed as opencode-client-bound (was denied);
+            # the zen rule still sits before the deepseek deny, so zen deepseek is allowed
+            "opencode-zen/deepseek-v4.1-flash": True,
+            "opencode-zen/muse-spark-1.3-contributor-free": True,
+            "openrouter/deepseek/deepseek-v4.1-flash": True,
+            "openrouter/meta/muse-spark-1.3-contributor-xhigh": True,
+            "openrouter/openai/gpt-oss-120b": True,
+            # FREEWIRE 2026-09-30: the $0 :free ids are allowed above deny-openrouter
+            "openrouter/qwen/qwen3.8-27b:free": True,
+            "openrouter/nvidia/nemotron-3-super-120b-a12b:free": True,
+            "openrouter/google/gemini-3.8-flash": False,
+            "deepseek/deepseek-flash": True,
+            "cheaperinference/deepseek-v4-flash": False,
+            "cc/claude-opus-4-6": True,                  # subscription seat
+            "antigravity/claude-opus-4-6-thinking": True,  # agy sign-in
+            "cheaperinference/claude-sonnet-5": False,
+            "cheaperinference/gpt-5.5": False,
+            "mistral/mistral-small-latest": True,        # no rule matches
+        }
+        got = {leg: not registry.leg_denied(leg, self.reg) for leg in cases}
+        self.assertEqual(got, cases)
+
+    def test_matching_is_case_insensitive(self):
+        """DSAMEND2 (Muse review of DSAMEND, operator rule 'never DeepSeek Pro
+        under ANY provider id'): the matcher casefolds pattern and leg alike.
+        Under case-SENSITIVE fnmatchcase a deny only binds the exact casing it
+        was written in, so `samba/DeepSeek-V4-Pro` — the very model the operator
+        forbids, spelled with capitals — matched no rule at all and fell through
+        to the no-match-allowed default. No deny may be escapable by
+        re-capitalising it."""
+        for leg in ("samba/DeepSeek-V4-Pro",
+                    "openrouter/deepseek/DeepSeek-V4-PRO",
+                    "Deepseek-V4-Pro"):
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), True)
+                self.assertEqual(
+                    (registry.leg_rule_for(leg, self.reg) or {}).get("id"),
+                    "deny-deepseek-pro", leg)
+        # and the mixed-case spellings of an ALLOW stay allowed (first match
+        # still wins, the casefold does not let a deny outrank an allow that
+        # precedes it): the registry's one mixed-case leg is samba/MiniMax-M3.
+        self.assertIs(registry.leg_denied("samba/MiniMax-M3", self.reg), False)
+        self.assertIs(registry.leg_denied("deepseek/deepseek-flash", self.reg), False)
+
+    def test_no_committed_verdict_changes_when_matching_folds_case(self):
+        """The 'expect none' guard the DSAMEND2 review asks for: for every leg
+        the registry actually names — every route leg, every unavailable_legs
+        key, and every provider spelling x model id it can be written with —
+        folding the case must not change which rule fires or its verdict. A leg
+        whose verdict does change is a leg some rule was only ever binding in
+        one casing, and the render and the resolver would disagree with the
+        operator's budget over it."""
+        legs = set()
+        for route in self.reg["routes"].values():
+            legs.update(l for l in (route.get("legs") or []) if isinstance(l, str))
+            legs.update(l for l in (route.get("unavailable_legs") or {})
+                        if isinstance(l, str))
+        for pid, prov in self.reg["providers"].items():
+            for sp in {pid, prov.get("omniroute_id") or pid}:
+                for mid in self.reg["models"]:
+                    legs.add("%s/%s" % (sp, mid))
+        # the case-SENSITIVE matcher, exactly as leg_rule_for worked before the
+        # fix: same rule order, fnmatchcase on the raw and canonical spellings.
+        rules = [r for r in self.reg["policy"]["leg_rules"]
+                 if isinstance(r, dict) and isinstance(r.get("match"), str)]
+
+        def old_rule(leg):
+            candidates = [leg]
+            canonical = registry._canonical_leg_spelling(leg, self.reg)
+            if canonical not in candidates:
+                candidates.append(canonical)
+            for rule in rules:
+                for candidate in candidates:
+                    if fnmatch.fnmatchcase(candidate, rule["match"]):
+                        return rule
+            return None
+
+        changed = {}
+        for leg in sorted(legs):
+            before, after = old_rule(leg), registry.leg_rule_for(leg, self.reg)
+            if (before or {}).get("id") != (after or {}).get("id") or \
+                    (before or {}).get("allow") != (after or {}).get("allow"):
+                changed[leg] = ((before or {}).get("id"), (after or {}).get("id"))
+        # T1-CLEAN-3 2026-10-01: the duplicate row is merged, so the sweep no
+        # longer synthesises that spelling and the fold changes NO committed
+        # verdict: the dict stays empty. (Before the merge the one entry below
+        # documented the duplicate's side effect: the new allow-groq-qwen3.8-27b
+        # also covered the unrelated huggingface model row 'Qwen/Qwen3.8-27B'
+        # spelled under the groq prefix - a combination no route carries. That
+        # row is now merged into the canonical 'qwen/qwen3.8-27b', so the
+        # synthetic leg is gone, not re-verdict.)
+        expected = {}
+        self.assertEqual(changed, expected,
+                         "unexpected leg verdict changes: %s"
+                         % sorted(set(changed.items()) - set(expected.items())))
+        self.assertGreater(len(legs), 1000, "the sweep must cover the registry")
+
+    def test_providers_key_spelling_matches_the_omniroute_id_rule(self):
+        """PROV finding 3: resolve_leg() accepts either the providers key or a
+        provider's omniroute_id, so leg_rules must gate BOTH spellings. A leg
+        written with the providers key (cheapinference/…) must hit the rule
+        written against the canonical id (cheaperinference/*)."""
+        # both spellings of the denied leg are denied
+        self.assertTrue(registry.leg_denied("cheapinference/glm-4.5-air", self.reg))
+        self.assertTrue(registry.leg_denied("cheaperinference/glm-4.5-air", self.reg))
+        # and both spellings of an allowed leg stay allowed (allow wins, first
+        # match, before the trailing deny-cheaperinference)
+        self.assertFalse(registry.leg_denied("cheapinference/kimi-k3", self.reg))
+        self.assertFalse(registry.leg_denied("cheaperinference/kimi-k3", self.reg))
+        # the providers key spelling is what the canonical resolution yields
+        self.assertEqual(
+            registry._canonical_leg_spelling("cheapinference/glm-4.5-air", self.reg),
+            "cheaperinference/glm-4.5-air")
+
+    def test_providers_key_spelling_is_flagged_when_serving(self):
+        """A denied leg is only tolerated while the route gates it by the same
+        exact string; a spelling with no gate is still a problem. Uses
+        openrouter/google/gemini-3.8-flash (denied by deny-openrouter, provider
+        now available after FREEWIRE) - groq's example legs are allowed now."""
+        reg = mutated()
+        reg["routes"]["l2-worker"]["legs"].append("openrouter/google/gemini-3.8-flash")
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("leg_rules" in p and "openrouter/google/gemini-3.8-flash" in p
+                for p in problems), problems)
+
+    def test_available_true_entry_does_not_gate_a_denied_leg(self):
+        """Only available:false gates (the renders' _leg_is_unavailable)."""
+        reg = mutated()
+        reg["routes"]["l2-worker"]["legs"].append("openrouter/google/gemini-3.8-flash")
+        reg["routes"]["l2-worker"].setdefault("unavailable_legs", {})[
+            "openrouter/google/gemini-3.8-flash"] = {"available": True}
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("openrouter/google/gemini-3.8-flash" in p for p in problems), problems)
+
+    def test_problem_names_rule_id_and_reason(self):
+        reg = mutated()
+        reg["routes"]["l2-worker"]["legs"].append("openrouter/google/gemini-3.8-flash")
+        rule = registry.leg_rule_for("openrouter/google/gemini-3.8-flash", reg)
+        hits = [p for p in registry.check_registry(reg) if "openrouter/google/gemini-3.8-flash" in p]
+        self.assertEqual(len(hits), 1, hits)
+        self.assertIn(rule["id"], hits[0])
+        self.assertIn(rule["reason"], hits[0])
+
+    def test_non_string_leg_is_left_to_rule_one(self):
+        # review-or2: a null leg must not crash the whole check in rule 9.
+        reg = mutated()
+        reg["routes"]["l2-worker"]["legs"].append(None)
+        problems = registry.check_registry(reg)
+        self.assertFalse(any(p.startswith("leg_rules") and "None" in p for p in problems))
+
+    def test_real_registry_passes_leg_rules_check(self):
+        """The committed registry must itself pass check (any denied serving
+        leg must be gated via unavailable_legs)."""
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+    # --- SB-C2 item 1: the Claude-family spellings that dodge */claude-* -----
+
+    DENIED_FAMILY_LEGS = {
+        "openrouter/anthropic/opus-5": "deny-claude-family-opus",
+        "bluesminds/sonnet-5": "deny-claude-family-sonnet",
+        "free-ai/haiku-4-5": "deny-claude-family-haiku",
+        "zen/fable-5": "deny-claude-family-fable",
+        # the anthropic provider id is not a seat row anywhere in the shipped
+        # rules: the two Claude seats are cc/* and antigravity/*, both allows
+        # ABOVE the denies. A model half that carries no family word at all is
+        # still denied by the provider rule.
+        "anthropic/mule-9": "deny-anthropic-paid",
+    }
+
+    def test_claude_family_names_without_the_word_claude_are_denied(self):
+        """SB-C2 (rev-sbc, spelling escape): deny-claude-paid-api matches only
+        `*/claude-*`, so a third-party leg named by its family word alone
+        (opus/sonnet/haiku/fable) escaped the leg rules and became usable the
+        moment the budget gate said yes. Each is now denied, and the deny that
+        fires is a family rule -- not some later provider wildcard."""
+        for leg, rule_id in self.DENIED_FAMILY_LEGS.items():
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), True)
+                self.assertEqual(
+                    (registry.leg_rule_for(leg, self.reg) or {}).get("id"),
+                    rule_id, leg)
+
+    def test_the_subscription_seats_still_match_their_allows_first(self):
+        """The family denies sit AFTER the two seat allows: a seat leg is the
+        operator's own Claude on a subscription/free sign-in, and first-match-
+        wins must keep saying allow for it."""
+        for leg in ("cc/claude-opus-4-6", "cc/opus-4-6",
+                    "antigravity/claude-opus-4-6-thinking",
+                    "antigravity/opus-4-6-thinking"):
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), False)
+
+    def test_non_claude_models_on_those_providers_stay_allowed(self):
+        """The family denies name Claude words, not providers: the same
+        providers' ordinary models keep whatever verdict they had -- a zen free
+        model still hits its client-bound allow, not a family deny."""
+        allowed = {
+            "zen/muse-spark-1.3-contributor": "allow-opencode-zen-client-bound",
+            "bluesminds/glm-4.7": None,
+            "free-ai/qwen3.8-27b": None,
+            "openrouter/deepseek/deepseek-v4.1-flash":
+                "allow-openrouter-deepseek-v4.1-flash",
+        }
+        for leg, rule_id in allowed.items():
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), False)
+                got = (registry.leg_rule_for(leg, self.reg) or {}).get("id")
+                self.assertEqual(got, rule_id, leg)
+
+    def test_the_family_denies_precede_every_provider_wildcard_allow(self):
+        """Position is the rule: each new deny must sit above every provider-
+        wide allow (`x/*` with a wildcard-only model half) that would otherwise
+        match first, and below the two seat allows."""
+        rules = self.reg["policy"]["leg_rules"]
+        index = {r.get("id"): i for i, r in enumerate(rules)}
+        denies = list(self.DENIED_FAMILY_LEGS.values()) + ["deny-claude-paid-api"]
+        seats = ["allow-claude-code-subscription", "allow-antigravity-signin"]
+        for seat in seats:
+            for deny in denies:
+                self.assertLess(index[seat], index[deny],
+                                "seat %s must match before deny %s" % (seat, deny))
+        wildcards = [r for r in rules
+                     if r.get("allow") is True and r.get("id") not in seats
+                     and str(r.get("match", "")).endswith("/*")]
+        self.assertTrue(wildcards, "no provider-wide allow to order against")
+        for rule in wildcards:
+            for deny in denies:
+                self.assertLess(index[deny], index[rule["id"]],
+                                "deny %s must precede wildcard allow %s"
+                                % (deny, rule["id"]))
+
+    def test_no_registered_non_claude_name_carries_a_family_word(self):
+        """The sweep the brief asks for BEFORE the rules were added, pinned
+        forever: every model id and every route leg naming opus/sonnet/haiku/
+        fable is also spelled claude/anthropic, so no legitimate non-Claude
+        model in the registry needed an explicit carve-out. A future entry
+        that trips this is a name to check by hand, not a rule to widen."""
+        fam = re.compile(r"(opus|sonnet|haiku|fable)", re.IGNORECASE)
+        claude = re.compile(r"(claude|anthropic)", re.IGNORECASE)
+        reg = self.reg
+        names = list(reg["models"])
+        names += [leg for route in reg["routes"].values()
+                  for leg in (route.get("legs") or []) if isinstance(leg, str)]
+        offenders = sorted({n for n in names if fam.search(n)
+                            and not claude.search(n)})
+        self.assertEqual(offenders, [])
+
+
+class MonthlyCapTests(unittest.TestCase):
+    """WS-DSCALL (2026-09-28): providers.<id>.monthly_cap_usd is the paid cap a
+    caller refuses at; the validator accepts only a positive number with a
+    monthly_cap_source."""
+
+    def test_the_live_deepseek_cap_is_25_with_a_source(self):
+        deepseek = load_registry()["providers"]["deepseek"]
+        self.assertEqual(deepseek["monthly_cap_usd"], 25)
+        self.assertTrue(deepseek["monthly_cap_source"].strip())
+        self.assertEqual(registry._check_monthly_caps(load_registry()), [])
+
+    def test_a_bad_cap_is_flagged_naming_the_provider(self):
+        for bad in (0, -1, "25", True, None):
+            reg = mutated()
+            reg["providers"]["deepseek"]["monthly_cap_usd"] = bad
+            problems = [p for p in registry.check_registry(reg) if "monthly_cap_usd" in p]
+            self.assertTrue(problems, bad)
+            self.assertIn("deepseek", problems[0])
+
+    def test_a_cap_without_a_source_is_flagged(self):
+        reg = mutated()
+        del reg["providers"]["deepseek"]["monthly_cap_source"]
+        self.assertTrue([p for p in registry.check_registry(reg) if "monthly_cap_source" in p])
+
+
+class ProviderLimitsTests(unittest.TestCase):
+    """providers.<id>.limits: per-model free-tier rate caps as data (brief R4,
+    2026-09-27). Keyed by the provider's own model spelling (the part of the
+    leg after '<provider>/'); validated against resolve_leg so an unknown model
+    spelling is caught here, not at route time. Values are non-negative ints;
+    rpm/rpd/tpm/tpd are each optional, source is required (D20).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_live_groq_limits_entries_are_shape_valid(self):
+        """Live shape only (review R4FIX): each groq limits entry carries only
+        the schema's allowed keys, every cap present is a non-negative int, and
+        the source is a non-empty string. The exact console numbers are pinned
+        by test_groq_limits_carry_the_console_numbers_inline against an inline
+        registry, so a legitimate re-measure edits one place instead of an
+        assertion over live data.
+        """
+        limits = self.reg["providers"]["groq"]["limits"]
+        self.assertEqual(
+            sorted(limits),
+            ["openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b"])
+        for model, entry in limits.items():
+            self.assertTrue(set(entry) <= ALLOWED_LIMIT_KEYS, (model, entry))
+            self.assertIsInstance(entry["source"], str, model)
+            self.assertTrue(entry["source"].strip(), model)
+            for field in ("rpm", "rpd", "tpm", "tpd"):
+                if field not in entry:
+                    continue
+                value = entry[field]
+                self.assertIsInstance(value, int, (model, field))
+                self.assertNotIsInstance(value, bool, (model, field))
+                self.assertGreaterEqual(value, 0, (model, field))
+
+    def test_groq_limits_carry_the_console_numbers_inline(self):
+        """The operator's measured Groq console numbers (brief R4), held as an
+        inline registry so the pin is over data, not over the live file."""
+        limits = {
+            "openai/gpt-oss-120b": {
+                "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000,
+                "source": "operator Groq console screenshot 2026-09-27"},
+            "openai/gpt-oss-20b": {
+                "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000,
+                "source": "operator Groq console screenshot 2026-09-27"},
+            "qwen/qwen3.8-27b": {
+                "rpm": 30, "rpd": 1000, "tpm": 8000, "tpd": 200000,
+                "source": "operator Groq console screenshot 2026-09-27"},
+        }
+        for entry in limits.values():
+            self.assertEqual(entry["rpm"], 30)
+            self.assertEqual(entry["rpd"], 1000)
+            self.assertEqual(entry["tpm"], 8000)
+            self.assertEqual(entry["tpd"], 200000)
+            self.assertEqual(entry["source"],
+                             "operator Groq console screenshot 2026-09-27")
+
+    def test_unknown_limits_field_is_flagged_with_provider_model_and_key(self):
+        """Review R4FIX: a 'tmp' key in a limits entry (measured to pass before
+        the fix) must be a problem naming the provider, the model and the key."""
+        reg = mutated()
+        reg["providers"]["groq"]["limits"]["openai/gpt-oss-120b"]["tmp"] = 1
+        problems = [p for p in registry.check_registry(reg) if "tmp" in p]
+        self.assertTrue(problems, registry.check_registry(reg))
+        joined = " ".join(problems)
+        self.assertIn("groq", joined)
+        self.assertIn("openai/gpt-oss-120b", joined)
+
+    def test_every_limits_key_resolves_as_a_groq_leg(self):
+        for key in self.reg["providers"]["groq"]["limits"]:
+            provider_id, model_id = registry.resolve_leg("groq/" + key, self.reg)
+            self.assertEqual(provider_id, "groq")
+            self.assertEqual(model_id, key)
+
+    def test_unknown_limits_key_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["groq"]["limits"]["ghost-model"] = {
+            "tpm": 8000, "source": "test"}
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("limits" in p and "ghost-model" in p for p in problems),
+            problems)
+
+    def test_a_negative_limit_value_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["groq"]["limits"]["openai/gpt-oss-120b"]["tpm"] = -1
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("limits" in p and "tpm" in p
+                and "openai/gpt-oss-120b" in p for p in problems),
+            problems)
+
+    def test_real_registry_passes_limits_check(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class CheaperinferenceUnavailableTests(unittest.TestCase):
+    """Operator 2026-09-27T17:2xZ: wallet balance exhausted (402), operator
+    rule: credits out -> off until topped up. Provider marked available:false.
+    Its pinned combos cheaperinference/{glm-5.2,kimi-k3} then go to omitted
+    like deepseek - re-pin tests accordingly."""
+
+    def test_provider_is_unavailable(self):
+        entry = load_registry()["providers"]["cheapinference"]
+        self.assertIs(entry.get("available"), False)
+
+    def test_no_cheaperinference_legs_are_servable(self):
+        reg = load_registry()
+        served = set()
+        for rid, route in reg["routes"].items():
+            for leg in registry.gateway_legs(route, reg):
+                if leg.startswith("cheaperinference/"):
+                    served.add(leg)
+        self.assertEqual(served, set())
+
+    def test_glm_4_5_air_and_deepseek_flash_stay_out(self):
+        reg = load_registry()
+        for rid, route in reg["routes"].items():
+            kept = registry.gateway_legs(route, reg)
+            self.assertNotIn("cheaperinference/glm-4.5-air", kept, rid)
+            self.assertNotIn("cheaperinference/deepseek-v4-flash", kept, rid)
+
+    def test_glm_4_5_air_is_declared_nowhere_after_the_recut(self):
+        # D657-D2 2026-10-08 (spec combo-v2 SS8: kimi/glm/mimo off): the leg is
+        # not merely route-gated any more, it is out of every chain. The
+        # provider-level available:false still refuses it if it is re-added.
+        reg = load_registry()
+        chains = [rid for rid, route in reg["routes"].items()
+                  if rid.startswith(("l1-", "l2-", "l3-", "t"))
+                  and any(leg.startswith("cheaperinference/")
+                          for leg in (route.get("legs") or []))]
+        self.assertEqual(chains, [])
+        self.assertTrue(registry._leg_is_unavailable(
+            "cheaperinference/glm-4.5-air", reg["routes"]["l2-worker"], reg))
+
+    def test_leg_rules_allow_the_three_and_deny_the_rest(self):
+        reg = load_registry()
+        # The three legs are allowed by leg_rules (explicit allow rules), but
+        # unavailable due to provider-level available:false.
+        for leg in ("cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
+                    "cheaperinference/minimax-m2.7"):
+            self.assertFalse(registry.leg_denied(leg, reg), leg)
+            self.assertTrue(registry._leg_is_unavailable(leg, reg["routes"]["l2-worker"], reg), leg)
+        # Other cheaperinference legs are denied by leg_rules (deny-cheaperinference)
+        # AND by provider-level available:false.
+        for leg in ("cheaperinference/glm-4.5-air",
+                    "cheaperinference/deepseek-v4-flash",
+                    "cheaperinference/claude-sonnet-5",
+                    "cheaperinference/anything-else"):
+            self.assertTrue(registry.leg_denied(leg, reg), leg)
+
+    def test_real_registry_passes_check_with_cheaperinference_back(self):
+        self.assertEqual(registry.check_registry(load_registry()), [])
+
+
+class CerebrasDisabledTests(unittest.TestCase):
+    """Operator 2026-09-27T12:55Z: cerebras has no free tier and no credits, so
+    OmniRoute disables the connection - provider available:false, and no
+    gateway declaration carries any of its legs."""
+
+    def test_provider_is_unavailable(self):
+        self.assertIs(load_registry()["providers"]["cerebras"].get("available"), False)
+
+    def test_gateway_legs_drop_every_cerebras_leg(self):
+        reg = load_registry()
+        for rid, route in reg["routes"].items():
+            kept = registry.gateway_legs(route, reg)
+            self.assertFalse([leg for leg in kept if leg.startswith("cerebras/")],
+                             "route %s still serves a cerebras leg" % rid)
+
+
+class ClaudeCodeLegsUnavailableTests(unittest.TestCase):
+    """Operator 2026-09-27T11:1xZ (via L0): Claude Code (cc/*) will not be
+    connected to OmniRoute, so provider cc is unavailable and no gateway
+    declaration carries a cc leg."""
+
+    def test_provider_is_unavailable(self):
+        self.assertIs(load_registry()["providers"]["cc"].get("available"), False)
+
+    def test_gateway_legs_drop_every_cc_leg(self):
+        reg = load_registry()
+        for rid, route in reg["routes"].items():
+            kept = registry.gateway_legs(route, reg)
+            self.assertFalse([leg for leg in kept if leg.startswith("cc/")],
+                             "route %s still serves a cc leg" % rid)
+
+
+class FreeAiProviderTests(unittest.TestCase):
+    """BRIEF FREEAI (2026-09-27): Free.ai joins as the free provider `free_ai`
+    with model `qwen7b`, wired as the LAST free leg of both zero-spend routes
+    so `l3-driver-free-only` serves again. `free_ai` is a public pool whose
+    terms allow training on prompts, so it is never private-safe and never
+    enters a -clean route.
+
+    D657-D2 (2026-10-08) took it out of every chain: probe D-657 got the ack
+    back 200 on both gateways but the tool call never landed and its cache is
+    undocumented, and the judge rule admits a leg on prompt_cache
+    true|documented only. The provider row stays so a passing re-probe can
+    re-admit it; these tests pin the absence, the shape and the training rule."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_provider_entry_shape(self):
+        provider = self.reg["providers"]["free_ai"]
+        self.assertEqual(provider["api_base"], "https://api.free.ai/v1")
+        self.assertEqual(provider["omniroute_id"], "free-ai")
+        self.assertEqual(provider["model_prefix"], "free-ai")
+        self.assertEqual(provider["litellm_prefix"], "openai")
+        self.assertEqual(provider["litellm_env"], "FREE_AI_API_KEY")
+        self.assertEqual(provider["tier"], "free")
+        self.assertIs(provider["trains_on_prompts"], True)
+
+    def test_gateway_ref_translates_to_the_builtin_free_ai_id(self):
+        # free_ai is a built-in OmniRoute connection; the gateway catalog names
+        # its model free-ai/qwen7b, exactly as antigravity -> agy.
+        self.assertEqual(
+            registry.gateway_ref("free_ai/qwen7b", self.reg), "free-ai/qwen7b")
+
+    def test_provider_limits_are_rpm_and_tpd_only(self):
+        # free_ai's terms cap requests per minute and tokens per DAY; there is
+        # no published per-minute token cap, so only rpm/tpd are declared (the
+        # resolver reads only `tpm`, which is deliberately absent).
+        limits = self.reg["providers"]["free_ai"]["limits"]
+        self.assertEqual(sorted(limits), ["qwen7b"])
+        entry = limits["qwen7b"]
+        self.assertEqual(entry["rpm"], 10)
+        self.assertEqual(entry["tpd"], 30000)
+        self.assertNotIn("tpm", entry)
+        self.assertTrue(entry["source"].strip())
+
+    def test_model_qwen7b_mirrors_its_qwen_sibling(self):
+        model = self.reg["models"]["qwen7b"]
+        self.assertEqual(model["context_advertised"], 131072)
+        self.assertEqual(model["output_max"], 16384)
+        self.assertEqual(model["price_in"], 0.0)
+        self.assertEqual(model["price_out"], 0.0)
+
+    def test_free_ai_is_never_private_safe(self):
+        safe, reason = registry.private_safe("free_ai", "qwen7b", self.reg)
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_free_ai_rides_no_chain_after_the_d657_tool_probe(self):
+        # D657-D2 2026-10-08: neither spelling may be declared by a chain route —
+        # the registry leg (free_ai/) and its rendered omniroute_id (free-ai/).
+        for rid, route in self.reg["routes"].items():
+            hits = [leg for leg in (route.get("legs") or [])
+                    if leg.startswith(("free_ai/", "free-ai/"))]
+            self.assertFalse(hits, "route %s still declares %s" % (rid, hits))
+
+    def test_l2_worker_closes_with_the_vertex_leg(self):
+        """BRIEF T2FREE (S1, urgent stopgap 2026-09-28) put the leg that
+        measured answering 200 last, so a request always fell through to
+        something. D657-D2 (2026-10-08) keeps that shape and changes the name:
+        probe D-657 measured `vertex/gemini-3.8-flash` answering on both
+        gateways with a documented cache, and spec SS8's paid-deepseek ban took
+        the old tail out, so the vertex leg is now the last leg a real request
+        can fall through to."""
+        route = self.reg["routes"]["l2-worker"]
+        self.assertEqual(live_legs(self.reg, "l2-worker")[-1],
+                         "vertex/gemini-3.8-flash")
+        legs = route["legs"]
+        for gone in ("free_ai/qwen7b", "deepseek/deepseek-flash",
+                     "ovhcloud/gpt-oss-120b",
+                     "meta_api/muse-spark-1.3-contributor"):
+            self.assertNotIn(gone, legs, gone)
+
+    def test_no_clean_route_carries_free_ai(self):
+        # PROV finding 11: assert BOTH spellings - the registry leg (free_ai/)
+        # and its rendered omniroute_id (free-ai/) - so a regression that emits
+        # either into a -clean route is caught.
+        for route_id, route in self.reg["routes"].items():
+            if not route_id.endswith("-clean"):
+                continue
+            self.assertFalse(
+                [leg for leg in route.get("legs") or []
+                 if leg.startswith(("free_ai/", "free-ai/"))],
+                "clean route %s carries free_ai" % route_id)
+
+    def test_gateway_legs_drop_free_ai_from_the_free_only_routes(self):
+        # D657-D2 2026-10-08: the free-only chains are now the probe-acked free
+        # band (bazaarlink + openrouter :free, cohere, groq), with no free_ai leg.
+        for route_id in ("l2-worker-free-only", "l3-driver-free-only"):
+            kept = registry.gateway_legs(self.reg["routes"][route_id], self.reg)
+            self.assertNotIn("free_ai/qwen7b", kept, route_id)
+            self.assertTrue(kept, route_id)
+
+    def test_t3_driver_free_only_serves_again(self):
+        ids = registry.servable_route_ids(self.reg)
+        self.assertIn("l3-driver-free-only", ids)
+        self.assertIn("l2-worker-free-only", ids)
+
+    def test_leg_rules_allow_the_free_ai_leg(self):
+        self.assertFalse(registry.leg_denied("free_ai/qwen7b", self.reg))
+
+    def test_real_registry_passes_check_with_free_ai(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class MetaApiProviderTests(unittest.TestCase):
+    """BRIEF MUSEAPI (2026-09-27): the Meta Model API joins as the paid provider
+    `meta_api` (OpenAI-compatible at api.meta.ai/v1, key 'meta'), its
+    `muse-spark-1.3-contributor` model heading l1-orchestrator-paid and
+    spark-1.3-contributor; on the tier route l1-orchestrator it follows the free
+    band (FREEKEYS-2 spend order, see test_on_t1_it_follows_the_free_band).
+    It trains on prompts by
+    contributor contract, so it is never private-safe and never enters a
+    -clean route; on l2-worker/l3-driver it is a paid escalation placed AFTER
+    that route's free legs (the trailing T2FREE stopgap free leg on l2-worker
+    excepted — it is last on purpose, see FreeAiProviderTests).
+
+    D657-D2 (2026-10-08) closes that description with spec combo-v2 SS8: no paid
+    muse rides a chain, only the `-free` muse ids may, and probe D-657 left even
+    those unproved. The leg is therefore *declared but gated* on
+    l1-orchestrator-clean and spark-1.3-contributor, and `l1-orchestrator-paid`
+    carries no legs at all; the provider row and its transport stay for a
+    re-probe."""
+
+    LEG = "meta_api/muse-spark-1.3-contributor"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_provider_entry_shape(self):
+        provider = self.reg["providers"]["meta_api"]
+        self.assertEqual(provider["api_base"], "https://api.meta.ai/v1")
+        self.assertEqual(provider["omniroute_id"], "meta-api")
+        # Not "meta": that is another provider's registry key (the direct
+        # opencode-only record), and a combos leg's prefix is looked up by name
+        # first, so borrowing it gave the leg that record's (absent) LiteLLM
+        # transport. The gateway prefix is the connection id, as free_ai's is
+        # "free-ai".
+        self.assertEqual(provider["model_prefix"], "meta-api")
+        self.assertEqual(provider["litellm_prefix"], "openai")
+        self.assertEqual(provider["litellm_env"], "META_API_KEY")
+        self.assertEqual(provider["tier"], "paid")
+        self.assertIs(provider["trains_on_prompts"], True)
+
+    def test_the_key_name_is_the_existing_meta_entry(self):
+        # The operator's Meta key is api-keys.yml's 'meta' (providers.meta's
+        # name). key_name says so instead of asking for a second key; every
+        # other provider's api-keys.yml name is its own id, so at most one
+        # provider may ever point at another one's name.
+        providers = self.reg["providers"]
+        self.assertEqual(providers["meta_api"]["key_name"], "meta")
+        self.assertIn("meta", providers)
+        for name, entry in providers.items():
+            claimed = entry.get("key_name")
+            if claimed is None:
+                continue
+            self.assertIn(claimed, providers,
+                          "%s claims key_name %r, which is no provider's name"
+                          % (name, claimed))
+            self.assertNotEqual(claimed, name,
+                                "%s repeats its own name as key_name" % name)
+
+    def test_gateway_ref_translates_through_the_model_prefix(self):
+        # The combos.json spelling is the connection apply registers, so a
+        # reader of combos.json can resolve the leg back to this provider.
+        self.assertEqual(registry.gateway_ref(self.LEG, self.reg),
+                         "meta-api/muse-spark-1.3-contributor")
+
+    def test_limits_are_the_published_contributor_ceilings(self):
+        entry = self.reg["providers"]["meta_api"]["limits"]["muse-spark-1.3-contributor"]
+        self.assertEqual(entry["rpm"], 100)
+        self.assertEqual(entry["tpm"], 3000000)
+        self.assertTrue(entry["source"].startswith("https://"))
+
+    def test_model_entry_matches_the_l0_measurement(self):
+        model = self.reg["models"]["muse-spark-1.3-contributor"]
+        self.assertEqual(model["context_advertised"], 1048576)
+        self.assertEqual(model["output_max"], 131072)
+        self.assertIs(model["reasoning"], True)
+        # $0.10 / $0.20 per 1M tokens, stored per token like every other entry.
+        self.assertAlmostEqual(model["price_in"], 0.10 / 1_000_000)
+        self.assertAlmostEqual(model["price_out"], 0.20 / 1_000_000)
+        self.assertEqual(model["effort_ladder"],
+                         ["minimal", "low", "medium", "high", "xhigh"])
+        self.assertNotIn("none", model["effort_ladder"])
+        self.assertNotIn("max", model["effort_ladder"])
+
+    def test_tool_calls_stays_the_conservative_unknown(self):
+        # Only tools/probe-toolcalls.py promotes this field (mapping doc
+        # section 3); the L0 call measured reasoning_effort, not a tool call.
+        self.assertEqual(self.reg["models"]["muse-spark-1.3-contributor"]["tool_calls"],
+                         "unproven")
+
+    def test_the_leg_is_declared_only_where_it_is_gated(self):
+        # D657-D2 2026-10-08 (spec SS8): the paid leg heads no chain. The meta-api
+        # spelling survives in exactly one route's `legs`, purely as a gated tail,
+        # and it is gated, so nothing renders it. (l1-orchestrator-clean declares
+        # the *openrouter* copy of the contributor, also gated — the exemption
+        # table names that one.)
+        routes = self.reg["routes"]
+        listing = sorted(rid for rid, route in routes.items()
+                         if self.LEG in (route.get("legs") or []))
+        self.assertEqual(listing, ["spark-1.3-contributor"])
+        self.assertNotIn(self.LEG,
+                         registry.gateway_legs(routes["spark-1.3-contributor"],
+                                               self.reg))
+        self.assertEqual(routes["l1-orchestrator-paid"]["legs"], [])
+
+    def test_t1_keeps_only_the_600k_qualified_band(self):
+        # TORDER 2026-10-01 (D-TORDER-1b, operator update 3): t1 keeps only legs
+        # whose window is >= 600000 (explicit constant T1_MIN_WINDOW in
+        # tools/combo-contract.py; rendered result is still 1M).
+        # D657-D2 2026-10-08 changed *which* legs qualify, not the bar: spec SS8
+        # took the paid deepseek tail (and the paid contributor) out of the
+        # chain, so the band is the free probe-acked head plus the credit vertex
+        # leg, every one of them >= 600000.
+        legs = self.reg["routes"]["l1-orchestrator"]["legs"]
+        self.assertNotIn(self.LEG, legs, "paid muse rides no chain (SS8)")
+        self.assertNotIn("deepseek/deepseek-flash", legs,
+                         "paid deepseek rides no chain (SS8)")
+        for leg in legs:
+            _, mid = registry.resolve_leg(leg, self.reg)
+            w = self.reg["models"][mid].get("context_advertised")
+            self.assertIsInstance(w, int, leg)
+            self.assertGreaterEqual(w, 600000, leg)
+    def test_the_paid_leg_escalates_no_chain(self):
+        # Was "the contributor follows that route's free legs on t2/t3"; SS8
+        # removed the paid leg from both chains outright (D657-D2 2026-10-08), so
+        # there is no position left to order — pin the absence over the legs that
+        # can actually answer.
+        for route_id in ("l2-worker", "l3-driver", "l2-orchestrator",
+                         "l3-implementer", "l3-researcher"):
+            serving = live_legs(self.reg, route_id)
+            self.assertNotIn(self.LEG, serving, route_id)
+            self.assertTrue(serving, route_id)
+
+    def test_no_clean_route_carries_the_leg(self):
+        for route_id, route in self.reg["routes"].items():
+            if not route_id.endswith("-clean"):
+                continue
+            self.assertFalse(
+                [leg for leg in route.get("legs") or []
+                 if leg.startswith(("meta_api/", "meta/"))],
+                "clean route %s carries the contributor leg" % route_id)
+
+    def test_it_is_never_private_safe(self):
+        safe, reason = registry.private_safe("meta_api", "muse-spark-1.3-contributor",
+                                             self.reg)
+        self.assertFalse(safe)
+        self.assertTrue(reason)
+
+    def test_only_the_t1_chain_of_the_three_headed_routes_serves(self):
+        # D657-D2 2026-10-08: SS8 left the two muse-headed routes with nothing
+        # servable (legs: [] and two gated tails). OR1d gives a route that
+        # declares legs and serves none no declaration on any surface, so they
+        # must be absent from the servable set, not merely empty.
+        ids = registry.servable_route_ids(self.reg)
+        self.assertIn("l1-orchestrator", ids)
+        for route_id in ("l1-orchestrator-paid", "spark-1.3-contributor"):
+            self.assertNotIn(route_id, ids, route_id)
+
+    def test_gateway_legs_drop_the_gated_contributor(self):
+        kept = registry.gateway_legs(self.reg["routes"]["spark-1.3-contributor"],
+                                     self.reg)
+        self.assertEqual(kept, [])
+
+    def test_real_registry_passes_check_with_meta_api(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class ReviewerPolicyTests(unittest.TestCase):
+    """Brief REVROUTE (S2) item 1 (2026-09-27): who may review is data, not
+    code. ``policy.reviewers`` is the ordered preference list the resolver walks
+    for a review card, and every entry names the model's ``family`` so the
+    different-family rule (an author is never reviewed by its own family) is
+    checkable without a vendor table in the resolver.
+
+    The operator's fixed order (REVROUTE, 2026-09-27): the PAID Meta Muse
+    contributor first, the other free families next, Claude Haiku last and only
+    as a first-pass fallback. Sonnet stays the high-risk closer and is
+    deliberately absent -- it is not on a preference list, it closes.
+
+    D657-D2 (AO-DENYLEGS D2, 2026-10-08) cut the head: §8 keeps the paid Muse
+    leg out and probe-d657 never acked it, so `omniroute/spark-1.3-contributor`
+    renders no combo and the first entry the walk reaches would always be
+    refused. The list now leads free, which is also what `reviewer_for`'s
+    two-pass walk does with it (every non-paid entry in list order first, the
+    paid ones only as last resort -- pinned in tests/test_autoos_resolver.py),
+    and Haiku stays at the tail.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+        cls.reviewers = cls.reg["policy"]["reviewers"]
+
+    def test_the_list_is_ordered_and_non_empty(self):
+        self.assertIsInstance(self.reviewers, list)
+        self.assertTrue(self.reviewers, "policy.reviewers is empty")
+
+    def test_every_entry_carries_the_four_fields(self):
+        for index, entry in enumerate(self.reviewers):
+            for key in ("client", "model", "family", "paid"):
+                self.assertIn(key, entry, "reviewers[%d] has no %s" % (index, key))
+            self.assertIsInstance(entry["client"], str)
+            self.assertIsInstance(entry["model"], str)
+            self.assertIsInstance(entry["family"], str)
+            self.assertTrue(entry["family"], "reviewers[%d].family is empty" % index)
+            self.assertIsInstance(entry["paid"], bool)
+
+    def test_every_entry_names_a_real_client(self):
+        for index, entry in enumerate(self.reviewers):
+            self.assertIn(entry["client"], self.reg["clients"],
+                          "reviewers[%d] client %r is not a registry client"
+                          % (index, entry["client"]))
+
+    def test_the_head_reviewer_is_a_free_row_that_can_close(self):
+        # D657-D2 replaced `test_the_paid_muse_reviewer_leads`: §8 keeps the paid
+        # Muse leg out and probe-d657 never acked it, so the head the walk reaches
+        # first was a row every card refused. The cost rule it carried stands --
+        # the preferred reviewer is a free one, and it is a real reviewer rather
+        # than a first pass, because it is where a review lands when nothing else
+        # rules it out.
+        first = self.reviewers[0]
+        self.assertIs(first["paid"], False, first["model"])
+        self.assertIsNot(first.get("first_pass_only"), True, first["model"])
+
+    def test_the_meta_seat_is_free_only(self):
+        # D657-D2 §8: "muse only free ids". Meta keeps a cross-family reviewer
+        # seat -- the paid contributor head is gone, the free grant is not.
+        meta = [e for e in self.reviewers if e["family"] == "meta"]
+        self.assertTrue(meta, "the meta family lost its reviewer seat")
+        for entry in meta:
+            self.assertIs(entry["paid"], False, entry["model"])
+
+    def test_haiku_is_a_first_pass_only_fallback(self):
+        haiku = [e for e in self.reviewers if e["family"] == "anthropic"]
+        self.assertTrue(haiku, "Claude Haiku is missing from the fallback list")
+        for entry in haiku:
+            self.assertIs(entry["first_pass_only"], True, entry["model"])
+
+    def test_a_reviewer_whose_leg_is_paid_tier_is_marked_paid(self):
+        # T0-PAID-4 Q2, extended T0-PAID-5 P5: the paid flag must agree with
+        # the leg's effective tier (model-level tier else provider tier)
+        # BOTH ways -- a reviewers entry whose leg resolves to tier paid
+        # must carry paid: true (or the last-resort walk misfiles it as
+        # free), and a paid: true entry with a leg must ride a paid-tier
+        # leg (or the flag gates nothing). An unresolvable reviewer leg
+        # fails the test instead of being skipped: a registry oddity must
+        # read as unknown in the resolver, never hide in validation.
+        from autoos_resolver import leg_tier
+        for index, entry in enumerate(self.reviewers):
+            leg = entry.get("leg")
+            if not leg:
+                continue
+            try:
+                tier = leg_tier(leg, self.reg)
+            except (ValueError, KeyError) as exc:
+                self.fail("reviewers[%d] %r has an unresolvable leg %r "
+                          "(%s)" % (index, entry.get("model"), leg, exc))
+            if tier == "paid":
+                self.assertIs(entry.get("paid"), True,
+                              "reviewers[%d] %r rides a paid-tier leg %r "
+                              "but is not marked paid" % (index, entry.get("model"), leg))
+            if entry.get("paid") is True:
+                self.assertEqual(tier, "paid",
+                                 "reviewers[%d] %r is marked paid but rides "
+                                 "a %s-tier leg %r"
+                                 % (index, entry.get("model"), tier, leg))
+
+    def test_sonnet_is_not_a_preference(self):
+        # The closer is the resolver's, not the list's: pinning that here so a
+        # later "add Sonnet to the reviewers list" edit has to say why.
+        for entry in self.reviewers:
+            self.assertNotIn("sonnet", entry["model"].lower())
+
+    def test_the_list_spans_several_families(self):
+        # A one-family reviewer list cannot satisfy the different-family rule
+        # for most authors.
+        self.assertGreater(len({e["family"] for e in self.reviewers}), 2)
+
+    def test_the_missing_family_on_a_model_is_still_a_check_failure(self):
+        # REVROUTE's premise: family is what the reviewer rule reads, so it is
+        # schema-required on every model (rule 6). Guards the field the brief
+        # asked for against a later "make it optional" edit.
+        reg = mutated()
+        model_id = sorted(reg["models"])[0]
+        del reg["models"][model_id]["family"]
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems if "family" in p], problems)
+
+    def test_check_rule_flags_a_reviewer_without_a_family(self):
+        reg = mutated()
+        del reg["policy"]["reviewers"][0]["family"]
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems if "reviewers" in p], problems)
+
+    def test_check_rule_flags_a_reviewer_with_an_unknown_client(self):
+        reg = mutated()
+        reg["policy"]["reviewers"][0]["client"] = "not-a-client"
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems if "reviewers" in p], problems)
+
+    def test_check_rule_flags_a_non_boolean_paid(self):
+        reg = mutated()
+        reg["policy"]["reviewers"][0]["paid"] = "yes"
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems if "reviewers" in p], problems)
+
+    def test_check_rule_rejects_an_empty_or_missing_list(self):
+        for mutate in (lambda r: r["policy"].__setitem__("reviewers", []),
+                       lambda r: r["policy"].pop("reviewers")):
+            reg = mutated()
+            mutate(reg)
+            problems = registry.check_registry(reg)
+            self.assertTrue([p for p in problems if "reviewers" in p], problems)
+
+    def test_check_rule_flags_a_reviewer_leg_that_does_not_resolve(self):
+        # A leg is the only link from a reviewer to a provider, and the
+        # resolver reads availability and the training test off it.
+        reg = mutated()
+        reg["policy"]["reviewers"][0]["leg"] = "no-such-provider/no-such-model"
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems
+                         if "reviewers" in p and "does not resolve" in p],
+                        problems)
+
+    def test_check_rule_flags_a_family_disagreeing_with_its_leg(self):
+        # The different-family rule compares the entry's spelling; a leg whose
+        # own model says something else means the rule silently mis-fires.
+        reg = mutated()
+        reg["policy"]["reviewers"][0]["family"] = "qwen"
+        problems = registry.check_registry(reg)
+        self.assertTrue([p for p in problems
+                         if "reviewers" in p and "disagrees" in p], problems)
+
+    def test_every_leg_on_the_reviewer_list_resolves(self):
+        legs = [e["leg"] for e in self.reviewers if "leg" in e]
+        self.assertTrue(legs, "no reviewer names a leg, so nothing is checked")
+        for leg in legs:
+            provider_id, model_id = registry.resolve_leg(leg, self.reg)
+            self.assertIn(model_id, self.reg["models"], leg)
+            self.assertIn(provider_id, self.reg["providers"], leg)
+
+    def test_the_list_ends_with_the_paid_fallback_that_closes_nothing(self):
+        # The old pin read "the list is ordered paid first, then free". D657-D2
+        # removed the paid head, and the cost preference it encoded lives in
+        # `reviewer_for` anyway (every non-paid entry in list order, then the
+        # paid ones as last resort -- pinned in tests/test_autoos_resolver.py).
+        # What the data still owes the operator's order is the tail: Haiku last,
+        # paid, and never the one who signs.
+        last = self.reviewers[-1]
+        self.assertEqual(last["family"], "anthropic")
+        self.assertIs(last["paid"], True)
+        self.assertIs(last["first_pass_only"], True)
+        self.assertEqual(self.reviewers.count(last), 1)
+
+    def test_real_registry_passes_the_reviewers_check(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class HandoffCapsPolicyTests(unittest.TestCase):
+    """rule 13 (brief AUTHORS (S1) item 2, 2026-09-28): the hand-off cap is
+    *derived* data, and nothing checked the derivation.
+
+    ``policy.handoff_caps`` is the single source for the context cap a lane stops
+    at (spec 8.3; tools/autoos_context.py reads ``cap_tokens`` and never
+    recomputes it), so a row whose ``cap_tokens`` disagrees with
+    ``window * cap_fraction`` states two caps at once: the operator edits the
+    fraction, the lane still hands off at the old number. The schema checks each
+    field's type and can say nothing about the arithmetic between them, so the
+    invariant needs a rule of its own. The ``match: ["*"]`` row is checked too --
+    it is what gives a model no other row names a cap at all, and its absence is
+    what makes ``autoos_context.load_caps`` silently fall back to the hardcoded
+    ``DEFAULT_CAPS`` nobody maintains.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+        cls.caps = cls.reg["policy"]["handoff_caps"]
+
+    def caps_problems(self, reg):
+        return [p for p in registry.check_registry(reg) if p.startswith("handoff_caps:")]
+
+    # -- the real registry --------------------------------------------------
+
+    def test_every_real_row_hands_off_at_window_times_fraction(self):
+        for key, entry in sorted(self.caps.items()):
+            with self.subTest(row=key):
+                self.assertEqual(entry["cap_tokens"],
+                                 round(entry["window"] * entry["cap_fraction"]), key)
+
+    def test_exactly_one_star_fallback_row_exists(self):
+        rows = sorted(k for k, e in self.caps.items() if "*" in (e.get("match") or []))
+        self.assertEqual(len(rows), 1, rows)
+
+    def test_the_real_registry_passes_the_handoff_caps_check(self):
+        self.assertEqual(self.caps_problems(self.reg), [])
+
+    # -- red on a bad row ---------------------------------------------------
+
+    def test_a_cap_that_disagrees_with_its_formula_names_the_row(self):
+        reg = mutated()
+        key = sorted(reg["policy"]["handoff_caps"])[0]
+        row = reg["policy"]["handoff_caps"][key]
+        row["cap_tokens"] = row["cap_tokens"] + 1
+        problems = self.caps_problems(reg)
+        self.assertEqual(len(problems), 1, problems)
+        # It names the row, and states both sides: "which number is wrong" must
+        # be answerable from the message, not from reopening the registry.
+        self.assertIn("policy.handoff_caps.%s" % key, problems[0])
+        self.assertIn(str(row["cap_tokens"]), problems[0])
+        self.assertIn(str(round(row["window"] * row["cap_fraction"])), problems[0])
+
+    def test_a_fraction_that_no_rounding_reproduces_is_reported_once(self):
+        # The other half of the same row: an operator lowers the fraction and
+        # forgets the tokens.
+        reg = mutated()
+        key = "claude-opus-1m"
+        reg["policy"]["handoff_caps"][key]["cap_fraction"] = 0.4
+        problems = self.caps_problems(reg)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("policy.handoff_caps.%s" % key, problems[0])
+
+    def test_deleting_the_star_row_is_reported_as_a_missing_fallback(self):
+        reg = mutated()
+        for key, entry in list(reg["policy"]["handoff_caps"].items()):
+            if "*" in entry["match"]:
+                del reg["policy"]["handoff_caps"][key]
+        problems = self.caps_problems(reg)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('"*"', problems[0])
+
+    def test_a_star_row_replaced_by_a_named_one_is_still_no_fallback(self):
+        # The defect is the same with a row that looks like a default: match
+        # ["*"] is the only spelling the cap reader treats as the fallback.
+        reg = mutated()
+        for entry in reg["policy"]["handoff_caps"].values():
+            if "*" in entry["match"]:
+                entry["match"] = ["sonnet"]
+        problems = self.caps_problems(reg)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn('"*"', problems[0])
+
+    def test_a_row_that_is_not_an_object_is_named_and_nothing_crashes(self):
+        reg = mutated()
+        reg["policy"]["handoff_caps"]["opus-ish"] = "600000"
+        problems = self.caps_problems(reg)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("handoff_caps.opus-ish", problems[0])
+
+    def test_a_row_whose_numbers_are_not_numbers_is_named(self):
+        # A string window or a boolean fraction cannot be multiplied; it is
+        # reported, not skipped (rule 6 only walks `required`, never types).
+        for key, patch in (("window", "1000000"), ("cap_fraction", "0.6"),
+                           ("cap_tokens", True)):
+            reg = mutated()
+            reg["policy"]["handoff_caps"]["claude-opus-1m"][key] = patch
+            problems = self.caps_problems(reg)
+            with self.subTest(field=key, value=patch):
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn("policy.handoff_caps.claude-opus-1m", problems[0])
+
+    def test_a_non_object_handoff_caps_section_is_reported_once(self):
+        # An absent section stays rule 6's (the schema marks it required); a
+        # present-but-wrong-typed one is this rule's, because nothing else can
+        # multiply it.
+        reg = mutated()
+        reg["policy"]["handoff_caps"] = []
+        self.assertEqual(len(self.caps_problems(reg)), 1, self.caps_problems(reg))
+        absent = mutated()
+        del absent["policy"]["handoff_caps"]
+        self.assertEqual(self.caps_problems(absent), [],
+                         "a missing required key belongs to rule 6, not here")
+        self.assertTrue([p for p in registry.check_registry(absent) if "handoff_caps" in p],
+                        "rule 6 must still name it")
+
+    def test_validate_exits_1_and_names_the_bad_row(self):
+        reg = mutated()
+        reg["policy"]["handoff_caps"]["gemini-1m"]["cap_tokens"] = 199999
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", prefix="registry-caps-", delete=False, encoding="utf-8")
+        json.dump(reg, tmp)
+        tmp.close()
+        try:
+            proc = subprocess.run(
+                [sys.executable, str(REGISTRY_TOOL), "validate", "--registry", tmp.name],
+                cwd=str(ROOT), capture_output=True, text=True, timeout=180)
+        finally:
+            Path(tmp.name).unlink()
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("policy.handoff_caps.gemini-1m", proc.stdout)
+
+
+class DeepSeekBackTests(unittest.TestCase):
+    """BRIEF DSBACK (S2 urgent, operator 2026-09-28 07:4xZ): DeepSeek's credit
+    ran out on 2026-09-27T16:4xZ (402 Insufficient Balance) and the whole
+    provider was switched off at the registry. The operator topped the balance
+    up and the router's own measured GET /user/balance answers
+    is_available=true at 19.99 USD, so the provider is back on.
+
+    These are written against the registry the renders read from, so a second
+    writer who flips the flag back off fails here rather than silently shipping
+    combos.json without the head of the -clean routes.
+    """
+
+    #: The rung list every laddered deepseek model must keep, verbatim.
+    LADDER = ["none", "low", "high", "max"]
+    #: The v4.1-Flash snapshots that carry the reasoning ladder (DSMAX).
+    #: 'deepseek-v4-flash' is a *different* snapshot — non-reasoning, ladder
+    #: empty, and denied outright by the operator's "DeepSeek = ONLY V4.1
+    #: Flash" rule — so it is pinned separately, not folded in here.
+    LADDERED = ("deepseek-flash", "deepseek-v4.1-flash",
+                "deepseek/deepseek-v4.1-flash")
+
+    @property
+    def reg(self):
+        return load_registry()
+
+    def test_deepseek_provider_is_available_again(self):
+        self.assertIs(self.reg["providers"]["deepseek"]["available"], True)
+
+    def test_deepseek_availability_carries_the_operator_source_note(self):
+        # The note is the provenance a later reader needs to know WHY the flag
+        # is on: a bare flip reads like an accidental re-enable (DSBACK).
+        entry = self.reg["providers"]["deepseek"]
+        note = " ".join(str(entry.get(key, "")) for key in ("$comment", "source"))
+        self.assertIn(
+            "operator top-up 2026-09-28T07:4xZ, router balance check "
+            "19.99 USD (DSBACK)", note)
+
+    def test_every_deepseek_ladder_rung_is_unchanged(self):
+        # DSMAX moved the ladder onto the native leg precisely so the aliases
+        # would re-render unchanged when the balance came back; a flip that
+        # also edited the ladders would silently change the effort surface.
+        models = self.reg["models"]
+        for mid in self.LADDERED:
+            self.assertEqual(models[mid]["effort_ladder"], self.LADDER, mid)
+        self.assertNotIn("deepseek-v4-flash", models)
+
+    def test_the_zen_leg_keeps_its_own_route_gate(self):
+        # DSBACK changes the PROVIDER, not the per-leg operator flags: the
+        # tool-calling probe measured 402/429 on the zen leg and that verdict
+        # stands until someone re-probes it. D657-D2 2026-10-08: the leg left
+        # every chain, so the gate now lives only on its own route.
+        reg = self.reg
+        entry = reg["routes"]["deepseek-v4.1-flash"]["unavailable_legs"].get(
+            "opencode-zen/deepseek-v4.1-flash")
+        self.assertIsInstance(entry, dict)
+        self.assertIs(entry["available"], False)
+        listing = [rid for rid, route in reg["routes"].items()
+                   if "opencode-zen/deepseek-v4.1-flash" in (route.get("legs") or [])]
+        self.assertEqual(listing, ["deepseek-v4.1-flash"])
+
+    def test_openrouter_serves_only_its_free_ids(self):
+        # FREEWIRE 2026-09-30 (free-probe, L1-backlog/ws-free-probe-20260930):
+        # the DSMAX provider-level blanket flag was lifted so the $0 ':free'
+        # ids can serve, and the guard MOVED to the route level. Providers.
+        # openrouter.available is therefore True now, but every paid BYOK leg
+        # the registry routes is still gated by routes.<id>.unavailable_legs,
+        # and policy.deny-openrouter still denies anything a stray allow does
+        # not name.
+        reg = self.reg
+        self.assertIs(reg["providers"]["openrouter"]["available"], True)
+        # TORDER-OR 2026-10-01 (no credits -> :free only): only t1-clean keeps
+        # declared+gated paid leg (so it stays omitted); all others removed.
+        for rid, leg in (("l1-orchestrator-clean", "openrouter/meta/muse-spark-1.3-contributor"),):
+            entry = reg["routes"][rid].get("unavailable_legs", {}).get(leg)
+            self.assertIsInstance(entry, dict, (rid, leg))
+        for rid, leg in (("l2-worker", "openrouter/deepseek/deepseek-v4.1-flash"),
+                         ("l2-orchestrator", "openrouter/deepseek/deepseek-v4.1-flash"),
+                         ("l2-worker-clean", "openrouter/deepseek/deepseek-v4.1-flash"),
+                         ("l1-orchestrator", "openrouter/meta/muse-spark-1.3-contributor"),
+                         ("spark-1.3-contributor", "openrouter/meta/muse-spark-1.3-contributor"),
+                         ("gemini-3.8-flash", "openrouter/google/gemini-3.8-flash")):
+            self.assertNotIn(leg, reg["routes"][rid].get("legs") or [], (rid, leg))
+            self.assertIs(entry["available"], False, (rid, leg))
+        # and the ':free' legs are allowed
+        self.assertFalse(registry.leg_denied(
+            "openrouter/qwen/qwen3.8-27b:free", reg))
+
+    def test_deepseek_legs_are_no_longer_gated_by_the_provider(self):
+        reg = self.reg
+        self.assertFalse(
+            registry._leg_is_unavailable("deepseek/deepseek-flash",
+                                         reg["routes"]["l2-worker-clean"], reg))
+
+    def test_the_clean_twins_close_with_the_private_safe_leg(self):
+        # L1-CLEAN (2026-10-01) put the native DeepSeek leg last as the paid
+        # fallback. SS8 (D657-D2 2026-10-08) bans paid DeepSeek from every chain,
+        # so the -clean twins now render exactly the one leg that is both
+        # private-safe and probe-acked. The render, not the registry list, is
+        # what the gateway serves.
+        rendered = {c["name"]: c for c in
+                    registry.render_omniroute(self.reg)["combos"]}
+        for name in ("l1-orchestrator-clean", "l2-orchestrator-clean",
+                     "l2-worker-clean", "l3-driver-clean",
+                     "l3-implementer-clean", "l3-researcher-clean"):
+            self.assertEqual(rendered[name]["models"],
+                             ["vertex/gemini-3.8-flash"], name)
+        served = [model for combo in rendered.values()
+                  for model in combo["models"]]
+        self.assertNotIn("deepseek/deepseek-flash", served)
+
+    def test_the_deepseek_route_is_gated_out_of_every_surface(self):
+        # The route whose ONLY served leg was deepseek/* failed closed during the
+        # 402 and DSBACK re-opened it. SS8 (D657-D2 2026-10-08) closed it again
+        # for a different reason: both its legs (the paid native copy and the zen
+        # copy) are declared-but-gated, so it serves nothing and OR1d gives it no
+        # declaration anywhere.
+        self.assertNotIn("deepseek-v4.1-flash",
+                         registry.servable_route_ids(self.reg))
+        self.assertEqual(
+            registry.gateway_legs(self.reg["routes"]["deepseek-v4.1-flash"],
+                                  self.reg), [])
+
+    def test_models_doc_no_longers_lists_the_paid_deepseek_leg(self):
+        # The leg DSBACK un-struck is gone from the chain the doc prints, so the
+        # row cannot promise it to a reader any more.
+        rows = [r for r in registry.render_models_doc(self.reg).splitlines()
+                if "l2-worker-clean" in r]
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertNotIn("deepseek-flash", row)
+            self.assertIn("gemini-3.8-flash", row)
+
+    def test_real_registry_passes_check_after_the_flip(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class DeepSeekFlashContext1MTests(unittest.TestCase):
+    """DS1M (operator 2026-09-30): the vendor's own Models & Pricing page
+    (https://api-docs.deepseek.com/quick_start/pricing) states MODEL
+    `deepseek-flash`, MODEL VERSION DeepSeek-V4.1-Flash, CONTEXT LENGTH 1M,
+    MAX OUTPUT 384K — and OpenRouter's live catalog agrees
+    (`deepseek/deepseek-v4.1-flash` context_length 1048576). The registry's
+    131072/65536/32768 on the three V4.1-Flash rows is stale: it caps the
+    `deepseek-v4.1-flash` combo at 128k through clamp_route_context even
+    though every servable leg answers a 1M window.
+    """
+
+    V41_ROWS = ("deepseek-flash", "deepseek-v4.1-flash",
+                "deepseek/deepseek-v4.1-flash")
+
+    @property
+    def reg(self):
+        return load_registry()
+
+    def test_v41_flash_rows_advertise_the_vendor_1m_window(self):
+        models = self.reg["models"]
+        for mid in self.V41_ROWS:
+            self.assertEqual(models[mid]["context_advertised"], 1048576, mid)
+
+    def test_v41_flash_rows_carry_the_vendor_384k_output(self):
+        models = self.reg["models"]
+        for mid in self.V41_ROWS:
+            self.assertEqual(models[mid]["output_max"], 393216, mid)
+
+    def test_deepseek_route_declares_1m_but_renders_nothing(self):
+        # SS8 (D657-D2 2026-10-08) gated the route's only two legs, so the
+        # registry keeps the corrected 1M window the vendor states while OR1d
+        # gives the route no declaration on any surface.
+        reg = self.reg
+        surface = reg["routes"]["deepseek-v4.1-flash"]["surfaces"]["omniroute"]
+        self.assertEqual(surface["context_declared"], "1M")
+        rendered = registry.render_omniroute(reg)
+        names = {c["name"] for c in rendered["combos"]}
+        self.assertNotIn("deepseek-v4.1-flash", names)
+        self.assertIn("deepseek-v4.1-flash", rendered["omitted"])
+
+
+class DeepSeekNativeIdAndProDenialTests(unittest.TestCase):
+    """BRIEF DSAMEND (S1-S2, operator 2026-09-28 10:0xZ, measured on
+    api.deepseek.com by routing-00): the native DeepSeek catalog is exactly
+    ['deepseek-flash', 'deepseek-v4-pro'], so
+
+      1. `deepseek-flash` is the ONLY id that may ever be sent to
+         api.deepseek.com — every other native spelling (the legacy
+         `deepseek/deepseek-v4-flash` row, which the API accepts only as an
+         alias that answers served=deepseek-flash) is a defect, and
+      2. `deepseek-v4-pro` is DENIED by standing operator rule: never route or
+         fall back to it. It must be denied by an explicit leg_rule that is
+         evaluated BEFORE any DeepSeek allow rule, so no future allow rule can
+         let it through, and it must appear in no render.
+
+    The other providers' spellings (`openrouter/deepseek/deepseek-v4.1-flash`,
+    opencode-zen's bare `deepseek-v4.1-flash`, `cheaperinference/deepseek-v4-
+    flash`) are other vendors' ids and are deliberately NOT touched here.
+    """
+
+    #: The only id allowed on the wire to the native DeepSeek API.
+    NATIVE = "deepseek/deepseek-flash"
+    #: A native spelling is `deepseek/deepseek-<x>` NOT prefixed by another
+    #: provider's segment (openrouter/deepseek/deepseek-v4.1-flash is
+    #: OpenRouter's own vendor-prefixed id, not a native call).
+    NATIVE_ID_RE = re.compile(r"([a-z0-9][a-z0-9._-]*/)?deepseek/deepseek-[a-z0-9._-]+")
+    #: Any DeepSeek id carrying a "pro" segment (the denied family).
+    PRO_ID_RE = re.compile(r"deepseek[a-z0-9._/-]*pro", re.IGNORECASE)
+
+    LITELLM_CONFIG_PATH = ROOT / "configuration" / "litellm" / "config.yaml"
+
+    def _prefixed_by_other_provider(self, text: str, at: int) -> bool:
+        """True when the bare `deepseek/<id>` match at `at` is really another
+        provider's id written with a separator instead of a slash — the shape
+        docs/models.md uses in its tables and prose ('openrouter
+        `deepseek/deepseek-v4.1-flash`'). A structured config always spells the
+        prefix with the slash, which match.group(1) already covers.
+
+        The exempted names come from the registry's own provider keys rather
+        than a hardcoded list: any provider but `deepseek` may legitimately
+        expose a DeepSeek-weight model under a slash-bearing id of its own
+        (FREEKEYS-2: a bazaarlink id of the shape
+        deepseek/deepseek-v4-flash-0731free:free,
+        gateway ref `bzl/…`). `deepseek` itself is never in the set, so a bare
+        native spelling still fails."""
+        others = [p for p in self.reg["providers"] if p != "deepseek"]
+        return bool(re.search(r"(?:%s)[\s`'\"|>~=-]*$" % "|".join(map(re.escape, others)),
+                              text[:at]))
+
+    def _surfaces(self) -> dict:
+        """Every machine-readable render and config that can put a DeepSeek id
+        on the wire, keyed by a name a failure can point at. Renders come from
+        the registry's own render functions (R-worker-01: never a hand-written
+        expectation of a render); the committed files are read so drift in a
+        file a render does not own (the hand-curated LiteLLM groups, the
+        vendored OpenHands profiles, the agent harness) is caught too."""
+        reg = self.reg
+        combo = registry.render_omniroute(reg)
+        surfaces = {
+            "render omniroute": json.dumps(combo, sort_keys=True),
+            "render litellm": "\n".join(
+                registry.render_litellm_blocks(reg, self._litellm_text()).values()),
+            "render ide": json.dumps(registry.render_ide(reg), sort_keys=True),
+            "render openhands": json.dumps(registry.render_openhands(reg),
+                                           sort_keys=True),
+            "render models-doc": registry.render_models_doc(reg),
+            "configuration/omniroute/combos.json": self._read(
+                ROOT / "configuration" / "omniroute" / "combos.json"),
+            "configuration/litellm/config.yaml": self._litellm_text(),
+            "catalog/ide-models.json": self._read(ROOT / "catalog" / "ide-models.json"),
+            "configuration/openhands/tier-profiles.json": self._read(
+                ROOT / "configuration" / "openhands" / "tier-profiles.json"),
+            "catalog/agent-harness.json": self._read(
+                ROOT / "catalog" / "agent-harness.json"),
+            "routes.*.legs": json.dumps(
+                {rid: r.get("legs") for rid, r in reg["routes"].items()},
+                sort_keys=True),
+        }
+        for path in sorted((ROOT / "openhands").glob("*/*.json")):
+            surfaces[str(path.relative_to(ROOT))] = path.read_text(encoding="utf-8")
+        return surfaces
+
+    def _read(self, path) -> str:
+        return path.read_text(encoding="utf-8")
+
+    def _litellm_text(self) -> str:
+        return self.LITELLM_CONFIG_PATH.read_text(encoding="utf-8")
+
+    @property
+    def reg(self):
+        return load_registry()
+
+    def _rule_ids(self) -> list:
+        return [r.get("id") for r in self.reg["policy"]["leg_rules"]]
+
+    # -- 1. the native id --------------------------------------------------
+
+    def test_registry_projects_no_native_deepseek_id_but_flash(self):
+        # models.<id>.direct is what the installers and the vendored OpenHands
+        # profiles take their wire model from, so a stale native spelling here is
+        # the root cause, not a render bug.
+        offenders = {}
+        for mid, entry in self.reg["models"].items():
+            direct = entry.get("direct")
+            if not isinstance(direct, dict):
+                continue
+            native = (direct.get("provider") == "deepseek"
+                      or "api.deepseek.com" in str(direct.get("base_url", "")))
+            if native and direct.get("model") != self.NATIVE:
+                offenders[mid] = direct.get("model")
+        self.assertEqual(offenders, {}, "models.<id>.direct sends a non-canonical "
+                                        "id to the native DeepSeek API")
+
+    def test_no_route_leg_uses_a_non_canonical_native_deepseek_leg(self):
+        for rid, route in self.reg["routes"].items():
+            for leg in list(route.get("legs") or []):
+                if leg.startswith("deepseek/"):
+                    self.assertEqual(leg, self.NATIVE, rid)
+
+    def test_every_vendored_profile_that_calls_deepseek_directly_uses_flash(self):
+        for path in sorted((ROOT / "openhands" / "profiles").glob("*.json")):
+            profile = json.loads(path.read_text(encoding="utf-8"))
+            if "api.deepseek.com" in str(profile.get("base_url", "")):
+                self.assertEqual(profile.get("model"), self.NATIVE,
+                                 str(path.relative_to(ROOT)))
+
+    def test_no_surface_sends_a_non_canonical_native_deepseek_id(self):
+        for name, text in self._surfaces().items():
+            for match in self.NATIVE_ID_RE.finditer(text):
+                if match.group(1) or self._prefixed_by_other_provider(
+                        text, match.start()):
+                    continue  # another provider's vendor-prefixed id
+                self.assertEqual(match.group(0), self.NATIVE,
+                                 "%s sends %r to the native DeepSeek API"
+                                 % (name, match.group(0)))
+
+    # -- 2. deepseek-v4-pro is denied everywhere ---------------------------
+
+    def test_deny_deepseek_pro_rule_exists(self):
+        rules = self.reg["policy"]["leg_rules"]
+        entry = next((r for r in rules if r.get("id") == "deny-deepseek-pro"), None)
+        self.assertIsInstance(entry, dict,
+                              "no deny-deepseek-pro rule (ids: %s)" % self._rule_ids())
+        self.assertIs(entry["allow"], False)
+        self.assertEqual(entry["match"], "*deepseek*pro*")
+        self.assertIn("routing-00", entry.get("source", ""))
+        self.assertIn("719cee9", entry.get("source", ""))
+
+    def test_deny_deepseek_pro_precedes_every_deepseek_allow_rule(self):
+        rules = self.reg["policy"]["leg_rules"]
+        try:
+            deny_at = [r.get("id") for r in rules].index("deny-deepseek-pro")
+        except ValueError:
+            self.fail("no deny-deepseek-pro rule (ids: %s)" % self._rule_ids())
+        for at, rule in enumerate(rules):
+            if rule.get("allow") is True and "deepseek" in str(rule.get("match", "")):
+                self.assertLess(deny_at, at,
+                                "deny-deepseek-pro must be evaluated before %s"
+                                % rule.get("id"))
+
+    def test_leg_rules_deny_the_pro_ids_though_deepseek_is_allowed(self):
+        self.assertIs(registry.leg_denied(self.NATIVE, self.reg), False,
+                      "the allowed native flash leg must stay allowed")
+        # Every spelling of the pro model, including the ones a wildcard allow
+        # rule (opencode-zen/*, cc/*) would otherwise have opened: the deny is
+        # first in the list precisely so no allow can reach it.
+        for leg in ("deepseek/deepseek-v4-pro",
+                    "openrouter/deepseek/deepseek-v4-pro",
+                    "cheaperinference/deepseek-v4-pro",
+                    "opencode-zen/deepseek-v4-pro",
+                    "samba/deepseek-v4-pro"):
+            with self.subTest(leg=leg):
+                self.assertIs(registry.leg_denied(leg, self.reg), True)
+                self.assertEqual(
+                    (registry.leg_rule_for(leg, self.reg) or {}).get("id"),
+                    "deny-deepseek-pro", leg)
+
+    def _pro_surfaces(self) -> dict:
+        """The machine surfaces the operator rule is about: docs/models.md is
+        prose about the ids, not a config that sends one, so it is scanned for
+        the native id above but excluded here."""
+        return {k: v for k, v in self._surfaces().items()
+                if k != "render models-doc"}
+
+    def test_no_render_or_config_contains_a_pro_deepseek_id(self):
+        for name, text in self._pro_surfaces().items():
+            found = self.PRO_ID_RE.findall(text)
+            self.assertEqual(found, [], "%s carries a DeepSeek pro id: %s"
+                             % (name, sorted(set(found))))
+
+    def test_litellm_router_fallbacks_carry_no_deepseek(self):
+        # The router's own fallback list is hand-curated, outside every managed
+        # block, so the surface scan above would miss a fallback added there.
+        block = re.search(r"^router_settings:\n((?:[ #].*\n)*)",
+                          self._litellm_text(), re.MULTILINE)
+        self.assertIsNotNone(block, "config.yaml has no router_settings block")
+        # The prose in there explains why the chains are empty and names the
+        # deployment they used to end in; only the settings themselves route.
+        settings = "\n".join(line for line in block.group(1).splitlines()
+                             if not line.lstrip().startswith("#"))
+        self.assertIn("fallbacks: []", settings)
+        self.assertNotIn("deepseek", settings.lower())
+
+    def test_real_registry_still_passes_check_with_the_deny_rule(self):
+        # rule 9 (_check_leg_rules) must stay clean: a deny rule may not strand
+        # a serving leg, and no route may leg into the pro model.
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class DeepSeekNativeEffortLadderTests(unittest.TestCase):
+    """DSAMEND item 3, measured live (routing-00, 2026-09-28T10:0xZ, source
+    'operator via routing-00 2026-09-28T10:0xZ; Server 719cee9'): 13 one-word
+    calls to POST https://api.deepseek.com/chat/completions as
+    model=deepseek-flash, max_tokens 16 and 512.
+
+    The wire parameter is `reasoning_effort`, and a deliberately bad value came
+    back 422 naming the whole accepted enum — quoted verbatim below, because
+    that string IS the vendor's contract for this leg:
+
+        reasoning_effort: unknown variant `zzz`, expected one of `none`,
+        `minimal`, `low`, `medium`, `high`, `xhigh`, `ultra`, `max`
+
+    Measured per call (HTTP 200 unless noted), completion_tokens_details.
+    reasoning_tokens at max_tokens 512: no param 20 (content 'ok', thinking
+    ran), low 18, high 25, max 18, `reasoning_effort: none` → no
+    completion_tokens_details at all (thinking off), `thinking:
+    {"type": "disabled"}` → same off. So the declared ladder needs no
+    re-mapping — every rung is a real wire value — but rung "none" is a LITERAL
+    the API must be told, not an omission: sending nothing gets thinking ON.
+    """
+
+    #: The vendor's own accepted set, from the 422 above.
+    WIRE_ENUM = ("none", "minimal", "low", "medium",
+                 "high", "xhigh", "ultra", "max")
+    MODEL_ID = "deepseek-flash"
+
+    @property
+    def model(self):
+        return load_registry()["models"][self.MODEL_ID]
+
+    def test_every_declared_rung_is_a_wire_value_this_api_accepts(self):
+        ladder = self.model["effort_ladder"]
+        self.assertEqual(ladder, ["none", "low", "high", "max"])
+        for rung in ladder:
+            self.assertIn(rung, self.WIRE_ENUM,
+                          "rung %r is not a reasoning_effort value the native "
+                          "API accepts (measured enum: %s)"
+                          % (rung, ", ".join(self.WIRE_ENUM)))
+
+    def test_the_off_rung_is_declared_because_omission_is_not_off(self):
+        # Removing "none" from this ladder would silently mean something else:
+        # callers that express rung none by sending no parameter (render_ide's
+        # filter, tools/autoos-agent.py apply_effort_rung) would leave this leg
+        # reasoning — measured 20 of 22 completion tokens with no parameter at
+        # all. The declared rung is what keeps that trap visible.
+        self.assertIn("none", self.model["effort_ladder"])
+        self.assertIs(self.model["reasoning"], True)
+
+    def test_the_measured_mapping_stays_recorded_on_the_leg(self):
+        # The registry is where a reader looks for what a rung costs on the
+        # wire; the measurement may be superseded but never quietly dropped.
+        note = self.model.get("$comment", "")
+        self.assertIn("reasoning_effort", note)
+        self.assertIn("reasoning is ON by default".lower(), note.lower())
+
+
+class MistralPlanLimitsTests(unittest.TestCase):
+    """BRIEF MISTRALFIX (S1-S2, L1-routing 2026-09-28T10:5xZ): a direct probe of
+    api.mistral.ai with the operator's key read the x-ratelimit headers per
+    model. Four models 429 at **0 requests/minute** on this plan
+    (mistral-small-latest, devstral-latest, mistral-medium-latest,
+    magistral-medium-latest), mistral-large-latest answers 403 (not on the
+    plan at all), and only the codestral pair (125 rpm) and the nemo/ministral
+    pair (188 rpm) serve. The gateway's own 7-day log agrees:
+    mistral/mistral-small-latest failed 51 of 51 calls.
+
+    Two defects this closes, both asserted over the live registry the renders
+    read from:
+      1. a measured plan limit that says "cannot serve" was data only — nothing
+         read rpm, so the resolver planned a 0-rpm leg as if it worked;
+      2. mistral/mistral-small-latest was still a leg of three routes, so a
+         real request fell through to a leg that cannot answer.
+    """
+
+    #: The probe source string every measured row must carry (D20: a limit is
+    #: worthless without naming how it was measured).
+    SOURCE = ("L1-routing direct probe 2026-09-28T10:5xZ "
+              "x-ratelimit headers")
+
+    @property
+    def reg(self):
+        return load_registry()
+
+    # -- the measured data -------------------------------------------------
+
+    def test_mistral_small_is_recorded_at_zero_rpm(self):
+        entry = self.reg["providers"]["mistral"]["limits"]["mistral-small-latest"]
+        self.assertEqual(entry["rpm"], 0)
+        self.assertEqual(entry["source"], self.SOURCE)
+
+    def test_mistral_code_is_recorded_at_its_measured_capacity(self):
+        # The model that DOES serve stays plannable: a 125 rpm / 625k tpm row
+        # must not be written as a deny just because its sibling is dead.
+        entry = self.reg["providers"]["mistral"]["limits"]["mistral-code-latest"]
+        self.assertEqual(entry["rpm"], 125)
+        self.assertEqual(entry["tpm"], 625000)
+        self.assertEqual(entry["source"], self.SOURCE)
+        self.assertNotIn("plan_available", entry)
+
+    def test_plan_available_false_is_flagged_when_not_a_bool(self):
+        # `plan_available: "false"` (a string) would read as truthy at the gate,
+        # so the type is a validation problem, not a rendering detail.
+        reg = mutated()
+        reg["providers"]["mistral"]["limits"]["mistral-small-latest"] = {
+            "plan_available": "false", "source": self.SOURCE}
+        problems = [p for p in registry.check_registry(reg)
+                    if "plan_available" in p]
+        self.assertTrue(problems, registry.check_registry(reg))
+
+    def test_a_true_plan_available_flag_is_a_valid_entry(self):
+        reg = mutated()
+        reg["providers"]["mistral"]["limits"]["mistral-small-latest"][
+            "plan_available"] = True
+        self.assertEqual(registry.check_registry(reg), [])
+
+    # -- the gate reads the table ------------------------------------------
+
+    def test_plan_dead_reasons_names_the_zero_rpm_leg(self):
+        pid, mid = registry.resolve_leg("mistral/mistral-small-latest", self.reg)
+        self.assertEqual(registry.plan_dead_reasons(pid, mid, self.reg),
+                         ["plan: 0 rpm"])
+
+    def test_plan_dead_reasons_is_empty_for_a_serving_leg(self):
+        pid, mid = registry.resolve_leg("mistral/mistral-code-latest", self.reg)
+        self.assertEqual(registry.plan_dead_reasons(pid, mid, self.reg), [])
+
+    def test_plan_dead_reasons_is_empty_without_a_limits_row(self):
+        # No measurement is not a deny: a provider with no limits table, and a
+        # model with no row in one, are both simply ungated.
+        reg = self.reg
+        self.assertEqual(
+            registry.plan_dead_reasons("deepseek", "deepseek-flash", reg), [])
+        self.assertIsNone(
+            registry.provider_plan_limits("deepseek", "deepseek-flash", reg))
+        self.assertIsNone(registry.provider_plan_limits("ghost", "ghost", reg))
+
+    def test_provider_plan_limits_returns_the_measured_row(self):
+        entry = registry.provider_plan_limits("mistral", "mistral-small-latest",
+                                              self.reg)
+        self.assertEqual(entry["rpm"], 0)
+
+    def test_plan_available_false_is_a_dead_reason(self):
+        reg = mutated()
+        reg["providers"]["mistral"]["limits"]["mistral-small-latest"] = {
+            "plan_available": False, "source": self.SOURCE}
+        self.assertEqual(
+            registry.plan_dead_reasons("mistral", "mistral-small-latest", reg),
+            ["plan: plan_available false"])
+
+    # -- the routes no longer point at it ----------------------------------
+
+    def test_no_route_carries_a_mistral_small_leg(self):
+        for route_id, route in self.reg["routes"].items():
+            self.assertNotIn("mistral/mistral-small-latest",
+                             route.get("legs") or [], route_id)
+
+    def test_the_clean_twins_keep_no_paid_deepseek_tail(self):
+        # L1-CLEAN (2026-10-01) kept the native DeepSeek leg live as the last paid
+        # fallback. SS8 (D657-D2 2026-10-08) bans the paid deepseek from every
+        # chain, so the -clean twins are now the single probe-acked, private-safe
+        # leg -- and it is live, which is what the route-liveness invariant needs.
+        for route_id in ("l2-worker-clean", "l3-driver-clean"):
+            self.assertEqual(self.reg["routes"][route_id]["legs"],
+                             ["vertex/gemini-3.8-flash"], route_id)
+            self.assertTrue(live_legs(self.reg, route_id), route_id)
+            self.assertNotIn("deepseek/deepseek-flash",
+                             live_legs(self.reg, route_id), route_id)
+
+    def test_t3_driver_heads_with_the_free_band(self):
+        # L1-routing DECISION FREEKEYS-2c, overriding MISTRALFIX's placement:
+        # the operator rule (D-141) is free -> credited-cheap -> paid on EVERY
+        # agentic combo, and a 429 on the head falls through the combo, so the
+        # head must be a grant, not the operator's money.
+        # GROQRETIRED 2026-10-14: with groq retired, the free band alternates
+        # openrouter and non-openrouter legs to preserve rule (g) provider
+        # diversity (OR -> Cohere -> OR -> Cohere -> OR -> BazaarLink -> OR).
+        legs = self.reg["routes"]["l3-driver"]["legs"]
+        self.assertEqual(leg_tier(self.reg, legs[0]), "free", legs[0])
+        self.assertEqual(legs[0],
+                         "openrouter/nvidia/nemotron-3-super-120b-a12b:free")
+        self.assertEqual(legs[1], "cohere/command-a-03-2025")
+        self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free", legs)
+        self.assertNotIn("opencode_gateway/glm-5.3-flash", legs)
+        self.assertNotIn("ainative/llama-4-maverick", legs)
+        self.assertNotIn("gemini/gemini-3.8-flash", legs)
+        self.assertNotIn("nebius/zai-org/GLM-5.2", legs)
+        self.assertNotIn("nebius/zai-org/GLM-5.3-Flash", legs)
+        self.assertNotIn("mistral/mistral-code-latest", legs)
+        self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
+
+    # -- the invariant ------------------------------------------------------
+
+    def test_every_route_that_serves_traffic_has_at_least_one_live_leg(self):
+        """A combo the gateway offers must be able to answer at least one of its
+        legs: not denied by policy.leg_rules, not flagged unavailable, not
+        client-bound, and not dead on the plan (0 rpm / plan_available false).
+
+        A route with no gateway-servable leg at all is out of scope — it gets no
+        combo, so it serves no traffic (l1-orchestrator-clean and the other
+        fully-flagged routes). That is the difference between "marked
+        unavailable" and "routed into a dead leg", and only the latter is a
+        defect.
+        """
+        reg = self.reg
+        dead = []
+        for route_id in sorted(registry.servable_route_ids(reg)):
+            if not live_legs(reg, route_id):
+                dead.append("%s: %s" % (route_id,
+                                        registry.gateway_legs(
+                                            reg["routes"][route_id], reg)))
+        self.assertEqual(dead, [])
+
+
+class MistralReplaceTests(unittest.TestCase):
+    """BRIEF MISTRALFIX2 (S1, operator via L1-main 2026-09-28 11:5xZ):
+    mistral-small does not work — replace it with Mistral Codestral wherever it
+    was a leg; if both mistral-code-latest and codestral-latest answer, use
+    mistral-code-latest. Measured through the gateway (max_tokens 4096, 3 calls
+    each, evidence work/L1-routing/MISTRALREPL.probe.jsonl):
+      mistral/mistral-code-latest  3/3 200, p50 0.3 s
+      mistral/codestral-latest     3/3 200, p50 0.3 s
+      mistral/mistral-small-latest 0/3 (429)
+    """
+
+    GATEWAY_SOURCE = ("L1-routing gateway probe 2026-09-28T11:5xZ "
+                      "(MISTRALREPL.probe.jsonl)")
+    CLEAN_TWINS = ("l2-worker-clean", "l3-driver-clean")
+
+    @property
+    def reg(self):
+        return load_registry()
+
+    # -- the replacement leg in the twins the brief names --------------------
+
+    def test_the_clean_twins_do_not_carry_mistral_code(self):
+        """BRIEF MISTRALFIX2 step 1 asks for mistral/mistral-code-latest at the
+        position mistral-small held in l2-worker-clean / l3-driver-clean, and for
+        each twin to have two live legs. Measured 2026-09-28 in this sandbox:
+        that leg cannot be added — `python3 tools/registry.py validate` exits 1
+        with 'privacy: <route> leg mistral/mistral-code-latest model trains on
+        prompts' for both twins (spec 3.1 rule 3 / `private_safe`: the model
+        record carries `trains_on_prompts: true`, its free pool trains). These
+        are the routes a `privacy=sensitive` card lands on (tests/test_autoos_
+        spawner.py), so the swap would send private prompts to a training pool —
+        and `tests/linux/33-documentation.sh` independently bans `mistral/
+        mistral-code` in any `-clean` combo. So the twins keep MISTRALFIX's legs
+        and one live leg each, and the operator's replacement lands as the
+        registered tested alternative (codestral) plus the probe record. This
+        test is the guard: a later lane that adds the leg fails here rather than
+        silently shipping a training leg into a no-training route.
+        """
+        reg = self.reg
+        for route_id, route in reg["routes"].items():
+            if route_id.endswith("-clean") and \
+                    route_id not in registry.CLEAN_ROUTE_EXEMPTIONS:
+                self.assertNotIn("mistral/mistral-code-latest",
+                                 route.get("legs") or [], route_id)
+        for route_id in self.CLEAN_TWINS:
+            safe, reason = registry.private_safe("mistral", "mistral-code-latest",
+                                                 reg)
+            self.assertFalse(safe, route_id)
+            self.assertEqual(reason, "model trains on prompts", route_id)
+
+    def test_the_clean_twins_still_live_without_the_deepseek_tail(self):
+        # SS8 (D657-D2 2026-10-08) took the native DeepSeek fallback out of the
+        # twins. They still serve -- one leg each, the probe-acked private-safe
+        # vertex row -- which is what the route-liveness invariant needs.
+        reg = self.reg
+        for route_id in self.CLEAN_TWINS:
+            self.assertEqual(live_legs(reg, route_id),
+                             ["vertex/gemini-3.8-flash"], route_id)
+            self.assertNotIn("deepseek/deepseek-flash",
+                             live_legs(reg, route_id), route_id)
+
+    # -- the registered tested alternative ----------------------------------
+
+    def test_codestral_is_registered_with_its_measured_limits(self):
+        entry = self.reg["providers"]["mistral"]["limits"]["codestral-latest"]
+        self.assertEqual(entry["rpm"], 125)
+        self.assertEqual(entry["tpm"], 625000)
+        self.assertIn("10:5xZ direct", entry["source"])
+        self.assertIn(self.GATEWAY_SOURCE, entry["source"])
+        self.assertIn("codestral-latest", self.reg["models"])
+
+    def test_codestral_counts_as_training_until_sourced(self):
+        # Operator 2026-09-28T12:0xZ: "Mistral trains -> never in -clean tiers".
+        # Nobody sourced that codestral does NOT train, so the record says it
+        # does and private_safe() keeps it out of every -clean route.
+        self.assertIs(self.reg["models"]["codestral-latest"].get("trains_on_prompts"), True)
+        safe, reason = registry.private_safe("mistral", "codestral-latest", self.reg)
+        self.assertFalse(safe)
+        self.assertEqual(reason, "model trains on prompts")
+
+    def test_mistral_comment_counts_three_limits_rows(self):
+        note = self.reg["providers"]["mistral"]["$comment"]
+        self.assertNotIn("Only the two models", note)
+        self.assertNotIn("mistral-large/codestral/", note)
+        self.assertIn("Only the three models", note)
+
+    def test_codestral_is_not_a_leg_of_any_route(self):
+        for route_id, route in self.reg["routes"].items():
+            self.assertNotIn("mistral/codestral-latest",
+                             route.get("legs") or [], route_id)
+
+    def test_the_gateway_probe_is_recorded_in_the_registry(self):
+        # A measurement that lives only in a probe file is data, not a record:
+        # the provider comment is where a later lane reads what was measured.
+        note = self.reg["providers"]["mistral"]["$comment"]
+        self.assertIn("MISTRALREPL.probe.jsonl", note)
+
+    # -- the rest of the registry agrees ------------------------------------
+
+    def test_no_route_carries_a_mistral_small_leg(self):
+        for route_id, route in self.reg["routes"].items():
+            self.assertNotIn("mistral/mistral-small-latest",
+                             route.get("legs") or [], route_id)
+
+    def test_t3_driver_has_no_mistral_code_leg(self):
+        # SS8 (D657-D2 2026-10-08) leaves no paid mistral leg in a chain; the
+        # "exactly one, never duplicated" pin becomes an absence pin, which a
+        # duplicate would still fail.
+        legs = self.reg["routes"]["l3-driver"]["legs"]
+        self.assertEqual(legs.count("mistral/mistral-code-latest"), 0)
+        self.assertEqual(legs.count("mistral/codestral-latest"), 0)
+
+    def test_real_registry_passes_check_after_the_swap(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class ClaudeBudgetPolicyTests(unittest.TestCase):
+    """D-102 CLAUDEBUDGET (S2) item 1: policy.claude_budget is the one home for
+    "how much Claude is left this week".
+
+    The resolver, the CLI and the orchestrator all read the same number, so the
+    field is checked like every other piece of shipped data: an unknown key (a
+    typo'd `budget_bellow`) must not silently mean "no threshold", and a share
+    of 1.5 must not silently mean "plenty left" -- both would keep routing
+    Claude work after the weekly allowance was gone. `claude_budget()` owns the
+    ON/OFF rule: mode == "budget" OR a share below `budget_below`.
+    """
+
+    def budget_reg(self, **over):
+        reg = mutated()
+        entry = {"mode": "normal", "weekly_share_left": None,
+                 "budget_below": 0.25, "source": "test"}
+        entry.update(over)
+        reg["policy"]["claude_budget"] = entry
+        return reg
+
+    def problems(self, reg):
+        return [p for p in registry.check_registry(reg) if "claude_budget" in p]
+
+    def on(self, reg):
+        return registry.claude_budget(reg)["on"]
+
+    # --- the shipped value -------------------------------------------------
+
+    def test_the_shipped_value_is_the_operators_decision(self):
+        entry = load_registry()["policy"]["claude_budget"]
+        self.assertEqual(entry["mode"], "normal")
+        self.assertEqual(entry["weekly_share_left"], 0.9)
+        self.assertEqual(entry["budget_below"], 0.25)
+        self.assertIn("D-102", entry["source"])
+        self.assertIn("2026-09-28", entry["source"])
+        self.assertIn("2026-10-01", entry["source"])
+
+    def test_the_shipped_registry_stays_clean(self):
+        self.assertEqual(registry.check_registry(load_registry()), [])
+
+    def test_the_shipped_registry_is_budget_mode_off(self):
+        self.assertFalse(self.on(load_registry()))
+
+    # --- the ON/OFF rule --------------------------------------------------
+
+    def test_on_when_mode_is_budget(self):
+        self.assertTrue(self.on(self.budget_reg(mode="budget",
+                                               weekly_share_left=None)))
+
+    def test_on_when_share_is_below_the_threshold_even_in_normal_mode(self):
+        # 0.2 < 0.25: the share alone turns it on, whatever `mode` says.
+        self.assertTrue(self.on(self.budget_reg(mode="normal",
+                                                weekly_share_left=0.2)))
+
+    def test_off_when_share_is_at_or_above_the_threshold_in_normal_mode(self):
+        for share in (0.25, 0.3, 1.0):
+            self.assertFalse(self.on(self.budget_reg(mode="normal",
+                                                     weekly_share_left=share)),
+                             "share %s must not turn budget mode on" % share)
+
+    def test_off_when_mode_is_normal_and_no_share_is_recorded(self):
+        self.assertFalse(self.on(self.budget_reg(mode="normal",
+                                                 weekly_share_left=None)))
+
+    def test_absent_field_is_off_so_an_old_registry_routes_unchanged(self):
+        reg = mutated()
+        reg["policy"].pop("claude_budget", None)
+        self.assertFalse(self.on(reg))
+        self.assertEqual(self.problems(reg), [])
+
+    # --- validation -------------------------------------------------------
+
+    def test_validate_rejects_a_share_above_one(self):
+        problems = self.problems(self.budget_reg(weekly_share_left=1.5))
+        self.assertTrue(problems, "share 1.5 must fail validation")
+        self.assertIn("1.5", problems[0])
+
+    def test_validate_rejects_a_share_below_zero(self):
+        self.assertTrue(self.problems(self.budget_reg(weekly_share_left=-0.1)))
+
+    def test_validate_rejects_an_unknown_field(self):
+        problems = self.problems(self.budget_reg(budget_bellow=0.25))
+        self.assertTrue(problems)
+        self.assertIn("budget_bellow", problems[0])
+
+    def test_validate_rejects_a_mode_that_is_not_normal_or_budget(self):
+        self.assertTrue(self.problems(self.budget_reg(mode="tight")))
+
+    def test_validate_rejects_a_non_numeric_threshold(self):
+        problems = self.problems(self.budget_reg(budget_below="0.25"))
+        self.assertTrue(problems)
+        self.assertIn("budget_below", problems[0])
+
+    def test_validate_rejects_a_non_string_source(self):
+        self.assertTrue(self.problems(self.budget_reg(source=42)))
+
+    def test_validate_accepts_a_null_share_with_a_source(self):
+        self.assertEqual(self.problems(self.budget_reg(
+            mode="budget", weekly_share_left=None)), [])
+
+    def test_the_schema_declares_the_field(self):
+        schema = registry.load(registry.SCHEMA_PATH)
+        props = schema["$defs"]["policy"]["properties"]["claude_budget"]
+        self.assertFalse(props["additionalProperties"])
+        self.assertEqual(set(props["properties"]),
+                         {"$comment", "mode", "weekly_share_left",
+                          "budget_below", "source"})
+
+class CreditSpendGuardTests(unittest.TestCase):
+    """FREEKEYS-1 (D-132/D-141) step 4: ``tier: credit`` is the finite vendor
+    grant -- morph's $10, deepinfra's and together_ai's $5 -- so it needs a guard
+    that reads as data, not as a comment in a `$comment`.
+
+    The trio a caller reads is `credit_usd` (what the operator funded),
+    `monthly_cap_usd` (where the call REFUSES, DSGUARD's shape: 100 % of the
+    grant) and `monthly_warn_fraction` (where it warns first, 80 %). Each half
+    fails silently on its own: a credit row with no cap is spent without a
+    limit, a cap that is not the grant moves the refuse line away from what was
+    funded, and a fraction of 0 or 1 warns on every call or never -- all three
+    look "configured" while enforcing nothing.
+    """
+
+    CREDIT_PROBLEM = "tier credit needs"
+
+    def credit_problems(self, reg):
+        return [p for p in registry.check_registry(reg) if self.CREDIT_PROBLEM in p
+                or "monthly_warn_fraction without" in p or "!= credit_usd" in p]
+
+    # --- the live data -----------------------------------------------------
+
+    def test_every_credited_provider_carries_a_complete_guard(self):
+        """The sweep the brief asked for, written over the data rather than over
+        a list of provider names: whatever row says `credit` must carry the whole
+        trio, so a twelfth credited provider is covered by this test the moment
+        someone adds its row."""
+        reg = load_registry()
+        credited = sorted(pid for pid, entry in reg["providers"].items()
+                          if isinstance(entry, dict) and entry.get("tier") == "credit")
+        self.assertTrue(credited, "no provider carries tier credit -- did the field die?")
+        self.assertEqual(registry._check_credit_guards(reg), [])
+        for pid in credited:
+            entry = reg["providers"][pid]
+            self.assertGreater(entry["credit_usd"], 0, pid)
+            self.assertEqual(entry["monthly_cap_usd"], entry["credit_usd"], pid)
+            self.assertTrue(0 < entry["monthly_warn_fraction"] < 1, pid)
+            self.assertTrue(entry["monthly_cap_source"].strip(), pid)
+
+    def test_the_shipped_grants_are_the_operators_numbers(self):
+        granted = {pid: entry["credit_usd"] for pid, entry in
+                   load_registry()["providers"].items()
+                   if isinstance(entry, dict) and entry.get("tier") == "credit"}
+        self.assertEqual(granted, {"morph": 10.0, "together_ai": 5.0,
+                                   "vertex_ai": 250.0, "ovhcloud": 200.0,
+                                   "freeaiapikey": 6.0})
+
+    def test_a_credit_tier_is_not_the_free_tier(self):
+        # private_safe() and probe_common._skip_reason both branch on tier: a
+        # credit row is never probed by the standing free probes, so a `-clean`
+        # route can never land on a finite grant by accident.
+        # T1-CLEAN-4 K1 (2026-10-01) re-states the contract the lane moved:
+        # `credit` is now ADMITTED to a clean route, but only a grant whose
+        # no-training claim is cited (K2: a valid `privacy` block). An
+        # unverified grant (trains_on_prompts null) still fails - and fails on
+        # the TRAINING check, not on the tier, which is why the old
+        # `assertIn("credit", reason)` is gone.
+        reg = load_registry()
+        for pid in ("morph", "together_ai"):
+            self.assertEqual(reg["providers"][pid]["tier"], "credit", pid)
+            safe, reason = registry.private_safe(pid, "deepseek-flash", reg)
+            self.assertFalse(safe, pid)
+            self.assertIn("trains on prompts", reason, pid)
+        for pid in ("vertex_ai", "ovhcloud"):
+            self.assertEqual(reg["providers"][pid]["tier"], "credit", pid)
+            safe, reason = registry.private_safe(pid, "deepseek-flash", reg)
+            self.assertTrue(safe, "%s: %s" % (pid, reason))
+
+    # --- the validator -----------------------------------------------------
+
+    def test_a_credit_row_without_a_cap_is_flagged(self):
+        reg = mutated()
+        del reg["providers"]["morph"]["monthly_cap_usd"]
+        problems = self.credit_problems(reg)
+        self.assertTrue(problems)
+        self.assertIn("morph", problems[0])
+
+    def test_a_cap_that_is_not_the_grant_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["morph"]["monthly_cap_usd"] = 20.0
+        self.assertTrue([p for p in self.credit_problems(reg)
+                         if "morph" in p and "credit_usd" in p])
+
+    def test_a_warn_fraction_outside_the_unit_interval_is_flagged(self):
+        for bad in (0, 1.0, 1.5, "0.8", True, None):
+            reg = mutated()
+            reg["providers"]["morph"]["monthly_warn_fraction"] = bad
+            self.assertTrue([p for p in self.credit_problems(reg) if "morph" in p], bad)
+
+    def test_a_warn_fraction_without_a_cap_is_flagged(self):
+        # A fraction on a row with no cap is a number nothing reads.
+        reg = mutated()
+        reg["providers"]["groq"]["monthly_warn_fraction"] = 0.8
+        self.assertTrue([p for p in self.credit_problems(reg)
+                         if "groq" in p and "without monthly_cap_usd" in p])
+
+    def test_a_non_credit_row_needs_no_guard(self):
+        # The trio is the credit tier's contract. A row that carries no grant at all
+        # (a real downgrade -- CreditTierEvasionTests) needs no guard, and the tier
+        # that keeps the money is what the checks below refuse.
+        reg = mutated()
+        for key in ("tier", "credit_usd", "monthly_cap_usd", "monthly_warn_fraction",
+                    "monthly_cap_source"):
+            reg["providers"]["morph"].pop(key, None)
+        reg["providers"]["morph"]["tier"] = "free"
+        self.assertEqual([p for p in self.credit_problems(reg) if "morph" in p], [])
+
+    def test_the_credit_guard_is_part_of_the_shipped_check(self):
+        """`check_registry` runs it: a guard only its own unit test reads
+        protects nothing from the next edit to the data."""
+        reg = mutated()
+        del reg["providers"]["morph"]["monthly_cap_usd"]
+        self.assertTrue(self.credit_problems(reg))
+
+    def test_a_dated_manual_spend_pair_is_accepted(self):
+        """T1-CREDIT-FIX: the manual fallback fields are optional but paired --
+        a complete dated figure passes the shipped check."""
+        reg = mutated()
+        reg["providers"]["morph"]["credit_spent_usd"] = 3.5
+        reg["providers"]["morph"]["credit_spent_as_of"] = "2026-09-30"
+        self.assertEqual(registry._check_credit_guards(reg), [])
+
+    def test_a_half_present_manual_spend_is_flagged(self):
+        """A figure with no date cannot age; a date with no figure judges
+        nothing -- both halves are flagged, not trusted."""
+        for figure, as_of in ((3.5, None), (None, "2026-09-30")):
+            reg = mutated()
+            if figure is not None:
+                reg["providers"]["morph"]["credit_spent_usd"] = figure
+            if as_of is not None:
+                reg["providers"]["morph"]["credit_spent_as_of"] = as_of
+            problems = [p for p in registry._check_credit_guards(reg)
+                        if "morph" in p and "credit_spent" in p]
+            self.assertTrue(problems, (figure, as_of))
+
+    def test_a_malformed_manual_spend_is_flagged(self):
+        for figure, as_of in ((-1.0, "2026-09-30"), (True, "2026-09-30"),
+                              ("3.5", "2026-09-30"), (3.5, ""),
+                              (3.5, None), (3.5, 20260930)):
+            reg = mutated()
+            reg["providers"]["morph"]["credit_spent_usd"] = figure
+            reg["providers"]["morph"]["credit_spent_as_of"] = as_of
+            problems = [p for p in registry._check_credit_guards(reg)
+                        if "morph" in p and "credit_spent" in p]
+            self.assertTrue(problems, (figure, as_of))
+
+    def test_absent_manual_spend_needs_nothing(self):
+        """The pair is optional: no credit row carries it today, and the
+        shipped registry stays clean."""
+        self.assertEqual(registry._check_credit_guards(load_registry()), [])
+
+
+class ThirdPartyClaudeLegTests(unittest.TestCase):
+    """FREEKEYS-1 step 4 (D-102): a Claude model reached through anyone else's
+    API is priced as Claude, so it must never be usable outside the budget gate.
+
+    Two things hold it in, and this class pins both: `policy.leg_rules` denies
+    `*/claude-*` (deny-claude-paid-api), and rule 9 (`_check_leg_rules`) refuses
+    a route that carries a denied leg without gating it. The sweep below walks
+    every provider x every Claude-named model row instead of only the legs
+    written today, because what matters is the pairing a later edit (FREEKEYS-2's
+    combos, or a probe that found a cheap Claude route) could add unnoticed.
+
+    The measured exceptions are named, not guessed: `cc` / `antigravity` /
+    `anthropic` are the operator's Claude SEATS (a subscription and a free
+    sign-in, rules 9-10), and `zen` (OpenCode Zen) is allowed wholesale by
+    `allow-opencode-zen-client-bound` -- its legs 403 through the gateway and
+    answer only inside the opencode client, so no combo can carry them. Nothing
+    else is exempt.
+    """
+
+    SEAT_PROVIDERS = {"cc", "antigravity", "anthropic"}
+    # SB-C (ZENCLAUDE): zen used to be a named exception; its Claude legs are
+    # now denied by the leg rules like every other third party, so no seat
+    # outside the subscription ones escapes the deny sweep.
+    GATEWAY_UNREACHABLE_SEATS = set()
+    CLAUDE_NAME_RE = re.compile(r"(?i)claude|anthropic")
+
+    def claude_models(self, reg) -> list:
+        return sorted(key for key, model in reg["models"].items()
+                      if self.CLAUDE_NAME_RE.search(key)
+                      or (model or {}).get("family") == "anthropic")
+
+    def third_party_legs(self, reg):
+        """Every (provider, leg) pair outside the named seats, for each
+        Claude-named model the registry knows."""
+        exempt = self.SEAT_PROVIDERS | self.GATEWAY_UNREACHABLE_SEATS
+        return [(pid, "%s/%s" % (pid, model_key))
+                for pid, entry in sorted(reg["providers"].items())
+                if isinstance(entry, dict) and pid not in exempt
+                for model_key in self.claude_models(reg)]
+
+    # --- the live data -----------------------------------------------------
+
+    def test_every_claude_leg_on_a_third_party_provider_is_denied(self):
+        reg = load_registry()
+        legs = self.third_party_legs(reg)
+        self.assertTrue(legs, "the sweep found no third-party provider at all")
+        allowed = [leg for _, leg in legs if not registry.leg_denied(leg, reg)]
+        self.assertEqual(allowed, [],
+                         "Claude legs a third-party provider would serve: %s" % allowed)
+
+    def test_the_named_exceptions_are_exactly_the_measured_ones(self):
+        """If a future edit lets a Claude leg through some other provider, it
+        lands here instead of quietly narrowing the sweep above."""
+        reg = load_registry()
+        escaped = sorted({pid for pid, entry in reg["providers"].items()
+                          if isinstance(entry, dict) and pid not in self.SEAT_PROVIDERS
+                          for model_key in self.claude_models(reg)
+                          if not registry.leg_denied("%s/%s" % (pid, model_key), reg)})
+        self.assertEqual(escaped, sorted(self.GATEWAY_UNREACHABLE_SEATS))
+
+    def test_zen_claude_is_denied_but_zen_free_models_stay_allowed(self):
+        """SB-C (ZENCLAUDE): the zen allowance is for zen's free models run
+        through the opencode client; a zen Claude leg is denied by the leg
+        rules (a declared Claude final must not land on a paid zen leg), and
+        the budget predicate still reads it as Claude."""
+        reg = load_registry()
+        self.assertTrue(registry.leg_denied("zen/claude-opus-5-5", reg))
+        rule = registry.leg_rule_for("zen/muse-spark-1.3-contributor", reg)
+        self.assertIsNotNone(rule)
+        self.assertTrue(rule["allow"])
+        self.assertEqual(rule["id"], "allow-opencode-zen-client-bound")
+        self.assertTrue(self.CLAUDE_NAME_RE.search("claude-opus-5-5"))
+        self.assertEqual(reg["models"]["claude-opus-5-5"]["family"], "anthropic")
+
+    def test_no_route_carries_a_claude_leg_off_a_seat(self):
+        reg = load_registry()
+        offenders = sorted({leg for route in reg["routes"].values()
+                            for leg in (route.get("legs") or [])
+                            if isinstance(leg, str) and self.CLAUDE_NAME_RE.search(leg)
+                            and leg.partition("/")[0]
+                            not in self.SEAT_PROVIDERS | self.GATEWAY_UNREACHABLE_SEATS})
+        self.assertEqual(offenders, [])
+
+    # --- the enforcement ---------------------------------------------------
+
+    def test_a_credited_provider_cannot_add_a_claude_leg_without_gating_it(self):
+        """Rule 9, not a comment: put `morph/claude-sonnet-5` in a serving route
+        and the check fails until the leg is gated unavailable."""
+        reg = mutated()
+        morph = reg["models"]["claude-sonnet-5"]["id"]
+        route_id = sorted(reg["routes"])[0]
+        reg["routes"][route_id].setdefault("legs", []).append("morph/%s" % morph)
+        self.assertTrue(registry.leg_denied("morph/%s" % morph, reg))
+        problems = [p for p in registry.check_registry(reg) if "leg_rules" in p
+                    or "denied" in p]
+        self.assertTrue(problems, "an allowed-looking Claude leg passed the check")
+        self.assertIn("morph/%s" % morph, " ".join(problems))
+
+    def test_the_freekeys1_providers_register_no_claude_model(self):
+        """D-102 held the probe off Claude, so none of the 11 providers added for
+        FREEKEYS-1 may carry a Claude-named model row of its own."""
+        reg = load_registry()
+        added = ("morph", "bazaarlink", "navyai", "arcee", "bluesminds", "agentrouter",
+                 "novita_ai", "scaleway", "nebius", "deepinfra", "together_ai")
+        legs = {"%s/%s" % (pid, model_key) for pid in added
+                for model_key in self.claude_models(reg)}
+        served = {leg for route in reg["routes"].values()
+                  for leg in (route.get("legs") or []) if leg in legs}
+        self.assertEqual(served, set())
+
+    # The 19 operator-listed providers still missing from the registry
+    # (lane A ws-providers-rescue, 2026-09-30).  All were probed through the
+    # OmniRoute gateway (GET /v1/models + chat-completion trials); none could
+    # serve a chat completion, so each is available:false with a measured
+    # $comment.  (ovhcloud was reconciled to the ws-ovh lane, commit f6f5e69,
+    # and dropped from this branch — see docs/handoff/2026-09-30-laneA-providers.md.)
+    # Like the 11 FREEKEYS-1 providers above, none may carry a
+    # Claude-named model row or serve a Claude leg in any route.
+    # AINATIVE/OPENCODE-GATEWAY left this set 2026-10-05 (operator): both
+    # connections are live again with grown catalogs (116 / 129 rows) and
+    # serve operator-ordered legs (llama-4-maverick, glm-5.3-flash).
+    MISSING_17 = (
+        "api_airforce", "llm7", "nscale", "siliconflow", "sealion",
+        "routeway", "requesty", "aion_labs", "agnes", "pollinations",
+        "g4f", "kilo_gateway", "felo",
+        "uncloseai", "ai_horde", "z_ai", "qoder_ai",
+    )
+
+    def test_each_of_the_17_missing_providers_is_registered(self):
+        reg = load_registry()
+        for pid in self.MISSING_17:
+            self.assertIn(pid, reg["providers"], "%s missing from providers" % pid)
+
+    def test_each_of_the_17_missing_providers_is_available_false(self):
+        reg = load_registry()
+        for pid in self.MISSING_17:
+            self.assertIs(reg["providers"][pid].get("available"), False,
+                          "providers.%s available is not false" % pid)
+
+    def test_each_of_the_17_missing_providers_has_a_measured_comment(self):
+        reg = load_registry()
+        for pid in self.MISSING_17:
+            comment = reg["providers"][pid].get("$comment", "")
+            self.assertTrue(comment, "providers.%s has no $comment" % pid)
+            self.assertIn("2026-09-28", comment,
+                         "providers.%s $comment lacks probe date" % pid)
+            self.assertIn("available is false", comment,
+                         "providers.%s $comment lacks 'available is false'" % pid)
+
+    def test_the_17_missing_providers_register_no_claude_model(self):
+        """D-102 held the probe off Claude, so none of the 17 missing providers
+        may carry a Claude-named model row or serve a Claude leg."""
+        reg = load_registry()
+        legs = {"%s/%s" % (pid, model_key) for pid in self.MISSING_17
+                for model_key in self.claude_models(reg)}
+        served = {leg for route in reg["routes"].values()
+                  for leg in (route.get("legs") or []) if leg in legs}
+        self.assertEqual(served, set())
+
+    def test_the_17_missing_providers_appear_in_no_route_legs(self):
+        """An available:false provider that never answered must not appear in
+        any route's legs list."""
+        reg = load_registry()
+        pids = set(self.MISSING_17)
+        for route_id, route in reg["routes"].items():
+            for leg in (route.get("legs") or []):
+                if not isinstance(leg, str):
+                    continue
+                prefix = leg.split("/", 1)[0]
+                self.assertNotIn(prefix, pids,
+                                 "route %s carries leg %s from a missing-17 provider"
+                                 % (route_id, leg))
+
+
+class CreditTierEvasionTests(unittest.TestCase):
+    """FREEKEYS-1b (item 4, rev-freekeys1 finding 6): a credited provider moved to
+    `tier: free` while it still carries `credit_usd` is the one edit that makes the
+    whole guard disappear -- the trio check only reads credit rows, the spend guard
+    only gates credit legs, and `tier: free` also re-admits the provider to the
+    `-clean` sweeps. The data says the operator funded it, so the tier is what has
+    to be rejected, not the grant.
+
+    A genuine downgrade is still possible: it just has to move the money out of the
+    row first, which is the version of the edit a reviewer can see.
+    """
+
+    def morph_downgrade(self, **changes) -> dict:
+        reg = mutated()
+        entry = reg["providers"]["morph"]
+        entry["tier"] = "free"
+        for key, value in changes.items():
+            if value is None:
+                entry.pop(key, None)
+            else:
+                entry[key] = value
+        return reg
+
+    def problems_for(self, reg, needle="credit_usd"):
+        return [p for p in registry.check_registry(reg)
+                if "morph" in p and needle in p]
+
+    def test_the_shipped_registry_has_no_tier_that_hides_a_grant(self):
+        reg = load_registry()
+        for pid, entry in reg["providers"].items():
+            if isinstance(entry, dict) and entry.get("tier") != "credit":
+                self.assertFalse(entry.get("credit_usd"),
+                                 "providers.%s: tier %s carries credit_usd"
+                                 % (pid, entry.get("tier")))
+
+    def test_a_free_tier_with_a_grant_on_it_is_rejected(self):
+        problems = self.problems_for(self.morph_downgrade())
+        self.assertTrue(problems, "a credited provider read as free with no complaint")
+        self.assertIn("credit", problems[0])
+
+    def test_the_refuse_line_survives_the_downgrade(self):
+        """`monthly_cap_usd` is what the guard refuses at -- renaming the tier must
+        not silently un-cap a funded grant either."""
+        self.assertTrue(self.problems_for(self.morph_downgrade(),
+                                          needle="monthly_cap_usd"))
+
+    def test_a_real_downgrade_moves_the_money_out_of_the_row(self):
+        reg = self.morph_downgrade(credit_usd=None, monthly_cap_usd=None,
+                                   monthly_warn_fraction=None,
+                                   monthly_cap_source=None)
+        self.assertEqual([p for p in registry.check_registry(reg) if "morph" in p], [])
+
+
+class ModelPrefixTests(unittest.TestCase):
+    """FREEKEYS-1b (item 1, rev-freekeys1 finding 1): `morph`, `deepinfra` and
+    `nebius` serve their models under their own name (`morph/morph-dsv4flash`,
+    `deepinfra/google/gemini-2.5-flash`, `nebius/zai-org/GLM-5.1` -- read from the
+    live gateway's `GET /v1/models`, 2026-09-28), so a `null` `model_prefix` leaves
+    a consumer that strips the namespace with nothing to strip against. Each row now
+    declares the prefix the gateway was measured using, and the ids registered under
+    it start with that prefix.
+    """
+
+    def prefix_of(self, reg, pid):
+        return reg["providers"][pid].get("model_prefix")
+
+    def models_of(self, reg, pid) -> list:
+        """Every registered model row that carries this provider's namespace, in
+        id spelling (`morph-dsv4flash`) or in the gateway's served spelling
+        (`deepinfra/google/gemini-2.5-flash`)."""
+        provider = reg["providers"][pid]
+        namespaces = {provider.get("model_prefix"), pid, provider.get("omniroute_id")}
+        out = []
+        for model_id, model in reg["models"].items():
+            if not isinstance(model, dict):
+                continue
+            shown = str(model.get("display_name") or "")
+            for ns in namespaces:
+                if ns and (model_id.startswith(ns + "-") or model_id.startswith(ns + "/")
+                           or shown.startswith(ns + "/")):
+                    out.append(model_id)
+                    break
+        return sorted(out)
+
+    def test_the_measured_providers_declare_their_namespace(self):
+        reg = load_registry()
+        self.assertEqual(self.prefix_of(reg, "morph"), "morph")
+        self.assertEqual(self.prefix_of(reg, "nebius"), "nebius")
+
+    def test_every_registered_model_of_a_prefixed_provider_starts_with_it(self):
+        """The sweep, not the list: a thirteenth prefixed provider is covered the
+        moment its first model row lands."""
+        reg = load_registry()
+        offenders = []
+        for pid in sorted(reg["providers"]):
+            prefix = self.prefix_of(reg, pid)
+            if not prefix:
+                continue
+            for model_id in self.models_of(reg, pid):
+                model = reg["models"][model_id]
+                shown = str(model.get("display_name") or "")
+                if not (model_id.startswith(prefix) or shown.startswith(prefix + "/")):
+                    offenders.append("%s/%s" % (pid, model_id))
+        self.assertEqual(offenders, [])
+
+    def test_the_prefixed_providers_carry_model_rows_at_all(self):
+        reg = load_registry()
+        for pid in ("morph", "nebius"):
+            self.assertTrue(self.models_of(reg, pid), pid)
+
+    def test_a_null_prefix_on_a_namespaced_provider_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["nebius"]["model_prefix"] = None
+        problems = [p for p in registry.check_registry(reg)
+                    if "nebius" in p and "model_prefix" in p]
+        self.assertTrue(problems, "a namespaced provider with no declared prefix passed")
+
+    def test_a_prefix_that_is_not_the_served_namespace_is_flagged(self):
+        reg = mutated()
+        reg["providers"]["morph"]["model_prefix"] = "morphx"
+        problems = [p for p in registry.check_registry(reg)
+                    if "morph" in p and "model_prefix" in p]
+        self.assertTrue(problems, "a prefix nothing is served under passed")
+
+    def test_the_check_ships_the_rule(self):
+        self.assertTrue(hasattr(registry, "_check_model_prefix"))
+
+
+# ---------------------------------------------------------------------------
+# FREEKEYS-2 (brief D-141 item 3): combos with cross-provider fallbacks.
+# ---------------------------------------------------------------------------
+
+# The agentic tier routes that carry worker traffic. `*-clean` twins are out:
+# rule 3 admits only private-safe (paid, trains_on_prompts false) legs, and
+# every FREEKEYS-1 grant is a `free`/`credit` provider whose training policy is
+# unverified (null), so none of them may enter one. `*-paid` are the
+# deliberately legless LiteLLM hand groups.
+AGENTIC_TIER_ROUTES = ("l1-orchestrator", "l1-orchestrator-free-only",
+                       "l2-worker", "l2-worker-free-only",
+                       "l3-driver", "l3-driver-free-only")
+
+# The probe-passing legs FREEKEYS-1 registered and FREEKEYS-2 wires in. NOT
+# `bazaarlink/deepseek/deepseek-v4-flash-0731free:free`: the L1-routing decision
+# on FREEKEYS-2's open question is the operator rule 'DeepSeek only V4.1 Flash',
+# and that row is V4 weights, so it stays registered and routes nowhere — see
+# DeepseekV41OnlyDecisionTests.
+NEW_FREE_LEGS = {
+    "nebius/zai-org/GLM-5.2",
+    "nebius/zai-org/GLM-5.3-Flash",
+}
+
+
+def leg_tier(reg: dict, leg: str) -> str:
+    """`free` / `credit` / `paid` for a leg: the EFFECTIVE tier, read exactly
+    as tools/registry.py's private_safe() reads it - the model-level `tier`
+    override when present, else the provider's own `tier`. FREEWIRE 2026-09-30
+    added openrouter `:free` legs whose provider tier is `paid` but whose model
+    row overrides it to `free`; a provider-only read counted those $0 legs as
+    paid and broke the free-band ordering checks."""
+    provider_id, model_id = registry.resolve_leg(leg, reg)
+    model = reg["models"].get(model_id) or {}
+    return (model.get("tier") or (reg["providers"][provider_id] or {}).get("tier")
+            or "paid")
+
+
+def usable_legs(reg: dict, route_id: str) -> list:
+    """`live_legs` plus the three filters an agentic card also hits, so "usable"
+    means what the resolver would actually plan: `tool_calls: proven` in the
+    tracked registry, a priced model where the provider's tier is `credit`
+    (an unpriced grant bills $0, so the resolver refuses the leg fail-closed),
+    and a context that fits the route's declared need (FREEKEYS-2c,
+    rev-freekeys2 finding 2 -- asked of `autoos_resolver.route_leg_context_fits`,
+    the resolver's own promise check, never restated here: a 32k leg was counted
+    as one of t1's three fallbacks for a 1M card, and three "usable" legs that
+    cannot carry the request are one usable leg and two 413s).
+
+    D657-D2 (2026-10-08) moved the price filter onto the resolver's own
+    `credit_leg_priced(model_id, registry, provider_id)` as well: one model id can
+    be served at two prices at once (T1-CREDIT-FIX-6, D-220) -- `gemini-3.8-flash`
+    is $0 through AI Studio and billed through Vertex -- so reading the
+    model-level `price_in` alone called a priced credit leg unpriced and counted
+    the chain one usable leg too few."""
+    route = reg["routes"][route_id]
+    out = []
+    for leg in live_legs(reg, route_id):
+        provider_id, model_id = registry.resolve_leg(leg, reg)
+        model = reg["models"][model_id]
+        if model.get("tool_calls") != "proven":
+            continue
+        if leg_tier(reg, leg) == "credit":
+            if not resolver.credit_leg_priced(model_id, reg, provider_id):
+                continue
+        if not resolver.route_leg_context_fits(leg, route, reg):
+            continue
+        out.append(leg)
+    return out
+
+
+class ComboCrossProviderTests(unittest.TestCase):
+    """Each agentic tier route must keep fallback legs on DIFFERENT providers
+    that a card can actually use, and the new free legs must sit in the route's
+    free band — ahead of the paid legs — so a run spends a free grant before the
+    operator's money. D657-D2 pins the usable band each re-cut chain really has
+    (see USABLE_LEG_BAND) instead of a fixed three, since the D-657 probe rules
+    removed legs rather than adding them."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_every_agentic_route_has_two_distinct_usable_providers(self):
+        # TORDER D-TORDER-2 skipped l1-orchestrator here because none of its
+        # >=600k legs was tool_calls:proven. D657-D2 proved the vertex leg on
+        # both gateways (probe-d657-central/workstation ack ok + tool ok), so
+        # the skip is lifted: the route now answers with two providers.
+        # l1-orchestrator-free-only is L0 ACCEPT single-provider (see
+        # test_t1_free_only_single_provider_exemption below), not skipped here.
+        for route_id in AGENTIC_TIER_ROUTES:
+            if route_id == "l1-orchestrator-free-only":
+                continue  # asserted in exemption test, not silently passed
+            providers = {registry.resolve_leg(leg, self.reg)[0]
+                         for leg in usable_legs(self.reg, route_id)}
+            self.assertGreaterEqual(
+                len(providers), 2,
+                "%s has %d usable free/priced provider(s) (%s): a card routed "
+                "here has no cross-provider fallback"
+                % (route_id, len(providers), sorted(providers)))
+
+    def test_t1_free_only_single_provider_exemption(self):
+        # L0 D-TORDER-2 ACCEPT: l1-orchestrator-free-only is deliberately
+        # single-provider. D657-D2 re-cut it from google_ai_studio (401 on both
+        # gateways) to the bazaarlink free leg. Passes ONLY via named exemption +
+        # registry constraint note; a missing note fails (so a future
+        # single-provider route without one still fails). Same style as
+        # CLEAN_ROUTE_EXEMPTIONS.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "combo_contract", str(ROOT / "tools" / "combo-contract.py"))
+        cc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cc)
+        self.assertIn("l1-orchestrator-free-only", cc.SINGLE_PROVIDER_EXEMPTIONS)
+        route = self.reg["routes"]["l1-orchestrator-free-only"]
+        # single servable provider
+        provs = {registry.resolve_leg(leg, self.reg)[0]
+                 for leg in registry.gateway_legs(route, self.reg)}
+        self.assertEqual(provs, {"bazaarlink"})
+        # the exemption's own reason names the same provider, so the gate and
+        # the registry cannot drift apart silently
+        self.assertIn("bazaarlink", cc.SINGLE_PROVIDER_EXEMPTIONS["l1-orchestrator-free-only"])
+        # exemption note present with required phrases (fails if missing)
+        note = route.get("$comment") or ""
+        for phrase in cc.REQUIRED_SINGLE_PROVIDER_NOTE_PHRASES:
+            self.assertIn(phrase, note, "constraint note missing %r" % phrase)
+        self.assertIn("deliberately single-provider", note)
+
+    # D657-D2 (2026-10-08): the >=3-usable-legs bar was written when the chains
+    # still carried legs the D-657 probe rules removed. Counting what the
+    # resolver would actually plan (tool_calls proven, credit legs priced,
+    # context fitting the route's declared need), the bands are these; each
+    # shortfall names its cause instead of a floor the registry no longer
+    # supports. Shortfall != defect — inventing a leg to reach 3 would be.
+    USABLE_LEG_BAND = {
+        # the gemini AI-Studio leg 401s on both gateways and free-ai's tool call
+        # never landed, so the free band keeps one leg and stays exempt above.
+        "l1-orchestrator-free-only": 1,
+        # bazaarlink free head + the measured vertex credit tail: 1M tool-calling
+        # second providers are all either paid (banned from a free-only band) or
+        # unproven, so two is what passes.
+        "l1-orchestrator": 2,
+        # the openrouter :free legs top out at 262144 < the route's 1M need, so
+        # only the two below are counted for a full-size card.
+        "l2-worker-free-only": 2,
+        "l2-worker": 3,
+        "l3-driver": 8,
+        "l3-driver-free-only": 7,
+    }
+
+    def test_every_agentic_route_keeps_the_usable_leg_band_it_declares(self):
+        """TORDER D-TORDER-2 wanted three fallbacks per agentic tier. D657-D2
+        pins the band each route really has and refuses drift in both
+        directions: a lost leg fails the count, and a leg that stops carrying
+        the route's promise (unproven tools, unpriced credit, too small a
+        window) fails the count too rather than quietly becoming a 413."""
+        for route_id, count in self.USABLE_LEG_BAND.items():
+            usable = usable_legs(self.reg, route_id)
+            self.assertEqual(
+                len(usable), count,
+                "%s plans %d usable leg(s) (%s), expected %d"
+                % (route_id, len(usable), usable, count))
+            if route_id != "l1-orchestrator-free-only":
+                # the named single-provider exemption is the one route allowed
+                # below two; every other band must still reach a fallback.
+                self.assertGreaterEqual(len(usable), 2, route_id)
+
+    def test_a_new_free_leg_never_trails_a_paid_leg(self):
+        # The band order the brief asks for: free -> credit -> paid. A new free
+        # leg added below an already-serving paid leg would be a leg nothing
+        # reaches while the paid one answers.
+        for route_id in AGENTIC_TIER_ROUTES:
+            legs = self.reg["routes"][route_id]["legs"]
+            serving = [leg for leg in legs if leg in live_legs(self.reg, route_id)]
+            tiers = [leg_tier(self.reg, leg) for leg in serving]
+            free_idx = [i for i, t in enumerate(tiers) if t == "free"]
+            paid_idx = [i for i, t in enumerate(tiers) if t == "paid"]
+            if not free_idx or not paid_idx:
+                continue
+            for leg in NEW_FREE_LEGS:
+                if leg in serving:
+                    self.assertLess(
+                        serving.index(leg), max(paid_idx),
+                        "%s: the new free leg %s trails a paid leg" % (route_id, leg))
+
+    def test_a_credit_leg_is_last_and_gated_until_priced(self):
+        """TORDER 2026-10-01 (trial->free->credits->paid): PRICED credit legs
+        (ovh x3 with OVH prices, vertex with measured window) sit in the credits
+        band AFTER all free legs and BEFORE paid (not last; deepseek is last),
+        servable (not gated). Only UNPRICED credit legs (morph/deepinfra tails,
+        price 0 = no price on file) are documented tail fallbacks: gated with
+        available:false so neither resolver nor render spends the grant.
+
+        OVH-REPROBE 2026-10-08 adds a second, honest gate reason: a credit leg
+        whose id the WITHDREW upstream (providers.ovhcloud is live again while
+        ovhcloud/Qwen3-Coder-30B-A3B-Instruct 404s, so the provider-level gate no
+        longer covers it). A gate must therefore name a reason, not one reason —
+        the price note still pins every leg that is gated for money."""
+        reasons = ("price", "does not exist", "withdraw", "retire")
+
+        def problems(reg):
+            found = []
+            for route_id, route in reg["routes"].items():
+                gated = route.get("unavailable_legs") or {}
+                for leg in route.get("legs") or []:
+                    if leg_tier(reg, leg) != "credit" or leg not in gated:
+                        continue
+                    entry = gated[leg]
+                    note = (entry.get("$comment") or "").lower()
+                    if entry.get("available") is not False:
+                        found.append((route_id, leg, "gate does not say available:false"))
+                    elif not any(reason in note for reason in reasons):
+                        found.append((route_id, leg, "gate names no reason"))
+            return found
+
+        self.assertEqual(problems(self.reg), [])
+        # the scan bites: a gate whose prose loses its reason is a defect
+        mutated = copy.deepcopy(self.reg)
+        for route in mutated["routes"].values():
+            for entry in (route.get("unavailable_legs") or {}).values():
+                entry["$comment"] = "gated"
+        self.assertTrue(problems(mutated), "an unreasoned credit gate passed")
+
+    def test_no_new_free_leg_enters_a_clean_route(self):
+        # Rule 3: these providers' trains_on_prompts is null (unverified), which
+        # private_safe() fails closed on. A -clean route is where a
+        # privacy=sensitive card lands, so none of them may ever be a leg of one.
+        for route_id, route in self.reg["routes"].items():
+            if not route_id.endswith("-clean"):
+                continue
+            for leg in NEW_FREE_LEGS:
+                self.assertNotIn(leg, route.get("legs") or [], route_id)
+
+    def test_the_usable_legs_carry_the_route_promise(self):
+        """FREEKEYS-2c (rev-freekeys2 finding 2): a usable-legs count is only
+        worth having if those legs answer the requests this route's cards make.
+        Measured 128k of `context_advertised` behind a 128k route, they do; drop
+        one leg's window to 32k -- the shape the finding named, a small free
+        model counted as a fallback for full-size cards -- and the filter stops
+        counting it, while the legs that do carry the promise stay counted.
+        The small leg is the weak link, not the band."""
+        reg = copy.deepcopy(self.reg)
+        small = "cohere/command-a-03-2025"
+        before = usable_legs(self.reg, "l3-driver")
+        self.assertIn(small, before)
+        reg["models"]["command-a-03-2025"]["context_advertised"] = 32000
+        after = usable_legs(reg, "l3-driver")
+        self.assertNotIn(small, after,
+                         "a 32k leg was still counted usable for a 128k route")
+        # TORDER: nebius removed (6 legs); SCWREMOVAL 2026-10-06: scaleway gone
+        # too; D657-D2: the ovhcloud leg leaves every chain (OVH credits out of
+        # L0-L2, no documented cache); GROQRETIRED 2026-10-14: groq retired (2 legs)
+        # — the band that remains still carries the promise, head and paid tail included.
+        self.assertIn("bazaarlink/deepseek/deepseek-v4-flash-0731free:free", after)
+        self.assertIn("cohere/command-a-plus-05-2026", after)
+        self.assertIn("vertex/gemini-3.8-flash", after)
+        self.assertEqual(len(after), len(before) - 1)
+        # and the promise it is measured against is the route's own declaration,
+        # not an invention of the filter: l3-driver sells 128k (combos.json
+        # `context`), so 128k is what a counted fallback must carry.
+        self.assertEqual(registry.context_label_to_tokens(
+            self.reg["routes"]["l3-driver"]["surfaces"]["omniroute"]["context_declared"]),
+            128000)
+
+    def test_the_real_registry_still_passes_check(self):
+        self.assertEqual(registry.check_registry(self.reg), [])
+
+
+class DeepseekV41OnlyDecisionTests(unittest.TestCase):
+    """L1-routing DECISION on the question FREEKEYS-2 left open (brief D-141 item
+    3): the operator rule is 'DeepSeek only V4.1 Flash', and the free bazaarlink
+    grant is `deepseek-v4-flash-0731` — V4 weights, not V4.1. So it is in no
+    combo and policy carries no per-leg allow for it: the blanket `deny-deepseek`
+    refuses any attempt to pin it. The measured rows stay, because the probe
+    result is a fact worth keeping and a later operator decision may lift the
+    rule — nothing routes there until then.
+
+    D657-D2 (2026-10-08) IS that later decision, and it lifted exactly the clause
+    the paragraph above hedged: operator D-657 (spec combo-v2 §7b/§8) bans the
+    PAID DeepSeek tails and admits the $0 free copy whose cache the D-657 probe
+    measured, so `bazaarlink/deepseek/deepseek-v4-flash-0731free:free` heads the
+    chains and policy carries `allow-bazaarlink-ds-v4-flash-0731-free` one slot
+    ahead of `deny-deepseek`. What the decision still owns, and what is pinned
+    here: the 0731 grant is V4 weights, never spelled as or folded into the
+    pinned V4.1 group; V4 Pro stays denied by the first rule in the list; and the
+    paid native `deepseek/deepseek-flash` leg rides no chain.
+    """
+
+    LEG = "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_the_leg_is_still_registered_and_measured(self):
+        model_id = registry.resolve_leg(self.LEG, self.reg)[1]
+        self.assertEqual(self.reg["models"][model_id]["tool_calls"], "proven")
+        self.assertEqual(self.reg["providers"]["bazaarlink"]["tier"], "free")
+
+    def test_the_leg_is_never_a_v41_spelling(self):
+        # The 0731 grant is V4 weights. D657-D2 admits it to the chains, so the
+        # guard that survives is that it never poses as, or joins, the pinned
+        # V4.1 group: its own model row names no V4.1 snapshot, and no rendered
+        # combo carries it beside one.
+        model_id = registry.resolve_leg(self.LEG, self.reg)[1]
+        self.assertNotIn("v4.1", model_id, model_id)
+        self.assertNotIn("v4.1", self.reg["models"][model_id].get("serves", ""))
+        for combo in registry.render_omniroute(self.reg)["combos"]:
+            carried = [m for m in combo["models"] if "0731free" in m]
+            v41 = [m for m in combo["models"] if "v4.1" in m]
+            self.assertFalse(carried and v41, combo["name"])
+
+    def test_the_named_allow_reopens_only_the_0731_spelling(self):
+        # Was "the blanket deny governs it" (no allow rule existed). D657-D2 added
+        # one allow, named to a single model id, ordered BEFORE deny-deepseek;
+        # every other DeepSeek spelling still falls through the blanket deny, and
+        # V4 Pro stays behind the first rule in the list.
+        rules = self.reg["policy"]["leg_rules"]
+        ids = [r["id"] for r in rules]
+        allow = next(r for r in rules
+                     if r["id"] == "allow-bazaarlink-ds-v4-flash-0731-free")
+        self.assertEqual(allow["match"], "*deepseek-v4-flash-0731free*")
+        self.assertLess(ids.index(allow["id"]), ids.index("deny-deepseek"),
+                        "a leg_rule is only as strong as its position")
+        self.assertLess(ids.index("deny-deepseek-pro"), ids.index(allow["id"]),
+                        "the pro denial is first on purpose, ahead of any allow")
+        self.assertFalse(registry.leg_denied(self.LEG, self.reg))
+        for other in ("openrouter/deepseek/deepseek-v4-flash",
+                      "cheaperinference/deepseek-v4-flash",
+                      "ollama-cloud/deepseek-v4-flash",
+                      "deepseek/deepseek-v4-pro"):
+            self.assertTrue(registry.leg_denied(other, self.reg), other)
+
+    def test_the_pinned_group_renders_nothing_and_stays_single(self):
+        # deepseek-v4.1-flash is pinned per model on purpose (mapping doc Open
+        # choice 11): its job is weights fidelity, not redundancy. SS8 (D657-D2
+        # 2026-10-08) gated both of its legs, so it ships no combo at all -- which
+        # is the same guarantee in the other direction: it can never be diluted by
+        # a non-V4.1 leg, because it renders no legs.
+        rendered = registry.render_omniroute(self.reg)
+        names = {c["name"] for c in rendered["combos"]}
+        self.assertNotIn("deepseek-v4.1-flash", names)
+        self.assertIn("deepseek-v4.1-flash", rendered["omitted"])
+        self.assertEqual(
+            registry.gateway_legs(self.reg["routes"]["deepseek-v4.1-flash"],
+                                  self.reg), [])
+        # (no non-V4.1 DeepSeek leg survives anywhere else: the leg-level rule is
+        # GatewayOrderTests.test_only_deepseek_v41_flash_survives_of_the_deepseek_family)
+
+
+class ZcodeLocalProcessProviderTests(unittest.TestCase):
+    """GWDIAG 2026-10-02 (D-323 items 2 and 4): zcode://app-server/stdio is a
+    LOCAL process the gateway must spawn, not an HTTP provider. The app is not
+    installed on the gateway host (502 'spawn zcode ENOENT'), so the provider is
+    registered unavailable with no model, leg, route or combo reference; and the
+    bazaarlink credit note that motivated keeping its legs on auto:free is
+    pinned here. These tests can fail on purpose.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_zcode_is_registered_unavailable_with_the_diagnosis(self):
+        zcode = self.reg["providers"]["zcode"]
+        self.assertFalse(zcode["available"])
+        self.assertEqual(zcode["id"], "zcode")
+        self.assertIn("spawn zcode ENOENT", zcode["$comment"])
+        self.assertIn("OS-72", zcode["$comment"])
+
+    def test_zcode_is_referenced_nowhere_else(self):
+        # The only allowed home for the string is providers.zcode itself: every
+        # other top-level section (models, routes, policy, clients, version) and
+        # every other provider must be clean.
+        others = {k: v for k, v in self.reg.items() if k != "providers"}
+        self.assertNotIn("zcode", json.dumps(others, sort_keys=True))
+        other_providers = {k: v for k, v in self.reg["providers"].items()
+                           if k != "zcode"}
+        self.assertNotIn("zcode", json.dumps(other_providers, sort_keys=True))
+        # ... and, belt and braces, no rendered combo pins it.
+        rendered = registry.render_omniroute(self.reg)
+        self.assertNotIn("zcode", json.dumps(rendered["combos"], sort_keys=True))
+        # (the one allowed home really does carry the string)
+        self.assertIn("zcode", json.dumps(self.reg["providers"]["zcode"]))
+
+    def test_bazaarlink_probes_the_free_model_and_notes_the_credit_trap(self):
+        bzl = self.reg["providers"]["bazaarlink"]
+        self.assertEqual(bzl["provider_data"],
+                         {"validationModelId": "auto:free"})
+        self.assertIn("credits exhausted", bzl["$comment"])
+
+
+class ComboContractTests(unittest.TestCase):
+    """TORDER 2026-10-01: tools/combo-contract.py gate runs in pytest (fail-closed)."""
+
+    def test_contract_exits_zero_with_per_combo_verdict(self):
+        proc = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "combo-contract.py")],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("contract PASS", proc.stdout)
+
+
+class CleanTierEvidenceTests(unittest.TestCase):
+    """L1-CLEAN (2026-10-01): the trial-credit providers a privacy=sensitive
+    route may now use must PROVE no-training with cited evidence. A bare
+    trains_on_prompts: false with no evidence is the defect this guards."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_ovhcloud_declares_no_training(self):
+        self.assertIs(self.reg["providers"]["ovhcloud"]["trains_on_prompts"], False)
+
+    def test_both_trial_providers_carry_cited_privacy_evidence(self):
+        expected = {
+            "ovhcloud": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/",
+            "vertex_ai": ("https://docs.cloud.google.com/vertex-ai/generative-ai/"
+                          "docs/vertex-ai-zero-data-retention"),
+        }
+        for pid, url in expected.items():
+            block = self.reg["providers"][pid]["privacy"]
+            self.assertIs(block["trains_on_prompts"], False, pid)
+            urls = [e["url"] for e in block["evidence"]]
+            self.assertIn(url, urls, pid)
+            for e in block["evidence"]:
+                self.assertTrue(e["url"].startswith("https://"), pid)
+                self.assertTrue(e["quote"].strip(), pid)
+                self.assertRegex(e["accessed"], r"^\d{4}-\d{2}-\d{2}$", pid)
+
+    def test_google_ai_studio_still_trains_on_prompts(self):
+        # The free AI-Studio provider trains; it must never gain a no-training
+        # privacy block (its paid twin is reached through openrouter instead).
+        self.assertIs(self.reg["providers"]["google_ai_studio"]["trains_on_prompts"], True)
+
+    def test_a_privacy_block_without_evidence_is_rejected(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["evidence"] = []
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy evidence" in p and "ovhcloud" in p for p in problems),
+            problems)
+
+    def test_a_privacy_block_must_agree_with_the_provider_flag(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["trains_on_prompts"] = None
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy" in p and "ovhcloud" in p for p in problems), problems)
+
+    def test_an_evidence_row_needs_a_quote(self):
+        reg = mutated()
+        reg["providers"]["vertex_ai"]["privacy"]["evidence"][0]["quote"] = "  "
+        problems = registry.check_registry(reg)
+        self.assertTrue(
+            any("privacy evidence" in p and "vertex_ai" in p for p in problems),
+            problems)
+
+
+class CleanTierRouteTests(unittest.TestCase):
+    """L2-CLEAN (2026-10-01): privacy=sensitive routes lead with the trial
+    credits (ovh + vertex), span >= 2 families, and end on paid deepseek.
+    PRIVACY 2026-10-05 (operator): the sensitive-capable set is narrowed to
+    the -clean worker routes only - privacy sensitive means only what is
+    risky to share (credentials and the like), nearly all projects are not
+    privacy sensitive, so l2-orchestrator is no longer pinned to the trial
+    legs and may carry the antigravity claude head (a privacy=sensitive CARD
+    is still filtered per-leg at routing time via private_safe).
+    D657-D2 (2026-10-08) supersedes both the trial-credit lead and the paid
+    deepseek tail: every OVH row 404s on both probe gateways (ack fail, so the
+    leg is omitted until a re-probe returns 200), the antigravity claude head
+    is 429 and agy is never a head, and spec SS8 bans a paid deepseek leg. What
+    survives both rules is the vertex credit, so a clean chain today is that one
+    leg - which is why the tail pin below asserts the *absence* of the banned
+    legs rather than a band the probes never confirmed.
+    OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1) is the re-probe that rule
+    asked for and reopens the OVH half of it: gpt-oss-120b, Qwen3.8-27B and
+    Qwen3.5-397B-A17B answer 200 again, so the provider is available and OVH
+    rides - as an L3 leg only (OVH documents no prompt caching, so no l0-/l1-/l2-
+    chain may carry it and no -clean chain does), in the credit band's trial
+    position ahead of the vertex tail, never consecutive with another OVH leg.
+    The clean chains this class owns are unchanged: the vertex credit leg alone."""
+
+    TRIAL_LEGS = ("ovhcloud/gpt-oss-120b", "ovhcloud/Qwen3.8-27B",
+                  "vertex/gemini-3.8-flash")
+    SENSITIVE = ("l2-worker-clean", "l3-driver-clean")
+    TRIAL_FAMILIES = {"google", "openai-oss", "qwen"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def _leg(self, leg):
+        pid, mid = registry.resolve_leg(leg, self.reg)
+        self.assertIs(self.reg["providers"][pid].get("trains_on_prompts"), False, leg)
+        return pid, mid
+
+    def test_every_clean_route_leg_trains_nothing(self):
+        for rid in ("l2-worker-clean", "l3-driver-clean"):
+            for leg in self.reg["routes"][rid]["legs"]:
+                self._leg(leg)
+
+    def test_sensitive_routes_lead_with_the_caching_credit_leg(self):
+        # D657-D2: the ovhcloud legs 404'd out of every chain (probe ack fail on
+        # both gateways), so the vertex credit leads and closes. OVH-REPROBE
+        # 2026-10-08 brought them back one layer up: an OVH leg rides L3 chains
+        # only, never a -clean or l0-/l1-/l2- chain (no documented cache). A clean
+        # route may never fall back onto a leg that trains on prompts.
+        for rid in self.SENSITIVE:
+            legs = self.reg["routes"][rid]["legs"]
+            self.assertEqual(legs[0], "vertex/gemini-3.8-flash", rid)
+            self.assertNotIn("ovhcloud/gpt-oss-120b", legs, rid)
+            self.assertNotIn("ovhcloud/Qwen3.8-27B", legs, rid)
+
+    def test_t2_orchestrator_is_1m_caching_with_the_free_head(self):
+        # CACHEORCH 2026-10-05 (operator): orchestrator tiers serve long
+        # sessions, so only prompt-caching providers may serve them - the two
+        # OVH legs are gone (OVH does not cache). CTX1M (same day): every
+        # serving leg advertises 1M, so the stale 128k declaration is raised.
+        # D657-D2 replaces the antigravity claude head (429 on both gateways,
+        # and agy is never a head per the D-657 rules) with the bazaarlink free
+        # leg, and drops the paid deepseek tail (spec SS8).
+        legs = self.reg["routes"]["l2-orchestrator"]["legs"]
+        self.assertEqual(legs, ["bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+                                "vertex/gemini-3.8-flash"])
+        self.assertEqual(
+            self.reg["routes"]["l2-orchestrator"]["surfaces"]["omniroute"]
+            ["context_declared"], "1M")
+        self.assertNotIn("antigravity/claude-sonnet-5-5-medium", legs)
+        self.assertEqual(legs[-1], "vertex/gemini-3.8-flash")
+
+    def test_sensitive_routes_end_on_a_leg_the_probes_confirmed(self):
+        # L2-CLEAN wanted a paid deepseek tail; D657-D2 bans it (spec SS8: no
+        # paid deepseek, no paid meta muse), so the closing leg is the vertex
+        # credit and the banned tail is asserted absent instead of pinned last.
+        for rid in self.SENSITIVE:
+            legs = self.reg["routes"][rid]["legs"]
+            self.assertEqual(legs[-1], "vertex/gemini-3.8-flash", rid)
+            for banned in ("deepseek/deepseek-flash",
+                           "antigravity/claude-sonnet-5-5-medium"):
+                self.assertNotIn(banned, legs, "%s carries the SS8-banned %s"
+                                 % (rid, banned))
+            for leg in legs:
+                self._leg(leg)
+
+    def test_clean_trial_legs_span_at_least_two_families(self):
+        # D657-D2 serves only the vertex leg on a clean chain, so this pins the
+        # REGISTERED trial band - the two families a re-probe 200 would put back
+        # on the lead, which is what the >=2-family promise needs to survive.
+        families = {self.reg["models"][self._leg(leg)[1]]["family"]
+                    for leg in self.TRIAL_LEGS}
+        self.assertGreaterEqual(len(families & self.TRIAL_FAMILIES), 2, families)
+
+    def test_no_banned_provider_serves_a_sensitive_route(self):
+        banned = ("google_ai_studio/", "openrouter/", "opencode-zen/", "gemini/")
+        for rid in self.SENSITIVE:
+            for leg in self.reg["routes"][rid]["legs"]:
+                self.assertFalse(leg.startswith(banned), (rid, leg))
+
+    def test_ovh_legs_ride_l3_chains_only_after_the_reprobe(self):
+        """L2-CLEAN kept ovhcloud/Qwen3-Coder-30B-A3B-Instruct in l2-worker and
+        l3-driver as an available:false gate ("not in OVH AI Endpoints catalog
+        2026-10-01"); D657-D2 deleted the gate with the leg it gated after
+        probe-d657 404'd all three ovhcloud spellings on both gateways.
+
+        OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1, operator brief) is the
+        re-probe that rule asked for: gpt-oss-120b, Qwen3.8-27B and
+        Qwen3.5-397B-A17B answer 200 again, so providers.ovhcloud is available
+        and OVH rides again — with the three bounds the brief draws:
+
+          (1) L3 legs ONLY. OVH documents no prompt caching, and spec SS2 keeps
+              the cache lever on L0-L2, so no l0-/l1-/l2- chain may carry it
+              (combo-contract rule (f) fails one there anyway).
+          (2) the credit band's TRIAL position — the last leg before the vertex
+              credit tail, after every free leg, so rule (b) holds and a 429 on
+              the grant falls through to the paid-for leg rather than opening
+              the chain with it.
+          (3) never consecutive with another OVH leg — one rate-limit domain per
+              step (rule (g)), which is also why only ONE OVH id rides each L3
+              chain: the second priced id takes the other chain.
+
+        Qwen3-Coder-30B stays retired (OVHCODER-DROP: OVH withdrew the id, a
+        completion 404s "does not exist"); OVHCODER-DROP retired it outright — see
+        test_ovh_coder_leg_is_retired_not_merged, not a per-leg gate here.
+        ovh-gpt-oss-120b re-probed 200 but is UNPRICED, so rule
+        (h) keeps it out of every chain — same per-leg gate, and the price gap
+        is filed in logs/briefs/denylegs-gaps.md."""
+        self.assertIs(self.reg["providers"]["ovhcloud"].get("available"), True)
+        stale = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
+        unpriced = "ovhcloud/gpt-oss-120b"
+        priced = ("ovhcloud/Qwen3.8-27B", "ovhcloud/Qwen3.5-397B-A17B")
+        routes = self.reg["routes"]
+
+        for rid, route in routes.items():
+            legs = route.get("legs") or []
+            # (1) no orchestrator layer carries an OVH leg, and no retired or
+            # unpriced id rides a chain (an operator-facing `ovh-*` seat route
+            # may still declare one, gated, so apply prunes the live combo).
+            if rid.startswith(("l0-", "l1-", "l2-")):
+                for leg in legs:
+                    self.assertFalse(leg.startswith("ovhcloud/"), (rid, leg))
+            if rid.startswith(("l0-", "l1-", "l2-", "l3-", "t")):
+                self.assertNotIn(stale, legs, rid)
+                self.assertNotIn(unpriced, legs, rid)
+
+            # (3) one OVH leg per step, anywhere.
+            for i in range(1, len(legs)):
+                self.assertFalse(legs[i].startswith("ovhcloud/")
+                                 and legs[i - 1].startswith("ovhcloud/"),
+                                 (rid, legs[i - 1], legs[i]))
+
+        # (2) the two priced ids, one per L3 chain, in the trial position.
+        for rid in ("l3-driver", "l3-implementer"):
+            legs = routes[rid]["legs"]
+            carried = [leg for leg in legs if leg.startswith("ovhcloud/")]
+            self.assertEqual(len(carried), 1, (rid, carried))
+            self.assertIn(carried[0], priced, rid)
+            self.assertEqual(legs[-2:], carried + ["vertex/gemini-3.8-flash"], rid)
+        self.assertNotEqual(routes["l3-driver"]["legs"][-2],
+                            routes["l3-implementer"]["legs"][-2],
+                            "both L3 chains carry the same OVH id: one grant, "
+                            "not two seats")
+
+        # every -clean route stays off the grant, cached-tail or not.
+        for rid, route in routes.items():
+            if rid.endswith("-clean"):
+                for leg in route.get("legs") or []:
+                    self.assertFalse(leg.startswith("ovhcloud/"), rid)
+
+        # the unpriced id keeps its own operator-facing seat, gated per leg so
+        # nothing renders it; the retired one has no seat at all.
+        self.assertNotIn("ovh-qwen3-coder-30b", routes)
+        self.assertIn(unpriced, routes["ovh-gpt-oss-120b"]["legs"])
+        gate = routes["ovh-gpt-oss-120b"]["unavailable_legs"][unpriced]
+        self.assertIs(gate["available"], False)
+        self.assertIn("price", (gate.get("$comment") or "").lower())
+        # and the seat whose leg is priced and live declares a servable leg
+        self.assertIn("ovhcloud/Qwen3.8-27B", routes["ovh-qwen3.8-27b"]["legs"])
+        self.assertEqual(registry.gateway_legs(routes["ovh-qwen3.8-27b"], self.reg),
+                         ["ovhcloud/Qwen3.8-27B"])
+        self.assertEqual(registry.gateway_legs(routes["ovh-gpt-oss-120b"], self.reg),
+                         [])
+
+    def test_ovh_coder_leg_is_retired_not_merged(self):
+        """OVHCODER-DROP 2026-10-08 (hotfix, lane lane-ovh-coder-drop).
+
+        OVH withdrew `Qwen3-Coder-30B-A3B-Instruct` upstream — a completion
+        request answers HTTP 404 "The model `Qwen3-Coder-30B-A3B-Instruct` does
+        not exist", and probe D-657 the same day 404'd both the `ovh/` and the
+        `ovhcloud/` spellings on central and on workstation. providers.ovhcloud
+        is AVAILABLE again the same day (OVH-REPROBE: gpt-oss-120b, Qwen3.8-27B
+        and Qwen3.5-397B-A17B answer 200), so a per-leg `available: false` gate
+        on a seat route would leave a declared route whose only leg can never
+        serve — a combo that renders nothing and an id that never stops
+        resolving. ORQWEN404's shape is the right one instead: the leg is out of
+        every chain (pinned by test_ovh_legs_ride_l3_chains_only_after_the_reprobe),
+        the seat ROUTE is deleted, and the id moves to
+        tools/registry.py OMNIROUTE_RETIRED_IDS so `apply` prunes the live combo.
+
+        So this pins the retirement, not the dead state: the id must be gone from
+        `routes`, named exactly once by the retire list, absent from every render
+        surface while present in combos.json's `retired`, and the models row is
+        kept — for its price history — carrying the dated note. Re-open only if
+        OVH re-lists the id and a fresh probe answers 200."""
+        leg = "ovhcloud/Qwen3-Coder-30B-A3B-Instruct"
+        routes = self.reg["routes"]
+
+        # (1) the route is deleted, not gated.
+        self.assertNotIn("ovh-qwen3-coder-30b", routes)
+        for rid, route in routes.items():
+            self.assertNotIn(leg, route.get("legs") or [], rid)
+            self.assertNotIn(leg, (route.get("unavailable_legs") or {}), rid)
+
+        # (2) the id retires, so apply prunes the live combo.
+        self.assertIn("ovh-qwen3-coder-30b", registry.OMNIROUTE_RETIRED_IDS)
+        self.assertNotIn("ovh-qwen3-coder-30b", registry.IDE_MODEL_ORDER)
+
+        # (3) nothing on any render surface names it; combos.json says retired.
+        combos = json.loads((ROOT / "configuration" / "omniroute"
+                             / "combos.json").read_text(encoding="utf-8"))
+        self.assertIn("ovh-qwen3-coder-30b", combos["retired"])
+        self.assertNotIn("ovh-qwen3-coder-30b", combos["omitted"])
+        self.assertNotIn("ovh-qwen3-coder-30b",
+                         [c["name"] for c in combos["combos"]])
+        self.assertNotIn("ovh-qwen3-coder-30b",
+                         registry.servable_route_ids(self.reg))
+        self.assertNotIn("ovh-qwen3-coder-30b",
+                         json.dumps(registry.render_ide(self.reg)))
+        # opencode.jsonc's hand passthrough left with the model (D5 pricing).
+        self.assertNotIn("ovh-direct-qwen3-coder-30b",
+                         (ROOT / "opencode.jsonc").read_text(encoding="utf-8"))
+
+        # (4) the model row survives for pricing history and says why.
+        row = self.reg["models"]["Qwen3-Coder-30B-A3B-Instruct"]
+        self.assertGreater(row["price_in"], 0)
+        self.assertTrue(row["price_source"])
+        self.assertIn("OVHCODER-DROP", row.get("$comment") or "")
+
+
+class ReviewLensRouteTests(unittest.TestCase):
+    """SS3 (combo-v2, 2026-10-08) stacks four review lenses - diff, tests-run,
+    codebase, transcript - and D-657 (SS8 lane AO-DENYLEGS) chains them as
+    `l3-review-*` routes, one combo per lens. Open item 2 (2026-10-08) is the
+    audit of that set: the three lenses a gateway can serve are combos, and the
+    fourth is a declared route that renders nothing, because the bar SS3 draws
+    for it (intelligence index >= 44) is only met by legs SS7b/SS8 took out of
+    the gateway. A legless route is the honest shape (like the `*-paid` ones:
+    `legs: []`, no combo rendered, nothing orphaned); a sub-44 leg in its place
+    would be the defect - a transcript review by a model that cannot hold a
+    transcript is the failure the lens exists to catch.
+
+    So the transcript lens is carried by the spawner's own client, exactly as
+    SS7b (b) says: a `policy.reviewers` row naming the qoder client's
+    Qwen3.8-Max, no gateway leg, marked paid because Max spends Qoder credit.
+    That row is what makes the lens reachable to the resolver, so it is pinned
+    here together with the route that documents it."""
+
+    LENSES = ("l3-review-diff", "l3-review-tests", "l3-review-codebase",
+              "l3-review-transcript")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def _route(self, rid):
+        route = self.reg["routes"].get(rid)
+        self.assertIsInstance(route, dict, "%s is not a declared route" % rid)
+        return route
+
+    def test_every_lens_of_the_spec_is_a_route(self):
+        for rid in self.LENSES:
+            route = self._route(rid)
+            self.assertEqual(route["id"], rid, rid)
+            self.assertEqual(route["class"], "cheap", rid)
+            surface = route["surfaces"]["omniroute"]
+            self.assertIn("context_declared", surface, rid)
+            self.assertIn(rid, surface["display_name"], rid)
+
+    def test_the_three_servable_lenses_chain_probe_passed_legs(self):
+        for rid in self.LENSES:
+            route = self._route(rid)
+            if rid == "l3-review-transcript":
+                continue
+            legs = route.get("legs") or []
+            self.assertTrue(legs, "%s declares a lens but no leg" % rid)
+            for leg in legs:
+                provider_id, model_id = registry.resolve_leg(leg, self.reg)
+                self.assertIn(model_id, self.reg["models"], leg)
+                # SS7b: a spawner-client leg never rides a gateway combo.
+                self.assertNotEqual(provider_id, "qoder_ai", (rid, leg))
+            self.assertFalse([leg for leg in legs if leg.startswith("ovhcloud/")],
+                             "%s: OVH documents no cache and 128k-clamps a 1M lens"
+                             % rid)
+
+    def test_the_transcript_lens_is_legless_and_says_why(self):
+        route = self._route("l3-review-transcript")
+        self.assertEqual(route.get("legs"), [],
+                         "a gateway leg now meets SS3's II >= 44 bar - re-chain "
+                         "the lens and give it legs")
+        self.assertEqual(list(route.get("unavailable_legs") or {}), [],
+                         "a legless lens carries no gate either")
+        note = route["$comment"]
+        for phrase in ("SS3", "44", "qoder", "legless"):
+            self.assertIn(phrase, note, note[:120])
+
+    def test_the_transcript_carrier_is_a_qoder_client_row_on_the_reviewer_list(self):
+        rows = [entry for entry in self.reg["policy"]["reviewers"]
+                if entry["client"] == "qoder"
+                and "max" in entry["model"].lower()]
+        self.assertTrue(rows, "SS7b(b): the transcript lens' carrier is the qoder "
+                              "client leg - policy.reviewers names no Qwen3.8-Max row")
+        entry = rows[0]
+        self.assertEqual(entry["family"], "qwen", entry["model"])
+        self.assertIs(entry["paid"], True,
+                      "Qwen3.8-Max spends Qoder credit (tools/autoos_clients.py)"
+                      ", so the last-resort pass is where it belongs")
+        self.assertNotIn("leg", entry,
+                         "a qoder row with a gateway leg would put a spawner-only "
+                         "client back into the combos (SS7b)")
+
+    def test_haiku_stays_the_tail_of_the_reviewer_list(self):
+        # SS8/REVROUTE's order: the free families first, the paid last-resorts
+        # after them, Claude Haiku at the very tail as the first-pass fallback.
+        # The transcript carrier joins the paid band, which must not push Haiku up.
+        reviewers = self.reg["policy"]["reviewers"]
+        self.assertEqual(reviewers[-1]["family"], "anthropic",
+                         "Haiku must stay the tail of the preference list")
+
+
+class ModelKeyCaseHygieneTests(unittest.TestCase):
+    """L3 (2026-10-01): two model keys that differ only in letter case are a
+    registry hygiene bug - the same model read twice, drifting."""
+
+    def test_no_model_keys_differ_only_in_case(self):
+        reg = load_registry()
+        seen = {}
+        for key in reg["models"]:
+            seen.setdefault(key.lower(), []).append(key)
+        dupes = {k: v for k, v in seen.items() if len(v) > 1}
+        self.assertEqual(dupes, {})
+
+
+
+class CreditPrivacyEvidenceGateTests(unittest.TestCase):
+    """T1-CLEAN-4 K2 (2026-10-01): the registry's own words - "a credit leg is
+    admitted because its provider now proves no-training with a cited
+    ``privacy`` block" (private_safe's docstring and the schema's tier
+    description) - must be ENFORCED, not documented. Before this the only gate
+    was `trains_on_prompts is False`, so a credit row that merely asserted the
+    flag passed as clean with no evidence behind it, and check_registry was
+    silent about it too."""
+
+    def test_a_credit_provider_without_a_privacy_block_is_not_private_safe(self):
+        reg = mutated()
+        del reg["providers"]["ovhcloud"]["privacy"]
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+        self.assertIn("credit", reason)
+
+    def test_a_credit_provider_with_an_incomplete_block_is_not_private_safe(self):
+        # an evidence row whose url is not https is no evidence at all
+        reg = mutated()
+        reg["providers"]["vertex_ai"]["privacy"]["evidence"][0]["url"] = "http://x.test/terms"
+        safe, reason = registry.private_safe("vertex_ai", "gemini-3.8-flash", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_a_cited_credit_provider_is_private_safe(self):
+        reg = load_registry()
+        for pid, model in (("ovhcloud", "gpt-oss-120b"), ("vertex_ai", "gemini-3.8-flash")):
+            safe, reason = registry.private_safe(pid, model, reg)
+            self.assertTrue(safe, "%s: %s" % (pid, reason))
+
+    def test_a_paid_provider_needs_no_block(self):
+        # the gate is credit-only: a paid leg was never asked to cite terms.
+        reg = load_registry()
+        self.assertNotIn("privacy", reg["providers"]["deepseek"])
+        safe, reason = registry.private_safe("deepseek", "deepseek-flash", reg)
+        self.assertTrue(safe, reason)
+
+    def test_check_registry_flags_a_credit_provider_with_no_privacy_block(self):
+        reg = mutated()
+        del reg["providers"]["ovhcloud"]["privacy"]
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.ovhcloud" in p], problems)
+
+    def test_check_registry_flags_a_credit_provider_with_an_empty_block(self):
+        reg = mutated()
+        reg["providers"]["vertex_ai"]["privacy"]["evidence"] = []
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.vertex_ai" in p], problems)
+
+    def test_a_model_tier_override_to_credit_on_a_paid_provider_is_not_private_safe(self):
+        # F1 (T1-CLEAN-4 rework): the gate read the EFFECTIVE tier (model
+        # override included) but the evidence predicate read only the provider's
+        # own tier, so this leg was clean at the gate and invisible to
+        # check_registry - one rule, two readings.
+        reg = mutated()
+        self.assertEqual(reg["providers"]["deepseek"]["tier"], "paid")
+        reg["models"]["deepseek-flash"]["tier"] = "credit"
+        safe, reason = registry.private_safe("deepseek", "deepseek-flash", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+        self.assertIn("credit", reason)
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.deepseek" in p], problems)
+
+    def test_a_paid_override_on_a_credit_provider_still_demands_the_block(self):
+        # F1, the symmetric leg: the credit requirement follows the leg's
+        # effective tier AND the provider's tier - either one being credit
+        # demands the cited block, so an override cannot escape it by spelling
+        # itself paid.
+        reg = mutated()
+        del reg["providers"]["ovhcloud"]["privacy"]
+        reg["models"]["gpt-oss-120b"]["tier"] = "paid"
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+        problems = registry._check_privacy_evidence(reg)
+        self.assertTrue([p for p in problems if "providers.ovhcloud" in p], problems)
+
+    def test_a_paid_override_on_a_cited_credit_provider_is_private_safe(self):
+        # and the rule stays consistent in the passing direction: a credit
+        # provider with complete evidence is clean whichever tier the leg runs
+        # under.
+        reg = mutated()
+        reg["models"]["gpt-oss-120b"]["tier"] = "paid"
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertTrue(safe, reason)
+        self.assertEqual(registry._check_privacy_evidence(reg), [])
+
+    def test_an_empty_quote_fails_the_credit_gate_not_just_the_check(self):
+        # F6: the K2 gate tests only mutated the evidence url, so the other
+        # evidence defects were untested at gate level.
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["evidence"][0]["quote"] = "   "
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_a_non_iso_accessed_date_fails_the_credit_gate(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["evidence"][0]["accessed"] = "1 Oct 2026"
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_a_block_that_disagrees_with_the_provider_flag_fails_the_gate(self):
+        reg = mutated()
+        reg["providers"]["ovhcloud"]["privacy"]["trains_on_prompts"] = True
+        safe, reason = registry.private_safe("ovhcloud", "gpt-oss-120b", reg)
+        self.assertFalse(safe)
+        self.assertIn("privacy", reason)
+
+    def test_the_committed_registry_needs_no_credit_privacy_fix(self):
+        self.assertEqual(registry._check_privacy_evidence(load_registry()), [])
+
+
+class ResolveLegFoldTests(unittest.TestCase):
+    """T1-CLEAN-4 K3 (2026-10-01): resolve_leg()'s case-fold fallback (T1-CLEAN-3)
+    had no direct test - the mutant `len(folded) >= 1` survived, i.e. nothing
+    pinned that an AMBIGUOUS fold is refused rather than silently decided."""
+
+    def _reg(self, *model_keys):
+        return {"providers": {"p": {"omniroute_id": "p", "tier": "paid",
+                                    "trains_on_prompts": False}},
+                "models": {k: {"id": k, "family": "test"} for k in model_keys}}
+
+    def test_an_exact_key_wins_over_a_fold_match(self):
+        reg = self._reg("Some-Model", "some-model")
+        self.assertEqual(registry.resolve_leg("p/Some-Model", reg), ("p", "Some-Model"))
+        self.assertEqual(registry.resolve_leg("p/some-model", reg), ("p", "some-model"))
+
+    def test_two_fold_matches_are_ambiguous_never_a_silent_pick(self):
+        reg = self._reg("Some-Model", "some-MODEL")
+        with self.assertRaises(ValueError) as ctx:
+            registry.resolve_leg("p/SOME-model", reg)
+        self.assertIn("SOME-model", str(ctx.exception))
+
+    def test_exactly_one_fold_match_resolves(self):
+        reg = self._reg("Qwen3-Coder-30B-A3B-Instruct")
+        self.assertEqual(
+            registry.resolve_leg("p/qwen3-coder-30b-a3b-instruct", reg),
+            ("p", "Qwen3-Coder-30B-A3B-Instruct"))
+
+    def test_no_fold_match_raises(self):
+        reg = self._reg("Some-Model")
+        with self.assertRaises(ValueError):
+            registry.resolve_leg("p/nothing-here", reg)
+
+    def test_a_real_leg_folds_to_the_canonical_key(self):
+        reg = load_registry()
+        self.assertEqual(
+            registry.resolve_leg("ovhcloud/qwen3-coder-30b-a3b-instruct", reg),
+            ("ovhcloud", "Qwen3-Coder-30B-A3B-Instruct"))
+
+
+class CleanCreditHeadPricedTests(unittest.TestCase):
+    """T1-CLEAN-4, out-of-scope pin (2026-10-01): the clean routes' credit HEAD
+    legs are unpriced right now, which is the state the resolver refuses them
+    for. Pinned so the CREDIT lane's change is a visible diff, not a surprise.
+    Priced by T1-CREDIT provider_prices at train integration."""
+
+    def test_the_clean_credit_head_legs_are_unpriced_today(self):
+        reg = load_registry()
+        for leg in ("ovhcloud/gpt-oss-120b", "vertex/gemini-3.8-flash"):
+            provider_id, model_id = registry.resolve_leg(leg, reg)
+            self.assertEqual(reg["providers"][provider_id]["tier"], "credit", leg)
+            self.assertFalse(resolver.credit_leg_priced(model_id, reg), leg)
+
+
+class DenyGemini31ProPreviewTests(unittest.TestCase):
+    """T1-CREDIT-FIX-11 R1 (D-255/D-256): gemini-3.1-pro-preview stays as a DENIED registry row."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+
+    def test_deny_rule_present_with_d255_reason(self):
+        rules = self.reg["policy"]["leg_rules"]
+        hits = [r for r in rules if "gemini-3.1-pro-preview" in r.get("match", "")]
+        self.assertTrue(hits, "no leg_rule matches gemini-3.1-pro-preview")
+        rule = hits[0]
+        self.assertFalse(rule["allow"])
+        self.assertIn("D-255", rule["reason"])
+
+    def test_legs_denied_in_all_spellings(self):
+        for leg in ("vertex/gemini-3.1-pro-preview", "gemini/gemini-3.1-pro-preview", "google/gemini-3.1-pro-preview", "vertex_ai/gemini-3.1-pro-preview"):
+            self.assertTrue(registry.leg_denied(leg, self.reg), leg)
+
+    def test_price_row_still_readable(self):
+        row = self.reg["models"]["gemini-3.1-pro-preview"]
+        self.assertEqual(row["provider_prices"]["vertex_ai"]["price_in"], 2e-06)
+
+    def test_denied_leg_never_usable_and_pin_fails_closed(self):
+        reg = mutated()
+        reg["routes"]["r-denied-probe"] = {"id": "r-denied-probe", "legs": ["vertex/gemini-3.1-pro-preview"], "class": "test"}
+        # resolve_leg needs provider + model rows; add minimal ones if absent
+        if "vertex" not in reg["providers"]:
+            reg["providers"]["vertex"] = {"id": "vertex", "tier": "paid", "monthly_cap_usd": 250.0}
+        route = reg["routes"]["r-denied-probe"]
+        legs, skipped, _ = resolver.usable_legs(route, {"kind": "implement", "privacy": "public"}, {"need_tokens": 10}, {"opencode": {"installed": True, "signed_in": True, "reason": ""}}, reg, {})
+        self.assertEqual(legs, [])
+        self.assertIn("vertex/gemini-3.1-pro-preview", skipped)
+        self.assertTrue(any("leg_rules" in r for r in skipped["vertex/gemini-3.1-pro-preview"]))
+
+
+_MISSING = object()
+
+# AO-PROBE-D657 data (D-658, 2026-10-08): the registry model rows the probe's
+# legs resolved to through tools/registry.py's resolve_leg, at the verdict the
+# two gateways' `cache` cells add up to - "true" on either gateway wins over
+# "false" on either, anything else is "unknown". gemini-3.8-flash is the one row
+# the probe answered for only SOME of its providers, so it has no model-level
+# verdict at all: its Vertex leg is documented-cached (Google implicit caching)
+# and its AI-Studio leg was never measured - that split lives in
+# `prompt_cache_by_provider` (D1 judge nit: caching is a provider+model fact).
+# D657-D2 (2026-10-08) registers the two legs the re-cut chains need
+# (cohere/command-a-plus-05-2026, openrouter/nvidia/nemotron-3-ultra-550b-a55b:free)
+# and takes their verdict from the same TSV cells: ack ok, tool ok, cache false
+# on both gateways, so both rows join the "false" group and ride no L0-L2 chain.
+_D657_BY_VALUE = {
+    "true": ("deepseek/deepseek-v4-flash-0731free:free",
+             "nvidia/nemotron-3-super-120b-a12b:free"),
+    "false": ("cohere/north-mini-code:free",
+              "command-a-03-2025",
+              "command-a-plus-05-2026",
+              "command-r-plus-08-2024",
+              "mistral-code-latest",
+              "nvidia/nemotron-3-ultra-550b-a55b:free",
+              "poolside/laguna-s-2.1:free"),
+    "unknown": ("Qwen3-Coder-30B-A3B-Instruct",
+                "Qwen3.8-27B",
+                "claude-sonnet-5",
+                "google/gemini-3.8-flash",
+                "gpt-oss-120b",
+                "llama-4-maverick",
+                "morph-dsv4flash",
+                "muse-spark-1.3-contributor-free",
+                "openai/gpt-oss-120b",
+                "openai/gpt-oss-20b",
+                "qwen/qwen3.8-27b",
+                "qwen/qwen3.8-27b:free",
+                "qwen7b"),
+}
+PROMPT_CACHE_D657 = {model_id: value
+                     for value, ids in _D657_BY_VALUE.items()
+                     for model_id in ids}
+
+# AO-MIMO-WIRING (2026-10-12) is a SECOND provenance, not an extension of the
+# D-657 TSV: two MiMo chat ids measured through the OmniRoute gateway the same
+# day the provider was wired. Kept apart from the D657 table on purpose — a row
+# this lane never probed must not read as if it came out of that probe's data.
+# AO-MIMO-V26 (same day): the v2.5 chat ids retire 2026-10-21 and are not wired; the
+# two v2.6 chat ids answer cached_tokens on the second identical call (1792 of 1917 /
+# 1856 of 1917).
+PROMPT_CACHE_MIMO_SMOKE = {"mimo-v2.6-pro": "true", "mimo-v2.6-flash": "true"}
+PROMPT_CACHE_ROWS = dict(PROMPT_CACHE_D657, **PROMPT_CACHE_MIMO_SMOKE)
+# The source string must name the measurement event that set the verdict, so
+# each accepted provenance is one dated event.
+PROMPT_CACHE_PROVENANCES = ("probe D-657 2026-10-08 central+workstation",
+                            "gateway smoke 2026-10-12")
+
+
+
+class PromptCacheFieldTests(unittest.TestCase):
+    """AO-PROBE-D657 (D-657/D-658, 2026-10-08): ``models.<id>.prompt_cache`` is
+    the prompt-caching verdict of a leg - one of the STRINGS "true" /
+    "documented" / "false" / "unknown", never a boolean or null, because the
+    probe's TSV cell, the vendor's documented claim and the measured hit are
+    three spellings of one fact. The schema (additionalProperties: false) has
+    to name the field and its companion ``prompt_cache_source``, and check owns
+    the value set because a gate reading ``is True`` and a gate reading
+    truthiness disagree about a string (``"false"`` is truthy)."""
+
+    MODEL_ID = "gemini-3.8-flash"
+
+    def problems(self, value, source=_MISSING):
+        reg = mutated()
+        reg["models"][self.MODEL_ID]["prompt_cache"] = value
+        if source is not _MISSING:
+            reg["models"][self.MODEL_ID]["prompt_cache_source"] = source
+        return [p for p in registry.check_registry(reg) if "prompt_cache" in p]
+
+    def test_the_committed_registry_carries_the_D657_probe_rows_and_nothing_else(self):
+        """AO-PROBE-D657 data (D-658): every registry model row a probe-d657
+        leg resolved to, at the verdict its TSV cells add up to - no invented
+        row, no verdict for a leg the probe never answered.
+        AO-MIMO-WIRING (2026-10-12) adds the second provenance above: two rows
+        from a gateway smoke the D-657 TSV never saw. The set is still closed —
+        a verdict with no measurement behind it is what this test refuses."""
+        reg = load_registry()
+        rows = {model_id: model["prompt_cache"]
+                for model_id, model in reg["models"].items()
+                if "prompt_cache" in model}
+        self.assertEqual(rows, PROMPT_CACHE_ROWS)
+        self.assertEqual(registry.check_registry(reg), [])
+
+    def test_every_set_verdict_names_where_it_came_from(self):
+        reg = load_registry()
+        for model_id, model in sorted(reg["models"].items()):
+            if "prompt_cache" not in model:
+                continue
+            self.assertIn(
+                True, [names in model["prompt_cache_source"]
+                       for names in PROMPT_CACHE_PROVENANCES],
+                "%s: prompt_cache_source %r names no probe event in %s"
+                % (model_id, model["prompt_cache_source"],
+                   PROMPT_CACHE_PROVENANCES))
+
+    def test_the_four_strings_validate(self):
+        for value in ("true", "documented", "false", "unknown"):
+            self.assertEqual(self.problems(value), [], repr(value))
+
+    def test_a_source_string_rides_with_the_verdict(self):
+        self.assertEqual(self.problems(
+            "documented", source="probe D-657 2026-10-08 central+workstation"), [])
+
+    def test_any_other_shape_is_named_with_its_model(self):
+        for value in (True, False, None, "True", "TRUE", "yes", "unmeasured",
+                      1, 0, "", {"cached": True}, ["true"]):
+            problems = self.problems(value)
+            self.assertEqual(len(problems), 1, (repr(value), problems))
+            self.assertIn("models.%s.prompt_cache" % self.MODEL_ID, problems[0])
+            self.assertIn("documented", problems[0])
+
+    def test_a_source_must_name_something(self):
+        for source in ("", "   ", None, 7, ["probe"]):
+            problems = self.problems("true", source=source)
+            # gemini-3.8-flash is the one row that carries a per-provider
+            # verdict beside the model-level one, so a missing attribution is
+            # named by both rules -- same fact, two readers of it.
+            self.assertEqual(len(problems), 2, (repr(source), problems))
+            for problem in problems:
+                self.assertIn("models.%s.prompt_cache_source" % self.MODEL_ID,
+                              problem)
+
+    def test_the_schema_permits_the_field_without_requiring_it(self):
+        schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
+                            .read_text(encoding="utf-8"))
+        model = schema["$defs"]["model"]
+        self.assertFalse(model["additionalProperties"])
+        self.assertEqual(model["properties"]["prompt_cache"]["type"], "string")
+        self.assertEqual(model["properties"]["prompt_cache"]["enum"],
+                         ["true", "documented", "false", "unknown"])
+        self.assertEqual(model["properties"]["prompt_cache_source"]["type"],
+                         "string")
+        for key in ("prompt_cache", "prompt_cache_source"):
+            self.assertNotIn(key, model["required"])
+
+
+class PromptCachePerProviderTests(unittest.TestCase):
+    """AO-DENYLEGS D1 (D-658 judge nit, 2026-10-08): caching is a fact about a
+    PROVIDER+MODEL leg, not a model id -- gemini-3.8-flash is documented-cached
+    through Vertex AI and was never measured through AI-Studio. The per-provider
+    verdict lives in ``models.<id>.prompt_cache_by_provider`` (same shape as
+    ``provider_prices``) and ``leg_prompt_cache()`` is the one reader: provider
+    entry first, model row next, "unknown" last -- so a model-level verdict can
+    never claim caching for a provider no probe answered."""
+
+    _SOURCE = "probe D-657 2026-10-08 central+workstation"
+
+    def mini(self, model_row):
+        return {
+            "version": "2026-10-08",
+            "providers": {
+                "vertex_ai": {"omniroute_id": "vertex"},
+                "google_ai_studio": {"omniroute_id": "gemini"},
+                "bazaarlink": {"model_prefix": "bzl"},
+            },
+            "models": {"gemini-3.8-flash": model_row},
+            "routes": {}, "clients": {}, "policy": {},
+        }
+
+    def problems(self, model_row, source=_SOURCE):
+        row = dict(model_row)
+        if source is not _MISSING:
+            row.setdefault("prompt_cache_source", source)
+        return [p for p in registry.check_registry(self.mini(row))
+                if "prompt_cache" in p]
+
+    def test_the_provider_entry_beats_the_model_row(self):
+        reg = self.mini({"prompt_cache": "documented",
+                         "prompt_cache_source": "probe D-657 2026-10-08",
+                         "prompt_cache_by_provider":
+                             {"google_ai_studio": "unknown"}})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "gemini/gemini-3.8-flash"), "unknown")
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "vertex/gemini-3.8-flash"),
+            "documented")
+
+    def test_the_model_row_answers_for_a_provider_with_no_entry(self):
+        reg = self.mini({"prompt_cache": "false"})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "gemini/gemini-3.8-flash"), "false")
+
+    def test_absence_and_a_bad_leg_both_read_unknown(self):
+        self.assertEqual(registry.leg_prompt_cache(self.mini({}),
+                                                   "gemini/gemini-3.8-flash"),
+                         "unknown")
+        self.assertEqual(registry.leg_prompt_cache(self.mini({}),
+                                                   "nowhere/gemini-3.8-flash"),
+                         "unknown")
+        self.assertEqual(registry.leg_prompt_cache(self.mini({}), "not-a-leg"),
+                         "unknown")
+
+    def test_a_malformed_verdict_is_not_promoted_to_the_fallback(self):
+        """"true" spelled as a boolean is the value set's own defect (rule
+        names it); the lookup must still not read it as a caching claim."""
+        reg = self.mini({"prompt_cache_by_provider": {"vertex_ai": True}})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "vertex/gemini-3.8-flash"), "unknown")
+
+    def test_the_committed_gemini_row_splits_by_provider(self):
+        """The move D1 makes: no model-level verdict for gemini-3.8-flash, a
+        documented Vertex leg and an unmeasured AI-Studio leg -- so the free
+        AI-Studio leg stops inheriting Vertex's caching claim."""
+        reg = load_registry()
+        row = reg["models"]["gemini-3.8-flash"]
+        self.assertNotIn("prompt_cache", row)
+        self.assertEqual(row["prompt_cache_by_provider"],
+                         {"google_ai_studio": "unknown",
+                          "vertex_ai": "documented"})
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "vertex/gemini-3.8-flash"),
+            "documented")
+        self.assertEqual(
+            registry.leg_prompt_cache(reg, "gemini/gemini-3.8-flash"), "unknown")
+
+    def test_a_known_provider_names_the_value_set(self):
+        problems = self.problems({"prompt_cache_by_provider": {"nope": "true"}})
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn("unknown provider", problems[0])
+
+    def test_a_bad_per_provider_value_is_named_with_model_and_provider(self):
+        for value in (True, "True", None, "", "yes", 1, ["true"]):
+            problems = self.problems(
+                {"prompt_cache_by_provider": {"vertex_ai": value}})
+            self.assertEqual(len(problems), 1, (repr(value), problems))
+            self.assertIn("prompt_cache_by_provider.vertex_ai", problems[0])
+
+    def test_an_empty_or_non_object_map_is_rejected(self):
+        for value in ({}, [], None, "true"):
+            problems = self.problems({"prompt_cache_by_provider": value})
+            self.assertEqual(len(problems), 1, (repr(value), problems))
+            self.assertIn("must be a non-empty object", problems[0])
+
+    def test_a_verdict_other_than_unknown_must_name_where_it_came_from(self):
+        for value in ("true", "documented", "false"):
+            problems = self.problems({"prompt_cache_by_provider":
+                                      {"vertex_ai": value}}, source=_MISSING)
+            self.assertEqual(len(problems), 1, (value, problems))
+            self.assertIn("prompt_cache_source must name", problems[0])
+        # "unknown" is the absence of an answer, so it owes no attribution.
+        self.assertEqual(self.problems({"prompt_cache_by_provider":
+                                        {"vertex_ai": "unknown"}},
+                                       source=_MISSING), [])
+
+    def test_the_schema_permits_the_map_without_requiring_it(self):
+        schema = json.loads((ROOT / "catalog" / "ai-registry.schema.json")
+                            .read_text(encoding="utf-8"))
+        model = schema["$defs"]["model"]
+        prop = model["properties"]["prompt_cache_by_provider"]
+        self.assertEqual(prop["type"], "object")
+        self.assertEqual(prop["additionalProperties"]["enum"],
+                         ["true", "documented", "false", "unknown"])
+        self.assertNotIn("prompt_cache_by_provider", model["required"])
+
+
+class ProviderSpellingTests(unittest.TestCase):
+    """LANE-PRICE-GAP (2026-10-08): the ONE registry-derived provider-spelling
+    normaliser.
+
+    A call-log row names its provider with the gateway connection id (`vertex`,
+    `ovh`) while the registry keys the provider and its `provider_prices` entry
+    with the provider id (`vertex_ai`, `ovhcloud`). Every consumer that prices a
+    row has to cross that gap; a hand-written name list crossed it only for the
+    providers its author had measured (the Vertex and OVH rows priced $0 while
+    their price sat on file). These tests pin the data-derived spelling map
+    instead, in both directions.
+    """
+
+    def _reg(self):
+        return {
+            "providers": {
+                "vertex_ai": {"id": "vertex_ai", "omniroute_id": "vertex",
+                              "model_prefix": None, "tier": "credit"},
+                "ovhcloud": {"id": "ovhcloud", "omniroute_id": "ovhcloud",
+                             "model_prefix": "ovh", "tier": "credit"},
+                "morph": {"id": "morph", "omniroute_id": "morph",
+                          "model_prefix": "morph", "tier": "credit"},
+                "gemini": {"id": "gemini", "omniroute_id": "gemini",
+                           "aliases": ["ai-studio"], "tier": "free"},
+                "free_ai": {"id": "free_ai", "omniroute_id": "free-ai",
+                            "aliases": "second-alias", "tier": "free"},
+            },
+            "models": {
+                "gemini-3.8-flash": {
+                    "id": "gemini-3.8-flash", "price_in": 0.0, "price_out": 0.0,
+                    "provider_prices": {
+                        "vertex_ai": {"price_in": 7.5e-07, "price_out": 3.75e-06,
+                                      "price_source": "test", "price_as_of": "2026-10-08"}}},
+                "gpt-oss-120b": {
+                    "id": "gpt-oss-120b", "price_in": 0.0, "price_out": 0.0,
+                    "provider_prices": {
+                        "ovhcloud": {"price_in": 1e-07, "price_out": 5e-07,
+                                     "price_source": "test", "price_as_of": "2026-10-08"}}},
+                "plain": {"id": "plain", "price_in": 1e-06, "price_out": 2e-06},
+            },
+        }
+
+    # --- forward: a provider id -> every namespace it answers to -------------
+
+    def test_the_alias_map_carries_the_key_and_every_declared_spelling(self):
+        alias_map = registry.provider_alias_map(self._reg())
+        self.assertEqual(alias_map["vertex_ai"], ["vertex_ai", "vertex"])
+        self.assertEqual(alias_map["ovhcloud"], ["ovhcloud", "ovh"])
+        self.assertEqual(alias_map["morph"], ["morph"])       # prefix == id: one entry
+        self.assertEqual(alias_map["gemini"], ["gemini", "ai-studio"])
+        # a bare string aliases value is a spelling too, not a skipped field
+        self.assertEqual(alias_map["free_ai"], ["free_ai", "free-ai", "second-alias"])
+
+    # --- reverse: a row's spelling -> the provider id -----------------------
+
+    def test_a_gateway_connection_id_resolves_to_the_provider_key(self):
+        reg = self._reg()
+        self.assertEqual(registry.provider_id_from_spelling("vertex", reg), "vertex_ai")
+
+    def test_a_model_prefix_namespace_resolves_to_the_provider_key(self):
+        reg = self._reg()
+        self.assertEqual(registry.provider_id_from_spelling("ovh", reg), "ovhcloud")
+
+    def test_a_declared_alias_resolves_to_the_provider_key(self):
+        reg = self._reg()
+        self.assertEqual(registry.provider_id_from_spelling("ai-studio", reg), "gemini")
+
+    def test_the_provider_key_is_also_its_own_spelling(self):
+        reg = self._reg()
+        self.assertEqual(registry.provider_id_from_spelling("vertex_ai", reg), "vertex_ai")
+        self.assertEqual(registry.provider_id_from_spelling("morph", reg), "morph")
+
+    def test_a_spelling_that_is_a_provider_key_wins_over_another_alias(self):
+        # `twin` is somebody's gateway id AND a provider key: the key is the
+        # unambiguous reading, and a price must not be borrowed by a stranger.
+        reg = self._reg()
+        reg["providers"]["twin"] = {"id": "twin", "omniroute_id": "twin", "tier": "free"}
+        reg["providers"]["shadow"] = {"id": "shadow", "omniroute_id": "twin", "tier": "free"}
+        self.assertEqual(registry.provider_id_from_spelling("twin", reg), "twin")
+
+    def test_an_ambiguous_spelling_resolves_to_nothing_never_a_guess(self):
+        # Two providers claiming one gateway id: picking either would bill one
+        # grant with the other's price, so the spelling prices nothing.
+        reg = self._reg()
+        reg["providers"]["shadow"] = {"id": "shadow", "omniroute_id": "twin", "tier": "free"}
+        reg["providers"]["rival"] = {"id": "rival", "omniroute_id": "twin", "tier": "free"}
+        self.assertIsNone(registry.provider_id_from_spelling("twin", reg))
+        self.assertIsNotNone(registry.provider_id_from_spelling("shadow", reg))
+
+    def test_an_unknown_or_empty_spelling_resolves_to_nothing(self):
+        reg = self._reg()
+        for spelling in ("ghost", "", "   ", None, "vertexish"):
+            self.assertIsNone(registry.provider_id_from_spelling(spelling, reg), spelling)
+
+    def test_matching_is_case_insensitive_where_the_fold_is_unique(self):
+        reg = self._reg()
+        self.assertEqual(registry.provider_id_from_spelling(" Vertex ", reg), "vertex_ai")
+        self.assertEqual(registry.provider_id_from_spelling("OVH", reg), "ovhcloud")
+
+    # --- the consumer half: leg_price reads a gateway spelling --------------
+
+    def test_leg_price_prices_a_bare_model_under_the_gateway_spelling(self):
+        reg = self._reg()
+        self.assertEqual(registry.leg_price("gemini-3.8-flash", "vertex", reg),
+                         (7.5e-07, 3.75e-06))
+        self.assertEqual(registry.leg_price("gpt-oss-120b", "ovh", reg), (1e-07, 5e-07))
+
+    def test_leg_price_keeps_the_model_level_price_for_an_unknown_provider(self):
+        # An unknown provider id must not borrow a stranger's provider_prices
+        # entry: the model-level row decides, exactly as before this change.
+        reg = self._reg()
+        self.assertIsNone(registry.leg_price("gemini-3.8-flash", "ghost", reg))
+        self.assertEqual(registry.leg_price("plain", "ghost", reg), (1e-06, 2e-06))
+
+    def test_the_committed_registry_resolves_its_measured_gateway_spellings(self):
+        # L1-measured 2026-10-08: 13.8M tokens billed under `vertex`, 0 cost.
+        reg = load_registry()
+        self.assertEqual(registry.provider_id_from_spelling("vertex", reg), "vertex_ai")
+        self.assertEqual(registry.provider_id_from_spelling("ovh", reg), "ovhcloud")
+        self.assertIsNotNone(registry.leg_price("gemini-3.8-flash", "vertex", reg))
+
+    def test_the_committed_registry_has_no_ambiguous_spelling(self):
+        # rule-1's shape for spellings: the reverse map resolving to nothing for
+        # a real gateway id would silently un-price a whole provider's rows.
+        reg = load_registry()
+        for provider_id, spellings in registry.provider_alias_map(reg).items():
+            for spelling in spellings:
+                self.assertEqual(
+                    registry.provider_id_from_spelling(spelling, reg), provider_id,
+                    "providers.%s spelling %r is ambiguous or shadowed" % (provider_id,
+                                                                            spelling))
+
+
+if __name__ == "__main__":
+    unittest.main()

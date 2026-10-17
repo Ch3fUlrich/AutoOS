@@ -1,0 +1,66 @@
+{
+  "nodes": [
+    {
+      "id": "project:acme",
+      "kind": "project",
+      "title": "Acme platform",
+      "body": "The platform this graph is about.",
+      "project": "acme",
+      "source": "fixture"
+    },
+    {
+      "id": "domain:operations",
+      "kind": "domain",
+      "title": "Operations",
+      "body": "How the platform is run.",
+      "project": "acme",
+      "links": [{"rel": "about", "id": "project:acme"}],
+      "source": "fixture"
+    },
+    {
+      "id": "technology:postgresql",
+      "kind": "technology",
+      "title": "PostgreSQL",
+      "body": "The primary datastore.",
+      "project": "acme",
+      "links": [{"rel": "about", "id": "domain:operations"}],
+      "source": "fixture"
+    },
+    {
+      "id": "decision:restore-drill",
+      "kind": "decision",
+      "title": "Restore drill from the nightly backup",
+      "body": "Run a restore drill every quarter against the nightly backup.",
+      "project": "acme",
+      "links": [{"rel": "about", "id": "project:acme"}],
+      "source": "fixture"
+    },
+    {
+      "id": "decision:backup-window",
+      "kind": "decision",
+      "title": "Nightly backup window",
+      "body": "Backups run in the nightly window, after the batch finishes.",
+      "project": "acme",
+      "links": [{"rel": "about", "id": "technology:postgresql"}],
+      "source": "fixture"
+    },
+    {
+      "id": "lesson:slow-failover",
+      "kind": "lesson",
+      "title": "Failover was slow under load",
+      "body": "A failover took minutes while the cluster was under load.",
+      "project": "acme",
+      "links": [{"rel": "about", "id": "domain:operations"}],
+      "source": "fixture"
+    },
+    {
+      "id": "component:ledger",
+      "kind": "component",
+      "title": "Ledger service",
+      "body": "The service that records balances.",
+      "project": "acme",
+      "links": [{"rel": "part_of", "id": "project:acme"}],
+      "source": "fixture"
+    }
+  ]
+}

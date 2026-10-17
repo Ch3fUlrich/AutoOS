@@ -1,0 +1,1270 @@
+#!/usr/bin/env python3
+"""AutoOS browser UI for headless machines.
+
+Serves web/index.html and drives the real installer by shelling out to
+./setup.sh, so the browser path and the terminal path cannot drift apart.
+
+Security: binds 127.0.0.1 by default and always requires a per-run token. A
+wider bind is opt-in and warned about, because this endpoint installs software.
+"""
+from __future__ import annotations
+
+import errno
+import ipaddress
+import json
+import os
+import secrets
+import shlex
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse, parse_qs
+
+ROOT = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else Path.cwd()
+PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8777
+BIND = sys.argv[3] if len(sys.argv) > 3 else "127.0.0.1"
+# Starting the server in dry-run LOCKS the whole session to preview-only: a safe
+# way to hand someone the URL without handing them the ability to change the box.
+FORCE_DRY = (sys.argv[4] if len(sys.argv) > 4 else "0") == "1"
+TOKEN = secrets.token_urlsafe(24)
+
+LOCK = threading.Lock()
+LOG: list[dict] = []
+RUN = {"running": False, "done": 0, "total": 0, "summary": "", "current": None}
+STATE_LOCK = threading.Lock()
+STATE_CACHE: dict | None = None
+PROGRESS_PREFIX = "@@AUTOOS_PROGRESS "
+
+
+_PLATFORMS_CACHE: dict[str, list[str]] | None = None
+
+
+def component_platforms() -> dict:
+    """id -> the platforms whose catalog contains it.
+
+    Read from every catalog, not just this machine's, so the page can say
+    "Windows only" instead of leaving the reader to guess whether something is
+    missing here because it does not exist or because nobody added it yet.
+    """
+    global _PLATFORMS_CACHE
+    if _PLATFORMS_CACHE is not None:
+        return _PLATFORMS_CACHE
+
+    out: dict[str, list[str]] = {}
+    for name in ("windows", "linux", "macos"):
+        path = ROOT / "catalog" / f"{name}.json"
+        if not path.exists():
+            continue
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for grp in data.get("categories", []):
+            for c in grp.get("components", []):
+                out.setdefault(c["id"], []).append(name)
+    _PLATFORMS_CACHE = out
+    return out
+
+
+# ── Logins and keys: one allowlist for the status card AND write-only setting
+#    from the page. `id` is a top-level key in configuration/api-keys.yml (a
+#    git-ignored file); `group` is how the page files the row; `apply` is the
+#    command that re-reads the file after a value changes (empty = nothing to
+#    re-apply from this file). A value never leaves the server: the payloads
+#    carry only presence, and POST /api/secrets cannot read one back out.
+APPLY_OMNIROUTE = "bash configuration/omniroute/apply.sh"
+APPLY_OPENCODE_PASSWORD = (
+    "bash configuration/docker/ai-stack/ai-stack.sh opencode-rotate"
+)
+
+SECRET_KEYS = {
+    "groq": {"name": "Groq", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "google_ai_studio": {"name": "Google AI Studio (Gemini)", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "mistral": {"name": "Mistral", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "cloudflare_workers_ai": {"name": "Cloudflare Workers AI", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "cohere": {"name": "Cohere", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "hugging_face": {"name": "Hugging Face", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "cerebras": {"name": "Cerebras", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "sambanova": {"name": "SambaNova", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "deepseek": {"name": "DeepSeek", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "meta": {"name": "Meta Model API", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "openrouter": {"name": "OpenRouter", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "zen": {"name": "OpenCode Zen", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "cheapinference": {"name": "Cheaper Inference (paid partner)", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "free_ai": {"name": "Free.ai", "group": "AI providers", "apply": APPLY_OMNIROUTE},
+    "omniroute": {"name": "OmniRoute client key", "group": "Router", "apply": APPLY_OMNIROUTE},
+    "omniroute_management": {"name": "OmniRoute management token", "group": "Router", "apply": APPLY_OMNIROUTE},
+    "opencode_password": {"name": "opencode serve password (user opencode)", "group": "Local services", "apply": APPLY_OPENCODE_PASSWORD},
+    "qoder_pat": {"name": "Qoder personal access token", "group": "Coding agents", "apply": ""},
+}
+
+# A template value is not a real key: it must read as "missing" everywhere, or
+# the card claims a machine is configured when it is still waiting for input.
+_PLACEHOLDER_PREFIX = "REPLACE_WITH_"
+
+
+def keys_file() -> Path:
+    """The api-keys.yml the page reads and writes.
+
+    Overridable with AUTOOS_KEYS_FILE (the same knob the shell scripts use) so
+    tests - and only tests - point at a throwaway file instead of the real one.
+    """
+    override = os.environ.get("AUTOOS_KEYS_FILE")
+    if override:
+        return Path(override)
+    return ROOT / "configuration" / "api-keys.yml"
+
+
+def _yaml_scalar(raw: str) -> str:
+    """The unquoted value of a YAML scalar as this server writes it."""
+    return raw.strip().strip("\"'").strip()
+
+
+def configured_ids() -> set:
+    """The allowlisted key ids that hold a real value in the keys file."""
+    path = keys_file()
+    if not path.exists():
+        return set()
+    have = set()
+    for line in path.read_text(encoding="utf-8-sig").splitlines():
+        if not line or line[0] in " \t":
+            continue
+        if line.startswith("#") or ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        scalar = _yaml_scalar(val)
+        if scalar and not scalar.upper().startswith(_PLACEHOLDER_PREFIX):
+            have.add(key.strip())
+    return have
+
+
+def provider_status() -> list:
+    """Which allowlisted keys have a value in configuration/api-keys.yml.
+
+    Values never leave this function: the payload carries only the key id, a
+    display label and whether a value is present.
+    """
+    have = configured_ids()
+    return [{"id": k, "name": v["name"], "configured": k in have}
+            for k, v in SECRET_KEYS.items()]
+
+
+def _client_is_loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _secrets_remote_ok(host: str) -> bool:
+    """Secrets may be set only where the file already lives - the loopback -
+    unless a tunnel-aware operator explicitly opts in."""
+    return (os.environ.get("AUTOOS_SERVE_REMOTE_SECRETS") == "1"
+            or _client_is_loopback(host))
+
+
+def _git_ignore_refusal(path: Path) -> str | None:
+    """The 409 reason when `path` is in a git work tree and not git-ignored.
+
+    0 = ignored (safe), 1 = in a work tree but NOT ignored (refuse), 128 =
+    not a work tree at all (safe: nothing here is tracked). Run from the
+    file's own directory so git discovers the work tree the file belongs to,
+    not this checkout's.
+    """
+    try:
+        res = subprocess.run(["git", "check-ignore", "-q", "--", str(path)],
+                             cwd=str(path.parent), capture_output=True)
+    except (OSError, subprocess.SubprocessError):
+        return None  # no git, or no parent directory: nothing to protect
+    if res.returncode == 1:
+        return f"{path} is not git-ignored; refusing to write a secret there"
+    return None
+
+
+def secrets_payload(client_host: str = "127.0.0.1") -> dict:
+    """GET /api/secrets body: set/missing per key, an apply hint, no values."""
+    have = configured_ids()
+    refusal = _git_ignore_refusal(keys_file())
+    return {
+        "secrets": [
+            {"id": k, "name": v["name"], "group": v["group"],
+             "configured": k in have, "apply": v["apply"]}
+            for k, v in SECRET_KEYS.items()
+        ],
+        "file": "configuration/api-keys.yml",
+        "writable": refusal is None and _secrets_remote_ok(client_host),
+    }
+
+_SECRET_MAX = 4096
+
+
+def _secret_value_error(value) -> str | None:
+    """Why `value` may not be written, or None when it is acceptable.
+
+    The returned messages never include the value itself.
+    """
+    if not isinstance(value, str):
+        return "value must be a string"
+    if not 1 <= len(value) <= _SECRET_MAX:
+        return f"value must be 1..{_SECRET_MAX} characters"
+    if "\r" in value or "\n" in value or "\0" in value:
+        return "value must not contain a newline or NUL"
+    if value != value.strip():
+        return "value must not start or end with whitespace"
+    if "'" in value or '"' in value:
+        return "value must not contain quote characters (' or \"): the shell and PowerShell readers of api-keys.yml take the value literally"
+    if value.upper().startswith(_PLACEHOLDER_PREFIX):
+        return "value still looks like the placeholder it replaces"
+    return None
+
+
+def _split_trailing_comment(after: str) -> tuple:
+    """Split " 'value' # comment" into (" 'value' ", "# comment").
+
+    The scanner matters: a value may itself contain " #" inside its quotes,
+    and a naive split would mistake that for the start of a comment.
+    """
+    in_quote = False
+    i, n = 0, len(after)
+    while i < n:
+        ch = after[i]
+        if ch == "'":
+            if in_quote and i + 1 < n and after[i + 1] == "'":
+                i += 2
+                continue
+            in_quote = not in_quote
+        elif ch == "#" and not in_quote and i > 0 and after[i - 1] in " \t":
+            return after[:i], after[i:]
+        i += 1
+    return after, ""
+
+
+def _quote_yaml(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def write_secret(key_id: str, value: str) -> tuple:
+    """Replace or append one `key_id: '<value>'` line, returning (code, body).
+
+    Write-only by construction: the value goes into the file and is never
+    returned, logged or echoed. An identical value is a no-op with no backup.
+    """
+    path = keys_file()
+    new_text = None
+    with LOCK:
+        raw = path.read_bytes() if path.exists() else None
+        original = raw.decode("utf-8-sig") if raw is not None else None
+        lines = original.splitlines(keepends=True) if original is not None else []
+
+        for i, line in enumerate(lines):
+            core = line.rstrip("\r\n")
+            if not core or core[0] in " \t":
+                continue
+            if core.startswith("#") or ":" not in core:
+                continue
+            head, _, after = core.partition(":")
+            if head.strip() != key_id:
+                continue
+            value_part, comment = _split_trailing_comment(after)
+            if _yaml_scalar(value_part) == value:
+                return 200, {"ok": True, "id": key_id, "unchanged": True}
+            new_line = head.rstrip() + ": " + _quote_yaml(value)
+            if comment:
+                new_line += " " + comment
+            lines[i] = new_line + ("\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else "")
+            new_text = "".join(lines)
+            break
+
+        if new_text is None:
+            text = original or ""
+            if text and not text.endswith("\n"):
+                text += "\n"
+            new_text = text + key_id + ": " + _quote_yaml(value) + "\n"
+
+        if raw is not None:
+            # Same stamp/collision scheme as _post_config: the undo listing only
+            # ranks \d{8}-?\d{6} names, and a name taken inside one second gets -1.
+            base = path.with_name(path.name + time.strftime(".autoos-backup-%Y%m%d-%H%M%S"))
+            backup = base
+            n = 0
+            while backup.exists() or backup.is_symlink():
+                n += 1
+                backup = base.with_name(f"{base.name}-{n}")
+            fd = os.open(str(backup), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(raw)
+
+        tmp = path.with_name(f"{path.name}.autoos-tmp-{os.getpid()}-{secrets.token_hex(4)}")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+                fh.write(new_text)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+    return 200, {"ok": True, "id": key_id, "configured": True,
+                 "apply": SECRET_KEYS[key_id]["apply"]}
+
+
+def secrets_post_response(body, client_host: str) -> tuple:
+    """Validate and apply a POST /api/secrets body. Returns (code, payload).
+
+    Module-level, not a Handler method, so tests can call it with a synthetic
+    client_host: Handler helpers all take `self`, and classify() /
+    usb_create_response set the same precedent.
+    """
+    if not isinstance(body, dict):
+        return 400, {"error": "payload must be a JSON object"}
+    key_id = body.get("id")
+    if not isinstance(key_id, str) or key_id not in SECRET_KEYS:
+        return 400, {"error": "unknown key id", "allowed": list(SECRET_KEYS)}
+    value = body.get("value")
+    problem = _secret_value_error(value)
+    if problem:
+        return 400, {"error": problem}
+    if not _secrets_remote_ok(client_host):
+        return 403, {"error": "secrets can be set only from this machine (loopback); "
+                              "use an SSH tunnel"}
+    refusal = _git_ignore_refusal(keys_file())
+    if refusal:
+        return 409, {"error": refusal}
+    try:
+        return write_secret(key_id, value)
+    except Exception as exc:
+        detail = str(exc)
+        if value:
+            # Belt-and-suspenders: a value must never reach a response body,
+            # even if some lower layer put it in the exception text.
+            detail = detail.replace(value, "***")
+        return 500, {"error": f"failed to save secret: {detail}"}
+
+
+# ── AI services: live status + the setup actions that already exist ────────
+# One row per HTTP service of the AI stack. `bind` and `auth` are what the
+# service is configured for (docs/web-services.md), `up` is probed live on
+# loopback. No key value is read here: the payload is safe to show.
+SERVICES = [
+    {"id": "omniroute", "name": "OmniRoute gateway", "port": 20128, "path": "/api/health",
+     "bind": "0.0.0.0", "auth": "client key on /v1 (REQUIRE_API_KEY); dashboard password",
+     "unit": "autoos-omniroute", "actions": ["apply-dry-run", "apply", "resume-stack"]},
+    {"id": "litellm", "name": "LiteLLM fallback", "port": 4000, "path": "/",
+     "bind": "127.0.0.1", "auth": "LITELLM_MASTER_KEY",
+     "unit": "autoos-litellm", "actions": ["resume-stack"]},
+    {"id": "opencode", "name": "opencode serve (web UI)", "port": 4096, "path": "/",
+     "bind": "0.0.0.0", "auth": "HTTP Basic on /api/* (user opencode)",
+     "unit": "autoos-opencode", "actions": ["start-opencode-serve"]},
+    {"id": "openhands", "name": "OpenHands", "port": 3000, "path": "/",
+     "bind": "0.0.0.0", "auth": "none - reach it only through the proxy",
+     "unit": None, "actions": ["start-openhands"]},
+]
+
+# The only commands the page can run. `live: False` is safe without a
+# confirmation (a dry run); everything else is confirmed in the browser and
+# refused outright when the server itself runs with --dry-run.
+SERVICE_ACTIONS = {
+    "apply-dry-run": {"label": "Apply router (dry run)", "live": False,
+                      "argv": ["bash", "configuration/omniroute/apply.sh", "--dry-run"]},
+    "apply": {"label": "Apply router", "live": True,
+              "argv": ["bash", "configuration/omniroute/apply.sh"]},
+    "start-openhands": {"label": "Start OpenHands", "live": True,
+                        "argv": ["bash", "configuration/start-stack.sh", "openhands"]},
+    "start-opencode-serve": {"label": "Start opencode serve", "live": True,
+                             "argv": ["bash", "configuration/start-stack.sh", "opencode-serve"]},
+    "resume-stack": {"label": "Resume the stack", "live": True,
+                     "argv": ["bash", "configuration/autostart/Start-AutoOSStack.sh"]},
+}
+
+
+def _probe_http(port: int, path: str) -> int:
+    """HTTP status of http://127.0.0.1:<port><path>, 0 when nothing answers."""
+    import urllib.error
+    import urllib.request
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d%s" % (port, path), timeout=2) as resp:
+            return resp.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+    except (OSError, ValueError):
+        return 0
+
+
+def service_status(probe=None) -> list:
+    """Live status of every AI service. `probe(port, path) -> code` is
+    injectable so tests never touch this machine's ports."""
+    probe = probe or _probe_http
+    out = []
+    for svc in SERVICES:
+        code = probe(svc["port"], svc["path"])
+        if svc["id"] == "omniroute":
+            up = code == 200
+        elif svc["id"] == "opencode":
+            # V2 answers its UI with 200; /api/* is what needs the password.
+            up = code in (200, 401)
+        elif svc["id"] == "litellm":
+            up = code == 200
+        else:
+            up = code not in (0, None)
+        row = {k: v for k, v in svc.items() if k != "path"}
+        row.update(code=code, up=up, health="http://127.0.0.1:%d%s" % (svc["port"], svc["path"]),
+                   actionLabels={a: SERVICE_ACTIONS[a]["label"] for a in svc["actions"]},
+                   liveActions=[a for a in svc["actions"] if SERVICE_ACTIONS[a]["live"]])
+        out.append(row)
+    return out
+
+
+def run_service_action(key: str) -> None:
+    """Worker: run one allowlisted action, streaming into the shared log."""
+    act = SERVICE_ACTIONS[key]
+    cmd = act["argv"]
+    env = dict(os.environ, AUTOOS_NO_COLOR="1")
+    with LOCK:
+        LOG.append({"level": "step", "text": "$ " + " ".join(cmd)})
+    try:
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            record_line(raw.rstrip("\r\n"))
+        proc.wait()
+        with LOCK:
+            RUN.update(done=1, summary="%s finished (exit %d)" % (act["label"], proc.returncode))
+            LOG.append({"level": "ok" if proc.returncode == 0 else "err",
+                        "text": "--- exit code %d ---" % proc.returncode})
+    except Exception as exc:
+        with LOCK:
+            RUN["summary"] = "%s failed: %s" % (act["label"], exc)
+            LOG.append({"level": "err", "text": RUN["summary"]})
+    finally:
+        with LOCK:
+            RUN["running"] = False
+
+
+def start_service_action(key: str) -> None:
+    threading.Thread(target=run_service_action, args=(key,), daemon=True).start()
+
+
+def service_action_response(body) -> tuple:
+    """Validate a POST /api/services/action body and start the worker.
+    Returns (http code, payload)."""
+    key = body.get("action") if isinstance(body, dict) else None
+    act = SERVICE_ACTIONS.get(key) if isinstance(key, str) else None
+    if act is None:
+        return 400, {"error": "unknown action", "allowed": sorted(SERVICE_ACTIONS)}
+    if act["live"] and FORCE_DRY:
+        return 409, {"error": "this server runs with --dry-run: only dry-run actions are allowed"}
+    with LOCK:
+        if RUN["running"]:
+            return 409, {"error": "a run is already in progress"}
+        LOG.clear()
+        RUN.update(running=True, done=0, total=1, summary="", current=None)
+    start_service_action(key)
+    return 202, {"started": True, "action": key}
+
+
+def state_components(catalog: dict, platform: str, platforms: dict, arch: str,
+                     headless: bool, installed: dict) -> list:
+    """The catalog rows the browser is served, filtered for this machine.
+
+    Pure so a test can ask the same question the server asks without starting a
+    server or touching a machine. `tombstone`, `note` and `replaced_by` are in the
+    payload because the page resolves dependencies, pre-ticks profiles and
+    collects prompts in the browser: it can only honour a retired id, and say
+    what took its work over, if the row says so. A browser selection comes back
+    to setup.sh as --only, where the same expansion runs before anything plans.
+    """
+    rows = []
+    for grp in catalog.get("categories", []):
+        if grp.get("requiresDisplay") and headless:
+            continue                      # hide, never show-and-fail
+        for c in grp.get("components", []):
+            if c.get("arch") and arch not in c["arch"]:
+                continue
+            status = installed.get(c["id"], "unknown")
+            rows.append({
+                "id": c["id"], "name": c["name"], "description": c["description"],
+                "provider": c["provider"], "package": c["package"],
+                "profiles": c.get("profiles", []), "prompt": c.get("prompt"),
+                "category": grp["name"],
+                "requires": c.get("requires", []), "homepage": c.get("homepage"),
+                "verify": c.get("verify"), "notes": c.get("notes"),
+                "platforms": platforms.get(c["id"], [platform]),
+                "installed": status == "installed",
+                "installedStatus": status,
+                "tombstone": c.get("tombstone") is True,
+                "note": c.get("note"),
+                "replaced_by": c.get("replaced_by") or [],
+            })
+    return rows
+
+
+def build_state() -> dict:
+    """System info + catalog, produced by the same shell code the CLI uses."""
+    probe = r"""
+set -euo pipefail
+cd "$AUTOOS_ROOT"
+. lib/linux/ui.sh; . lib/linux/detect.sh; . lib/linux/catalog.sh; . lib/linux/install.sh
+AUTOOS_NO_COLOR=1 ui_init
+detect_system
+catalog_load "catalog/${SYS_OS:-linux}.json" "$SYS_ARCH" "$SYS_IS_HEADLESS"
+catalog_detect_installed
+installed=()
+for ((i=0; i<${#CAT_ID[@]}; i++)); do
+    installed+=("${CAT_ID[i]}" "$(if (( CAT_INSTALLED[i] )); then printf installed; else printf not-detected; fi)")
+done
+python3 - "$SYS_DISTRO_NAME" "$SYS_ARCH" "$SYS_MODEL" "$SYS_CPU_NAME" "$SYS_CPU_CORES" \
+          "$SYS_RAM_GB" "$SYS_FREE_DISK_GB" "$SYS_USER" "$SYS_IS_HEADLESS" \
+          "$(suggested_profile)" "$(hostname)" "${SYS_ENVIRONMENT:-unknown}" \
+          "${SYS_IS_WSL:-0}" "${SYS_WSL_VERSION:-}" "${SYS_WSL_DISTRO:-}" \
+          "${SYS_OS:-linux}" "${installed[@]}" <<'PY'
+import json, sys
+k = sys.argv[1:]
+print(json.dumps({
+  "system": {
+    "host": k[10], "distribution": k[0], "architecture": k[1], "model": k[2],
+    "cpu": k[3], "cores": k[4], "memory": k[5] + " GB", "free disk": k[6] + " GB",
+    "user": k[7], "display": "headless" if k[8] == "1" else "graphical",
+    "environment": k[11],
+  },
+  "suggested": k[9],
+  "wsl": {"isWsl": k[12] == "1", "version": k[13], "distro": k[14]},
+  "platform": k[15],
+  "installed": dict(zip(k[16::2], k[17::2])),
+}))
+PY
+"""
+    out = subprocess.run(["bash", "-c", probe], capture_output=True, text=True,
+                         cwd=str(ROOT), env={**os.environ, "AUTOOS_ROOT": str(ROOT)})
+    if out.returncode != 0:
+        raise RuntimeError(out.stderr[-2000:] or "detection failed")
+    info = json.loads(out.stdout.strip().splitlines()[-1])
+
+    platform = info["platform"]
+    catalog = json.loads((ROOT / "catalog" / f"{platform}.json").read_text(encoding="utf-8"))
+    platforms = component_platforms()
+    arch = info["system"]["architecture"]
+    headless = info["system"]["display"] == "headless"
+    components = state_components(catalog, platform, platforms, arch, headless,
+                                  info["installed"])
+    installed_names = [c["name"] for c in components if c["installed"]]
+    info["system"]["installed applications"] = (
+        "✓ " + ", ".join(installed_names) + f" ({len(installed_names)} detected)"
+        if installed_names else "none detected"
+    )
+    return {
+        "platform": "macOS" if platform == "macos" else "Linux",
+        "system": info["system"],
+        "suggested": info["suggested"],
+        "wsl": info.get("wsl", {"isWsl": False, "version": "", "distro": ""}),
+        "profiles": catalog.get("profiles", {}),
+        "prompts": catalog.get("prompts", {}),
+        "components": components,
+        "providers": provider_status(),
+    }
+
+
+def cached_state() -> dict:
+    global STATE_CACHE
+    with STATE_LOCK:
+        if STATE_CACHE is None:
+            STATE_CACHE = build_state()
+        return STATE_CACHE
+
+
+def record_line(line: str) -> None:
+    """Structured snapshots count completions; ordinary text remains just a log."""
+    with LOCK:
+        if line.startswith(PROGRESS_PREFIX):
+            try:
+                event = json.loads(line[len(PROGRESS_PREFIX):])
+                done, total = int(event["done"]), int(event["total"])
+                if 0 <= done <= total:
+                    RUN.update(done=done, total=total, current=event)
+            except (ValueError, TypeError, KeyError):
+                pass  # A damaged progress line cannot interrupt pipe draining.
+            return
+        LOG.append({"level": classify(line), "text": line})
+
+
+def classify(line: str) -> str:
+    t = line.strip()
+    if t.startswith("+ "):
+        return "ok"
+    if t.startswith("! "):
+        return "warn"
+    if t.startswith("x "):
+        return "err"
+    if t.startswith("> "):
+        return "step"
+    if t.startswith(("run:", "would run:", "would ")):
+        return "muted"
+    return ""
+
+
+def run_install(ids: list[str], answers: dict, dry: bool) -> None:
+    global STATE_CACHE
+    env = dict(os.environ, AUTOOS_NO_COLOR="1", AUTOOS_PROGRESS_EVENTS="1")
+    for key, val in (answers or {}).items():
+        if val:
+            env["AUTOOS_ANSWER_" + key.upper().replace("-", "_")] = str(val)
+
+    cmd = ["bash", "setup.sh", "--only", ",".join(ids), "--yes", "--no-color"]
+    if dry:
+        cmd.append("--dry-run")
+
+    with LOCK:
+        LOG.append({"level": "step", "text": "$ " + " ".join(cmd)})
+
+    try:
+        # Merging stderr into stdout drains both streams even during a noisy
+        # installer. Decode imperfect vendor output without losing the worker.
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            record_line(raw.rstrip("\r\n"))
+        proc.wait()
+        with LOCK:
+            RUN["summary"] = "finished (exit %d)" % proc.returncode
+            LOG.append({
+                "level": "ok" if proc.returncode == 0 else "err",
+                "text": "--- exit code %d ---" % proc.returncode,
+            })
+    except Exception as exc:
+        with LOCK:
+            RUN["summary"] = "installer failed: " + str(exc)
+            LOG.append({"level": "err", "text": RUN["summary"]})
+    finally:
+        with STATE_LOCK:
+            STATE_CACHE = None
+        with LOCK:
+            RUN["running"] = False
+
+
+def _run_bash(script: str) -> subprocess.CompletedProcess:
+    """Run a snippet with the repo's shell modules sourced, AUTOOS_ROOT set.
+
+    Every AUTOOS_FAKE_* / AUTOOS_* testing knob usb.sh already understands
+    (AUTOOS_FAKE_LSBLK, AUTOOS_FAKE_UID, ...) reaches this subprocess
+    unchanged, because os.environ is inherited rather than replaced — the
+    same reason a test can call usb_create_response() directly with
+    AUTOOS_FAKE_LSBLK exported in its own shell and see it honoured here.
+    """
+    env = dict(os.environ, AUTOOS_ROOT=str(ROOT))
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True,
+                          cwd=str(ROOT), env=env)
+
+
+_USB_SOURCE = '. lib/linux/ui.sh; . lib/linux/detect.sh; . lib/linux/download.sh; . lib/linux/usb.sh\n'
+
+
+def usb_devices_response() -> dict:
+    """Live USB candidates plus whether this process can actually write one.
+
+    B10: elevation is surfaced here, not discovered at write time, so the
+    browser can disable the create button with a reason instead of
+    offering an action that would fail on "Access is denied".
+    """
+    listing = _run_bash('set -euo pipefail\ncd "$AUTOOS_ROOT"\n' + _USB_SOURCE + 'usb_list\n')
+    devices = []
+    if listing.returncode == 0:
+        for line in listing.stdout.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 5:
+                continue
+            dev, model, size, rm, tran = parts[:5]
+            try:
+                size = int(size)
+            except ValueError:
+                size = 0
+            devices.append({
+                "device": dev, "model": model or "(unknown model)", "size": size,
+                "removable": rm == "1", "bus": tran,
+            })
+
+    elevation = _run_bash('set -euo pipefail\ncd "$AUTOOS_ROOT"\n' + _USB_SOURCE + 'usb_require_elevation\n')
+    elevated = elevation.returncode == 0
+    reason = "" if elevated else (elevation.stderr or elevation.stdout or "not elevated").strip()
+    return {"devices": devices, "elevated": elevated, "reason": reason}
+
+
+def usb_images_response() -> dict:
+    """Static catalog data the dialog needs: images plus this machine's engines.
+
+    Filtered here (not in the page) so the page never has to know an
+    engine's platform/arch rules, and so `rufus` (interactive: true) never
+    reaches the browser at all - it needs a human at a GUI (task-11 brief).
+    """
+    images = json.loads((ROOT / "catalog" / "images.json").read_text(encoding="utf-8")).get("images", [])
+    engines_all = json.loads((ROOT / "catalog" / "engines.json").read_text(encoding="utf-8")).get("engines", [])
+    platform = "macos" if sys.platform == "darwin" else "linux"
+    try:
+        import platform as _platform
+        arch = "arm64" if _platform.machine().lower() in ("arm64", "aarch64") else "x64"
+    except Exception:
+        arch = "x64"
+    engines = [
+        e for e in engines_all
+        if not e.get("interactive") and platform in e.get("platforms", []) and arch in e.get("arch", [])
+    ]
+    return {"images": images, "engines": engines}
+
+
+def _image_size_bytes(image_id: str) -> int:
+    """catalog/images.json's sizeGb for <image_id>, in bytes, or 0.
+
+    Finding F12: usb_guard's own size check (usb.sh:369) compares the
+    target device against $AUTOOS_IMAGE_BYTES, defaulting to 0 - "unknown,
+    never a refusal" - when the caller never told it. The CLI path
+    (usb_plan, usb.sh:696) always computes this before calling usb_guard;
+    this is the same lookup for the HTTP path, which used to call usb_guard
+    with no AUTOOS_IMAGE_BYTES at all and so accepted a device smaller than
+    the image with a 202. 0 (unknown image, missing/unreadable catalog, or
+    no sizeGb on this entry - e.g. custom-url/custom-local) intentionally
+    reproduces the old "never a refusal on size" behaviour rather than
+    inventing a size limit this catalog entry never declared.
+    """
+    try:
+        images = json.loads((ROOT / "catalog" / "images.json").read_text(encoding="utf-8")).get("images", [])
+    except (OSError, ValueError):
+        return 0
+    entry = next((e for e in images if e.get("id") == image_id), None)
+    if entry is None:
+        return 0
+    size_gb = entry.get("sizeGb")
+    if not isinstance(size_gb, (int, float)):
+        return 0
+    return int(round(size_gb * 1_000_000_000))
+
+
+def usb_create_response(body: dict) -> tuple[int, dict]:
+    """Validate a USB-create request. Never writes to a device.
+
+    MODULE-LEVEL, not a Handler method: Handler subclasses
+    BaseHTTPRequestHandler and every one of its helpers takes `self` as the
+    first argument, so `Handler._usb_create(body)` would receive the dict
+    AS self and raise TypeError the moment a test - or do_POST - called it
+    with a plain dict. classify() above is module-level for the identical
+    reason, and this function follows the same rule.
+
+    The device-safety check (usb_guard) runs before anything else, mirroring
+    usb_guard's own "most dangerous mistake first" ordering: a bad device is
+    refused before this function ever looks at whether the rest of the
+    request is even well-formed. image/engine are read (but not yet
+    validated as present) ahead of the guard call so their sizeGb/mode can
+    feed that same guard call (finding F12) without disturbing this
+    "guard first" order - the "image and engine are both required" check
+    below still runs after the guard, exactly as before.
+    """
+    device = str(body.get("device") or "")
+    if not device:
+        return 400, {"error": "a target device is required"}
+
+    image = str(body.get("image") or "")
+    engine = str(body.get("engine") or "")
+    image_bytes = _image_size_bytes(image)
+    mode = "mounted-fat32-writable" if engine == "uefi-copy" else "unmounted"
+    guard = _run_bash(
+        'set -euo pipefail\ncd "$AUTOOS_ROOT"\n' + _USB_SOURCE +
+        f"AUTOOS_IMAGE_BYTES={image_bytes} usb_guard {shlex.quote(device)} {shlex.quote(mode)}\n"
+    )
+    if guard.returncode != 0:
+        reason = (guard.stderr or guard.stdout or "device refused by usb_guard").strip()
+        return 400, {"error": reason}
+
+    kind = str(body.get("kind") or "installer")
+    if not image or not engine:
+        return 400, {"error": "image and engine are both required"}
+
+    with LOCK:
+        if RUN["running"]:
+            return 409, {"error": "a run is already in progress"}
+
+    return 202, {"ok": True, "image": image, "kind": kind, "engine": engine, "device": device}
+
+
+def run_usb_create(image: str, kind: str, engine: str, device: str) -> None:
+    """Preview a USB write through the same plan-then-execute CLI path.
+
+    Always --dry-run: task-11's constraints are explicit that the browser
+    must never trigger a real write. usb_plan (which --create-usb runs)
+    documents itself as emitting commands and running nothing, so this is
+    belt-and-suspenders rather than the only thing standing between this
+    button and a real write - but it is a cheap and explicit one.
+
+    Finding F11': --wipe-target-disk used to be passed here too. setup.sh's
+    --dry-run flag sets AUTOOS_DRY_RUN=1 itself (setup.sh:95), so this was
+    never actually a live-wipe path as Gemini's review first framed it - but
+    a browser PREVIEW acknowledging "the target device's current contents
+    are lost" is gratuitous, and leaves exactly one missing flag between a
+    preview and a real wipe. Dropped from the command line, and
+    AUTOOS_DRY_RUN=1 is now also set directly in `env` (belt-and-suspenders
+    alongside the --dry-run flag already on the command line) so nothing
+    about this call depends on a single flag surviving unchanged.
+    """
+    global STATE_CACHE
+    env = dict(os.environ, AUTOOS_NO_COLOR="1", AUTOOS_PROGRESS_EVENTS="1", AUTOOS_DRY_RUN="1")
+    cmd = ["bash", "setup.sh", "--create-usb", "--image", image, "--kind", kind,
+           "--engine", engine, "--usb-device", device,
+           "--dry-run", "--yes", "--no-color"]
+
+    with LOCK:
+        LOG.append({"level": "step", "text": "$ " + " ".join(cmd)})
+
+    try:
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True, errors="replace", bufsize=1)
+        assert proc.stdout is not None
+        for raw in proc.stdout:
+            record_line(raw.rstrip("\r\n"))
+        proc.wait()
+        with LOCK:
+            RUN["summary"] = "finished (exit %d)" % proc.returncode
+            LOG.append({
+                "level": "ok" if proc.returncode == 0 else "err",
+                "text": "--- exit code %d ---" % proc.returncode,
+            })
+    except Exception as exc:
+        with LOCK:
+            RUN["summary"] = "usb create failed: " + str(exc)
+            LOG.append({"level": "err", "text": RUN["summary"]})
+    finally:
+        with STATE_LOCK:
+            STATE_CACHE = None
+        with LOCK:
+            RUN["running"] = False
+
+
+def example_block(name):
+    """One top-level block of autoos.config.example.json, or {}.
+
+    The example is the single home for the shipped defaults, so the server reads
+    them from there rather than restating them.
+    """
+    path = ROOT / "autoos.config.example.json"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get(name) or {}
+    except (OSError, ValueError):
+        return {}
+
+
+def detected_answers():
+    """Answers we can read off the machine instead of asking for them.
+
+    A prefilled field is only an improvement when the value is real; a plausible
+    looking placeholder is worse than an empty box, because it reads as answered.
+    """
+    answers = {}
+    for key, args in (("git_user_name", ["user.name"]), ("git_user_email", ["user.email"])):
+        try:
+            res = subprocess.run(["git", "config", "--global"] + args,
+                                 capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        value = res.stdout.strip()
+        if res.returncode == 0 and value:
+            answers[key] = value
+    return answers
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "AutoOS"
+
+    def log_message(self, *_args):  # keep the terminal clean
+        pass
+
+    def _authed(self, qs) -> bool:
+        return secrets.compare_digest((qs.get("token") or [""])[0], TOKEN)
+
+    def _send(self, code: int, body: bytes, ctype: str) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _json(self, code: int, obj) -> None:
+        self._send(code, json.dumps(obj).encode(), "application/json")
+
+    # ── claude session state ────────────────────────────────────────────────
+    # The engine is the single source for discovery and the state format; the
+    # server only forwards it, so the card and the CLI can never disagree.
+
+    def _claude_engine(self, command):
+        """Run one engine command and return its stdout, or None."""
+        script = ROOT / "lib" / "linux" / "claude_sessions.py"
+        if not script.is_file():
+            return None
+        try:
+            res = subprocess.run([sys.executable, str(script), command],
+                                 capture_output=True, text=True, cwd=str(ROOT), timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return res.stdout if res.returncode == 0 else None
+
+    def _claude_state(self):
+        """What the card needs to answer "will my sessions come back?"."""
+        state = {"sessions": [], "captured_at_iso": None}
+        raw = self._claude_engine("state")
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                state["sessions"] = parsed.get("sessions", [])
+                state["captured_at_iso"] = parsed.get("captured_at_iso")
+            except ValueError:
+                pass
+        unit = Path.home() / ".config" / "systemd" / "user" / "claude-sessions-restore.service"
+        state["installed"] = unit.is_file()
+        return state
+
+    def _handle_get_index(self):
+        page = (ROOT / "web" / "index.html").read_bytes()
+        return self._send(200, page, "text/html; charset=utf-8")
+
+    def _handle_get_state(self):
+        try:
+            return self._json(200, cached_state())
+        except Exception as exc:  # surface the real reason to the page
+            return self._json(500, {"error": str(exc)})
+
+    def _handle_get_ping(self):
+        # Deliberately the cheapest thing this server does: the page polls it
+        # every couple of seconds to notice the moment this process goes away.
+        return self._json(200, {"ok": True, "running": RUN["running"]})
+
+    def _handle_get_log(self, qs):
+        try:
+            offset = max(0, int((qs.get("offset") or ["0"])[0]))
+        except ValueError:
+            return self._json(400, {"error": "offset must be an integer"})
+        with LOCK:
+            offset = min(offset, len(LOG))
+            lines = LOG[offset:]
+            payload = {
+                "lines": lines, "offset": offset + len(lines),
+                "running": RUN["running"], "done": RUN["done"],
+                "total": RUN["total"], "summary": RUN["summary"],
+                "current": RUN["current"],
+            }
+        return self._json(200, payload)
+
+    def _handle_get_config(self):
+        cfg_file = ROOT / "autoos.config.json"
+        if cfg_file.is_file():
+            try:
+                data = json.loads(cfg_file.read_text(encoding="utf-8"))
+                return self._json(200, data)
+            except Exception as exc:
+                return self._json(500, {"error": f"failed to read config: {exc}"})
+        # No config yet. Seed it from the machine, never from the example
+        # file: its answers are illustrative ("Your Name", "you@example.com")
+        # and serving them puts fake identity in the form, where it looks
+        # answered and gets saved as though it were real.
+        return self._json(200, {
+            "version": 1,
+            "profile": "workstation",
+            "answers": detected_answers(),
+            "claude_autostart": example_block("claude_autostart"),
+        })
+
+    def _handle_get_claude_sessions(self):
+        # `state`, never `snapshot`: a GET must not have side effects, and the
+        # first version re-recorded the machine's sessions on every page load.
+        return self._json(200, self._claude_state())
+
+    def _handle_get_secrets(self):
+        # No values: set/missing per key, plus the apply hint and whether a
+        # write is possible from here. The page renders an input per row.
+        try:
+            return self._json(200, secrets_payload(self.client_address[0]))
+        except Exception as exc:
+            return self._json(500, {"error": str(exc)})
+
+    def do_GET(self):
+        u = urlparse(self.path)
+        qs = parse_qs(u.query)
+
+        if u.path in ("/", "/index.html"):
+            return self._handle_get_index()
+
+        if not self._authed(qs):
+            return self._json(403, {"error": "bad or missing token"})
+
+        routes = {
+            "/api/state": self._handle_get_state,
+            "/api/ping": self._handle_get_ping,
+            "/api/config": self._handle_get_config,
+            "/api/claude/sessions": self._handle_get_claude_sessions,
+            "/api/services": lambda: self._json(200, {"services": service_status()}),
+            "/api/secrets": self._handle_get_secrets,
+        }
+
+        if u.path == "/api/log":
+            return self._handle_get_log(qs)
+
+        if handler := routes.get(u.path):
+            return handler()
+
+        if u.path == "/api/images":
+            try:
+                return self._json(200, usb_images_response())
+            except Exception as exc:
+                return self._json(500, {"error": str(exc)})
+
+        if u.path == "/api/usb/devices":
+            try:
+                return self._json(200, usb_devices_response())
+            except Exception as exc:
+                return self._json(500, {"error": str(exc)})
+
+        return self._json(404, {"error": "not found"})
+
+    def do_POST(self):
+        u = urlparse(self.path)
+        if not self._authed(parse_qs(u.query)):
+            return self._json(403, {"error": "bad or missing token"})
+        if u.path == "/api/claude/snapshot":
+            return self._post_claude_snapshot()
+        if u.path == "/api/config":
+            return self._post_config()
+        if u.path == "/api/usb/create":
+            return self._post_usb_create()
+        if u.path == "/api/install":
+            return self._post_install()
+        if u.path == "/api/secrets":
+            return self._post_secrets()
+        if u.path == "/api/services/action":
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                return self._json(400, {"error": "payload must be JSON"})
+            code, payload = service_action_response(body)
+            return self._json(code, payload)
+        return self._json(404, {"error": "not found"})
+
+    def _post_claude_snapshot(self):
+        out = self._claude_engine("snapshot")
+        if out is None:
+            return self._json(500, {"error": "could not run the session snapshot"})
+        payload = self._claude_state()
+        payload["ok"] = True
+        return self._json(200, payload)
+
+    def _post_config(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                return self._json(400, {"error": "payload must be a JSON object"})
+            cfg_file = ROOT / "autoos.config.json"
+            try:
+                original = cfg_file.read_text(encoding="utf-8-sig") if cfg_file.exists() else None
+                merged = json.loads(original) if original is not None else {}
+            except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+                # The config already on disk is the user's and is not JSON - or
+                # not text at all, which fails in the read, before the parser
+                # ever runs. Either way that is the caller's problem to fix, not
+                # a server fault: answer 400, write nothing, and let the
+                # decoder's position text stand - it names a byte and an offset,
+                # never a value, so nothing of the file echoes back to the page.
+                return self._json(400, {
+                    "error": f"existing autoos.config.json is corrupt: {exc}"})
+            if not isinstance(merged, dict):
+                raise ValueError("Existing configuration must be an object")
+            for key, value in body.items():
+                if key == "answers" and isinstance(value, dict) and isinstance(merged.get(key), dict):
+                    merged[key].update(value)
+                else:
+                    merged[key] = value
+            # Compare serialized JSON, not dicts: True == 1 in Python, so an
+            # unchanged save must not churn the file or pile up backups of
+            # identical bytes - and {"flag": true} over {"flag": 1} IS a change.
+            if original is not None and json.dumps(merged, sort_keys=True) == json.dumps(json.loads(original), sort_keys=True):
+                return self._json(200, {"ok": True, "saved": str(cfg_file), "unchanged": True})
+            if original is not None:
+                # The undo listing only ranks \d{8}-?\d{6} stamps; a name that
+                # is taken - even inside one second - gets -1, -2, ... .
+                base = cfg_file.with_name(cfg_file.name + time.strftime(".autoos-backup-%Y%m%d-%H%M%S"))
+                backup = base
+                n = 0
+                while backup.exists() or backup.is_symlink():
+                    n += 1
+                    backup = base.with_name(f"{base.name}-{n}")
+                backup.write_text(original, encoding="utf-8")
+            # The temp name must not be guessable: a fixed
+            # autoos.config.json.tmp lets whoever can plant a symlink there take
+            # the save's bytes and, once the rename follows the link, the config
+            # path itself. mkstemp picks an unpredictable name in the config's own
+            # directory, so the replace stays atomic across one filesystem.
+            payload = json.dumps(merged, indent=2) + "\n"
+            fd, tmp_name = tempfile.mkstemp(dir=str(ROOT), prefix=".autoos.config.",
+                                            suffix=".tmp")
+            try:
+                if cfg_file.is_file():
+                    # mkstemp creates 0600; saving new bytes must not also change
+                    # who can read them - setup.sh --config may run as someone
+                    # else.
+                    os.chmod(fd, cfg_file.stat().st_mode & 0o777)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(payload)
+                os.replace(tmp_name, str(cfg_file))
+            except BaseException:
+                try:
+                    os.close(fd)  # already owned (and closed) once fdopen succeeded
+                except OSError:
+                    pass
+                try:
+                    os.unlink(tmp_name)
+                except OSError:
+                    pass
+                raise
+            return self._json(200, {"ok": True, "saved": str(cfg_file)})
+        except Exception as exc:
+            return self._json(500, {"error": f"failed to save config: {exc}"})
+
+    def _post_secrets(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self._json(400, {"error": "payload must be JSON"})
+        code, payload = secrets_post_response(body, self.client_address[0])
+        return self._json(code, payload)
+
+    def _post_install(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(length) or b"{}")
+        ids = [str(i) for i in body.get("ids", []) if i]
+        if not ids:
+            return self._json(400, {"error": "no components selected"})
+
+        with LOCK:
+            if RUN["running"]:
+                return self._json(409, {"error": "a run is already in progress"})
+            LOG.clear()
+            # Reserve before starting the worker: two simultaneous POSTs must
+            # never launch two package managers against the same machine.
+            RUN.update(running=True, done=0, total=len(ids), summary="", current=None)
+        dry = bool(body.get("dryRun", True)) or FORCE_DRY
+        threading.Thread(
+            target=run_install,
+            args=(ids, body.get("answers", {}), dry),
+            daemon=True,
+        ).start()
+        return self._json(202, {"started": True})
+
+    def _post_usb_create(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self._json(400, {"error": "payload must be JSON"})
+        if not isinstance(body, dict):
+            return self._json(400, {"error": "payload must be a JSON object"})
+        code, payload = usb_create_response(body)
+        if code != 202:
+            return self._json(code, payload)
+        # Reserve before starting the worker, under the SAME lock /api/install
+        # uses - a write must never run alongside an install, or another write.
+        with LOCK:
+            if RUN["running"]:
+                return self._json(409, {"error": "a run is already in progress"})
+            LOG.clear()
+            RUN.update(running=True, done=0, total=1, summary="", current=None)
+        threading.Thread(
+            target=run_usb_create,
+            args=(payload["image"], payload["kind"], payload["engine"], payload["device"]),
+            daemon=True,
+        ).start()
+        return self._json(202, {"started": True})
+
+
+
+def main() -> int:
+    # daemon_threads: a worker still streaming a log must not keep the process
+    # alive after Ctrl-C. allow_reuse_address: restarting on the same port should
+    # not fail with "address already in use" during TIME_WAIT. Both are class
+    # attributes read at construction, so they are set before the bind loop below.
+    ThreadingHTTPServer.daemon_threads = True
+    ThreadingHTTPServer.allow_reuse_address = True
+
+    # Line-buffer stdout: when this is redirected to a file or a pipe (which is
+    # exactly how a wrapper reads back the URL) Python block-buffers by default
+    # and the connection details never appear until the process exits.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except AttributeError:  # pragma: no cover - Python < 3.7
+        pass
+
+    # A busy port is not a reason to make someone re-run the whole detect pass
+    # with a --port flag. Walk forward until one is free, then print the URL that
+    # actually works - a moved port is a note, not an error. Bind first: printing
+    # a URL for a port we never got is how people end up debugging the wrong thing.
+    srv, port = None, PORT
+    for candidate in range(PORT, PORT + 20):
+        try:
+            srv = ThreadingHTTPServer((BIND, candidate), Handler)
+            port = candidate
+            break
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+    if srv is None:
+        print(f"  x Could not listen on port {PORT} or the 19 ports after it.")
+        return 1
+
+    url = f"http://{'localhost' if BIND == '127.0.0.1' else BIND}:{port}/?token={TOKEN}"
+    print()
+    if port != PORT:
+        print(f"  ! Port {PORT} was already in use - serving on {port} instead.")
+    print("  AutoOS browser UI")
+    print("  " + "-" * 58)
+    print(f"  {url}")
+    print("  " + "-" * 58)
+    if BIND != "127.0.0.1":
+        print("  WARNING: bound to a non-loopback address. Anyone who can reach this")
+        print("           port AND has the token above can install software here.")
+    if FORCE_DRY:
+        print("  Session is LOCKED to dry run - the browser cannot install anything.")
+    print("  The token changes every run. Ctrl-C to stop.")
+    print()
+    # Re-arm SIGINT explicitly. A process started in the background by a
+    # non-interactive shell inherits SIGINT as SIG_IGN, and CPython then leaves
+    # it ignored - so Ctrl-C (or `kill -INT`) would do nothing at all. Handling
+    # SIGTERM too means `kill` and service managers stop it cleanly as well.
+    def _request_stop(_signum, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _request_stop)
+    try:
+        signal.signal(signal.SIGTERM, _request_stop)
+    except (AttributeError, ValueError):  # pragma: no cover - not on every platform
+        pass
+
+    # serve_forever() polls on a 0.5 s tick, so SIGINT lands promptly; shutting
+    # down explicitly releases the socket instead of leaving it to interpreter exit.
+    try:
+        srv.serve_forever(poll_interval=0.2)
+    except KeyboardInterrupt:
+        print("\n  stopping the AutoOS browser UI...", flush=True)
+    finally:
+        # NOT srv.shutdown(): it blocks until serve_forever() signals that it
+        # has stopped, and we are on the very thread that ran it - so calling it
+        # here deadlocks and Ctrl-C appears to do nothing. serve_forever() has
+        # already returned by this point; closing the socket is all that is left.
+        srv.server_close()
+        print("  server stopped.", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

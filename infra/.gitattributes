@@ -1,0 +1,23 @@
+# infra/.gitattributes
+#
+# Root ../.gitattributes is the single source of truth for the common types
+# (`* text=auto eol=lf`, LF for .sh/.py/.yml/.yaml/.json/.md/.html, CRLF for
+# .ps1/.psm1/.psd1, and binary for .ttf/.png/.jpg/.exe). Only rules that ADD
+# coverage beyond it live here.
+#
+# Windows-only script extensions: the root catch-all `* text=auto eol=lf` would
+# force these to LF, which breaks them on Windows. They must be CRLF.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.vbs  text eol=crlf
+
+# systemd units — pin LF explicitly (they run under `sh`; a stray CR breaks them).
+*.service text eol=lf
+*.timer   text eol=lf
+
+# Font / icon binaries root does not list — never normalize.
+*.gif   binary
+*.ico   binary
+*.woff  binary
+*.woff2 binary
+*.eot   binary

@@ -1,0 +1,1343 @@
+{
+  "$schema": "./schema.json",
+  "platform": "windows",
+  "profiles": {
+    "workstation": "Full development workstation — everything below that fits the hardware.",
+    "ai-coding": "Coding and AI tooling only, plus the terminal it runs in.",
+    "light": "Minimal remote-access box — Claude Code, Tailscale and Herdr only.",
+    "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
+    "local-ai": "Local AI inference with Ollama — no API key and no network, but models are 1.4-4.7 GB.",
+    "custom": "Start with nothing ticked and choose by hand.",
+    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing.",
+    "rescue": "Disaster-recovery toolkit and emergency AI recovery environment."
+  },
+  "categories": [
+    {
+      "id": "terminal",
+      "name": "Terminal & Shell",
+      "description": "The shell you will spend the rest of the setup looking at.",
+      "components": [
+        {
+          "id": "windows-terminal",
+          "name": "Windows Terminal",
+          "description": "Tabbed terminal with true-colour support",
+          "provider": "winget",
+          "package": "Microsoft.WindowsTerminal",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://learn.microsoft.com/windows/terminal/",
+          "installedAppx": [
+            "Microsoft.WindowsTerminal"
+          ]
+        },
+        {
+          "id": "powershell7",
+          "name": "PowerShell 7",
+          "description": "Modern cross-platform PowerShell",
+          "provider": "winget",
+          "package": "Microsoft.PowerShell",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "pwsh --version",
+          "homepage": "https://learn.microsoft.com/powershell/",
+          "installedNames": [
+            "PowerShell 7-x64",
+            "PowerShell 7 (x64)",
+            "PowerShell 7"
+          ],
+          "installedAppx": [
+            "Microsoft.PowerShell"
+          ]
+        },
+        {
+          "id": "oh-my-posh",
+          "name": "Oh My Posh",
+          "description": "Prompt theme engine for PowerShell",
+          "provider": "winget",
+          "package": "JanDeDobbeleer.OhMyPosh",
+          "requires": [
+            "powershell7",
+            "nerd-font",
+            "psreadline",
+            "terminal-icons"
+          ],
+          "postInstall": "Install-AutoOSPoshTheme",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "oh-my-posh --version",
+          "homepage": "https://ohmyposh.dev/",
+          "notes": "Installs a calm everyday prompt, completion/history helpers and file icons. The coding theme remains available.",
+          "installedAppx": [
+            "ohmyposh.cli"
+          ]
+        },
+        {
+          "id": "nerd-font",
+          "name": "Meslo Nerd Font",
+          "description": "Patched font with prompt glyphs and icons",
+          "provider": "script",
+          "package": "meslo-nerd-font",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "postInstall": "Install-AutoOSNerdFont",
+          "notes": "No winget package exists for Meslo; downloaded from the ryanoasis/nerd-fonts release and installed per-user.",
+          "homepage": "https://www.nerdfonts.com/"
+        },
+        {
+          "id": "psreadline",
+          "name": "PSReadLine",
+          "description": "History suggestions, search and tab completion",
+          "provider": "psmodule",
+          "package": "PSReadLine",
+          "minimumVersion": "2.2.0",
+          "profiles": [],
+          "homepage": "https://github.com/PowerShell/PSReadLine"
+        },
+        {
+          "id": "terminal-icons",
+          "name": "Terminal-Icons",
+          "description": "File and folder icons in PowerShell",
+          "provider": "psmodule",
+          "package": "Terminal-Icons",
+          "profiles": [],
+          "requires": [
+            "nerd-font"
+          ],
+          "homepage": "https://github.com/devblackops/Terminal-Icons"
+        }
+      ]
+    },
+    {
+      "id": "ui-design",
+      "name": "UI & Desktop Design",
+      "description": "Explorer, taskbar and window-manager customisation.",
+      "components": [
+        {
+          "id": "windhawk",
+          "name": "Windhawk",
+          "description": "Mod platform for Explorer and the taskbar",
+          "provider": "winget",
+          "package": "RamenSoftware.Windhawk",
+          "postInstall": "Install-AutoOSWindhawkMods",
+          "profiles": [
+            "workstation"
+          ],
+          "notes": "Seeds settings for the Better file sizes and Taskbar Clock mods; the mods themselves are enabled once from the Windhawk UI.",
+          "homepage": "https://windhawk.net/"
+        },
+        {
+          "id": "powertoys",
+          "name": "PowerToys",
+          "description": "FancyZones, PowerRename, Run and friends",
+          "provider": "winget",
+          "package": "Microsoft.PowerToys",
+          "profiles": [
+            "workstation"
+          ],
+          "homepage": "https://learn.microsoft.com/windows/powertoys/"
+        },
+        {
+          "id": "wiztree",
+          "name": "WizTree",
+          "description": "Find what is eating the disk, by reading the MFT",
+          "provider": "winget",
+          "package": "AntibodySoftware.WizTree",
+          "profiles": [
+            "workstation"
+          ],
+          "homepage": "https://diskanalyzer.com/"
+        }
+      ]
+    },
+    {
+      "id": "ai-coding",
+      "name": "Coding & AI",
+      "description": "Editors, agents and the runtimes they need.",
+      "components": [
+        {
+          "id": "git",
+          "name": "Git",
+          "description": "Version control",
+          "provider": "winget",
+          "package": "Git.Git",
+          "postInstall": "Set-AutoOSGitConfig",
+          "prompt": "git_user_name, git_user_email",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "verify": "git --version",
+          "homepage": "https://git-scm.com/",
+          "installedNames": [
+            "Git"
+          ]
+        },
+        {
+          "id": "gh",
+          "name": "GitHub CLI",
+          "description": "GitHub command-line tool for git, PRs and issues",
+          "provider": "winget",
+          "package": "GitHub.cli",
+          "requires": [
+            "git"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "gh --version",
+          "homepage": "https://cli.github.com/"
+        },
+        {
+          "id": "nodejs",
+          "name": "Node.js LTS",
+          "description": "JavaScript runtime — required by Claude Code",
+          "provider": "winget",
+          "package": "OpenJS.NodeJS.LTS",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "verify": "node --version",
+          "homepage": "https://nodejs.org/"
+        },
+        {
+          "id": "claude-code",
+          "name": "Claude Code CLI",
+          "description": "Anthropic's terminal coding agent",
+          "provider": "npm",
+          "package": "@anthropic-ai/claude-code",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "rescue"
+          ],
+          "verify": "claude --version",
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code",
+          "prompt": "claude_gateway_routing",
+          "postInstall": "Set-AutoOSClaudeGateway"
+        },
+        {
+          "id": "claude-autostart",
+          "name": "Claude autostart",
+          "description": "Reopens the Claude Code sessions you had before a reboot",
+          "provider": "script",
+          "package": "claude-autostart",
+          "requires": [
+            "claude-code"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code",
+          "launcher": "none"
+        },
+        {
+          "id": "cost-gate",
+          "name": "Daily cost gate",
+          "description": "Checks today's gateway spend and blocks runs past the cap",
+          "provider": "script",
+          "package": "cost-gate",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/blob/main/docs/ai/cost-guard.md",
+          "launcher": "none"
+        },
+        {
+          "id": "agy",
+          "name": "Antigravity CLI",
+          "description": "Google's terminal coding agent",
+          "provider": "winget",
+          "package": "Google.AntigravityCLI",
+          "arch": [
+            "x64",
+            "arm64"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "rescue"
+          ],
+          "verify": "agy --version",
+          "homepage": "https://antigravity.google/product/antigravity-cli",
+          "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
+        },
+        {
+          "id": "qwen-code",
+          "name": "Qwen Code CLI",
+          "description": "Qwen's terminal coding agent (routable through OmniRoute)",
+          "provider": "npm",
+          "package": "@qwen-code/qwen-code",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "qwen --version",
+          "homepage": "https://github.com/QwenLM/qwen-code",
+          "notes": "Headless: qwen -p. tools/autoos-agent.py --client qwen routes it through OmniRoute."
+        },
+        {
+          "id": "gemini-cli",
+          "name": "Gemini CLI",
+          "description": "Google's open-source terminal agent (OmniRoute-routable)",
+          "provider": "npm",
+          "package": "@google/gemini-cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "gemini --version",
+          "homepage": "https://github.com/google-gemini/gemini-cli",
+          "notes": "Headless: gemini -p. agy succeeds it, but only this one can route through OmniRoute."
+        },
+        {
+          "id": "codex",
+          "name": "OpenAI Codex CLI",
+          "description": "OpenAI's terminal coding agent (OmniRoute-routable)",
+          "provider": "npm",
+          "package": "@openai/codex",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "codex --version",
+          "homepage": "https://github.com/openai/codex",
+          "notes": "Headless: codex exec. Spawned through omniroute run, so no OpenAI login is needed."
+        },
+        {
+          "id": "qodercli",
+          "name": "Qoder CLI",
+          "description": "Alibaba terminal coding agent (Qwen-powered)",
+          "provider": "script",
+          "package": "qodercli",
+          "arch": [
+            "x64"
+          ],
+          "postInstall": "Set-AutoOSQoderMcp",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "qodercli --version",
+          "homepage": "https://qoder.com/cli",
+          "notes": "Wires ~/.qoder/bin on PATH and QODER_PERSONAL_ACCESS_TOKEN from api-keys.yml. Headless use needs the PAT; interactive /login still works. Windows arm64 is not supported per the vendor's own installation docs, so the component is hidden there rather than shown and failing."
+        },
+        {
+          "id": "devin-cli",
+          "name": "Devin CLI",
+          "description": "Cognition terminal coding agent",
+          "provider": "winget",
+          "package": "CognitionAI.DevinCLI",
+          "arch": [
+            "x64",
+            "arm64"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "devin --version",
+          "homepage": "https://cli.devin.ai",
+          "notes": "Needs an interactive `devin auth login` once; the gateway side connects via `omniroute providers add devin-cli --oauth` or the dashboard."
+        },
+        {
+          "id": "ollama",
+          "name": "Ollama",
+          "description": "Local AI model runtime",
+          "provider": "winget",
+          "package": "Ollama.Ollama",
+          "verify": "ollama --version",
+          "homepage": "https://ollama.com/",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-4b",
+          "name": "Qwen3 4B",
+          "description": "General-purpose local model, 2.5 GB download, 256K context",
+          "provider": "custom",
+          "package": "qwen3:4b",
+          "postInstall": "Install-AutoOSOllamaModelQwen34B",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen3:4b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "notes": "Pre-ticked default: small enough to load fast off USB, and its 256K context fits a full dmesg/SMART dump.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-1-7b",
+          "name": "Qwen3 1.7B",
+          "description": "Smaller/faster general-purpose local model, 1.4 GB download",
+          "provider": "custom",
+          "package": "qwen3:1.7b",
+          "postInstall": "Install-AutoOSOllamaModelQwen317B",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen3:1.7b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "profiles": []
+        },
+        {
+          "id": "ollama-model-qwen2-5-coder-7b",
+          "name": "Qwen2.5 Coder 7B",
+          "description": "Coding-focused local model, 4.7 GB download",
+          "provider": "custom",
+          "package": "qwen2.5-coder:7b",
+          "postInstall": "Install-AutoOSOllamaModelQwenCoder7B",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen2.5-coder:7b",
+          "homepage": "https://ollama.com/library/qwen2.5-coder",
+          "profiles": []
+        },
+        {
+          "id": "oterm",
+          "name": "oterm",
+          "description": "Terminal UI chat client for Ollama models",
+          "provider": "custom",
+          "package": "oterm",
+          "postInstall": "Install-AutoOSOterm",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "oterm --help",
+          "homepage": "https://github.com/ggozad/oterm",
+          "notes": "No winget/choco package exists upstream (checked winget.run and community.chocolatey.org); installed via pip. Interactive TUI only — 'ai local' is the scriptable path to the same models.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "opencode",
+          "name": "OpenCode CLI",
+          "description": "AI coding agent with local-model support",
+          "provider": "npm",
+          "package": "opencode-ai",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "rescue"
+          ],
+          "verify": "opencode --version",
+          "postInstall": "Set-AutoOSOpenCodeConfig",
+          "homepage": "https://opencode.ai/"
+        },
+        {
+          "id": "openhands",
+          "name": "OpenHands Agent Canvas",
+          "description": "Multi-agent orchestration canvas and UI for OpenHands",
+          "provider": "npm",
+          "package": "@openhands/agent-canvas",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "agent-canvas --version",
+          "postInstall": "Set-AutoOSOpenHandsConfig",
+          "homepage": "https://github.com/All-Hands-AI/OpenHands"
+        },
+        {
+          "id": "claude-desktop",
+          "name": "Claude Desktop",
+          "description": "Claude desktop application",
+          "provider": "winget",
+          "package": "Anthropic.Claude",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://claude.ai/download",
+          "installedNames": [
+            "Claude"
+          ]
+        },
+        {
+          "id": "handy",
+          "name": "Handy",
+          "description": "Offline speech-to-text — dictate instead of typing",
+          "provider": "winget",
+          "package": "cjpais.Handy",
+          "homepage": "https://github.com/cjpais/Handy",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Needs a microphone; runs fully offline, nothing is sent to a server."
+        },
+        {
+          "id": "antigravity",
+          "name": "Antigravity",
+          "description": "Google's agent-first IDE",
+          "provider": "winget",
+          "package": "Google.Antigravity",
+          "postInstall": "Set-AutoOSAntigravityMcp",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://antigravity.google/"
+        },
+        {
+          "id": "vscode",
+          "name": "Visual Studio Code",
+          "description": "Editor",
+          "provider": "winget",
+          "package": "Microsoft.VisualStudioCode",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "code --version",
+          "homepage": "https://code.visualstudio.com/"
+        },
+        {
+          "id": "neovim",
+          "name": "Neovim + LazyVim",
+          "description": "Modal editor with the LazyVim starter config",
+          "provider": "winget",
+          "package": "Neovim.Neovim",
+          "requires": [
+            "git"
+          ],
+          "postInstall": "Install-AutoOSNeovim",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "nvim --version",
+          "homepage": "https://www.lazyvim.org/",
+          "notes": "Ensures nvim is on PATH, then enables the sidekick extra."
+        },
+        {
+          "id": "docker",
+          "name": "Docker Desktop",
+          "description": "Containers — backs the local MCP memory stack",
+          "provider": "winget",
+          "package": "Docker.DockerDesktop",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Requires virtualisation enabled in BIOS and a reboot after install.",
+          "verify": "docker --version",
+          "homepage": "https://www.docker.com/products/docker-desktop/"
+        },
+        {
+          "id": "herdr",
+          "name": "Herdr",
+          "description": "Persistent, resumable AI sessions",
+          "provider": "script",
+          "package": "herdr",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "prompt": "herdr_source",
+          "verify": "herdr --version",
+          "homepage": "https://www.npmjs.com/package/herdr"
+        },
+        {
+          "id": "agent-skills",
+          "name": "agent-skills (retired)",
+          "description": "Retired: its work moved to other components",
+          "provider": "custom",
+          "package": "agent-skills",
+          "tombstone": true,
+          "note": "its work moved to the mcp-* components",
+          "replaced_by": [
+            "mcp-graphify",
+            "mcp-serena",
+            "mcp-playwright",
+            "mcp-context7"
+          ],
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS"
+        },
+        {
+          "id": "uv",
+          "name": "uv",
+          "description": "Extremely fast Python package and project manager",
+          "provider": "winget",
+          "package": "astral-sh.uv",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "uv --version",
+          "homepage": "https://docs.astral.sh/uv/"
+        },
+        {
+          "id": "zed",
+          "name": "Zed",
+          "description": "Fast Rust editor with an AI agent panel",
+          "provider": "winget",
+          "package": "ZedIndustries.Zed",
+          "requires": [
+            "litellm"
+          ],
+          "postInstall": "Set-AutoOSZedProxy",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "zed --help",
+          "homepage": "https://zed.dev/",
+          "notes": "Agent panel is pointed at the local OmniRoute gateway."
+        },
+        {
+          "id": "litellm",
+          "name": "LiteLLM tier router",
+          "description": "Local LLM router: free-first tiers for all agents",
+          "provider": "custom",
+          "package": "litellm",
+          "postInstall": "Install-AutoOSLitellm",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "litellm --version",
+          "homepage": "https://docs.litellm.ai/",
+          "notes": "Manual fallback router; primary is OmniRoute. Needs configuration/litellm/.env; see docs/api-keys.md."
+        },
+        {
+          "id": "omniroute",
+          "name": "OmniRoute gateway",
+          "description": "Local AI gateway: free tiers with auto fallback",
+          "provider": "npm",
+          "package": "omniroute",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "omniroute --version",
+          "homepage": "https://github.com/diegosouzapw/OmniRoute",
+          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first.",
+          "prompt": "claude_gateway_routing",
+          "postInstall": "Install-AutoOSOmniRouteRouting"
+        },
+        {
+          "id": "zcode",
+          "name": "ZCode (Z.ai)",
+          "description": "Z.ai coding agent app (GLM models)",
+          "provider": "winget",
+          "package": "ZhipuAI.ZCode",
+          "installedNames": [
+            "ZCode"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://zcode.z.ai",
+          "notes": "Log in inside the app with the GLM account. No version pin: the winget manifest lags the vendor."
+        },
+        {
+          "id": "zcode-gateway",
+          "name": "ZCode gateway link",
+          "description": "Check OmniRoute can use the ZCode server bundle",
+          "provider": "custom",
+          "package": "zcode-gateway",
+          "requires": [
+            "omniroute"
+          ],
+          "postInstall": "Set-AutoOSZcodeGatewayEnv",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "powershell -NoProfile -Command if (Test-Path \"$env:USERPROFILE\\.zcode\\server\\zcode-server.cjs\") { exit 0 } else { exit 1 }",
+          "homepage": "https://zcode.z.ai",
+          "notes": "Needs the ZCode server bundle: in the ZCode desktop app add this host as an SSH remote and connect once (installs ~/.zcode/server, syncs the login). Detect-only: nothing is installed or changed by this step except two env lines when the bundle sits in a non-default place. The dashboard connection test for zcode always fails (zcode:// is not http): only a real chat call proves it."
+        },
+        {
+          "id": "opencode-cli",
+          "name": "OpenCode CLI",
+          "description": "Terminal AI coding agent (TUI) on the tier router",
+          "provider": "npm",
+          "package": "@opencode/cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "verify": "opencode --version",
+          "postInstall": "Set-AutoOSOpenCodeConfig",
+          "homepage": "https://opencode.ai/",
+          "notes": "V2 CLI. The legacy npm package opencode-ai (V1) cannot read the V2 providers config."
+        },
+        {
+          "id": "qoder-desktop",
+          "name": "Qoder",
+          "description": "Qoder's agentic desktop IDE",
+          "provider": "winget",
+          "package": "Alibaba.Qoder",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://qoder.com/download",
+          "notes": "Desktop IDE (Windows 10+). No verify command: the app puts no confirmed CLI on PATH. MCP wiring lives on qodercli."
+        },
+        {
+          "id": "openhands-docker",
+          "name": "OpenHands Docker",
+          "description": "Autonomous coding agent — Docker app, OmniRoute-routed",
+          "provider": "custom",
+          "package": "openhands",
+          "requires": [
+            "docker"
+          ],
+          "postInstall": "Install-AutoOSOpenHands",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "docker image inspect docker.openhands.dev/openhands/openhands:latest",
+          "homepage": "https://www.all-hands.dev/",
+          "notes": "Start with .\\configuration\\start-stack.ps1 -App openhands; LLM profiles: configuration/openhands/config.toml."
+        },
+        {
+          "id": "mcp-serena",
+          "name": "Serena MCP Server",
+          "description": "Semantic code navigation and symbol search MCP server",
+          "provider": "custom",
+          "package": "mcp-serena",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "Install-AutoOSMcpSerena",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Semantic code navigation and LSP symbols for Claude Code and Antigravity.",
+          "homepage": "https://github.com/serena-agent/serena"
+        },
+        {
+          "id": "mcp-graphify",
+          "name": "Graphify MCP Server",
+          "description": "Codebase knowledge graph MCP server for coding agents",
+          "provider": "custom",
+          "package": "mcp-graphify",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "Install-AutoOSMcpGraphify",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Codebase dependency knowledge graph queries for coding agents.",
+          "homepage": "https://github.com/Graphify-Labs/graphify"
+        },
+        {
+          "id": "mcp-playwright",
+          "name": "Playwright MCP Server",
+          "description": "Headless browser automation MCP server for coding agents",
+          "provider": "custom",
+          "package": "mcp-playwright",
+          "requires": [
+            "nodejs"
+          ],
+          "postInstall": "Install-AutoOSMcpPlaywright",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Browser automation and web testing for Claude Code and Antigravity.",
+          "homepage": "https://github.com/modelcontextprotocol/servers"
+        },
+        {
+          "id": "mcp-context7",
+          "name": "Context7 MCP Server",
+          "description": "Real-time library documentation and code context MCP server",
+          "provider": "custom",
+          "package": "mcp-context7",
+          "requires": [
+            "nodejs"
+          ],
+          "prompt": "context7_api_key",
+          "postInstall": "Install-AutoOSMcpContext7",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Up-to-date documentation lookups for frameworks and libraries.",
+          "homepage": "https://github.com/upstash/context7-mcp"
+        }
+      ]
+    },
+    {
+      "id": "remote",
+      "name": "Remote Access & Networking",
+      "components": [
+        {
+          "id": "tailscale",
+          "name": "Tailscale",
+          "description": "Mesh VPN — reach this box from anywhere",
+          "provider": "winget",
+          "package": "Tailscale.Tailscale",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "verify": "tailscale version",
+          "homepage": "https://tailscale.com/"
+        },
+        {
+          "id": "wireguard",
+          "name": "WireGuard",
+          "description": "VPN client",
+          "provider": "winget",
+          "package": "WireGuard.WireGuard",
+          "profiles": [
+            "workstation"
+          ],
+          "homepage": "https://www.wireguard.com/"
+        },
+        {
+          "id": "parsec",
+          "name": "Parsec",
+          "description": "Low-latency remote desktop",
+          "provider": "winget",
+          "package": "Parsec.Parsec",
+          "profiles": [
+            "workstation",
+            "everyday"
+          ],
+          "homepage": "https://parsec.app/"
+        },
+        {
+          "id": "moonlight",
+          "name": "Moonlight",
+          "description": "Game-streaming client",
+          "provider": "winget",
+          "package": "MoonlightGameStreamingProject.Moonlight",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://moonlight-stream.org/",
+          "installedNames": [
+            "Moonlight Game Streaming Client"
+          ]
+        },
+        {
+          "id": "teamviewer",
+          "name": "TeamViewer",
+          "description": "Remote support",
+          "provider": "winget",
+          "package": "TeamViewer.TeamViewer",
+          "profiles": [],
+          "homepage": "https://www.teamviewer.com/"
+        }
+      ]
+    },
+    {
+      "id": "tools",
+      "name": "General Tools",
+      "components": [
+        {
+          "id": "7zip",
+          "name": "7-Zip",
+          "description": "Archives",
+          "provider": "winget",
+          "package": "7zip.7zip",
+          "profiles": [
+            "workstation",
+            "everyday",
+            "rescue"
+          ],
+          "verify": "7z",
+          "homepage": "https://www.7-zip.org/",
+          "installedNames": [
+            "7-Zip"
+          ]
+        },
+        {
+          "id": "notepadplusplus",
+          "name": "Notepad++",
+          "description": "Quick text editor",
+          "provider": "winget",
+          "package": "Notepad++.Notepad++",
+          "profiles": [
+            "workstation"
+          ],
+          "homepage": "https://notepad-plus-plus.org/"
+        },
+        {
+          "id": "firefox",
+          "name": "Firefox",
+          "description": "Browser",
+          "provider": "winget",
+          "package": "Mozilla.Firefox",
+          "profiles": [
+            "workstation",
+            "everyday"
+          ],
+          "homepage": "https://www.mozilla.org/firefox/",
+          "installedNames": [
+            "Mozilla Firefox"
+          ]
+        },
+        {
+          "id": "chrome",
+          "name": "Google Chrome",
+          "description": "Browser",
+          "provider": "winget",
+          "package": "Google.Chrome",
+          "profiles": [
+            "workstation",
+            "everyday"
+          ],
+          "homepage": "https://www.google.com/chrome/",
+          "installedNames": [
+            "Google Chrome"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "media",
+      "name": "Media & Communication",
+      "components": [
+        {
+          "id": "vlc",
+          "name": "VLC",
+          "description": "Media player",
+          "provider": "winget",
+          "package": "VideoLAN.VLC",
+          "profiles": [
+            "workstation",
+            "everyday"
+          ],
+          "homepage": "https://www.videolan.org/vlc/",
+          "installedNames": [
+            "VLC media player"
+          ]
+        },
+        {
+          "id": "spotify",
+          "name": "Spotify",
+          "description": "Music",
+          "provider": "winget",
+          "package": "Spotify.Spotify",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.spotify.com/",
+          "installedAppx": [
+            "SpotifyAB.SpotifyMusic"
+          ]
+        },
+        {
+          "id": "slack",
+          "name": "Slack",
+          "description": "Team chat",
+          "provider": "winget",
+          "package": "SlackTechnologies.Slack",
+          "profiles": [],
+          "homepage": "https://slack.com/",
+          "installedAppx": [
+            "91750D7E.Slack"
+          ]
+        },
+        {
+          "id": "zoom",
+          "name": "Zoom",
+          "description": "Video calls",
+          "provider": "winget",
+          "package": "Zoom.Zoom",
+          "profiles": [],
+          "homepage": "https://zoom.us/",
+          "installedNames": [
+            "Zoom Workplace"
+          ]
+        },
+        {
+          "id": "whatsapp",
+          "name": "WhatsApp",
+          "description": "Messaging",
+          "provider": "winget",
+          "package": "9NKSQGP7F2NH",
+          "profiles": [],
+          "source": "msstore",
+          "homepage": "https://www.whatsapp.com/",
+          "installedAppx": [
+            "5319275A.WhatsAppDesktop"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "research",
+      "name": "Notes & Research",
+      "components": [
+        {
+          "id": "obsidian",
+          "name": "Obsidian",
+          "description": "Markdown knowledge base",
+          "provider": "winget",
+          "package": "Obsidian.Obsidian",
+          "profiles": [
+            "workstation"
+          ],
+          "homepage": "https://obsidian.md/"
+        },
+        {
+          "id": "zotero",
+          "name": "Zotero",
+          "description": "Reference manager",
+          "provider": "winget",
+          "package": "DigitalScholar.Zotero",
+          "profiles": [],
+          "homepage": "https://www.zotero.org/"
+        }
+      ]
+    },
+    {
+      "id": "science",
+      "name": "Scientific Python",
+      "description": "Conda plus an isolated analysis environment.",
+      "components": [
+        {
+          "id": "miniconda",
+          "name": "Miniconda3",
+          "description": "Conda package manager",
+          "provider": "winget",
+          "package": "Anaconda.Miniconda3",
+          "postInstall": "Add-AutoOSCondaToPath",
+          "profiles": [],
+          "verify": "conda --version",
+          "homepage": "https://docs.conda.io/projects/miniconda/"
+        },
+        {
+          "id": "suite2p",
+          "name": "suite2p environment",
+          "description": "Conda env for calcium-imaging analysis",
+          "provider": "custom",
+          "package": "suite2p",
+          "requires": [
+            "miniconda"
+          ],
+          "postInstall": "New-AutoOSCondaEnv",
+          "profiles": [],
+          "homepage": "https://suite2p.readthedocs.io/"
+        }
+      ]
+    },
+    {
+      "id": "sync",
+      "name": "File Sync",
+      "components": [
+        {
+          "id": "owncloud",
+          "name": "ownCloud Desktop",
+          "description": "Self-hosted file sync",
+          "provider": "winget",
+          "package": "ownCloud.ownCloudDesktop",
+          "profiles": [],
+          "homepage": "https://owncloud.com/desktop-app/",
+          "installedNames": [
+            "ownCloud"
+          ]
+        },
+        {
+          "id": "googledrive",
+          "name": "Google Drive",
+          "description": "Drive for desktop",
+          "provider": "winget",
+          "package": "Google.GoogleDrive",
+          "profiles": [],
+          "homepage": "https://www.google.com/drive/download/"
+        }
+      ]
+    },
+    {
+      "id": "everyday",
+      "name": "Everyday & Entertainment",
+      "description": "Personal desktop, media, games and maker tools.",
+      "requiresDisplay": true,
+      "components": [
+        {
+          "id": "hwinfo",
+          "name": "HWiNFO",
+          "description": "Hardware information and sensor monitoring",
+          "provider": "winget",
+          "package": "REALiX.HWiNFO",
+          "profiles": [
+            "everyday",
+            "rescue"
+          ],
+          "homepage": "https://www.hwinfo.com/",
+          "installedNames": [
+            "HWiNFO64",
+            "HWiNFO® 64"
+          ]
+        },
+        {
+          "id": "steam",
+          "name": "Steam",
+          "description": "Game library and store",
+          "provider": "winget",
+          "package": "Valve.Steam",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://store.steampowered.com/about/"
+        },
+        {
+          "id": "discord",
+          "name": "Discord",
+          "description": "Voice, video and community chat",
+          "provider": "winget",
+          "package": "Discord.Discord",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://discord.com/download"
+        },
+        {
+          "id": "fiio-k3",
+          "name": "FiiO K3 USB DAC driver",
+          "description": "USB audio driver for the FiiO K3 DAC",
+          "provider": "manual",
+          "package": "fiio-k3",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.fiio.com/Driver_Download",
+          "notes": "Action required: download the official FiiO USB DAC driver for K3 and follow its wizard. macOS/Linux use class-compliant USB audio without this Windows driver.",
+          "installedNames": [
+            "FiiO USB DAC Driver"
+          ]
+        },
+        {
+          "id": "jellyfin-client",
+          "name": "Jellyfin Media Player",
+          "description": "Desktop client for your Jellyfin media server",
+          "provider": "winget",
+          "package": "Jellyfin.JellyfinMediaPlayer",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://jellyfin.org/downloads/clients/all/",
+          "installedNames": [
+            "Jellyfin Media Player"
+          ]
+        },
+        {
+          "id": "chitubox",
+          "name": "CHITUBOX Basic",
+          "description": "Prepare models for resin 3D printing",
+          "provider": "manual",
+          "package": "chitubox",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.chitubox.com/en/download/chitubox-free",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer.",
+          "installedNames": [
+            "CHITUBOX Basic",
+            "CHITUBOX"
+          ]
+        },
+        {
+          "id": "unified-remote",
+          "name": "Unified Remote Server",
+          "description": "Control this computer from your phone",
+          "provider": "winget",
+          "package": "UnifiedIntents.UnifiedRemote",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.unifiedremote.com/download",
+          "notes": "Install the Unified Remote app on your phone and pair with this server. Review remote access settings before use.",
+          "installedNames": [
+            "Unified Remote Server",
+            "Unified Remote"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "rescue",
+      "name": "Disaster Recovery",
+      "description": "Disk, filesystem, hardware and installer-USB tools for a rescue stick.",
+      "components": [
+        {
+          "id": "crystaldiskinfo",
+          "name": "CrystalDiskInfo",
+          "description": "Disk health, S.M.A.R.T. status and temperature monitor",
+          "provider": "winget",
+          "package": "CrystalDewWorld.CrystalDiskInfo",
+          "homepage": "https://crystalmark.info/en/software/crystaldiskinfo/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "testdisk",
+          "name": "TestDisk & PhotoRec",
+          "description": "Recover lost partitions and undelete files",
+          "provider": "winget",
+          "package": "CGSecurity.TestDisk",
+          "homepage": "https://www.cgsecurity.org/wiki/TestDisk",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "windirstat",
+          "name": "WinDirStat",
+          "description": "Visualise what is filling up the disk",
+          "provider": "winget",
+          "package": "WinDirStat.WinDirStat",
+          "homepage": "https://windirstat.net/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "sysinternals",
+          "name": "Sysinternals Suite",
+          "description": "Process Explorer, Autoruns and the rest of the PsTools",
+          "provider": "winget",
+          "package": "Microsoft.Sysinternals.Suite",
+          "homepage": "https://learn.microsoft.com/sysinternals/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "ventoy",
+          "name": "Ventoy",
+          "description": "Multi-ISO bootable USB creator",
+          "provider": "winget",
+          "package": "Ventoy.Ventoy",
+          "homepage": "https://www.ventoy.net/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "rufus",
+          "name": "Rufus",
+          "description": "Format and create bootable USB drives from an ISO",
+          "provider": "winget",
+          "package": "Rufus.Rufus",
+          "homepage": "https://rufus.ie/",
+          "profiles": [
+            "rescue"
+          ]
+        },
+        {
+          "id": "usbipd-win",
+          "name": "usbipd-win",
+          "description": "Share local USB devices with WSL2 and Hyper-V guests",
+          "provider": "winget",
+          "package": "dorssel.usbipd-win",
+          "verify": "usbipd --version",
+          "homepage": "https://github.com/dorssel/usbipd-win",
+          "profiles": [
+            "rescue"
+          ]
+        }
+      ]
+    }
+  ],
+  "prompts": {
+    "omnigraph_url": {
+      "question": "Omnigraph remote server URL (blank = local Docker stack on :8080)",
+      "default": "",
+      "validate": "url_or_empty",
+      "help": "If you run a shared Omnigraph server, give its base URL here and the MCP config will point at it instead of localhost."
+    },
+    "herdr_source": {
+      "question": "Herdr install source",
+      "default": "npm:herdr",
+      "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in winget, so AutoOS needs to be told where it lives."
+    },
+    "git_user_name": {
+      "question": "Git commit author name (e.g. Jane Doe)",
+      "default": "",
+      "help": "Sets git config --global user.name so commits on this machine have your author name."
+    },
+    "git_user_email": {
+      "question": "Git commit author email (e.g. jane@example.com)",
+      "default": "",
+      "help": "Sets git config --global user.email so commits on this machine have your email."
+    },
+    "context7_api_key": {
+      "question": "Upstash Context7 API key (blank to use default rate limit)",
+      "default": "",
+      "help": "Optional API key for Upstash Context7 live documentation lookups."
+    },
+    "claude_gateway_routing": {
+      "question": "Claude Code routing: 'login' (claude.ai sign-in) or 'gateway' (local OmniRoute)",
+      "default": "login",
+      "help": "gateway writes ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN into ~/.claude/settings.json so Claude Code talks to OmniRoute - this disables the claude.ai connectors, and needs the OmniRoute client key. login (the default) keeps the claude.ai sign-in and removes those two keys again if an earlier run set them."
+    }
+  },
+  "windhawk_mods": [
+    {
+      "id": "explorer-details-better-file-sizes",
+      "name": "Better file sizes in Explorer details",
+      "settings": {}
+    },
+    {
+      "id": "taskbar-clock-customization",
+      "name": "Taskbar Clock Customization",
+      "settings": {
+        "TopLine": "%date%  %time%",
+        "BottomLine": "💻%cpu%    |    %gpu% 🎞️  %newline%🧠%ram%    | %total_speed%"
+      }
+    }
+  ]
+}

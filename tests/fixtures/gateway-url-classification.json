@@ -1,0 +1,310 @@
+[
+ {
+  "url": "",
+  "local": true
+ },
+ {
+  "url": "http://127.0.0.1:20128",
+  "local": true
+ },
+ {
+  "url": "http://localhost:20128",
+  "local": true
+ },
+ {
+  "url": "https://localhost",
+  "local": true
+ },
+ {
+  "url": "http://[::1]:20128",
+  "local": true
+ },
+ {
+  "url": "http://LOCALHOST:20128/",
+  "local": true
+ },
+ {
+  "url": "http://LocalHost:20128",
+  "local": true
+ },
+ {
+  "url": "http://localhost",
+  "local": true
+ },
+ {
+  "url": "https://localhost:20128",
+  "local": true
+ },
+ {
+  "url": "http://user:pass@127.0.0.1:8080",
+  "local": true
+ },
+ {
+  "url": "http://user@127.0.0.1:8080",
+  "local": true
+ },
+ {
+  "url": "http://user:pass@localhost:8080",
+  "local": true
+ },
+ {
+  "url": "http://user:pass@[::1]:8080",
+  "local": true
+ },
+ {
+  "url": "http://a@b@127.0.0.1:20128",
+  "local": true
+ },
+ {
+  "url": "http://user:p@ss@127.0.0.1:20128",
+  "local": true
+ },
+ {
+  "url": "http://user:p@ss@localhost:20128",
+  "local": true
+ },
+ {
+  "url": "http://user:p@ss@[::1]:20128",
+  "local": true
+ },
+ {
+  "url": "  http://127.0.0.1:20128  ",
+  "local": true
+ },
+ {
+  "url": "\thttp://localhost:20128\n",
+  "local": true
+ },
+ {
+  "url": "http://127.0.0.1/x@y",
+  "local": true
+ },
+ {
+  "url": "http://localhost?x=1",
+  "local": true
+ },
+ {
+  "url": "http://127.0.0.1#frag",
+  "local": true
+ },
+ {
+  "url": "http://127.0.0.1:20128/v1?k=a@b",
+  "local": true
+ },
+ {
+  "url": "http://localhost:",
+  "local": true
+ },
+ {
+  "url": "http://127.0.0.1:65535",
+  "local": true
+ },
+ {
+  "url": "HTTP://LOCALHOST:20128",
+  "local": true
+ },
+ {
+  "url": "Https://127.0.0.1",
+  "local": true
+ },
+ {
+  "url": "not-a-url",
+  "local": false
+ },
+ {
+  "url": "https://gw.example.com",
+  "local": false
+ },
+ {
+  "url": "http://server:20128",
+  "local": false
+ },
+ {
+  "url": "http://[::2]:20128",
+  "local": false
+ },
+ {
+  "url": "http://a@b@gw.example.com",
+  "local": false
+ },
+ {
+  "url": "https://remote.example.com:20128",
+  "local": false
+ },
+ {
+  "url": "  https://gw.example.com  ",
+  "local": false
+ },
+ {
+  "url": "http://evil.example/x@127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "http://evil.example#@127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "http://evil.example?x=@127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "http://localhost.",
+  "local": false
+ },
+ {
+  "url": "http://127.0.0.2",
+  "local": false
+ },
+ {
+  "url": "http://0.0.0.0",
+  "local": false
+ },
+ {
+  "url": "http://evil.example\\@127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "http:\\\\127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "http://127.0.0.1\\x",
+  "local": false
+ },
+ {
+  "url": "http://127.1",
+  "local": false
+ },
+ {
+  "url": "http://0x7f.1",
+  "local": false
+ },
+ {
+  "url": "http://2130706433",
+  "local": false
+ },
+ {
+  "url": "http://0177.0.0.1",
+  "local": false
+ },
+ {
+  "url": "http://localhost:abc",
+  "local": false
+ },
+ {
+  "url": "http://127.0.0.1:99999",
+  "local": false
+ },
+ {
+  "url": "http://127.0.0.1:-1",
+  "local": false
+ },
+ {
+  "url": "http://127.0.0.1:123456",
+  "local": false
+ },
+ {
+  "url": "http://[::1]evil",
+  "local": false
+ },
+ {
+  "url": "http://[::1",
+  "local": false
+ },
+ {
+  "url": "http://[127.0.0.1]:20128",
+  "local": false
+ },
+ {
+  "url": "http://::1",
+  "local": false
+ },
+ {
+  "url": "http://[::1]:abc",
+  "local": false
+ },
+ {
+  "url": "file://127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "ftp://127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "ws://localhost:20128",
+  "local": false
+ },
+ {
+  "url": "unix://localhost",
+  "local": false
+ },
+ {
+  "url": "git+ssh://localhost",
+  "local": false
+ },
+ {
+  "url": "   ",
+  "local": false
+ },
+ {
+  "url": "\t\n",
+  "local": false
+ },
+ {
+  "url": "127.0.0.1:20128",
+  "local": false
+ },
+ {
+  "url": "localhost:20128",
+  "local": false
+ },
+ {
+  "url": "//127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "http://",
+  "local": false
+ },
+ {
+  "url": "http://:20128",
+  "local": false
+ },
+ {
+  "url": "http:///x",
+  "local": false
+ },
+ {
+  "url": "http://127.0.0.1 /x",
+  "local": false
+ },
+ {
+  "url": "http://127.0.0.1\u0001",
+  "local": false
+ },
+ {
+  "url": "http://127.0.0.1\u00a0",
+  "local": false
+ },
+ {
+  "url": "http://127.0.0.1\u200b",
+  "local": false
+ },
+ {
+  "url": "http://127.0.0.1\r\nHost: evil",
+  "local": false
+ },
+ {
+  "url": "1http://127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "ht tp://127.0.0.1",
+  "local": false
+ },
+ {
+  "url": "http://localhost\u00e9",
+  "local": false
+ }
+]

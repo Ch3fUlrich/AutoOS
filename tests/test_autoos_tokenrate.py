@@ -1,0 +1,1139 @@
+#!/usr/bin/env python3
+"""Tests for tools/autoos_tokenrate.py and the `token-rate` verb (RESTART spec §5 Metric).
+
+Fixtures are shaped exactly like a real Claude Code transcript record. Measured
+2026-09-28 on one assistant record in the L1-routing lane's transcript dir
+(`~/.claude/projects/<the cwd's slug>/*.jsonl`, one file per session): the
+top-level keys are
+
+    ['advisorModel', 'apiBlockIndex', 'cwd', 'effort', 'entrypoint', 'gitBranch',
+     'isSidechain', 'message', 'parentUuid', 'perTurnEffort', 'requestId',
+     'serverClassifierRequest', 'sessionId', 'sessionKind', 'session_id',
+     'timestamp', 'type', 'userType', 'uuid', 'version']
+
+and `message.usage` carries
+
+    ['input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens',
+     'output_tokens', 'output_tokens_details', 'server_tool_use', 'service_tier',
+     'cache_creation', 'inference_geo', 'iterations', 'speed']
+
+with `timestamp` like `2026-09-26T19:16:44.016Z` and `cwd` like a lane
+directory under the operator's code tree. `usage.iterations` repeats the four
+token fields per iteration, so summing it too would double count — the fixtures
+carry it and the tests assert it is ignored.
+
+The git denominator is exercised against a throwaway repo in a TemporaryDirectory,
+the transcripts against a throwaway projects dir, so nothing reads the live
+machine. Run it directly, never through unittest discover:
+
+    python3 tests/test_autoos_tokenrate.py
+"""
+import itertools
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+TOOLS = ROOT / "tools"
+AGENT = TOOLS / "autoos-agent.py"
+TOKENRATE = TOOLS / "autoos_tokenrate.py"
+sys.path.insert(0, str(TOOLS))
+
+import autoos_tokenrate as tr  # noqa: E402
+
+# The orchestrator prefix used by most fixtures, and a sibling that must not match.
+PREFIX = "/home/user/code/AutoOS-lanes/L1-routing"
+OTHER = "/home/user/code/AutoOS-lanes/L1-backlog"
+
+# A real transcript gives every record its own uuid; fixtures get one per call.
+_RECORD_IDS = itertools.count(1)
+
+
+def usage_line(input_tokens=0, output_tokens=0, cache_creation=0, cache_read=0,
+               ts="2026-09-27T12:00:00.000Z", cwd=PREFIX, session="sess-1",
+               with_iterations=True, sidechain=False, uuid=None, mid=None,
+               no_uuid=False, rid=None, model="claude-opus-4-6[1m]"):
+    """One assistant record, key-for-key as the real transcript writes it.
+
+    `sidechain=True` is the in-session subagent turn (router D-045): the same
+    shape with `isSidechain` true, plus the `agentId` key only the subagent
+    files carry (measured 2026-09-28: top-level records have `isSidechain:
+    false` and no `agentId`; the 8,888 records under
+    `<projects>/<session>/subagents/*.jsonl` have `isSidechain: true`,
+    `agentId`, `sessionKind: "bg"`, and the parent's `cwd`).
+
+    `uuid` identifies the *record* and is unique per call by default, as it is
+    in a real transcript — one API turn writes one record per content block, all
+    sharing `message.id` but each with its own uuid (measured: 1,901 of 3,553
+    message ids in the L1-routing parent files appear on more than one record,
+    always with the same usage). Pass an explicit `uuid` to build the duplicate
+    the dedup has to collapse, `no_uuid=True` to leave it out so `mid` is the
+    only identity, and `session=""` for a file whose records carry no
+    `sessionId` at all.
+
+    `requestId` is the top-level key naming the API *response* a record belongs
+    to (measured 2026-09-28: present on all 9,745 in-window records of the
+    L1-routing row and on all but one of L1-main's 7,089, and never varying
+    within one `message.id`). A fixture with a `mid` therefore gets a requestId
+    derived from it — two records that share a message id share a response id,
+    which is what the real transcript does. Pass `rid=` to write the requestId,
+    `rid=""` to leave the key out, and `rid=` together with `mid=None` for a
+    record that has a response id but no message id.
+    """
+    usage = {
+        "input_tokens": input_tokens,
+        "cache_creation_input_tokens": cache_creation,
+        "cache_read_input_tokens": cache_read,
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"thinking_tokens": 0},
+        "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+        "service_tier": "standard",
+        "cache_creation": {"ephemeral_1h_input_tokens": cache_creation,
+                           "ephemeral_5m_input_tokens": 0},
+        "inference_geo": "not_available",
+        "speed": "standard",
+    }
+    if with_iterations:
+        # The real client mirrors the turn into `iterations`; a sum over both
+        # fields and the list would double every record.
+        usage["iterations"] = [{
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_read_input_tokens": cache_read,
+            "cache_creation_input_tokens": cache_creation,
+            "type": "message",
+        }]
+    record = {
+        "type": "assistant",
+        "cwd": cwd,
+        "timestamp": ts,
+        "sessionId": session,
+        "session_id": session,
+        "isSidechain": sidechain,
+        "gitBranch": "L1-routing/R5ARATE",
+        "message": {
+            "model": model,
+            "role": "assistant",
+            "usage": usage,
+        },
+    }
+    if not no_uuid:
+        record["uuid"] = (uuid if uuid is not None
+                          else "rec-%d" % next(_RECORD_IDS))
+    if mid is not None:
+        record["message"]["id"] = mid
+        if rid is None:
+            rid = "req-%s" % mid
+    if rid:
+        record["requestId"] = rid
+    if sidechain:
+        record["agentId"] = "agent-%s" % session
+    return json.dumps(record)
+
+
+def slug(path):
+    return str(path).replace("/", "-").replace(".", "-")
+
+
+def write_transcript(projects_dir, cwd, name, lines, session_paths=False):
+    d = projects_dir / slug(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / name).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return d / name
+
+
+def write_subagents(projects_dir, cwd, session, name, lines):
+    """`<project>/<session>/subagents/<name>.jsonl` — how this host writes them."""
+    d = projects_dir / slug(cwd) / session / "subagents"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / ("%s.jsonl" % name)).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return d / ("%s.jsonl" % name)
+
+
+def git(repo, *args, env_extra=None):
+    env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@e",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@e")
+    if env_extra:
+        env.update(env_extra)
+    proc = subprocess.run(["git", "-C", str(repo)] + list(args),
+                          capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def init_repo(path):
+    """A throwaway checkout with a `main` and one plain commit, so `count_merges`
+    has a branch to read and 0 merges to report."""
+    repo = Path(path)
+    repo.mkdir(parents=True, exist_ok=True)
+    git(repo, "init", "-b", "main")
+    (repo / "f").write_text("1\n", encoding="utf-8")
+    git(repo, "add", "f")
+    git(repo, "commit", "-m", "chore: base")
+    return repo
+
+
+class WeightTests(unittest.TestCase):
+    """The 0.1 cache-read weight and the four summed fields (spec §5)."""
+
+    def test_cache_read_weight_is_one_tenth(self):
+        self.assertEqual(tr.CACHE_READ_WEIGHT, 0.1)
+
+    def test_all_four_fields_summed(self):
+        # 100 + 200 + 300 + 0.1 * 4000 = 1000.
+        rec = tr.UsageRecord(input_tokens=100, output_tokens=200,
+                             cache_creation_input_tokens=300,
+                             cache_read_input_tokens=4000)
+        self.assertEqual(rec.weighted(), 1000.0)
+        self.assertEqual(rec.naive(), 4600)
+
+    def test_iterations_are_not_double_counted(self):
+        lines = [usage_line(input_tokens=10, output_tokens=20,
+                            cache_creation=30, cache_read=400)]
+        total = tr.sum_records(tr.iter_usage_records(lines))
+        self.assertEqual(total.records, 1)
+        self.assertEqual(total.naive, 460)
+        self.assertAlmostEqual(total.weighted, 100.0)  # 10+20+30+0.1*400
+
+    def test_malformed_and_non_usage_lines_are_skipped(self):
+        lines = ["", "not json", "{", json.dumps({"type": "user", "cwd": PREFIX}),
+                 json.dumps({"type": "assistant", "message": {"no": 1}}),
+                 json.dumps({"type": "assistant", "message": {"usage": "no"}}),
+                 usage_line(input_tokens=1)]
+        total = tr.sum_records(tr.iter_usage_records(lines))
+        self.assertEqual(total.records, 1)
+        self.assertEqual(total.naive, 1)
+
+
+class AllRecordsTests(unittest.TestCase):
+    """The regression this tool exists for: every record, not the last one."""
+
+    def test_every_record_counts_not_only_the_last(self):
+        lines = [usage_line(input_tokens=1000), usage_line(input_tokens=2000),
+                 usage_line(input_tokens=3000)]
+        total = tr.sum_records(tr.iter_usage_records(lines))
+        self.assertEqual(total.records, 3)
+        self.assertEqual(total.naive, 6000)
+        # fill_from_transcript keeps the last record only: 3000. Guard that the
+        # new iterator does not inherit that behaviour.
+        import autoos_context as ctx
+        self.assertEqual(ctx.fill_from_transcript(lines)["tokens"], 3000)
+        self.assertGreater(total.naive, ctx.fill_from_transcript(lines)["tokens"])
+
+    def test_sessions_count_distinct_ids_across_files(self):
+        lines_a = [usage_line(session="a"), usage_line(session="a")]
+        lines_b = [usage_line(session="b")]
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl", lines_a)
+            write_transcript(projects, PREFIX, "b.jsonl", lines_b)
+            res = tr.measure(projects, [PREFIX], "2026-09-27T00:00:00Z",
+                             "2026-09-28T00:00:00Z")
+        self.assertEqual(res.sessions, 2)
+        self.assertEqual(res.records, 3)
+
+
+class SidechainTests(unittest.TestCase):
+    """Router D-045: in-session subagent turns stay in the numerator, split out.
+
+    The decision is that an `isSidechain` record is orchestrator cost — the
+    parent session paid for it — so nothing is filtered out; what was missing
+    was the visibility of how big that part is.
+    """
+
+    def mixed(self):
+        """One parent turn (weighted 400) and one subagent turn (weighted 100)."""
+        return [
+            usage_line(input_tokens=100, output_tokens=100, cache_creation=100,
+                       cache_read=1000),
+            usage_line(input_tokens=10, output_tokens=20, cache_creation=30,
+                       cache_read=400, sidechain=True),
+        ]
+
+    def test_parse_record_carries_the_sidechain_flag(self):
+        parent = tr.parse_record(usage_line(input_tokens=1))
+        child = tr.parse_record(usage_line(input_tokens=1, sidechain=True))
+        self.assertFalse(parent.sidechain)
+        self.assertTrue(child.sidechain)
+
+    def test_sidechain_record_is_not_excluded_from_the_numerator(self):
+        total = tr.sum_records(tr.iter_usage_records(self.mixed()))
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 500.0)
+        self.assertEqual(total.naive, 1760)
+
+    def test_sidechain_split_of_a_mixed_fixture(self):
+        total = tr.sum_records(tr.iter_usage_records(self.mixed()))
+        self.assertEqual(total.subagent_records, 1)
+        self.assertAlmostEqual(total.subagent_weighted, 100.0)
+        self.assertEqual(total.subagent_naive, 460)
+
+    def test_all_parent_fixture_reports_a_zero_subagent_split(self):
+        total = tr.sum_records(tr.iter_usage_records(
+            [usage_line(input_tokens=100, output_tokens=100, cache_creation=100,
+                        cache_read=1000)] * 2))
+        self.assertEqual(total.subagent_records, 0)
+        self.assertAlmostEqual(total.subagent_weighted, 0.0)
+        self.assertEqual(total.subagent_naive, 0)
+        self.assertAlmostEqual(total.summary().subagent_share_pct(), 0.0)
+
+    def test_measure_splits_sidechain_over_files(self):
+        lines = self.mixed() + [usage_line(input_tokens=6, output_tokens=0,
+                                           cache_creation=0, cache_read=0,
+                                           session="sess-2", sidechain=True)]
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl", lines)
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 3)
+        self.assertAlmostEqual(res.weighted, 506.0)  # 400 + 100 + 6
+        self.assertEqual(res.naive, 1766)
+        self.assertEqual(res.subagent_records, 2)
+        self.assertAlmostEqual(res.subagent_weighted, 106.0)
+        self.assertEqual(res.subagent_naive, 466)
+        self.assertAlmostEqual(res.subagent_share_pct(),
+                               round(100.0 * 106.0 / 506.0, 1))
+
+    def test_share_is_of_weighted_and_survives_rounding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl", self.mixed())
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["subagent_records"], 1)
+        self.assertEqual(res["subagent_weighted"], 100.0)
+        self.assertEqual(res["subagent_naive"], 460)
+        self.assertEqual(res["subagent_share_pct"], 20.0)  # 100 of 500 weighted
+
+
+class SubagentFileDiscoveryTests(unittest.TestCase):
+    """Router answer R5A3: discovery reaches `<session>/subagents/*.jsonl`.
+
+    D-045 kept an `isSidechain` turn in the numerator and reported its share;
+    what made all three measured rows print `0.0%` was that this host's client
+    writes those turns one level below what `discover_transcripts` scanned. The
+    fix is a discovery scope, not a filter: the subagent records join the
+    weighted and naive numerator *and* stay in the subagent columns, and a
+    record seen in both a session file and a subagent file counts once.
+    """
+
+    PARENT = dict(input_tokens=100, output_tokens=100, cache_creation=100,
+                  cache_read=1000)          # weighted 400, naive 1300
+    CHILD = dict(input_tokens=10, output_tokens=20, cache_creation=30,
+                 cache_read=400)            # weighted 100, naive 460
+
+    def tree(self, projects, parent_lines=None, child_lines=None, session="sess-1"):
+        """One session file plus its `subagents/` dir, both in the window."""
+        if parent_lines is None:
+            parent_lines = [usage_line(**self.PARENT, session=session)]
+        if child_lines is None:
+            child_lines = [usage_line(**self.CHILD, session=session, sidechain=True)]
+        if parent_lines:
+            write_transcript(projects, PREFIX, "%s.jsonl" % session, parent_lines)
+        if child_lines:
+            write_subagents(projects, PREFIX, session, "agent-a", child_lines)
+
+    def measure(self, projects):
+        return tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                          "2026-09-29T00:00:00Z")
+
+    def test_discover_transcripts_returns_both_the_session_and_the_subagent_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects)
+            found = tr.discover_transcripts(projects, [PREFIX])
+        self.assertEqual(sorted(p.name for p in found),
+                         ["agent-a.jsonl", "sess-1.jsonl"])
+
+    def test_subagent_file_counts_in_the_numerator_and_in_the_split(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects)
+            res = self.measure(projects)
+        self.assertEqual(res.records, 2)
+        self.assertAlmostEqual(res.weighted, 500.0)      # 400 + 100, both counted
+        self.assertEqual(res.naive, 1760)                # 1300 + 460
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 100.0)
+        self.assertEqual(res.subagent_naive, 460)
+        self.assertAlmostEqual(res.subagent_share_pct(), 20.0)
+
+    def test_a_record_from_a_subagents_file_counts_as_subagent_without_the_flag(self):
+        """Provenance decides too: `isSidechain` false inside a `subagents/` file
+        is still a subagent turn — the flag is the transcript's own claim, the
+        directory is the client's."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, child_lines=[usage_line(**self.CHILD,
+                                                         sidechain=False)])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 2)
+        self.assertAlmostEqual(res.weighted, 500.0)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 100.0)
+
+    def test_a_parent_record_outside_a_subagents_file_is_never_the_subagent_column(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, child_lines=[])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 1)
+        self.assertEqual(res.subagent_records, 0)
+
+    def test_the_same_record_in_a_parent_and_a_subagent_file_counts_once(self):
+        dup = "shared-uuid-1"
+        parent = usage_line(**self.PARENT, uuid=dup, sidechain=False)
+        child = usage_line(**self.PARENT, uuid=dup, sidechain=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, parent_lines=[parent], child_lines=[child])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 1)                 # not 2
+        self.assertAlmostEqual(res.weighted, 400.0)      # not 800
+        self.assertEqual(res.naive, 1300)
+        # and the one copy that counts is the copy that belongs to a subagent.
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 400.0)
+        self.assertAlmostEqual(res.subagent_share_pct(), 100.0)
+
+    def test_dedup_uses_the_message_id_when_the_record_has_no_uuid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects,
+                      parent_lines=[usage_line(**self.PARENT, no_uuid=True,
+                                               mid="msg-shared")],
+                      child_lines=[usage_line(**self.PARENT, no_uuid=True,
+                                              mid="msg-shared", sidechain=True)])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 400.0)
+        self.assertEqual(res.subagent_records, 1)
+
+    def test_the_blocks_of_one_turn_count_once_because_they_are_one_response(self):
+        """R5A4 reverses the identity: the numerator counts the API *response*,
+        and one response is written as one record per content block, all sharing
+        `message.id` and each carrying the same turn usage. Deduped by uuid (as
+        R5A3 did) those blocks were `turns x blocks`; keyed on the message id
+        they are one turn."""
+        one_turn = [usage_line(**self.PARENT, mid="msg-one-turn"),
+                    usage_line(**self.PARENT, mid="msg-one-turn")]
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, parent_lines=one_turn, child_lines=[])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 400.0)
+        self.assertEqual(res.naive, 1300)
+
+    def test_a_subagent_file_adds_no_session_of_its_own(self):
+        """Its records carry the parent's `sessionId`; when they carry none, the
+        session dir — not `agent-a` — is the fallback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, child_lines=[usage_line(**self.CHILD, session="",
+                                                        sidechain=True)])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 2)
+        self.assertEqual(res.sessions, 1)
+
+    def test_the_window_and_the_cwd_filter_apply_to_subagent_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects, child_lines=[
+                usage_line(**self.CHILD, ts="2026-09-25T23:59:59.000Z"),
+                usage_line(**self.CHILD, cwd=OTHER)])
+            res = self.measure(projects)
+        self.assertEqual(res.records, 1)                 # the parent turn only
+        self.assertEqual(res.subagent_records, 0)
+
+    def test_the_report_carries_the_subagent_files_through(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            self.tree(projects)
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["records"], 2)
+        self.assertEqual(res["weighted"], 500.0)
+        self.assertEqual(res["subagent_weighted"], 100.0)
+        self.assertEqual(res["subagent_share_pct"], 20.0)
+
+
+class ResponseDedupTests(unittest.TestCase):
+    """The R5A4 decision: one API response in the numerator, never one per block.
+
+    R5A3 measured the shape this closes — Claude Code writes one transcript
+    record per content block, each repeating the same `message.id`, the same
+    `requestId` and the same usage (1,901 of 3,553 message ids in the L1-routing
+    parent files appear on more than one record) — so with a uuid as the only
+    identity the numerator counted *turns x blocks*. Identity is now the
+    response: `message.id` plus `requestId` when the record carries one, and the
+    uuid is the fallback for a record with no message id at all. The first
+    record of a message wins; a later duplicate may only move it into the
+    subagent view.
+    """
+
+    BLOCK = dict(input_tokens=100, output_tokens=100, cache_creation=100,
+                 cache_read=1000)             # weighted 400, naive 1300
+
+    def sum(self, lines):
+        return tr.sum_records(tr.iter_usage_records(lines))
+
+    def test_parse_record_keys_the_identity_on_the_response_not_the_record(self):
+        a = tr.parse_record(usage_line(**self.BLOCK, mid="msg-1", uuid="u-1"))
+        b = tr.parse_record(usage_line(**self.BLOCK, mid="msg-1", uuid="u-2"))
+        self.assertEqual(a.identity, b.identity)
+        self.assertIn("msg-1", a.identity)
+        self.assertIn("req-msg-1", a.identity)
+        self.assertNotIn("u-1", a.identity)
+
+    def test_three_records_sharing_a_message_id_and_usage_count_once(self):
+        lines = [usage_line(**self.BLOCK, mid="msg-blocks") for _ in range(3)]
+        total = self.sum(lines)
+        self.assertEqual(total.records, 1)
+        self.assertAlmostEqual(total.weighted, 400.0)
+        self.assertEqual(total.naive, 1300)
+
+    def test_different_message_ids_count_separately(self):
+        total = self.sum([usage_line(**self.BLOCK, mid="msg-a"),
+                          usage_line(**self.BLOCK, mid="msg-b")])
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 800.0)
+
+    def test_the_same_message_id_under_another_request_id_is_two_responses(self):
+        """A retried response repeats the message id but is billed again, so the
+        request id is part of the identity."""
+        total = self.sum([
+            usage_line(**self.BLOCK, mid="msg-retry", rid="req-1"),
+            usage_line(**self.BLOCK, mid="msg-retry", rid="req-1"),
+            usage_line(**self.BLOCK, mid="msg-retry", rid="req-2"),
+        ])
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 800.0)
+
+    def test_a_record_without_a_message_id_falls_back_to_its_uuid(self):
+        same = [usage_line(**self.BLOCK, uuid="uuid-only"),
+                usage_line(**self.BLOCK, uuid="uuid-only")]
+        self.assertEqual(self.sum(same).records, 1)
+        both = [usage_line(**self.BLOCK, uuid="uuid-one"),
+                usage_line(**self.BLOCK, uuid="uuid-two")]
+        self.assertEqual(self.sum(both).records, 2)
+
+    def test_a_record_with_neither_a_message_id_nor_a_uuid_is_its_own_response(self):
+        total = self.sum([usage_line(**self.BLOCK, no_uuid=True),
+                          usage_line(**self.BLOCK, no_uuid=True)])
+        self.assertEqual(total.records, 2)
+        self.assertAlmostEqual(total.weighted, 800.0)
+
+    def test_the_first_record_of_a_message_wins_and_a_duplicate_adds_no_usage(self):
+        """Measured on this host: 242 of the 4,964 in-window L1-routing message
+        ids do *not* repeat the usage — the client writes the growing partial
+        usage as the blocks land, so the last record of a message carries the
+        most. The rule is still first-wins, so a duplicate never adds usage."""
+        total = self.sum([usage_line(**self.BLOCK, mid="msg-grow"),
+                          usage_line(input_tokens=100, output_tokens=300,
+                                     cache_creation=100, cache_read=1000,
+                                     mid="msg-grow")])
+        self.assertEqual(total.records, 1)
+        self.assertAlmostEqual(total.weighted, 400.0)   # not 500, not 900
+        self.assertEqual(total.naive, 1300)
+
+    def test_a_subagent_copy_of_a_parent_message_counts_once_in_the_subagent_view(self):
+        """Across files: the same response written at both depths is one turn's
+        cost, reported as a subagent turn because a subagent file claims it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            parent = [usage_line(**self.BLOCK, mid="msg-mirror"),
+                      usage_line(**self.BLOCK, mid="msg-mirror")]
+            child = [usage_line(**self.BLOCK, mid="msg-mirror", sidechain=True)]
+            write_transcript(projects, PREFIX, "sess-1.jsonl", parent)
+            write_subagents(projects, PREFIX, "sess-1", "agent-a", child)
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 400.0)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 400.0)
+        self.assertAlmostEqual(res.subagent_share_pct(), 100.0)
+
+    def test_a_deduped_subagent_duplicate_never_moves_a_record_out_of_the_view(self):
+        """The subagent file's own blocks of one response collapse too, and the
+        first copy to arrive (the parent's) decides the usage — the move is
+        one-way into the subagent view."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "sess-1.jsonl",
+                             [usage_line(**self.BLOCK, mid="msg-both")])
+            write_subagents(projects, PREFIX, "sess-1", "agent-a",
+                            [usage_line(**self.BLOCK, mid="msg-both",
+                                        sidechain=True),
+                             usage_line(**self.BLOCK, mid="msg-both",
+                                        sidechain=True)])
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 400.0)   # not 800
+
+    def test_a_promoting_duplicate_adds_the_counted_usage_not_its_own(self):
+        """R5A5 finding 1 (HIGH): the streaming case makes the two copies of one
+        response *differ*. The parent file holds the first, partial record (50
+        weighted); the `subagents/` copy carries the finished usage (400). The
+        totals kept the first, so the promotion must reuse the first — otherwise
+        the view reports 400 of a 50 weighted numerator."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "sess-1.jsonl",
+                             [usage_line(input_tokens=50, mid="msg-grow-mirror")])
+            write_subagents(projects, PREFIX, "sess-1", "agent-a",
+                            [usage_line(**self.BLOCK, mid="msg-grow-mirror",
+                                        sidechain=True)])
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertAlmostEqual(res.weighted, 50.0)          # the first record's
+        self.assertEqual(res.naive, 50)
+        self.assertEqual(res.subagent_records, 1)
+        self.assertAlmostEqual(res.subagent_weighted, 50.0)  # not the duplicate's 400
+        self.assertEqual(res.subagent_naive, 50)
+        self.assertLessEqual(res.subagent_weighted, res.weighted)
+
+    def test_the_promoted_view_is_always_a_subset_of_the_numerator(self):
+        """Property over the fixture set: `subagent_weighted` is a *view onto*
+        the records the plain field already sums (D-045), so it can never exceed
+        it — whatever order copies of one response arrive in, and whatever usage
+        each copy claims. Sweeps the fixture usages at both depths, deliberately
+        mismatching the parent's and the duplicate's numbers (the streaming
+        partial usage is what made the bug visible)."""
+        usages = [dict(self.BLOCK), dict(input_tokens=50),
+                  dict(input_tokens=10, output_tokens=20, cache_creation=30,
+                       cache_read=400),
+                  dict(input_tokens=0)]
+        for parent_usage, dup_usage in itertools.product(usages, usages):
+            for parent_sidechain in (False, True):
+                parent = [usage_line(**parent_usage, mid="msg-sweep",
+                                     sidechain=parent_sidechain)]
+                dups = [usage_line(**dup_usage, mid="msg-sweep",
+                                   sidechain=parent_sidechain),
+                        usage_line(**dup_usage, mid="msg-sweep", sidechain=True)]
+                first = tr.parse_record(parent[0])
+                total = tr.sum_records(tr.iter_usage_records(parent + dups))
+                with self.subTest(parent=parent_usage, dup=dup_usage,
+                                  parent_sidechain=parent_sidechain):
+                    self.assertEqual(total.records, 1)
+                    self.assertAlmostEqual(total.weighted, first.weighted())
+                    self.assertEqual(total.naive, first.naive())
+                    # the view re-uses the response that was counted, never the
+                    # duplicate's own numbers, and so stays inside the numerator
+                    self.assertEqual(total.subagent_records, 1)
+                    self.assertAlmostEqual(total.subagent_weighted,
+                                           first.weighted())
+                    self.assertEqual(total.subagent_naive, first.naive())
+                    self.assertLessEqual(total.subagent_weighted, total.weighted)
+                    self.assertLessEqual(total.subagent_naive, total.naive)
+                    self.assertLessEqual(total.summary().subagent_share_pct() or 0,
+                                         100.0)
+
+    def test_the_report_and_the_cli_count_each_response_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(**self.BLOCK, mid="msg-cli"),
+                              usage_line(**self.BLOCK, mid="msg-cli"),
+                              usage_line(**self.BLOCK, mid="msg-cli")])
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["records"], 1)
+        self.assertEqual(res["weighted"], 400.0)
+        self.assertEqual(res["naive"], 1300)
+
+
+class ProjectsDirEchoTests(unittest.TestCase):
+    """`--json` must not print the default transcript root — it carries the
+    operator's username — unless the user named it. The repo path is the same
+    secret by the same route: its default is the current working directory."""
+
+    def test_an_explicit_projects_dir_is_echoed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(input_tokens=1)])
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["projects_dir"], str(projects))
+
+    def test_a_defaulted_repo_is_not_echoed(self):
+        """The default repo is the resolved cwd, and a cwd under the operator's
+        home is not part of the answer: say `default`, echo the path only when
+        the user named it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(input_tokens=1)])
+            repo = init_repo(Path(tmp) / "repo")
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX],
+                            repo=repo, repo_defaulted=True,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["repo"], "default")
+        self.assertNotIn(str(repo), json.dumps(res))
+
+    def test_a_named_repo_is_echoed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp) / "projects"
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(input_tokens=1)])
+            repo = init_repo(Path(tmp) / "repo")
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX],
+                            repo=repo, since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+        self.assertEqual(res["repo"], str(repo))
+
+
+class WindowTests(unittest.TestCase):
+    """Half-open window: since inclusive, until exclusive, by record timestamp."""
+
+    def test_records_outside_the_window_are_dropped(self):
+        lines = [
+            usage_line(ts="2026-09-26T23:59:59.999Z", input_tokens=1),
+            usage_line(ts="2026-09-27T00:00:00.000Z", input_tokens=2),
+            usage_line(ts="2026-09-27T12:00:00.000Z", input_tokens=4),
+            usage_line(ts="2026-09-28T00:00:00.000Z", input_tokens=8),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "s.jsonl", lines)
+            res = tr.measure(projects, [PREFIX], "2026-09-27T00:00:00Z",
+                             "2026-09-28T00:00:00Z")
+        self.assertEqual(res.records, 2)
+        self.assertEqual(res.naive, 6)
+
+    def test_relative_since_resolves_against_until(self):
+        start, end = tr.resolve_window("48h", "2026-09-28T00:00:00Z", now=datetime(
+            2026, 9, 28, tzinfo=timezone.utc))
+        self.assertEqual(start, datetime(2026, 9, 26, tzinfo=timezone.utc))
+        self.assertEqual(end, datetime(2026, 9, 28, tzinfo=timezone.utc))
+
+    def test_missing_timestamp_record_is_skipped(self):
+        rec = json.loads(usage_line(input_tokens=5))
+        del rec["timestamp"]
+        total = tr.sum_records(tr.iter_usage_records([json.dumps(rec)]))
+        self.assertEqual(total.records, 0)
+
+
+class CwdScopingTests(unittest.TestCase):
+    """Only sessions whose cwd belongs to the named orchestrator count."""
+
+    def test_records_outside_the_prefix_are_excluded(self):
+        lines = [usage_line(input_tokens=1, cwd=PREFIX),
+                 usage_line(input_tokens=100, cwd=OTHER),
+                 usage_line(input_tokens=10000, cwd="/home/user/code/Invest")]
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl", [lines[0]])
+            write_transcript(projects, OTHER, "b.jsonl", [lines[1]])
+            write_transcript(projects, "/home/user/code/Invest", "c.jsonl", [lines[2]])
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertEqual(res.naive, 1)
+
+    def test_lane_sandboxes_under_the_prefix_still_match(self):
+        deep = PREFIX + "/logs/sandboxes/L1-routing-R5ARATE-20260928-071419-run"
+        lines = [usage_line(input_tokens=7, cwd=deep)]
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, deep, "a.jsonl", lines)
+            res = tr.measure(projects, [PREFIX], "2026-09-26T00:00:00Z",
+                             "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 1)
+        self.assertEqual(res.naive, 7)
+
+    def test_sibling_prefix_is_not_matched(self):
+        # /home/user/code/AutoOS is a prefix of the string but the lane dir is a
+        # different orchestrator: matching is per path segment, not per char.
+        lines = [usage_line(input_tokens=9, cwd="/home/user/code/AutoOS-lanes/L2-general")]
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, "/home/user/code/AutoOS-lanes/L2-general",
+                             "a.jsonl", lines)
+            res = tr.measure(projects, ["/home/user/code/AutoOS"],
+                             "2026-09-26T00:00:00Z", "2026-09-29T00:00:00Z")
+        self.assertEqual(res.records, 0)
+
+
+class MergeTests(unittest.TestCase):
+    """The denominator: first-parent merges into main, named by branch prefix."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.repo = Path(cls._tmp.name)
+        git(cls.repo, "init", "-b", "main")
+        # main base, then two lane merges and one unrelated merge.
+        (cls.repo / "README").write_text("base\n", encoding="utf-8")
+        git(cls.repo, "add", "README")
+        git(cls.repo, "commit", "-m", "chore: base")
+        for i, subject in enumerate([
+            "Merge L1-routing/R6STOP 0732cf0: gateway stop parsed",
+            "Merge l1/routing T2FREE ad23e99: free leg",
+            "Merge l1/backlog 5575b86: omnigraph-client joins profile",
+        ]):
+            branch = "lane%d" % i
+            git(cls.repo, "checkout", "-b", branch, "main")
+            (cls.repo / ("%s.txt" % branch)).write_text("x\n", encoding="utf-8")
+            git(cls.repo, "add", "%s.txt" % branch)
+            git(cls.repo, "commit", "-m", "feat: %s" % branch)
+            git(cls.repo, "checkout", "main")
+            env = {"GIT_COMMITTER_DATE": "2026-09-27T%d:00:00 +0000" % (10 + i)}
+            git(cls.repo, "merge", "--no-ff", "-m", subject, branch, env_extra=env)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_merges_attributed_by_prefix(self):
+        n = tr.count_merges(self.repo, "main", ["L1-routing/", "l1/routing"],
+                            "2026-09-26T00:00:00Z", "2026-09-28T00:00:00Z")
+        self.assertEqual(n, 2)
+
+    def test_prefix_is_case_insensitive_substring(self):
+        # The lane writes `Merge L1-routing/…`; the orchestrator names either
+        # casing, so matching must not depend on it.
+        self.assertEqual(tr.count_merges(self.repo, "main", ["l1-routing/"],
+                                         "2026-09-26T00:00:00Z",
+                                         "2026-09-28T00:00:00Z"), 1)
+        self.assertEqual(tr.count_merges(self.repo, "main", ["L1-ROUTING/"],
+                                         "2026-09-26T00:00:00Z",
+                                         "2026-09-28T00:00:00Z"), 1)
+        self.assertEqual(tr.count_merges(self.repo, "main", ["L1/Routing"],
+                                         "2026-09-26T00:00:00Z",
+                                         "2026-09-28T00:00:00Z"), 1)
+
+    def test_no_prefix_counts_every_merge(self):
+        self.assertEqual(tr.count_merges(self.repo, "main", [],
+                                         "2026-09-26T00:00:00Z",
+                                         "2026-09-28T00:00:00Z"), 3)
+
+    def test_window_is_committer_date(self):
+        n = tr.count_merges(self.repo, "main", [], "2026-09-27T11:00:00Z",
+                            "2026-09-27T13:00:00Z")
+        self.assertEqual(n, 2)
+
+    def test_non_merge_commits_are_never_counted(self):
+        self.assertEqual(tr.count_merges(self.repo, "main", ["chore: base"],
+                                         "2026-09-20T00:00:00Z",
+                                         "2026-09-30T00:00:00Z"), 0)
+
+
+class ReportTests(unittest.TestCase):
+    """Output shape: the §5 fields, the bias line, and n/a on an empty denominator."""
+
+    def build(self, tmp, merges_repo=None):
+        projects = Path(tmp) / "projects"
+        write_transcript(projects, PREFIX, "a.jsonl", [
+            usage_line(input_tokens=100, output_tokens=100, cache_creation=100,
+                       cache_read=1000),
+            usage_line(input_tokens=100, output_tokens=100, cache_creation=100,
+                       cache_read=1000),
+        ])
+        return projects
+
+    def test_zero_merges_prints_na_and_never_divides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            git(repo, "init", "-b", "main")
+            (repo / "f").write_text("1\n", encoding="utf-8")
+            git(repo, "add", "f")
+            git(repo, "commit", "-m", "chore: only a plain commit")
+            projects = self.build(tmp)
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX],
+                            repo=repo, branch="main", branch_prefixes=["L1-routing/"],
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-28T00:00:00Z")
+            text = tr.format_text(res)
+        self.assertEqual(res["merges"], 0)
+        self.assertEqual(res["weighted_per_merge"], None)
+        self.assertIn("n/a", text)
+        self.assertNotIn("nan", text)
+        self.assertIn("weighted-per-merge: n/a", text)
+
+    def test_per_merge_division_and_bias_line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            git(repo, "init", "-b", "main")
+            (repo / "f").write_text("1\n", encoding="utf-8")
+            git(repo, "add", "f")
+            git(repo, "commit", "-m", "chore: base")
+            git(repo, "checkout", "-b", lane := "lane")
+            (repo / "g").write_text("2\n", encoding="utf-8")
+            git(repo, "add", "g")
+            git(repo, "commit", "-m", "feat: g")
+            git(repo, "checkout", "main")
+            git(repo, "merge", "--no-ff", "-m", "Merge L1-routing/R5 1a2b3c: x", lane,
+                env_extra={"GIT_COMMITTER_DATE": "2026-09-27T12:00:00 +0000"})
+            projects = self.build(tmp)
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX],
+                            repo=repo, branch="main",
+                            branch_prefixes=["L1-routing/"],
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-28T00:00:00Z")
+            text = tr.format_text(res)
+        # 2 records: weighted 2*(100+100+100+0.1*1000) = 800, naive 2*1300 = 2600.
+        self.assertEqual(res["weighted"], 800.0)
+        self.assertEqual(res["naive"], 2600)
+        self.assertEqual(res["merges"], 1)
+        self.assertEqual(res["weighted_per_merge"], 800.0)
+        self.assertEqual(res["naive_per_merge"], 2600.0)
+        self.assertIn("sessions: 1", text)
+        self.assertIn("bias:", text)
+        self.assertIn("rewards shorter sessions", text)
+        self.assertIn("prices the orchestrator only", text)
+
+    def test_subagent_columns_are_in_the_text_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl", [
+                usage_line(input_tokens=100, output_tokens=100,
+                           cache_creation=100, cache_read=1000),
+                usage_line(input_tokens=10, output_tokens=20, cache_creation=30,
+                           cache_read=400, sidechain=True),
+            ])
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+            text = tr.format_text(res)
+        self.assertIn("subagent-records: 1", text)
+        self.assertIn("subagent-weighted: 100", text)
+        self.assertIn("subagent-naive: 460", text)
+        self.assertIn("subagent-share: 20.0%", text)
+        # the numerator is unchanged by the split: D-045 keeps sidechain in it.
+        self.assertIn("weighted: 500", text)
+
+    def test_empty_numerator_share_is_na_not_a_division(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = Path(tmp)
+            write_transcript(projects, PREFIX, "a.jsonl",
+                             [usage_line(input_tokens=1, cwd=OTHER)])
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            since="2026-09-26T00:00:00Z",
+                            until="2026-09-29T00:00:00Z")
+            text = tr.format_text(res)
+        self.assertEqual(res["weighted"], 0.0)
+        self.assertIsNone(res["subagent_share_pct"])
+        self.assertIn("subagent-share: n/a", text)
+        self.assertNotIn("nan", text)
+        json.dumps(res)
+
+    def test_json_output_is_machine_readable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = self.build(tmp)
+            res = tr.report(projects_dir=projects, cwd_prefixes=[PREFIX], repo=None,
+                            branch="main", branch_prefixes=["L1-routing/"],
+                            since="2026-09-26T00:00:00Z", until="2026-09-28T00:00:00Z")
+        for key in ("window", "sessions", "records", "weighted", "naive",
+                    "merges", "weighted_per_merge", "naive_per_merge", "bias",
+                    "subagent_records", "subagent_weighted", "subagent_naive",
+                    "subagent_share_pct"):
+            self.assertIn(key, res)
+        json.dumps(res)
+
+
+class CliTests(unittest.TestCase):
+    """The CLI and the `token-rate` verb read a fixture projects dir."""
+
+    env = None
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.projects = Path(self.tmp.name) / "projects"
+        write_transcript(self.projects, PREFIX, "a.jsonl", [
+            usage_line(input_tokens=1, output_tokens=2, cache_creation=3,
+                       cache_read=40),
+        ])
+        self.env = dict(os.environ, HOME=Path(self.tmp.name) / "no-home")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_tool(self, *args, cwd=None):
+        return subprocess.run([sys.executable, str(TOKENRATE)] + list(args),
+                              capture_output=True, text=True, env=self.env,
+                              cwd=str(cwd or ROOT), stdin=subprocess.DEVNULL)
+
+    def test_cli_prints_all_fields(self):
+        proc = self.run_tool("--projects-dir", str(self.projects),
+                             "--cwd-prefix", PREFIX, "--no-git",
+                             "--since", "2026-09-26T00:00:00Z",
+                             "--until", "2026-09-28T00:00:00Z")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for label in ("window:", "sessions:", "records:", "weighted:", "naive:",
+                      "subagent-records:", "subagent-weighted:",
+                      "subagent-naive:", "subagent-share:",
+                      "merges:", "weighted-per-merge:", "naive-per-merge:",
+                      "bias:"):
+            self.assertIn(label, proc.stdout)
+
+    def test_cli_json_reports_the_subagent_split(self):
+        lines = [usage_line(input_tokens=1, output_tokens=2, cache_creation=3,
+                            cache_read=40),
+                 usage_line(input_tokens=10, output_tokens=0, cache_creation=0,
+                            cache_read=100, sidechain=True)]
+        write_transcript(self.projects, PREFIX, "b.jsonl", lines)
+        proc = self.run_tool("--projects-dir", str(self.projects),
+                             "--cwd-prefix", PREFIX, "--no-git",
+                             "--since", "2026-09-26T00:00:00Z",
+                             "--until", "2026-09-28T00:00:00Z", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        # setUp's parent (weighted 10) + this parent (10) + subagent (20) = 40,
+        # and half of the numerator is the subagent turn.
+        self.assertEqual(data["records"], 3)
+        self.assertEqual(data["weighted"], 40.0)
+        self.assertEqual(data["subagent_records"], 1)
+        self.assertEqual(data["subagent_weighted"], 20.0)
+        self.assertEqual(data["subagent_naive"], 110)
+        self.assertEqual(data["subagent_share_pct"], 50.0)
+
+    def test_cli_json(self):
+        proc = self.run_tool("--projects-dir", str(self.projects),
+                             "--cwd-prefix", PREFIX, "--no-git",
+                             "--since", "2026-09-26T00:00:00Z",
+                             "--until", "2026-09-28T00:00:00Z", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["records"], 1)
+        self.assertEqual(data["naive"], 46)
+        self.assertEqual(data["weighted"], 10.0)
+        self.assertEqual(data["merges"], 0)
+        self.assertIsNone(data["weighted_per_merge"])
+
+    def test_cli_json_reaches_the_subagent_files(self):
+        """The measured shape: the parent turn carries no flag and the subagent
+        file lives one level down, under the session's own directory."""
+        session = json.loads(usage_line(input_tokens=1, output_tokens=2,
+                                        cache_creation=3, cache_read=40))["sessionId"]
+        write_subagents(self.projects, PREFIX, session, "agent-a",
+                        [usage_line(input_tokens=100, output_tokens=0,
+                                    cache_creation=0, cache_read=0)])
+        proc = self.run_tool("--projects-dir", str(self.projects),
+                             "--cwd-prefix", PREFIX, "--no-git",
+                             "--since", "2026-09-26T00:00:00Z",
+                             "--until", "2026-09-28T00:00:00Z", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["records"], 2)
+        self.assertEqual(data["weighted"], 110.0)
+        self.assertEqual(data["subagent_records"], 1)
+        self.assertEqual(data["subagent_weighted"], 100.0)
+        self.assertEqual(data["subagent_share_pct"], 90.9)
+
+    def test_cli_json_without_projects_dir_prints_default_not_a_path(self):
+        """The default root is `$HOME/.claude/projects` — on this host a real
+        operator's home — so `--json` names it as `default` and echoes nothing
+        about the path."""
+        proc = self.run_tool("--cwd-prefix", PREFIX, "--no-git",
+                             "--since", "2026-09-26T00:00:00Z",
+                             "--until", "2026-09-28T00:00:00Z", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["projects_dir"], "default")
+        self.assertNotIn(str(Path(self.env["HOME"])), proc.stdout)
+
+    def test_cli_json_echoes_an_explicit_projects_dir(self):
+        proc = self.run_tool("--projects-dir", str(self.projects),
+                             "--cwd-prefix", PREFIX, "--no-git",
+                             "--since", "2026-09-26T00:00:00Z",
+                             "--until", "2026-09-28T00:00:00Z", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["projects_dir"], str(self.projects))
+
+    def test_cli_json_without_repo_prints_default_not_the_cwd(self):
+        """The denominator's default is the current directory — on the
+        orchestrator's machine a path holding its username — so an unnamed
+        `--repo` is reported as `default`, exactly as `--projects-dir` is."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = init_repo(Path(tmp) / "repo")
+            proc = self.run_tool("--projects-dir", str(self.projects),
+                                 "--cwd-prefix", PREFIX,
+                                 "--since", "2026-09-26T00:00:00Z",
+                                 "--until", "2026-09-28T00:00:00Z", "--json",
+                                 cwd=str(repo))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(proc.stdout)
+        self.assertEqual(data["repo"], "default")
+        self.assertEqual(data["merges"], 0)
+        self.assertNotIn(str(repo), proc.stdout)
+
+    def test_cli_json_echoes_an_explicit_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = init_repo(Path(tmp) / "repo")
+            proc = self.run_tool("--projects-dir", str(self.projects),
+                                 "--cwd-prefix", PREFIX, "--repo", str(repo),
+                                 "--since", "2026-09-26T00:00:00Z",
+                                 "--until", "2026-09-28T00:00:00Z", "--json")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            data = json.loads(proc.stdout)
+        self.assertEqual(data["repo"], str(repo))
+
+    def test_repeatable_branch_prefix(self):
+        proc = self.run_tool("--projects-dir", str(self.projects), "--no-git",
+                             "--cwd-prefix", "/x",
+                             "--branch-prefix", "L1-routing/",
+                             "--branch-prefix", "l1/routing",
+                             "--since", "48h", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        data = json.loads(proc.stdout)
+        self.assertEqual(data["branch_prefixes"], ["L1-routing/", "l1/routing"])
+
+    def test_relative_since_accepted(self):
+        proc = self.run_tool("--projects-dir", str(self.projects), "--no-git",
+                             "--cwd-prefix", PREFIX, "--since", "48h", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("2026", json.loads(proc.stdout)["window"]["since"])
+
+    def test_unknown_since_unit_exits_2(self):
+        proc = self.run_tool("--projects-dir", str(self.projects), "--no-git",
+                             "--cwd-prefix", PREFIX, "--since", "tomorrow")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("--since", proc.stderr)
+
+    def test_missing_branch_exits_2_with_a_message(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            git(repo, "init", "-b", "main")
+            proc = self.run_tool("--projects-dir", str(self.projects),
+                                 "--cwd-prefix", PREFIX, "--repo", str(repo),
+                                 "--branch", "no-such-branch",
+                                 "--since", "2026-09-26T00:00:00Z",
+                                 "--until", "2026-09-28T00:00:00Z")
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("token-rate:", proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def test_agent_verb_dispatches(self):
+        proc = subprocess.run(
+            [sys.executable, str(AGENT), "token-rate",
+             "--projects-dir", str(self.projects), "--no-git",
+             "--cwd-prefix", PREFIX, "--since", "2026-09-26T00:00:00Z",
+             "--until", "2026-09-28T00:00:00Z", "--json"],
+            capture_output=True, text=True, env=self.env, cwd=str(ROOT),
+            stdin=subprocess.DEVNULL)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout)["records"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

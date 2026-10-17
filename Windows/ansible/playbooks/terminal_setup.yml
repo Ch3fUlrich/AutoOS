@@ -1,0 +1,112 @@
+---
+- name: Configure the terminal prompt (oh-my-posh)
+  hosts: windows
+  gather_facts: true
+
+  vars:
+    repo_url: https://github.com/Ch3fUlrich/AutoOS.git
+    # Every path derives from the target's own environment. The old version
+    # hardcoded one user's profile path in one task while using {{ ansible_user }}
+    # everywhere else, so the theme copy failed for every other user.
+    checkout_dir: '{{ ansible_env.USERPROFILE }}\Downloads\AutoOS'
+    theme_dir: '{{ ansible_env.LOCALAPPDATA }}\AutoOS\themes'
+    theme_name: powerlevel10k_rainbow_env.omp.json
+
+  tasks:
+    - name: Ensure Git is installed
+      chocolatey.chocolatey.win_chocolatey:
+        name: git
+        state: present
+
+    - name: Read the current user Path
+      ansible.windows.win_environment:
+        name: Path
+        level: user
+        state: present
+      check_mode: true
+      register: current_path
+      changed_when: false
+
+    # Append, never replace - see python_miniconda_suite2p.yml for the incident
+    # this guards against.
+    - name: Add Git to the user Path
+      ansible.windows.win_environment:
+        name: Path
+        value: "{{ (existing | list + [git_cmd]) | join(';') }}"
+        level: user
+        state: present
+      vars:
+        existing: "{{ (current_path.value | default('')) | split(';') | reject('equalto', '') | list }}"
+        git_cmd: C:\Program Files\Git\cmd
+      when: git_cmd not in existing
+
+    # The old version ran `Remove-Item -Recurse -Force` and re-cloned on every
+    # run, destroying any local state and reporting "changed" forever.
+    - name: Check out AutoOS on the target
+      ansible.windows.win_shell: |
+        $ErrorActionPreference = 'Stop'
+        if (Test-Path '{{ checkout_dir }}\.git') {
+            git -C '{{ checkout_dir }}' pull --ff-only
+        } else {
+            git clone --depth 1 '{{ repo_url }}' '{{ checkout_dir }}'
+        }
+      register: checkout
+      changed_when: "'Already up to date' not in checkout.stdout"
+
+    - name: Ensure the theme directory exists
+      ansible.windows.win_file:
+        path: "{{ theme_dir }}"
+        state: directory
+
+    # Installed under its OWN name in a user-writable directory. The old version
+    # copied it over oh-my-posh's built-in powerlevel10k_rainbow.omp.json in
+    # Program Files: it needed elevation, clobbered a vendor file, and was
+    # silently reverted by any oh-my-posh upgrade.
+    - name: Install the AutoOS theme
+      ansible.windows.win_copy:
+        src: '{{ checkout_dir }}\Windows\Terminal\oh-my-posh\theme\{{ theme_name }}'
+        dest: '{{ theme_dir }}\{{ theme_name }}'
+        remote_src: true
+
+    - name: Detect PowerShell 7
+      ansible.windows.win_shell: if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'yes' } else { 'no' }
+      register: has_pwsh
+      changed_when: false
+
+    # PowerShell 7 reads Documents\PowerShell\; Windows PowerShell 5.1 reads
+    # Documents\WindowsPowerShell\. The old version always wrote the 5.1 profile
+    # but initialised `pwsh`, so the prompt was themed in neither shell.
+    - name: Ensure the PowerShell profile exists
+      ansible.windows.win_file:
+        path: "{{ profile_path }}"
+        state: touch
+      vars:
+        profile_dir: >-
+          {{ 'PowerShell' if has_pwsh.stdout is search('yes')
+             else 'WindowsPowerShell' }}
+        profile_path: >-
+          {{ ansible_env.USERPROFILE }}\Documents\{{ profile_dir }}\Microsoft.PowerShell_profile.ps1
+
+    - name: Initialise oh-my-posh from the profile
+      community.windows.win_lineinfile:
+        path: "{{ profile_path }}"
+        line: >-
+          oh-my-posh init {{ 'pwsh' if has_pwsh.stdout is search('yes') else 'powershell' }}
+          --config '{{ theme_dir }}\{{ theme_name }}' | Invoke-Expression
+        regexp: '^oh-my-posh init'
+        state: present
+        create: true
+      vars:
+        profile_dir: >-
+          {{ 'PowerShell' if has_pwsh.stdout is search('yes')
+             else 'WindowsPowerShell' }}
+        profile_path: >-
+          {{ ansible_env.USERPROFILE }}\Documents\{{ profile_dir }}\Microsoft.PowerShell_profile.ps1
+
+    - name: Install PSReadLine for the connecting user
+      ansible.windows.win_shell: |
+        if (-not (Get-Module -ListAvailable PSReadLine)) {
+            Install-Module -Name PSReadLine -Scope CurrentUser -Force
+        }
+      register: psreadline
+      changed_when: psreadline.stdout | trim | length > 0

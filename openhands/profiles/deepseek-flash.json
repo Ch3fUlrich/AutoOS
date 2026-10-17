@@ -1,0 +1,22 @@
+{
+  "auth_type": "api_key",
+  "api_mode": "auto",
+  "stream": false,
+  "drop_params": true,
+  "modify_params": true,
+  "disable_stop_word": false,
+  "caching_prompt": true,
+  "log_completions": false,
+  "native_tool_calling": true,
+  "is_subscription": false,
+  "capability_overrides": {},
+  "litellm_extra_body": {},
+  "model": "deepseek/deepseek-flash",
+  "base_url": "https://api.deepseek.com",
+  "max_input_tokens": 1048576,
+  "max_output_tokens": 393216,
+  "input_cost_per_token": 3e-07,
+  "output_cost_per_token": 1.2e-06,
+  "cache_read_cost_per_token": 3e-08,
+  "reasoning_effort": "high"
+}

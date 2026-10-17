@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "id": "d52f4e7e-61b0-401d-9f99-0d9d8aa6b41c",
+  "name": "claude-sonnet",
+  "revision": 1,
+  "mcp_server_refs": null,
+  "agent_kind": "acp",
+  "acp_server": "claude-code",
+  "acp_model": "sonnet",
+  "acp_session_mode": null,
+  "acp_prompt_timeout": 1800.0,
+  "acp_startup_timeout": 90.0,
+  "acp_command": null,
+  "acp_args": null
+}

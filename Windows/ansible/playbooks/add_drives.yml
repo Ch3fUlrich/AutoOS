@@ -1,0 +1,26 @@
+---
+- name: Map network drives
+  hosts: windows
+  gather_facts: false
+
+  tasks:
+    - name: Ensure network drives are mapped
+      ansible.windows.win_mapped_drive:
+        letter: "{{ item.letter }}"
+        path: "{{ item.path }}"
+        username: "{{ item.username }}"
+        password: "{{ item.password }}"
+        state: present
+      loop: "{{ network_drives }}"
+      loop_control:
+        label: "{{ item.name }}"     # keep the password out of the task log
+      no_log: true
+
+    - name: Read back the mapped drives
+      ansible.windows.win_command: net use
+      register: drive_mapping
+      changed_when: false
+
+    - name: Show the mapped drives
+      ansible.builtin.debug:
+        var: drive_mapping.stdout_lines

@@ -1,0 +1,15 @@
+# Hourly dedup sweep. It exits immediately when there are no duplicates, so
+# running it often is cheap; it only rebuilds (brief downtime) when needed.
+# NOTE: use a wall-clock OnCalendar (not monotonic OnUnitActiveSec) so the timer
+# always has a valid next trigger and Persistent=true actually catches up after
+# downtime — a monotonic-only timer stops scheduling (NEXT=-) once boot+10min
+# elapses without the service having run in the current boot.
+[Unit]
+Description=Periodic Omnigraph memory dedup
+[Timer]
+OnBootSec=10min
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=90
+[Install]
+WantedBy=timers.target

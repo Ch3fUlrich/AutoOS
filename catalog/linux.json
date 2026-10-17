@@ -1,0 +1,1784 @@
+{
+  "$schema": "./schema.json",
+  "platform": "linux",
+  "profiles": {
+    "workstation": "Full desktop workstation — same coding and AI stack as the Windows profile.",
+    "ai-coding": "Coding and AI tooling plus the shell, no desktop packages.",
+    "light": "Small board (Raspberry Pi 5 and similar) — Claude Code, Tailscale and Herdr only.",
+    "server": "Headless server — shell, networking and containers, no GUI.",
+    "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
+    "local-ai": "Local AI inference with Ollama — no API key and no network, but models are 1.4-4.7 GB.",
+    "custom": "Start with nothing ticked and choose by hand.",
+    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing.",
+    "rescue": "Disaster-recovery toolkit and emergency AI recovery environment."
+  },
+  "categories": [
+    {
+      "id": "core",
+      "name": "Core CLI",
+      "description": "The tools everything else assumes are present.",
+      "components": [
+        {
+          "id": "build-essentials",
+          "name": "Build essentials",
+          "description": "clang, make and headers",
+          "provider": "apt",
+          "package": "clang build-essential",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "gcc --version",
+          "homepage": "https://packages.ubuntu.com/build-essential"
+        },
+        {
+          "id": "git",
+          "name": "Git",
+          "description": "Version control",
+          "provider": "apt",
+          "package": "git",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "git --version",
+          "homepage": "https://git-scm.com/"
+        },
+        {
+          "id": "download-tools",
+          "name": "curl & wget",
+          "description": "Download tools",
+          "provider": "apt",
+          "package": "curl wget ca-certificates",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "curl --version",
+          "homepage": "https://curl.se/"
+        },
+        {
+          "id": "python3",
+          "name": "Python 3",
+          "description": "Interpreter, pip and venv",
+          "provider": "apt",
+          "package": "python3 python3-pip python3-venv python3-setuptools python3-wheel",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "python3 --version",
+          "homepage": "https://www.python.org/"
+        },
+        {
+          "id": "monitoring",
+          "name": "Monitoring tools",
+          "description": "htop, nmon and fastfetch",
+          "provider": "apt",
+          "package": "htop nmon",
+          "postInstall": "install_fastfetch",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "homepage": "https://github.com/fastfetch-cli/fastfetch"
+        },
+        {
+          "id": "file-tools",
+          "name": "File tools",
+          "description": "Midnight Commander, rsync and NFS client",
+          "provider": "apt",
+          "package": "mc rsync nfs-common",
+          "profiles": [
+            "workstation",
+            "server"
+          ],
+          "homepage": "https://midnight-commander.org/"
+        },
+        {
+          "id": "git-config",
+          "name": "Git Configuration",
+          "description": "Configure global user.name, user.email, and default branch",
+          "provider": "custom",
+          "package": "git-config",
+          "requires": [
+            "git"
+          ],
+          "postInstall": "setup_git_config",
+          "prompt": "git_user_name, git_user_email",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "homepage": "https://git-scm.com/"
+        },
+        {
+          "id": "gh",
+          "name": "GitHub CLI",
+          "description": "GitHub command-line tool for git, PRs and issues",
+          "provider": "script",
+          "package": "gh",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "gh --version",
+          "homepage": "https://cli.github.com/"
+        },
+        {
+          "id": "ripgrep",
+          "name": "ripgrep",
+          "description": "Fast line-oriented regex search tool (rg)",
+          "provider": "apt",
+          "package": "ripgrep",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "rg --version",
+          "homepage": "https://github.com/BurntSushi/ripgrep"
+        },
+        {
+          "id": "fd",
+          "name": "fd-find",
+          "description": "Fast and user-friendly alternative to find",
+          "provider": "apt",
+          "package": "fd-find",
+          "postInstall": "link_fdfind",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "homepage": "https://github.com/sharkdp/fd"
+        }
+      ]
+    },
+    {
+      "id": "shell",
+      "name": "Shell & Terminal",
+      "description": "zsh, prompt theme and the font that renders it.",
+      "components": [
+        {
+          "id": "zsh",
+          "name": "Zsh",
+          "description": "The shell",
+          "provider": "apt",
+          "package": "zsh",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "zsh --version",
+          "homepage": "https://www.zsh.org/"
+        },
+        {
+          "id": "oh-my-zsh",
+          "name": "Oh My Zsh",
+          "description": "Zsh framework and plugin manager",
+          "provider": "script",
+          "package": "oh-my-zsh",
+          "requires": [
+            "zsh",
+            "git",
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "homepage": "https://ohmyz.sh/"
+        },
+        {
+          "id": "zsh-plugins",
+          "name": "Zsh plugins",
+          "description": "autosuggestions and syntax highlighting",
+          "provider": "script",
+          "package": "zsh-plugins",
+          "requires": [
+            "oh-my-zsh"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "homepage": "https://github.com/zsh-users/zsh-autosuggestions"
+        },
+        {
+          "id": "powerlevel10k",
+          "name": "Powerlevel10k",
+          "description": "Prompt theme",
+          "provider": "script",
+          "package": "powerlevel10k",
+          "requires": [
+            "oh-my-zsh"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "homepage": "https://github.com/romkatv/powerlevel10k"
+        },
+        {
+          "id": "nerd-font",
+          "name": "MesloLGS Nerd Font",
+          "description": "Font with the prompt glyphs",
+          "provider": "script",
+          "package": "meslo-nerd-font",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation"
+          ],
+          "notes": "Only useful where a local display renders the terminal; skipped on headless profiles.",
+          "homepage": "https://www.nerdfonts.com/"
+        },
+        {
+          "id": "tmux",
+          "name": "tmux",
+          "description": "Terminal multiplexer",
+          "provider": "apt",
+          "package": "tmux",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "tmux -V",
+          "homepage": "https://github.com/tmux/tmux/wiki"
+        },
+        {
+          "id": "fzf",
+          "name": "fzf",
+          "description": "Command-line fuzzy finder",
+          "provider": "apt",
+          "package": "fzf",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "fzf --version",
+          "homepage": "https://github.com/junegunn/fzf"
+        }
+      ]
+    },
+    {
+      "id": "ai-coding",
+      "name": "Coding & AI",
+      "description": "The same agent stack as the Windows workstation profile.",
+      "components": [
+        {
+          "id": "nodejs",
+          "name": "Node.js LTS",
+          "description": "Runtime required by Claude Code",
+          "provider": "script",
+          "package": "nodesource-lts",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "node --version",
+          "homepage": "https://nodejs.org/"
+        },
+        {
+          "id": "claude-code",
+          "name": "Claude Code CLI",
+          "description": "Anthropic's terminal coding agent",
+          "provider": "npm",
+          "package": "@anthropic-ai/claude-code",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server",
+            "rescue"
+          ],
+          "verify": "claude --version",
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code",
+          "prompt": "claude_gateway_routing",
+          "postInstall": "route_claude_to_gateway"
+        },
+        {
+          "id": "claude-autostart",
+          "name": "Claude autostart",
+          "description": "Reopens the Claude Code sessions you had before a reboot",
+          "provider": "script",
+          "package": "claude-autostart",
+          "requires": [
+            "claude-code"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code",
+          "launcher": "none"
+        },
+        {
+          "id": "herdr-sessions",
+          "name": "Herdr sessions",
+          "description": "Snapshots and restores Herdr panes across a reboot",
+          "provider": "script",
+          "package": "herdr-sessions",
+          "requires": [
+            "herdr",
+            "claude-code"
+          ],
+          "profiles": [],
+          "prompt": "herdr_sessions_profile",
+          "launcher": "none",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/tree/main/configuration/herdr-sessions",
+          "notes": "Snapshots every Herdr pane every 5 minutes and restores them at boot, on machines that run Herdr as their terminal host. Mutually exclusive with Claude autostart - only one session-restore mechanism may be installed at a time; remove the other first."
+        },
+        {
+          "id": "memguard",
+          "name": "Memory guard",
+          "description": "Stops the newest agent run when memory runs low",
+          "provider": "script",
+          "package": "memguard",
+          "profiles": [
+            "workstation",
+            "server"
+          ],
+          "launcher": "none",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/tree/main/docs/ai/memory-guard.md",
+          "notes": "Checks MemAvailable every 10s and, only below the floor, stops the newest autoos-worker-*.scope - one run per shot, never the session, sshd or the gateways."
+        },
+        {
+          "id": "cost-gate",
+          "name": "Cost gate refresh",
+          "description": "Refreshes the daily cost-gate verdict from the call log",
+          "provider": "script",
+          "package": "cost-gate",
+          "profiles": [
+            "workstation",
+            "server"
+          ],
+          "launcher": "none",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/tree/main/docs/ai/cost-guard.md",
+          "notes": "Renders the cost-gate user units and, only when absent, the daily-gate.conf with warn/block (defaults 20/25). Enable the timer with AUTOOS_COST_GATE_ENABLE=1."
+        },
+        {
+          "id": "agy",
+          "name": "Antigravity CLI",
+          "description": "Google's terminal coding agent",
+          "provider": "script",
+          "package": "agy",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server",
+            "rescue"
+          ],
+          "verify": "agy --version",
+          "homepage": "https://antigravity.google/product/antigravity-cli",
+          "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
+        },
+        {
+          "id": "qwen-code",
+          "name": "Qwen Code CLI",
+          "description": "Qwen's terminal coding agent (routable through OmniRoute)",
+          "provider": "npm",
+          "package": "@qwen-code/qwen-code",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "qwen --version",
+          "homepage": "https://github.com/QwenLM/qwen-code",
+          "notes": "Headless: qwen -p. tools/autoos-agent.py --client qwen routes it through OmniRoute."
+        },
+        {
+          "id": "gemini-cli",
+          "name": "Gemini CLI",
+          "description": "Google's open-source terminal agent (OmniRoute-routable)",
+          "provider": "npm",
+          "package": "@google/gemini-cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "gemini --version",
+          "homepage": "https://github.com/google-gemini/gemini-cli",
+          "notes": "Headless: gemini -p. agy succeeds it, but only this one can route through OmniRoute."
+        },
+        {
+          "id": "codex",
+          "name": "OpenAI Codex CLI",
+          "description": "OpenAI's terminal coding agent (OmniRoute-routable)",
+          "provider": "npm",
+          "package": "@openai/codex",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "codex --version",
+          "homepage": "https://github.com/openai/codex",
+          "notes": "Headless: codex exec. Spawned through omniroute run, so no OpenAI login is needed."
+        },
+        {
+          "id": "qodercli",
+          "name": "Qoder CLI",
+          "description": "Alibaba terminal coding agent (Qwen-powered)",
+          "provider": "script",
+          "package": "qodercli",
+          "requires": [
+            "download-tools"
+          ],
+          "postInstall": "setup_qoder_mcp",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "qodercli --version",
+          "homepage": "https://qoder.com/cli",
+          "notes": "Headless use needs QODER_PERSONAL_ACCESS_TOKEN exported (see docs/api-keys.md); interactive /login still works."
+        },
+        {
+          "id": "devin-cli",
+          "name": "Devin CLI",
+          "description": "Cognition terminal coding agent",
+          "provider": "script",
+          "package": "devin-cli",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "devin --version",
+          "homepage": "https://cli.devin.ai",
+          "notes": "Needs an interactive `devin auth login` once; the gateway side connects via `omniroute providers add devin-cli --oauth` or the dashboard."
+        },
+        {
+          "id": "opencode",
+          "name": "OpenCode CLI",
+          "description": "AI coding agent with local-model support",
+          "provider": "npm",
+          "package": "opencode-ai",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "rescue"
+          ],
+          "verify": "opencode --version",
+          "postInstall": "setup_opencode_config",
+          "homepage": "https://opencode.ai/"
+        },
+        {
+          "id": "openhands",
+          "name": "OpenHands Agent Canvas",
+          "description": "Multi-agent orchestration canvas and UI for OpenHands",
+          "provider": "npm",
+          "package": "@openhands/agent-canvas",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "agent-canvas --version",
+          "postInstall": "setup_openhands_config",
+          "homepage": "https://github.com/All-Hands-AI/OpenHands"
+        },
+        {
+          "id": "wsl-agent-home",
+          "name": "WSL native agent home",
+          "description": "CAO home on ext4, exports CAO_HOME_DIR",
+          "provider": "custom",
+          "package": "wsl-agent-home",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "test -d ~/.cao",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/blob/main/docs/wsl-agent-home.md",
+          "postInstall": "setup_wsl_agent_home"
+        },
+        {
+          "id": "handy",
+          "name": "Handy",
+          "description": "Offline speech-to-text — dictate instead of typing",
+          "provider": "script",
+          "package": "handy",
+          "arch": [
+            "x64",
+            "arm64"
+          ],
+          "requires": [
+            "download-tools"
+          ],
+          "homepage": "https://handy.computer/",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Needs a microphone; installs the .deb from the latest GitHub release."
+        },
+        {
+          "id": "vscode",
+          "name": "Visual Studio Code",
+          "description": "Editor",
+          "provider": "script",
+          "package": "vscode",
+          "requires": [
+            "download-tools"
+          ],
+          "verify": "code --version",
+          "homepage": "https://code.visualstudio.com/",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Adds Microsoft's signed apt repository, as their own docs instruct."
+        },
+        {
+          "id": "herdr",
+          "name": "Herdr",
+          "description": "Persistent, resumable AI sessions",
+          "provider": "script",
+          "package": "herdr",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "prompt": "herdr_source",
+          "verify": "herdr --version",
+          "homepage": "https://www.npmjs.com/package/herdr"
+        },
+        {
+          "id": "docker",
+          "name": "Docker Engine",
+          "description": "Containers — backs the local MCP memory stack",
+          "provider": "script",
+          "package": "docker",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "postInstall": "add_user_to_docker_group",
+          "verify": "docker --version",
+          "homepage": "https://docs.docker.com/engine/"
+        },
+        {
+          "id": "antigravity",
+          "name": "Antigravity",
+          "description": "Antigravity 2.0, Google's agentic desktop app (Electron)",
+          "provider": "script",
+          "package": "antigravity",
+          "arch": [
+            "x64"
+          ],
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation"
+          ],
+          "notes": "Antigravity Hub 2.x (Electron desktop app) — x64 only, so hidden on arm64 machines. Newest version discovered from winget-pkgs (needs the GitHub API; GITHUB_TOKEN raises its rate limit), installed user-local from Google's Linux tarball into ~/.local/opt/antigravity (command: antigravity, no sudo). Google publishes no sha256 for it (no published sha256): size, gzip, member list, ELF and version are checked instead. setup.sh --update checks for a newer version.",
+          "verify": "test -x ~/.local/opt/antigravity/antigravity",
+          "updatable": true,
+          "homepage": "https://antigravity.google/"
+        },
+        {
+          "id": "agent-skills",
+          "name": "agent-skills (retired)",
+          "description": "Retired: its work moved to other components",
+          "provider": "custom",
+          "package": "agent-skills",
+          "tombstone": true,
+          "note": "its work moved to agent-skill-links, omnigraph-client and the mcp-* components",
+          "replaced_by": [
+            "agent-skill-links",
+            "omnigraph-client",
+            "mcp-graphify",
+            "mcp-serena",
+            "mcp-playwright",
+            "mcp-context7"
+          ],
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS"
+        },
+        {
+          "id": "agent-skill-links",
+          "name": "Agent skill links",
+          "description": "Link this checkout's skills into every client's skills dir",
+          "provider": "custom",
+          "package": "agent-skill-links",
+          "postInstall": "install_agent_skill_links",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS",
+          "notes": "One symlink per skill of this checkout's .agents/skills into Antigravity, Claude Code (user and project scope), ~/.agents/skills and — when codex is present — ~/.codex/skills. Your own skills and links are never touched; a checkout that moved is repointed."
+        },
+        {
+          "id": "omnigraph-client",
+          "name": "Omnigraph MCP client",
+          "description": "Pinned Omnigraph bridge, env file and MCP wrapper",
+          "provider": "custom",
+          "package": "omnigraph-client",
+          "requires": [
+            "nodejs"
+          ],
+          "postInstall": "install_omnigraph_client",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "prompt": "omnigraph_url",
+          "homepage": "https://www.npmjs.com/package/@modernrelay/omnigraph-mcp",
+          "notes": "Needs the omnigraph_url answer and the omnigraph_token key (or OMNIGRAPH_TOKEN) and skips with a hint when either is missing. Writes ~/.autoos-omnigraph.env (mode 600), pre-installs the pinned bridge into a private npm prefix instead of npx, and installs the omnigraph-mcp-autoos wrapper that reads the env file itself."
+        },
+        {
+          "id": "neovim",
+          "name": "Neovim + LazyVim",
+          "description": "Editor with the LazyVim starter config",
+          "provider": "apt",
+          "package": "neovim",
+          "requires": [
+            "git"
+          ],
+          "postInstall": "install_lazyvim",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "nvim --version",
+          "homepage": "https://www.lazyvim.org/"
+        },
+        {
+          "id": "uv",
+          "name": "uv",
+          "description": "Fast Python package and tool manager from Astral",
+          "provider": "script",
+          "package": "uv",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "uv --version",
+          "notes": "Used by the mcp-* components to run graphify and the Python MCP servers.",
+          "homepage": "https://docs.astral.sh/uv/"
+        },
+        {
+          "id": "zed",
+          "name": "Zed",
+          "description": "Fast Rust editor with an AI agent panel",
+          "provider": "script",
+          "package": "zed",
+          "requires": [
+            "download-tools",
+            "litellm"
+          ],
+          "postInstall": "route_zed_to_proxy",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "zed --help",
+          "homepage": "https://zed.dev/",
+          "notes": "Agent panel is pointed at the local OmniRoute gateway."
+        },
+        {
+          "id": "qoder-desktop",
+          "name": "Qoder",
+          "description": "Qoder's agent-first desktop IDE",
+          "provider": "manual",
+          "package": "qoder-desktop",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://qoder.com/download",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer. The vendor ships .deb/.rpm packages only."
+        },
+        {
+          "id": "litellm",
+          "name": "LiteLLM tier router",
+          "description": "Local LLM router: free-first tiers for all agents",
+          "provider": "custom",
+          "package": "litellm",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "install_litellm_proxy",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "litellm --version",
+          "homepage": "https://docs.litellm.ai/",
+          "notes": "Manual fallback router; primary is OmniRoute. Needs configuration/litellm/.env; see docs/api-keys.md."
+        },
+        {
+          "id": "omniroute",
+          "name": "OmniRoute gateway",
+          "description": "Local AI gateway: free tiers with auto fallback",
+          "provider": "npm",
+          "package": "omniroute",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "omniroute --version",
+          "homepage": "https://github.com/diegosouzapw/OmniRoute",
+          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first.",
+          "prompt": "claude_gateway_routing",
+          "postInstall": "route_detected_clis_to_gateway"
+        },
+        {
+          "id": "zcode-gateway",
+          "name": "ZCode gateway link",
+          "description": "Check OmniRoute can use the ZCode server bundle",
+          "provider": "custom",
+          "package": "zcode-gateway",
+          "requires": [
+            "omniroute"
+          ],
+          "postInstall": "setup_zcode_gateway_env",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "test -f \"$HOME/.zcode/server/zcode-server.cjs\"",
+          "homepage": "https://zcode.z.ai",
+          "notes": "Needs the ZCode server bundle: in the ZCode desktop app add this host as an SSH remote and connect once (installs ~/.zcode/server, syncs the login). Detect-only: nothing is installed or changed by this step except two env lines when the bundle sits in a non-default place. The dashboard connection test for zcode always fails (zcode:// is not http): only a real chat call proves it."
+        },
+        {
+          "id": "opencode-cli",
+          "name": "OpenCode CLI",
+          "description": "Terminal AI coding agent (TUI) on the tier router",
+          "provider": "npm",
+          "package": "@opencode/cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "opencode --version",
+          "postInstall": "setup_opencode_config",
+          "homepage": "https://opencode.ai/",
+          "notes": "V2 CLI. The legacy npm package opencode-ai (V1) cannot read the V2 providers config."
+        },
+        {
+          "id": "openhands-docker",
+          "name": "OpenHands Docker",
+          "description": "Autonomous coding agent — Docker app, OmniRoute-routed",
+          "provider": "custom",
+          "package": "openhands",
+          "requires": [
+            "docker"
+          ],
+          "postInstall": "install_openhands",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "docker image inspect docker.openhands.dev/openhands/openhands:latest",
+          "homepage": "https://www.all-hands.dev/",
+          "notes": "Start with ./configuration/start-stack.sh openhands; LLM profiles: configuration/openhands/config.toml."
+        },
+        {
+          "id": "ai-stack-docker",
+          "name": "AI stack (Docker)",
+          "description": "OmniRoute, opencode serve and OpenHands as hardened containers",
+          "provider": "custom",
+          "package": "ai-stack-docker",
+          "requires": [
+            "docker"
+          ],
+          "postInstall": "install_ai_stack",
+          "profiles": [
+            "server"
+          ],
+          "verify": "test -f ~/.config/autoos/ai-stack/stack.env",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/blob/main/docs/web-services.md#server-profile-the-ai-stack-in-docker",
+          "notes": "Replaces the native gateway + opencode units. A running host moves with configuration/docker/ai-stack/ai-stack.sh migrate."
+        },
+        {
+          "id": "bw",
+          "name": "Bitwarden CLI",
+          "description": "Command-line password manager for secrets and vault access",
+          "provider": "npm",
+          "package": "@bitwarden/cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "verify": "bw --version",
+          "homepage": "https://bitwarden.com/help/cli/"
+        },
+        {
+          "id": "ollama",
+          "name": "Ollama",
+          "description": "Local AI runtime and embeddings for Omnigraph",
+          "provider": "script",
+          "package": "ollama",
+          "requires": [
+            "download-tools"
+          ],
+          "prompt": "ollama_models",
+          "postInstall": "setup_ollama_models",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server",
+            "local-ai"
+          ],
+          "verify": "ollama --version",
+          "notes": "Powers local LLMs and nomic-embed-text for Omnigraph semantic recall.",
+          "homepage": "https://ollama.com/"
+        },
+        {
+          "id": "ollama-model-qwen3-4b",
+          "name": "Qwen3 4B",
+          "description": "General-purpose local model, 2.5 GB download, 256K context",
+          "provider": "custom",
+          "package": "qwen3:4b",
+          "postInstall": "pull_ollama_model_qwen3_4b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen3:4b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "notes": "Pre-ticked default: small enough to load fast off USB, and its 256K context fits a full dmesg/SMART dump.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-1-7b",
+          "name": "Qwen3 1.7B",
+          "description": "Smaller/faster general-purpose local model, 1.4 GB download",
+          "provider": "custom",
+          "package": "qwen3:1.7b",
+          "postInstall": "pull_ollama_model_qwen3_1_7b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen3:1.7b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "profiles": []
+        },
+        {
+          "id": "ollama-model-qwen2-5-coder-7b",
+          "name": "Qwen2.5 Coder 7B",
+          "description": "Coding-focused local model, 4.7 GB download",
+          "provider": "custom",
+          "package": "qwen2.5-coder:7b",
+          "postInstall": "pull_ollama_model_qwen25_coder_7b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen2.5-coder:7b",
+          "homepage": "https://ollama.com/library/qwen2.5-coder",
+          "profiles": []
+        },
+        {
+          "id": "oterm",
+          "name": "oterm",
+          "description": "Terminal UI chat client for Ollama models",
+          "provider": "custom",
+          "package": "oterm",
+          "postInstall": "install_oterm",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "oterm --help",
+          "homepage": "https://github.com/ggozad/oterm",
+          "notes": "No apt/snap package exists upstream; installed via pip. Interactive TUI only — 'ai local' is the scriptable path to the same models.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "mcp-serena",
+          "name": "Serena MCP Server",
+          "description": "Semantic code navigation and symbol search MCP server",
+          "provider": "custom",
+          "package": "mcp-serena",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "install_mcp_serena",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Semantic code navigation and LSP symbols for Claude Code and Antigravity.",
+          "homepage": "https://github.com/serena-agent/serena"
+        },
+        {
+          "id": "mcp-graphify",
+          "name": "Graphify MCP Server",
+          "description": "Codebase knowledge graph MCP server for coding agents",
+          "provider": "custom",
+          "package": "mcp-graphify",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "install_mcp_graphify",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Codebase dependency knowledge graph queries for coding agents.",
+          "homepage": "https://github.com/Graphify-Labs/graphify"
+        },
+        {
+          "id": "mcp-playwright",
+          "name": "Playwright MCP Server",
+          "description": "Headless browser automation MCP server for coding agents",
+          "provider": "custom",
+          "package": "mcp-playwright",
+          "requires": [
+            "nodejs"
+          ],
+          "postInstall": "install_mcp_playwright",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Browser automation and web testing for Claude Code and Antigravity.",
+          "homepage": "https://github.com/modelcontextprotocol/servers"
+        },
+        {
+          "id": "mcp-context7",
+          "name": "Context7 MCP Server",
+          "description": "Real-time library documentation and code context MCP server",
+          "provider": "custom",
+          "package": "mcp-context7",
+          "requires": [
+            "nodejs"
+          ],
+          "prompt": "context7_api_key",
+          "postInstall": "install_mcp_context7",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Up-to-date documentation lookups for frameworks and libraries.",
+          "homepage": "https://github.com/upstash/context7-mcp"
+        }
+      ]
+    },
+    {
+      "id": "network",
+      "name": "Remote Access & Networking",
+      "components": [
+        {
+          "id": "tailscale",
+          "name": "Tailscale",
+          "description": "Mesh VPN — reach this box from anywhere",
+          "provider": "script",
+          "package": "tailscale",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "server"
+          ],
+          "verify": "tailscale version",
+          "homepage": "https://tailscale.com/"
+        },
+        {
+          "id": "taildrop-sort",
+          "name": "Taildrop file sorter",
+          "description": "Sorts received Taildrop files into per-owner folders",
+          "provider": "script",
+          "package": "taildrop-sort",
+          "requires": [
+            "tailscale"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "server"
+          ],
+          "homepage": "https://tailscale.com/",
+          "launcher": "none"
+        },
+        {
+          "id": "openssh-server",
+          "name": "OpenSSH server",
+          "description": "Accept inbound SSH",
+          "provider": "apt",
+          "package": "openssh-server",
+          "profiles": [
+            "light",
+            "server"
+          ],
+          "verify": "sshd -V",
+          "homepage": "https://www.openssh.com/"
+        },
+        {
+          "id": "wireguard",
+          "name": "WireGuard",
+          "description": "VPN",
+          "provider": "apt",
+          "package": "wireguard",
+          "profiles": [
+            "workstation",
+            "server",
+            "rescue"
+          ],
+          "homepage": "https://www.wireguard.com/"
+        },
+        {
+          "id": "xpipe",
+          "name": "XPipe",
+          "description": "SSH connection manager",
+          "provider": "script",
+          "package": "xpipe",
+          "arch": [
+            "x64"
+          ],
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation"
+          ],
+          "verify": "xpipe version",
+          "homepage": "https://xpipe.io/"
+        }
+      ]
+    },
+    {
+      "id": "desktop",
+      "name": "Desktop",
+      "description": "Only offered when a display is present.",
+      "requiresDisplay": true,
+      "components": [
+        {
+          "id": "xorg-openbox",
+          "name": "Xorg + Openbox",
+          "description": "Minimal window manager",
+          "provider": "apt",
+          "package": "xinit openbox",
+          "profiles": [
+            "workstation"
+          ],
+          "homepage": "http://openbox.org/"
+        },
+        {
+          "id": "firefox",
+          "name": "Firefox ESR",
+          "description": "Browser",
+          "provider": "apt",
+          "package": "firefox-esr",
+          "profiles": [
+            "workstation",
+            "everyday"
+          ],
+          "homepage": "https://www.mozilla.org/firefox/"
+        },
+        {
+          "id": "w3m",
+          "name": "w3m",
+          "description": "Terminal browser",
+          "provider": "apt",
+          "package": "w3m",
+          "profiles": [],
+          "homepage": "https://w3m.sourceforge.net/"
+        },
+        {
+          "id": "chrome",
+          "name": "Google Chrome",
+          "description": "Browser",
+          "provider": "script",
+          "package": "google-chrome",
+          "arch": [
+            "x64"
+          ],
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "everyday"
+          ],
+          "verify": "google-chrome --version",
+          "homepage": "https://www.google.com/chrome/"
+        },
+        {
+          "id": "bitwarden-chrome",
+          "name": "Bitwarden for Chrome",
+          "description": "Bitwarden password manager extension for Chrome",
+          "provider": "script",
+          "package": "bitwarden-chrome",
+          "arch": [
+            "x64"
+          ],
+          "requires": [
+            "chrome"
+          ],
+          "profiles": [
+            "workstation"
+          ],
+          "notes": "Configures Bitwarden extension automatically in Chrome.",
+          "homepage": "https://chromewebstore.google.com/detail/bitwarden-password-manage/nngceckbapebfimnlniiiahkandclblb"
+        }
+      ]
+    },
+    {
+      "id": "automation",
+      "name": "Automation",
+      "components": [
+        {
+          "id": "ansible",
+          "name": "Ansible",
+          "description": "Provision other machines from this one",
+          "provider": "apt",
+          "package": "ansible sshpass",
+          "profiles": [
+            "workstation",
+            "server"
+          ],
+          "verify": "ansible --version",
+          "homepage": "https://docs.ansible.com/"
+        },
+        {
+          "id": "cron",
+          "name": "cron",
+          "description": "Scheduled jobs",
+          "provider": "apt",
+          "package": "cron",
+          "profiles": [
+            "workstation",
+            "server"
+          ],
+          "homepage": "https://manpages.ubuntu.com/manpages/noble/man8/cron.8.html"
+        }
+      ]
+    },
+    {
+      "id": "everyday",
+      "name": "Everyday & Entertainment",
+      "description": "Personal desktop, media, games and maker tools.",
+      "requiresDisplay": true,
+      "components": [
+        {
+          "id": "spotify",
+          "name": "Spotify",
+          "description": "Music and podcasts",
+          "provider": "manual",
+          "package": "spotify",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.spotify.com/download/",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "vlc",
+          "name": "VLC media player",
+          "description": "Play local videos, music and network streams",
+          "provider": "apt",
+          "package": "vlc",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.videolan.org/vlc/"
+        },
+        {
+          "id": "7zip",
+          "name": "7-Zip",
+          "description": "Create and extract compressed archives",
+          "provider": "apt",
+          "package": "p7zip-full",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.7-zip.org/"
+        },
+        {
+          "id": "steam",
+          "name": "Steam",
+          "description": "Game library and store",
+          "provider": "manual",
+          "package": "steam",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://store.steampowered.com/about/",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "discord",
+          "name": "Discord",
+          "description": "Voice, video and community chat",
+          "provider": "manual",
+          "package": "discord",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://discord.com/download",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "parsec",
+          "name": "Parsec",
+          "description": "Remote desktop and low-latency streaming",
+          "provider": "manual",
+          "package": "parsec",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://parsec.app/downloads",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "moonlight",
+          "name": "Moonlight",
+          "description": "Stream games from a compatible host",
+          "provider": "manual",
+          "package": "moonlight",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://moonlight-stream.org/",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "jellyfin-client",
+          "name": "Jellyfin Media Player",
+          "description": "Desktop client for your Jellyfin media server",
+          "provider": "manual",
+          "package": "jellyfin-client",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://jellyfin.org/downloads/clients/all/",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "chitubox",
+          "name": "CHITUBOX Basic",
+          "description": "Prepare models for resin 3D printing",
+          "provider": "manual",
+          "package": "chitubox",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.chitubox.com/en/download/chitubox-free",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+        },
+        {
+          "id": "unified-remote",
+          "name": "Unified Remote Server",
+          "description": "Control this computer from your phone",
+          "provider": "manual",
+          "package": "unified-remote",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.unifiedremote.com/download",
+          "notes": "Install the Unified Remote app on your phone and pair with this server. Review remote access settings before use."
+        }
+      ]
+    },
+    {
+      "id": "rescue",
+      "name": "Disaster Recovery",
+      "description": "Disk, filesystem, hardware and Windows-repair tools for a rescue USB.",
+      "components": [
+        {
+          "id": "smartmontools",
+          "name": "smartmontools",
+          "description": "S.M.A.R.T. disk health monitoring and self-tests",
+          "provider": "apt",
+          "package": "smartmontools",
+          "verify": "smartctl --version",
+          "homepage": "https://www.smartmontools.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "nvme-cli",
+          "name": "nvme-cli",
+          "description": "Query and manage NVMe SSDs from the command line",
+          "provider": "apt",
+          "package": "nvme-cli",
+          "verify": "nvme version",
+          "homepage": "https://github.com/linux-nvme/nvme-cli",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "hdparm",
+          "name": "hdparm",
+          "description": "Inspect and tune SATA/PATA drive parameters",
+          "provider": "apt",
+          "package": "hdparm",
+          "verify": "hdparm -V",
+          "homepage": "https://sourceforge.net/projects/hdparm/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "pciutils",
+          "name": "pciutils",
+          "description": "List and inspect PCI devices (lspci)",
+          "provider": "apt",
+          "package": "pciutils",
+          "verify": "lspci --version",
+          "homepage": "https://mj.ucw.cz/sw/pciutils/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "usbutils",
+          "name": "usbutils",
+          "description": "List and inspect USB devices (lsusb)",
+          "provider": "apt",
+          "package": "usbutils",
+          "verify": "lsusb --version",
+          "homepage": "https://github.com/gregkh/usbutils",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "lshw",
+          "name": "lshw",
+          "description": "Detailed hardware configuration report",
+          "provider": "apt",
+          "package": "lshw",
+          "verify": "lshw -version",
+          "homepage": "https://ezix.org/project/wiki/HardwareLiSter",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "dmidecode",
+          "name": "dmidecode",
+          "description": "Dump BIOS/UEFI DMI (SMBIOS) table contents",
+          "provider": "apt",
+          "package": "dmidecode",
+          "verify": "dmidecode --version",
+          "homepage": "https://www.nongnu.org/dmidecode/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "inxi",
+          "name": "inxi",
+          "description": "Full system hardware and driver summary",
+          "provider": "apt",
+          "package": "inxi",
+          "verify": "inxi -V",
+          "homepage": "https://github.com/smxi/inxi",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "lm-sensors",
+          "name": "lm-sensors",
+          "description": "Read CPU and board temperature/voltage sensors",
+          "provider": "apt",
+          "package": "lm-sensors",
+          "verify": "sensors -v",
+          "homepage": "https://github.com/lm-sensors/lm-sensors",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "memtester",
+          "name": "memtester",
+          "description": "Stress-test RAM for a failing module while booted",
+          "provider": "apt",
+          "package": "memtester",
+          "homepage": "https://pyropus.ca/software/memtester/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "stress-ng",
+          "name": "stress-ng",
+          "description": "Load-test CPU, memory and I/O under stress",
+          "provider": "apt",
+          "package": "stress-ng",
+          "verify": "stress-ng --version",
+          "homepage": "https://github.com/ColinIanKing/stress-ng",
+          "notes": "Not in the original rescue list — added so a rescue stick can also load-test suspect hardware.",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "f3",
+          "name": "F3 (Fight Flash Fraud)",
+          "description": "Detect counterfeit flash drives that lie about their size",
+          "provider": "apt",
+          "package": "f3",
+          "verify": "f3write --version",
+          "homepage": "https://fight-flash-fraud.readthedocs.io/en/latest/",
+          "notes": "Not in the original rescue list — added because fake-capacity USB sticks are exactly what a rescue kit should catch.",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "gdisk",
+          "name": "gdisk",
+          "description": "Interactive and scriptable GPT partition editor",
+          "provider": "apt",
+          "package": "gdisk",
+          "verify": "sgdisk --version",
+          "homepage": "https://www.rodsbooks.com/gdisk/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "parted",
+          "name": "GNU Parted",
+          "description": "Create, resize and delete disk partitions",
+          "provider": "apt",
+          "package": "parted",
+          "verify": "parted --version",
+          "homepage": "https://www.gnu.org/software/parted/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "testdisk",
+          "name": "TestDisk & PhotoRec",
+          "description": "Recover lost partitions and undelete files",
+          "provider": "apt",
+          "package": "testdisk",
+          "homepage": "https://www.cgsecurity.org/wiki/TestDisk",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "ddrescue",
+          "name": "GNU ddrescue",
+          "description": "Copy data off a failing disk, retrying bad sectors",
+          "provider": "apt",
+          "package": "gddrescue",
+          "verify": "ddrescue --version",
+          "homepage": "https://www.gnu.org/software/ddrescue/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "e2fsprogs",
+          "name": "e2fsprogs",
+          "description": "Create and check ext2/ext3/ext4 filesystems",
+          "provider": "apt",
+          "package": "e2fsprogs",
+          "verify": "e2fsck -V",
+          "homepage": "https://e2fsprogs.sourceforge.net/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "btrfs-progs",
+          "name": "btrfs-progs",
+          "description": "Create and check Btrfs filesystems",
+          "provider": "apt",
+          "package": "btrfs-progs",
+          "verify": "btrfs --version",
+          "homepage": "https://btrfs.readthedocs.io/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "xfsprogs",
+          "name": "xfsprogs",
+          "description": "Create and check XFS filesystems",
+          "provider": "apt",
+          "package": "xfsprogs",
+          "verify": "mkfs.xfs -V",
+          "homepage": "https://xfs.wiki.kernel.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "ntfs-3g",
+          "name": "ntfs-3g",
+          "description": "Read and write NTFS filesystems from Linux",
+          "provider": "apt",
+          "package": "ntfs-3g",
+          "verify": "ntfs-3g --version",
+          "homepage": "https://github.com/tuxera/ntfs-3g",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "dosfstools",
+          "name": "dosfstools",
+          "description": "Create and check FAT/VFAT filesystems",
+          "provider": "apt",
+          "package": "dosfstools",
+          "homepage": "https://github.com/dosfstools/dosfstools",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "exfatprogs",
+          "name": "exfatprogs",
+          "description": "Create and check exFAT filesystems",
+          "provider": "apt",
+          "package": "exfatprogs",
+          "verify": "mkfs.exfat --version",
+          "homepage": "https://github.com/exfatprogs/exfatprogs",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "lvm2",
+          "name": "LVM2",
+          "description": "Activate and manage Linux LVM volume groups",
+          "provider": "apt",
+          "package": "lvm2",
+          "verify": "vgs --version",
+          "homepage": "https://sourceware.org/lvm2/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "mdadm",
+          "name": "mdadm",
+          "description": "Assemble and inspect Linux software RAID arrays",
+          "provider": "apt",
+          "package": "mdadm",
+          "verify": "mdadm --version",
+          "homepage": "https://raid.wiki.kernel.org/index.php/Mdadm",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "cryptsetup",
+          "name": "cryptsetup",
+          "description": "Unlock and manage LUKS-encrypted volumes",
+          "provider": "apt",
+          "package": "cryptsetup",
+          "verify": "cryptsetup --version",
+          "homepage": "https://gitlab.com/cryptsetup/cryptsetup",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "dislocker",
+          "name": "dislocker",
+          "description": "Mount BitLocker-encrypted Windows volumes",
+          "provider": "apt",
+          "package": "dislocker",
+          "arch": ["x64"],
+          "homepage": "https://github.com/Aorimn/dislocker",
+          "notes": "Debian-family only; no Fedora path yet.",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "chntpw",
+          "name": "chntpw",
+          "description": "Reset lost Windows account passwords offline",
+          "provider": "apt",
+          "package": "chntpw",
+          "arch": ["x64"],
+          "homepage": "https://pogostick.net/~pnh/ntpasswd/",
+          "notes": "Debian-family only; no Fedora path yet.",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "efibootmgr",
+          "name": "efibootmgr",
+          "description": "Inspect and repair UEFI boot entries",
+          "provider": "apt",
+          "package": "efibootmgr",
+          "verify": "efibootmgr --version",
+          "homepage": "https://github.com/rhboot/efibootmgr",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "arch-install-scripts",
+          "name": "arch-install-scripts",
+          "description": "Chroot bootstrap helpers (pacstrap, genfstab)",
+          "provider": "apt",
+          "package": "arch-install-scripts",
+          "homepage": "https://gitlab.archlinux.org/archlinux/arch-install-scripts",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "clonezilla",
+          "name": "Clonezilla",
+          "description": "Clone or image a whole disk for backup or restore",
+          "provider": "apt",
+          "package": "clonezilla",
+          "homepage": "https://clonezilla.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "gparted",
+          "name": "GParted",
+          "description": "Graphical partition editor",
+          "provider": "apt",
+          "package": "gparted",
+          "verify": "gparted --version",
+          "homepage": "https://gparted.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "nmap",
+          "name": "nmap",
+          "description": "Network discovery and port scanning",
+          "provider": "apt",
+          "package": "nmap",
+          "verify": "nmap --version",
+          "homepage": "https://nmap.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "tcpdump",
+          "name": "tcpdump",
+          "description": "Capture and inspect network traffic",
+          "provider": "apt",
+          "package": "tcpdump",
+          "verify": "tcpdump --version",
+          "homepage": "https://www.tcpdump.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "iperf3",
+          "name": "iperf3",
+          "description": "Measure network throughput between two hosts",
+          "provider": "apt",
+          "package": "iperf3",
+          "verify": "iperf3 --version",
+          "homepage": "https://github.com/esnet/iperf",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "ethtool",
+          "name": "ethtool",
+          "description": "Query and configure Ethernet NIC settings",
+          "provider": "apt",
+          "package": "ethtool",
+          "verify": "ethtool --version",
+          "homepage": "https://www.kernel.org/pub/software/network/ethtool/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "borgbackup",
+          "name": "BorgBackup",
+          "description": "Deduplicating, encrypted backup tool",
+          "provider": "apt",
+          "package": "borgbackup",
+          "verify": "borg --version",
+          "homepage": "https://www.borgbackup.org/",
+          "profiles": ["rescue"]
+        },
+        {
+          "id": "restic",
+          "name": "restic",
+          "description": "Fast, encrypted backups to local or cloud storage",
+          "provider": "apt",
+          "package": "restic",
+          "verify": "restic version",
+          "homepage": "https://restic.net/",
+          "profiles": ["rescue"]
+        }
+      ]
+    }
+  ],
+  "prompts": {
+    "omnigraph_url": {
+      "question": "Omnigraph remote server URL (blank = local Docker stack on :8080)",
+      "default": "",
+      "validate": "url_or_empty",
+      "help": "If you run a shared Omnigraph server, give its base URL here and the MCP config will point at it instead of localhost."
+    },
+    "herdr_source": {
+      "question": "Herdr install source",
+      "default": "npm:herdr",
+      "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in apt, so AutoOS needs to be told where it lives."
+    },
+    "herdr_sessions_profile": {
+      "question": "Absolute path to a herdr-sessions site profile (.conf), blank to skip",
+      "default": "",
+      "help": "Site-specific (hosts, paths) and never shipped in this public repo. Leave blank and the component reports 'skipped: no profile' rather than guessing one."
+    },
+    "git_user_name": {
+      "question": "Git commit author name (e.g. Jane Doe)",
+      "default": "",
+      "help": "Sets git config --global user.name so commits on this machine have your author name."
+    },
+    "git_user_email": {
+      "question": "Git commit author email (e.g. jane@example.com)",
+      "default": "",
+      "help": "Sets git config --global user.email so commits on this machine have your email."
+    },
+    "ollama_models": {
+      "question": "Ollama model(s) to pull (blank for nomic-embed-text, or 'none' to skip)",
+      "default": "nomic-embed-text",
+      "help": "nomic-embed-text provides the 768-dim embeddings Omnigraph needs for semantic memory recall."
+    },
+    "context7_api_key": {
+      "question": "Upstash Context7 API key (blank to use default rate limit)",
+      "default": "",
+      "help": "Optional API key for Upstash Context7 live documentation lookups."
+    },
+    "claude_gateway_routing": {
+      "question": "Claude Code routing: 'login' (claude.ai sign-in) or 'gateway' (local OmniRoute)",
+      "default": "login",
+      "help": "gateway writes ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN into ~/.claude/settings.json so Claude Code talks to OmniRoute - this disables the claude.ai connectors, and needs the OmniRoute client key. login (the default) keeps the claude.ai sign-in and removes those two keys again if an earlier run set them."
+    }
+  }
+}

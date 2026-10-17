@@ -1,0 +1,6 @@
+import json, datetime, os, tempfile
+p = os.path.expanduser('~/fleet/oc-pilot/gate-block.json')
+d = {"day": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d"), "usd": 99.0, "budget": 0.01,
+     "verdict": "block", "by_provider": {}, "unpriced_models": [], "unpriced_default_used": False, "truncated": False, "bad_rows": 0,
+     "note": "pilot-only block: the OC-PILOT may not start Google-paid legs (routing D-598 follow-up)"}
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p)); os.write(fd, json.dumps(d).encode()); os.close(fd); os.replace(tmp, p)

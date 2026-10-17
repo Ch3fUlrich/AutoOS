@@ -1,0 +1,857 @@
+#!/usr/bin/env bash
+# AutoOS — post-install provisioning for Linux.
+#
+# One entry point. Detects the machine, suggests a profile, lets you tick exactly
+# what you want, shows the plan, then installs it.
+#
+#   detect -> profile -> select -> plan -> confirm -> execute -> report
+#
+# Nothing is installed before the confirmation step.
+
+set -euo pipefail
+
+AUTOOS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB="$AUTOOS_ROOT/lib/linux"
+
+# shellcheck source=lib/linux/ui.sh
+. "$LIB/ui.sh"
+# shellcheck source=lib/linux/progress.sh
+. "$LIB/progress.sh"
+# shellcheck source=lib/linux/detect.sh
+. "$LIB/detect.sh"
+# shellcheck source=lib/linux/catalog.sh
+. "$LIB/catalog.sh"
+# shellcheck source=lib/linux/install.sh
+. "$LIB/install.sh"
+# shellcheck source=lib/linux/download.sh
+. "$LIB/download.sh"
+# shellcheck source=lib/linux/usb.sh
+. "$LIB/usb.sh"
+
+# Resolved properly after detect_system; this is only the fallback for the
+# catalog-only modes that run before detection.
+CATALOG="$AUTOOS_ROOT/catalog/linux.json"
+PROFILE=""; ONLY=""; ASSUME_YES=0; DO_SERVE=0; PORT=8777; BIND="127.0.0.1"
+CLAUDE_SESSIONS=""
+LIST_ONLY=0; CHECK_ONLY=0; DO_UNDO=0; FROM_STATE=""
+STATE_PATH="$AUTOOS_ROOT/.autoos-state.json"
+STATE_PROFILE=""; STATE_SELECTED=""
+# Task 6 (installer-USB planner): --create-usb and its companions.
+DO_CREATE_USB=0; USB_IMAGE=""; USB_KIND="installer"; USB_ENGINE=""; USB_DEVICE=""
+USB_WIPE=0; LIST_USB=0; LIST_ENGINES=0
+# custom-url / custom-local inputs, read by usb_plan (lib/linux/usb.sh).
+USB_IMAGE_URL=""; USB_IMAGE_PATH=""; USB_IMAGE_SHA256=""; USB_WRITE_MODE=""
+
+usage() {
+    cat <<'EOF'
+AutoOS — post-install provisioning for Linux
+
+  ./setup.sh [options]
+
+  --profile <name>   workstation | ai-coding | light | server | custom
+  --only <ids>       Comma-separated component ids; installs only these
+  --dry-run          Print every command without changing anything
+  --update           Also check installed components that can tell a newer version
+                     (Antigravity Hub) and update them; without it they are skipped
+  --yes, -y          Non-interactive: take profile defaults, skip confirmation
+  --no-color         Disable ANSI colour
+  --claude-sessions [status|snapshot|restore|configure]
+                     Report or drive the Claude session autostart
+  --serve            Browser UI instead of the terminal menu (headless boxes)
+  --port N           Port for --serve (default 8777)
+  --bind ADDR        Bind address for --serve (default 127.0.0.1)
+  --list             Print the catalog and exit
+  --check-catalog    Validate the catalog and exit non-zero on any problem
+
+  --config FILE      Load configuration (default autoos.config.json if present)
+  --from-state FILE  Replay a previous run's selection and answers
+  --save-state FILE  Where to write this run's state (default .autoos-state.json)
+  --no-verify        Skip the post-install "does it actually work" check
+  --undo             Restore files AutoOS backed up (does NOT uninstall packages)
+                     (does not cover a USB write — that cannot be undone)
+  --host-name [<name>] Set the machine's host_name in host.yml (creates if missing,
+                      default = normalised short hostname). If host.yml exists,
+                      reports skipped and never overwrites.
+
+  --create-usb           Build a bootable installer/rescue USB (--dry-run shows the plan only)
+  --image <id>            catalog/images.json entry to write
+  --kind <kind>            installer | live-persistent | full-os (default: installer)
+  --engine <id>            catalog/engines.json entry to write with
+  --usb-device <path>      Target device, e.g. /dev/sdb
+  --wipe-target-disk       Required for a real write: confirms the target disk's contents may be destroyed
+  --image-url <url>        With --image custom-url: the image to download (needs --image-sha256)
+  --image-path <file>      With --image custom-local: an image already on disk
+  --image-sha256 <hex>     Digest to verify a custom image against (required for a URL)
+  --write-mode <mode>      hybrid | raw - required for a custom image
+  --list-usb              List candidate USB devices and exit
+  --list-engines          List write engines available on this machine and exit
+  --help, -h         This text
+
+Examples:
+  ./setup.sh                                  interactive
+  ./setup.sh --from-state .autoos-state.json  repeat a previous machine's setup
+  ./setup.sh --profile light --dry-run        what a Raspberry Pi would get
+  ./setup.sh --only claude-code,tailscale -y  just those two, plus dependencies
+  ./setup.sh --serve                          drive it from a browser
+EOF
+}
+
+CONFIG_FILE="${AUTOOS_ROOT}/autoos.config.json"
+INSTALLED_ONLY=0
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --config)  CONFIG_FILE="${2:-}"; shift 2 ;;
+        --profile) PROFILE="${2:-}"; shift 2 ;;
+        --only)    ONLY="${2:-}"; shift 2 ;;
+        --dry-run) AUTOOS_DRY_RUN=1; shift ;;
+        --update)  AUTOOS_UPDATE=1; export AUTOOS_UPDATE; shift ;;
+        --yes|-y)  ASSUME_YES=1; shift ;;
+        --no-color) AUTOOS_NO_COLOR=1; shift ;;
+        --serve)   DO_SERVE=1; shift ;;
+        --claude-sessions) CLAUDE_SESSIONS="${2:-status}"
+                   case "$CLAUDE_SESSIONS" in
+                       status|snapshot|restore|configure) shift 2 ;;
+                       *) CLAUDE_SESSIONS="status"; shift ;;
+                   esac ;;
+        --port)    PORT="${2:-8777}"; shift 2 ;;
+        --bind)    BIND="${2:-127.0.0.1}"; shift 2 ;;
+        --list)    LIST_ONLY=1; shift ;;
+        --installed|--list-installed) INSTALLED_ONLY=1; shift ;;
+        --check-catalog) CHECK_ONLY=1; shift ;;
+        --from-state) FROM_STATE="${2:-}"; shift 2 ;;
+        --save-state) STATE_PATH="${2:-}"; shift 2 ;;
+        --no-verify)  AUTOOS_VERIFY=0; shift ;;
+        --undo)       DO_UNDO=1; shift ;;
+        --host-name)
+            # Optional value: a following --flag (or nothing) means "use this
+            # machine's own hostname". Never eat the next flag as a name.
+            AUTOOS_HOST_NAME_GIVEN=1
+            if [[ -n "${2:-}" && "${2:-}" != -* ]]; then AUTOOS_HOST_NAME_CLI="$2"; shift 2
+            else AUTOOS_HOST_NAME_CLI=""; shift
+            fi ;;
+        --create-usb)       DO_CREATE_USB=1; shift ;;
+        --image)            USB_IMAGE="${2:-}"; shift 2 ;;
+        --kind)              USB_KIND="${2:-installer}"; shift 2 ;;
+        --engine)            USB_ENGINE="${2:-}"; shift 2 ;;
+        --usb-device)        USB_DEVICE="${2:-}"; shift 2 ;;
+        --wipe-target-disk)  USB_WIPE=1; shift ;;
+        --image-url)         USB_IMAGE_URL="${2:-}"; shift 2 ;;
+        --image-path)        USB_IMAGE_PATH="${2:-}"; shift 2 ;;
+        --image-sha256)      USB_IMAGE_SHA256="${2:-}"; shift 2 ;;
+        --write-mode)        USB_WRITE_MODE="${2:-}"; shift 2 ;;
+        --list-usb)          LIST_USB=1; shift ;;
+        --list-engines)      LIST_ENGINES=1; shift ;;
+        --help|-h) usage; exit 0 ;;
+        *) printf 'Unknown option: %s\n\n' "$1"; usage; exit 2 ;;
+    esac
+done
+
+# ─── --host-name: set machine host_name in host.yml ─────────────────────────────
+# If --host-name was given, write host.yml (creates if missing, never overwrites).
+# install.sh is already sourced above, so _host_config_path/_normalize_hostname
+# are available. An explicit name is written exactly; a bare --host-name
+# defaults to the normalised short hostname.
+# Honors --dry-run: prints what would be written without writing.
+if [[ "${AUTOOS_HOST_NAME_GIVEN:-0}" == 1 ]]; then
+    host_file="$(_host_config_path)"
+    if [[ -f "$host_file" ]]; then
+        ui_info "host.yml exists at $host_file - skipped (use AUTOOS_HOST_NAME to override at runtime)"
+    else
+        _host_name_value="${AUTOOS_HOST_NAME_CLI:-}"
+        if [[ -n "$_host_name_value" && ! "$_host_name_value" =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
+            # one token, starting with a letter, digit or underscore: it becomes a field name and a host.yml value
+            ui_err "--host-name takes letters, digits, dot, dash and underscore only, and may not start with a dot or a dash"
+            exit 2
+        fi
+        if [[ -z "$_host_name_value" ]]; then
+            _host_name_value="$(_normalize_hostname "$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo localhost)")"
+        fi
+        if (( AUTOOS_DRY_RUN )); then
+            ui_info "would write $host_file (host_name: $_host_name_value)"
+        else
+            mkdir -p "$(dirname "$host_file")"
+            printf 'host_name: %s\n' "$_host_name_value" >"$host_file"
+            ui_ok "Created $host_file with host_name: $_host_name_value"
+        fi
+    fi
+    exit 0
+fi
+
+ui_init
+
+# ─── Catalog-only modes ─────────────────────────────────────────────────────
+if (( CHECK_ONLY )); then
+    # Validate every catalog, not just this machine's: a typo in macos.json must
+    # fail CI on a Linux runner too. catalog/*.json holds more than one catalog
+    # *type* (component catalogs, images.json, engines.json), each with a
+    # different top-level shape, so dispatch by that shape rather than
+    # assuming every file here is a component catalog — and rather than
+    # trusting the filename, which silently mis-validates a renamed file.
+    rc=0
+    # Every file under catalog/, dispatched by its top-level shape:
+    # component catalogs ("categories"), images.json ("images"),
+    # engines.json ("engines") and ide-models.json ("models"). Two branches
+    # once fixed the same problem two ways - one by dispatching on shape,
+    # one by listing the three OS files by name - and merged to the
+    # narrower list, which silently stopped checking images/engines.
+    for cat in "$AUTOOS_ROOT"/catalog/*.json; do
+        [[ -f "$cat" ]] || continue
+        catalog_require_python || exit 1
+        cat_type="$(python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception:
+    print("invalid"); sys.exit(0)
+if "routes" in data and "clients" in data:
+    print("registry"); sys.exit(0)
+for key in ("categories", "images", "engines", "models", "roles"):
+    if key in data:
+        print(key); sys.exit(0)
+if "$schema" in data:
+    print("schema"); sys.exit(0)
+print("unknown")
+' "$cat")"
+        case "$cat_type" in
+            schema)
+                # A JSON Schema shipped beside a catalog (ai-registry.schema.json):
+                # parsed successfully above, and that is all it needs here.
+                ui_ok "$(basename "$cat") is valid." ;;
+            models)
+                # The IDE model list (catalog/ide-models.json): shape check here
+                # (a list of entries with unique ids); tests/run-tests.sh's
+                # "registry models" block checks the registry projection into
+                # the installers.
+                if python3 -c '
+import json, sys
+models = json.load(open(sys.argv[1], encoding="utf-8")).get("models")
+ok = isinstance(models, list) and models and all(isinstance(m, dict) and m.get("id") for m in models)
+ids = [m.get("id") for m in models] if ok else []
+sys.exit(0 if ok and len(ids) == len(set(ids)) else 1)
+' "$cat"; then ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            registry)
+                # The AI registry (catalog/ai-registry.json): it also has a
+                # "models" key (a map, not ide-models.json's list), so it is
+                # matched first; its one validator is tools/registry.py.
+                if python3 "$AUTOOS_ROOT/tools/registry.py" check --registry "$cat" >/dev/null; then
+                    ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            roles)
+                # The agent harness (catalog/agent-harness.json): its one
+                # validator is the generator that consumes it.
+                if python3 "$AUTOOS_ROOT/lib/agent_harness.py" check --harness "$cat" >/dev/null; then
+                    ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            categories)
+                if catalog_validate "$cat"; then ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            images)
+                if python3 "$AUTOOS_ROOT/tests/helpers/images_validate.py" "$cat"; then
+                    ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            engines)
+                if engine_validate "$cat" "$AUTOOS_ROOT/catalog"; then
+                    ui_ok "$(basename "$cat") is valid."
+                else ui_err "$(basename "$cat") has problems."; rc=1; fi ;;
+            *)
+                # An unrecognised shape must fail loudly, not be skipped —
+                # a silently-skipped malformed catalog is how a bad one
+                # reaches a user (AGENTS.md §5).
+                ui_err "$(basename "$cat"): unknown catalog type"; rc=1 ;;
+        esac
+    done
+    exit $rc
+fi
+
+if (( LIST_ONLY )); then
+    detect_system
+    if [[ "${SYS_OS:-linux}" == "macos" ]]; then CATALOG="$AUTOOS_ROOT/catalog/macos.json"; fi
+    catalog_load "$CATALOG" "$SYS_ARCH" "$SYS_IS_HEADLESS"
+    catalog_probe_installed
+    last=""
+    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        if [[ "${CAT_GROUP[i]}" != "$last" ]]; then ui_section "${CAT_GROUP[i]}"; last="${CAT_GROUP[i]}"; fi
+        inst_mark="  "
+        if (( CAT_INSTALLED[i] )); then
+            inst_mark="$(_c ok)✓$(_c reset) "
+        fi
+        # A tombstone is a known id that installs nothing; the row says so
+        # rather than letting someone tick it and watch nothing happen.
+        retired=""
+        catalog_is_tombstone "$i" && retired=" $(_c muted)(retired)$(_c reset)"
+        printf '  %s%-18s %-8s %s%s\n' "$inst_mark" "${CAT_ID[i]}" "${CAT_PROVIDER[i]}" "${CAT_DESC[i]}" "$retired"
+        [[ -n "${CAT_PROFILES[i]}" ]] && printf '    %-18s profiles: %s\n' "" "${CAT_PROFILES[i]}"
+    done
+    exit 0
+fi
+
+if (( INSTALLED_ONLY )); then
+    detect_system
+    if [[ "${SYS_OS:-linux}" == "macos" ]]; then CATALOG="$AUTOOS_ROOT/catalog/macos.json"; fi
+    catalog_load "$CATALOG" "$SYS_ARCH" "$SYS_IS_HEADLESS"
+    catalog_probe_installed
+    ui_section "Installed applications"
+    found=0
+    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        if (( CAT_INSTALLED[i] )); then
+            printf '  %-26s %-8s %s\n' "${CAT_NAME[i]}" "${CAT_PROVIDER[i]}" "${CAT_DESC[i]}"
+            found=$((found + 1))
+        fi
+    done
+    printf '\n'
+    if (( found > 0 )); then
+        ui_ok "$found installed application(s) detected on this system."
+    else
+        ui_info "No catalog applications currently installed."
+    fi
+    exit 0
+fi
+
+# ─── USB creation (Task 6) ──────────────────────────────────────────────────
+# A pure planner-and-guard flow, standalone like the catalog-only modes
+# above: usb_plan "emits commands and runs nothing" (its own docstring in
+# lib/linux/usb.sh), so nothing below this point writes to a disk, only to
+# stdout. --list-engines and --create-usb --dry-run both have to work
+# without ever reaching the main install pipeline's "Detect" banner.
+# create_usb_flow — the whole --create-usb / --list-usb / --list-engines
+# path as a function so the top-level menu's "Create installer USB" entry
+# (Task 10) can reach it too. Returns the exit status; the callers exit.
+create_usb_flow() {
+    # detect_system is silent (sets SYS_* globals; prints nothing) and is
+    # skipped whenever EITHER SYS_OS or SYS_ARCH is already set. That is
+    # what lets B11/B13's tests simulate macOS and arm64 independently,
+    # without a second machine (AGENTS.md §5): they export SYS_OS or
+    # SYS_ARCH before invoking this script, and a fresh detect_system()
+    # call would otherwise silently overwrite BOTH with this machine's real
+    # `uname` — checking only one of the two globals here would still let
+    # the other one get clobbered.
+    if [[ -z "${SYS_OS:-}" && -z "${SYS_ARCH:-}" ]]; then detect_system; fi
+
+    # setup.sh is the shared Linux AND macOS entry point (AGENTS.md), but
+    # nothing past this line was written for `diskutil`-shaped output —
+    # refuse cleanly here rather than fail unpredictably inside usb_list.
+    if [[ "$(_usb_current_os)" == "macos" ]]; then
+        ui_err "USB creation is not supported on macOS"
+        return 1
+    fi
+
+    if (( LIST_ENGINES )); then
+        ui_section "USB write engines available on this machine"
+        while IFS= read -r eid; do
+            [[ -z "$eid" ]] && continue
+            # mapfile, not `read < <(...)`: a process substitution that
+            # produces no output makes `read` fail, which under this
+            # script's `set -e` would abort the whole run rather than just
+            # this one engine's row.
+            eng_fields=()
+            mapfile -t eng_fields < <(_engine_field "$eid" name interactive)
+            ename="${eng_fields[0]:-$eid}"; einteractive="${eng_fields[1]:-0}"
+            tag=""; [[ "$einteractive" == "1" ]] && tag=" (interactive)"
+            printf '  %-12s %s%s\n' "$eid" "$ename" "$tag"
+        done < <(_engine_list_for_platform "$(_usb_current_os)" "$(_usb_current_arch)")
+        return 0
+    fi
+
+    if (( LIST_USB )); then
+        ui_section "Candidate USB devices"
+        found_usb=0
+        while IFS=$'\t' read -r dpath dmodel dsize _drm _dtran; do
+            [[ -z "$dpath" ]] && continue
+            printf '  %-14s %-24s %s bytes\n' "$dpath" "$dmodel" "$dsize"
+            found_usb=$((found_usb + 1))
+        done < <(usb_list)
+        (( found_usb == 0 )) && ui_info "No USB devices found."
+        return 0
+    fi
+
+    # DO_CREATE_USB
+    # Task 10: an interactive session that did not give every flag gets the
+    # four-step chooser (image -> kind -> engine -> device) and the one
+    # confirmation that names the device and that its data is destroyed;
+    # a non-interactive one keeps the explicit refusal below.
+    if [[ -z "$USB_IMAGE" || -z "$USB_ENGINE" || -z "$USB_DEVICE" ]] && ui_is_interactive; then
+        usb_choose_interactively || return 1
+    fi
+    if [[ -z "$USB_IMAGE" || -z "$USB_ENGINE" || -z "$USB_DEVICE" ]]; then
+        ui_err "--create-usb requires --image, --engine and --usb-device (--list-engines / --list-usb to discover values)"
+        return 2
+    fi
+    # AGENTS.md hard rule 3: every destructive action is opt-in and
+    # announced. usb_plan below refuses nothing based on --wipe-target-disk
+    # (Task 7 owns the actual write and its own confirmation), but a plan
+    # for a raw-write engine already means the target's current contents
+    # are lost, so the flag is acknowledged here rather than silently
+    # accepted-and-ignored if a user thought passing it would gate something.
+    if (( USB_WIPE )); then
+        ui_muted "Acknowledged: the target device's current contents will be overwritten."
+    fi
+    # if/else, not `cmd; rc=$?`: under `set -e` (active for this whole
+    # script) a bare failing command substitution assignment would exit the
+    # script right here, before usb_plan_rc — or the plan/refusal text
+    # captured with it — was ever used. A command that is an if-condition
+    # is the one form set -e never treats as fatal.
+    if usb_plan_out="$(usb_plan "$USB_IMAGE" "$USB_KIND" "$USB_ENGINE" "$USB_DEVICE" 2>&1)"; then
+        usb_plan_rc=0
+    else
+        usb_plan_rc=$?
+    fi
+    printf '%s\n' "$usb_plan_out"
+    if (( usb_plan_rc != 0 )); then
+        return 1
+    fi
+
+    # Elevation (B10): checked here, once the plan is known to be coherent,
+    # not deferred to write time — the failure this prevents is a dry run
+    # that looks perfect followed by "Access is denied" on the one run that
+    # matters. uefi-copy writes onto an already-mounted filesystem and needs
+    # no elevation; every other engine does (same split usb_require_elevation
+    # documents). A dry run still shows the plan above even when unelevated
+    # — that gap belongs in the preview, not hidden behind a hard failure
+    # that would stop the plan from ever being shown.
+    if [[ "$USB_ENGINE" != "uefi-copy" ]]; then
+        if ! usb_elev_out="$(usb_require_elevation 2>&1)"; then
+            if (( AUTOOS_DRY_RUN )); then
+                ui_warn "$usb_elev_out"
+            else
+                ui_err "$usb_elev_out"
+                return 1
+            fi
+        fi
+    fi
+
+    if (( AUTOOS_DRY_RUN )); then
+        return 0
+    fi
+
+    # The real write. Until this was wired, a --create-usb without
+    # --dry-run printed the plan and exited 0 - a "create" that created
+    # nothing. usb_execute (lib/linux/usb.sh) is the only thing that ever
+    # runs a plan line; it gets exactly the lines printed above, on stdin.
+    #
+    # AGENTS.md hard rule 3: every destructive action is opt-in and
+    # announced. The plan above is the announcement; --wipe-target-disk is
+    # the opt-in. Without it a real run stops HERE, after showing what it
+    # would do, having downloaded and written nothing - a plan is not
+    # consent, and neither is --yes (which answers the install menu's
+    # questions, not "may I destroy this disk").
+    if (( ! USB_WIPE )); then
+        ui_err "refusing to write $USB_DEVICE: re-run with --wipe-target-disk to confirm that everything on it may be destroyed (the plan above is exactly what would run)"
+        return 1
+    fi
+    ui_section "Writing $USB_DEVICE"
+    if printf '%s\n' "$usb_plan_out" | usb_execute "$USB_DEVICE"; then
+        return 0
+    fi
+    return 1
+}
+
+if (( DO_CREATE_USB || LIST_USB || LIST_ENGINES )); then
+    if create_usb_flow; then exit 0; else exit $?; fi
+fi
+
+# ─── 1. Detect ──────────────────────────────────────────────────────────────
+AUTOOS_LOG="$AUTOOS_ROOT/logs/autoos-$(date +%Y%m%d-%H%M%S).log"
+ui_init
+if [[ "$(uname -s)" == "Darwin" ]]; then ui_banner "macOS"; else ui_banner "Linux"; fi
+
+detect_system
+
+# One entry point, two catalogs: macOS is Homebrew, everything else is apt.
+if [[ "${SYS_OS:-linux}" == "macos" ]]; then
+    CATALOG="$AUTOOS_ROOT/catalog/macos.json"
+fi
+
+ui_section "Detected system"
+ui_kv "Distribution"    "$SYS_DISTRO_NAME"
+ui_kv "Architecture"    "$SYS_ARCH"
+ui_kv "Model"           "$SYS_MODEL"
+ui_kv "CPU"             "$SYS_CPU_NAME — $SYS_CPU_CORES cores"
+ui_kv "Memory"          "$SYS_RAM_GB GB"
+ui_kv "Free disk"       "$SYS_FREE_DISK_GB GB"
+ui_kv "User"            "$SYS_USER"
+if (( SYS_IS_ROOT )); then ui_kv "Privileges" "root" ok
+elif (( SYS_CAN_SUDO )); then ui_kv "Privileges" "sudo available" ok
+else ui_kv "Privileges" "unprivileged" warn; fi
+ui_kv "Display"         "$( ((SYS_IS_HEADLESS)) && echo "headless" || echo "graphical session" )"
+
+ui_kv "Environment"     "${SYS_ENVIRONMENT:-unknown}"
+
+present=""
+if (( SYS_HAS_GIT ));    then present+="git ";    fi
+if (( SYS_HAS_NODE ));   then present+="node ";   fi
+if (( SYS_HAS_DOCKER )); then present+="docker "; fi
+if (( SYS_HAS_ZSH ));    then present+="zsh ";    fi
+ui_kv "Already present" "${present:-nothing relevant}"
+
+# Load catalog to identify all installed applications
+catalog_load "$CATALOG" "$SYS_ARCH" "$SYS_IS_HEADLESS"
+catalog_probe_installed
+mapfile -t installed_apps < <(catalog_installed_names)
+if (( ${#installed_apps[@]} > 0 )); then
+    inst_str=""
+    for app in "${installed_apps[@]}"; do
+        [[ -n "$inst_str" ]] && inst_str+=", "
+        inst_str+="$app"
+    done
+    ui_kv "Installed apps" "$(_c ok)✓$(_c reset) ${inst_str} (${#installed_apps[@]} detected)"
+else
+    ui_kv "Installed apps" "none detected"
+fi
+
+detect_blockers
+if (( ${#BLOCKER_MESSAGE[@]} )); then
+    ui_section "Warnings"
+    fatal=0
+    for ((i = 0; i < ${#BLOCKER_MESSAGE[@]}; i++)); do
+        if [[ "${BLOCKER_SEVERITY[i]}" == "error" ]]; then ui_err "${BLOCKER_MESSAGE[i]}"; fatal=1
+        else ui_warn "${BLOCKER_MESSAGE[i]}"; fi
+        ui_muted "    ${BLOCKER_FIX[i]}"
+    done
+    if (( fatal && ! AUTOOS_DRY_RUN )); then
+        ui_err "Cannot continue until the errors above are resolved."
+        exit 1
+    fi
+fi
+
+# ─── Undo ───────────────────────────────────────────────────────────────────
+if (( DO_UNDO )); then
+    autoos_undo "$ASSUME_YES"
+    # B13: a USB write does not participate in --save-state/--from-state/
+    # --undo at all — say so plainly rather than silently leaving a user's
+    # last USB write out of what "undo" covers, which they would reasonably
+    # expect it to.
+    ui_muted "A USB write is not tracked by AutoOS and cannot be undone."
+    exit 0
+fi
+
+# ─── Browser mode ───────────────────────────────────────────────────────────
+# ─── Claude session autostart ───────────────────────────────────────────────
+# A first-class entry point rather than "go and run this file under lib/": the
+# status of a background service is exactly the thing people need after a reboot.
+if [[ -n "$CLAUDE_SESSIONS" ]]; then
+    args=("$CLAUDE_SESSIONS")
+    (( AUTOOS_DRY_RUN )) && args+=(--dry-run)
+    AUTOOS_ROOT="$AUTOOS_ROOT" exec bash "$LIB/claude-sessions.sh" "${args[@]}"
+fi
+
+if (( DO_SERVE )); then
+    # shellcheck source=lib/linux/serve.sh
+    . "$LIB/serve.sh"
+    serve_start "$AUTOOS_ROOT" "$PORT" "$BIND"
+    exit 0
+fi
+
+# ─── 2. Profile ─────────────────────────────────────────────────────────────
+if [[ -n "$CONFIG_FILE" && -f "$CONFIG_FILE" ]]; then
+    autoos_config_load "$CONFIG_FILE"
+    if [[ -z "$PROFILE" && -n "$CONFIG_PROFILE" ]]; then
+        PROFILE="$CONFIG_PROFILE"
+    fi
+fi
+
+SUGGESTED="$(suggested_profile)"
+if [[ -n "$FROM_STATE" ]]; then
+    autoos_state_load "$FROM_STATE" || exit 1
+    PROFILE="${STATE_PROFILE:-custom}"
+elif [[ -n "$ONLY" ]]; then
+    PROFILE="custom"
+elif [[ -z "$PROFILE" ]]; then
+    ui_section "Profile"
+    if (( ASSUME_YES )); then
+        PROFILE="$SUGGESTED"
+    else
+        p_opts=()
+        while IFS=$'\t' read -r pname pdesc; do
+            p_badge=""
+            [[ "$pname" == "$SUGGESTED" ]] && p_badge="suggested"
+            p_opts+=("${pname}|${pname}|${pdesc}|${p_badge}")
+        done < <(catalog_profile_list "$CATALOG")
+        p_opts+=("create-usb|Create installer USB|Build a bootable rescue/installer stick instead of installing|")
+        ui_select_radio PROFILE "Choose installation profile" "$SUGGESTED" "${p_opts[@]}"
+        if [[ "$PROFILE" == "create-usb" ]]; then
+            DO_CREATE_USB=1
+            if create_usb_flow; then exit 0; else exit $?; fi
+        fi
+    fi
+fi
+if ! catalog_has_profile "$PROFILE"; then ui_err "Unknown profile '$PROFILE'"; exit 2; fi
+ui_ok "Using profile: $PROFILE"
+
+# ─── 3. Select ──────────────────────────────────────────────────────────────
+if [[ -n "$FROM_STATE" ]]; then
+    SELECTED="$STATE_SELECTED"
+    for id in $SELECTED; do
+        catalog_index_of "$id" >/dev/null || { ui_warn "state names unknown component '$id' - skipping"; }
+    done
+    # keep only ids this machine actually offers
+    kept=""
+    for id in $SELECTED; do
+        catalog_index_of "$id" >/dev/null 2>&1 && kept+="$id "
+    done
+    SELECTED="${kept% }"
+elif [[ -n "$ONLY" ]]; then
+    SELECTED="${ONLY//,/ }"
+    for id in $SELECTED; do
+        catalog_index_of "$id" >/dev/null || { ui_err "Unknown component id: $id"; exit 1; }
+    done
+elif (( ASSUME_YES )); then
+    SELECTED="$(catalog_profile_defaults "$PROFILE")"
+else
+    menu_pre="$(catalog_profile_defaults "$PROFILE")"
+    # shellcheck disable=SC2086  # the pre-tick list is a deliberate word list
+    catalog_menu_rows $menu_pre
+    if ! ui_menu "Choose what to install" "Dependencies are added automatically."; then
+        ui_warn "Cancelled — nothing was changed."
+        exit 0
+    fi
+    SELECTED="$MENU_RESULT"
+fi
+
+if [[ -z "${SELECTED// /}" ]]; then
+    ui_warn "Nothing selected — nothing to do."
+    exit 0
+fi
+
+# Any of the paths above may still name a retired id — a state file written
+# before the retirement, --only, the browser's payload arriving as --only, a menu
+# whose rows the lock failed to keep out — and the ids that took its work over
+# cannot be in a selection made before they existed. Expand on the way to the
+# plan, unconditionally, so the plan, the run and the saved state all read the
+# same list and no path can plan a tombstone without its replacements.
+# shellcheck disable=SC2086  # SELECTED is a deliberate word list
+catalog_expand_replacements $SELECTED >/dev/null
+SELECTED="$EXPANDED_IDS"
+if (( ${#EXPANDED_LINES[@]} )); then
+    for _line in "${EXPANDED_LINES[@]}"; do ui_muted "$_line"; done
+fi
+
+# ─── 4. Plan ────────────────────────────────────────────────────────────────
+# shellcheck disable=SC2086  # SELECTED is a deliberate word list
+catalog_resolve $SELECTED >/dev/null
+
+ui_section "Plan"
+n=0
+for id in $PLAN_IDS; do
+    n=$((n + 1))
+    i="$(catalog_index_of "$id")"
+    tag=""
+    if [[ " $PLAN_AUTO " == *" $id "* ]]; then tag="$(_c muted)(dependency)$(_c reset)"; fi
+    if catalog_is_tombstone "$i"; then tag="$tag $(_c muted)(retired)$(_c reset)"; fi
+    printf '  %2d. %-22s %-8s %s %s\n' "$n" "${CAT_NAME[i]}" "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "$tag"
+    # Announced while there is still nothing on the disk to undo: a requirement
+    # that installs nothing can never be satisfied, so this row will fail.
+    blocked_reason="$(catalog_resolve_blocked "$id")"
+    if [[ -n "$blocked_reason" ]]; then
+        ui_warn "${CAT_NAME[i]} $blocked_reason - it cannot be installed"
+    fi
+    if (( CAT_INSTALLED[i] )); then
+        if [[ "$AUTOOS_UPDATE" == 1 ]] && component_is_updatable "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}"; then
+            ui_ok "✓ Already installed - checking for a newer version (--update)"
+        else
+            ui_ok "✓ Already installed - package will be skipped"
+        fi
+    fi
+    # A retired entry keeps the provider it had, and its vendor link is stale
+    # with its work: telling the user to go and install it by hand asks for a
+    # step nobody needs, for a row that reports "skipped: retired" two stages on.
+    if [[ "${CAT_PROVIDER[i]}" == manual ]] && ! catalog_is_tombstone "$i"; then
+        ui_warn "Action required: ${CAT_HOMEPAGE[i]}"
+    fi
+    if [[ -n "${CAT_NOTES[i]}" ]]; then ui_muted "      ${CAT_NOTES[i]}"; fi
+done
+auto_count=0
+for _ in $PLAN_AUTO; do auto_count=$((auto_count + 1)); done
+printf '\n'
+ui_info "$n component(s); $auto_count pulled in as dependencies."
+
+# ─── 5. Questions (all of them, before anything is touched) ─────────────────
+asked=" "
+config_updated=0
+for id in $PLAN_IDS; do
+    i="$(catalog_index_of "$id")"
+    # Nothing installs, so nothing needs to be known first: a retired entry that
+    # still carries its old prompt asks a question whose answer would be thrown
+    # away. Same for a component resolve refused - it will not be installed
+    # either, and its prompt can never be answered in time to matter.
+    if catalog_is_tombstone "$i"; then continue; fi
+    if [[ -n "$(catalog_resolve_blocked "$id")" ]]; then continue; fi
+    raw_prompts="${CAT_PROMPT[i]}"
+    [[ -z "$raw_prompts" ]] && continue
+    for key in ${raw_prompts//,/ }; do
+        [[ -z "$key" ]] && continue
+        [[ "$asked" == *" $key "* ]] && continue
+        asked+="$key "
+        q="$(catalog_prompt_field "$CATALOG" "$key" question)"
+        d="$(catalog_prompt_field "$CATALOG" "$key" default)"
+        h="$(catalog_prompt_field "$CATALOG" "$key" help)"
+        # An AUTOOS_ANSWER_<KEY> environment variable pre-answers the prompt; this is
+        # how --serve passes the browser's answers through to the same code path.
+        env_key="AUTOOS_ANSWER_$(printf '%s' "$key" | tr '[:lower:]-' '[:upper:]_')"
+        if [[ -n "${!env_key:-}" ]]; then
+            AUTOOS_ANSWERS["$key"]="${!env_key}"
+        elif [[ -n "${AUTOOS_ANSWERS[$key]:-}" ]]; then
+            # Pre-filled from configuration file
+            :
+        elif (( ASSUME_YES )); then
+            AUTOOS_ANSWERS["$key"]="$d"
+        else
+            if [[ "$asked" == " $key " ]]; then ui_section "A few questions"; fi
+            # Declared here because ui_ask assigns it via printf -v (which the
+            # linter cannot follow) and an unset name would trip set -u.
+            reply=""
+            ui_ask reply "$q" "$d" "$h"
+            AUTOOS_ANSWERS["$key"]="$reply"
+            config_updated=1
+        fi
+    done
+done
+
+if (( config_updated )) && [[ -n "$CONFIG_FILE" ]] && (( ! AUTOOS_DRY_RUN )); then
+    autoos_config_save "$CONFIG_FILE" "$PROFILE"
+    ui_ok "Saved answers to ${CONFIG_FILE}"
+fi
+
+# ─── 6. Confirm ─────────────────────────────────────────────────────────────
+if (( AUTOOS_DRY_RUN )); then
+    ui_warn "DRY RUN — no changes will be made."
+elif (( ! ASSUME_YES )); then
+    printf '\n'
+    if ! ui_confirm "Install these $n component(s)?" y; then
+        ui_warn "Cancelled — nothing was changed."
+        exit 0
+    fi
+fi
+
+# ─── 7. Execute ─────────────────────────────────────────────────────────────
+ui_section "Installing"
+# The result buckets are the ones lib/linux/install.sh declares: one component id
+# per bucket, and the counts the report prints are their lengths, so a number can
+# never disagree with the list it summarises. Ids, not the names printed for a
+# component: a name with a space splits into several "results" in the state file.
+unverified=0
+step=0; manual=0; manual_names=""
+for id in $PLAN_IDS; do
+    step=$((step + 1))
+    i="$(catalog_index_of "$id")"
+    ui_step "[$step/$n] ${CAT_NAME[i]}"
+    progress_start "$id" "${CAT_NAME[i]}" "$((step-1))" "$n"
+    if catalog_is_tombstone "$i"; then
+        # A tombstone is kept in the catalog for exactly one reason: old state
+        # files and --only still name it. Selecting it is not an error and not a
+        # success — it is a no-op that says which id retired and what replaced it.
+        if [[ -n "${CAT_RETIRE_NOTE[i]:-}" ]]; then
+            ui_ok "${CAT_NAME[i]}: skipped: retired (${CAT_RETIRE_NOTE[i]})"
+        else
+            ui_ok "${CAT_NAME[i]}: skipped: retired"
+        fi
+        AUTOOS_RESULT_SKIPPED+=("$id")
+        progress_update skipped 1
+        continue
+    fi
+    # Resolve already announced this one and said why; the plan is not the
+    # report, so it is recorded as the failure it is rather than installed
+    # without the dependency it asked for.
+    blocked_reason="$(catalog_resolve_blocked "$id")"
+    if [[ -n "$blocked_reason" ]]; then
+        ui_err "${CAT_NAME[i]}: $blocked_reason"
+        AUTOOS_RESULT_FAILED+=("$id")
+        progress_update failed 1
+        continue
+    fi
+    install_rc=0
+    install_component "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}" || { install_rc=$?; INSTALL_STATE="failed"; }
+    case "$INSTALL_STATE" in
+        manual) manual=$((manual+1)); manual_names+="$id "; ui_warn "Action required: ${CAT_HOMEPAGE[i]}" ;;
+        installed)
+            run_post_install "${CAT_POST[i]}" "$id"
+            # A post-install that recorded a failure — it refused to change a
+            # file, or the step itself exited non-zero — makes the component a
+            # failure, so it is not also reported as installed: see
+            # autoos_fold_extra_failures.
+            if autoos_is_recorded_failure "$id"; then
+                ui_err "${CAT_NAME[i]}: post-install step failed"
+            else
+                AUTOOS_RESULT_INSTALLED+=("$id")
+                verify_component "${CAT_VERIFY[i]}" "${CAT_NAME[i]}"
+                if [[ "$VERIFY_STATE" == "unverified" ]]; then unverified=$((unverified + 1)); fi
+                ui_ok "${CAT_NAME[i]} done"
+            fi
+            ;;
+        skipped)
+            run_post_install "${CAT_POST[i]}" "$id"
+            autoos_is_recorded_failure "$id" || AUTOOS_RESULT_SKIPPED+=("$id")
+            ;;
+        failed)
+            AUTOOS_RESULT_FAILED+=("$id")
+            ui_err "${CAT_NAME[i]} failed"
+            ;;
+    esac
+    progress_update "$INSTALL_STATE" 1
+    if [[ "$install_rc" == 124 ]]; then ui_err "Run stopped after timeout; remaining applications were not started."; break; fi
+done
+
+# Post-install steps can record a failure of their own - a user file they could
+# not back up, so a change they refused to make - without the package install
+# failing, including one recorded while a *different* component was installing.
+# Fold those in last, so neither the summary nor the exit code claims success over
+# something that never happened: the refusal moves the id into the failed bucket
+# and out of the success ones, so it is counted and written exactly once.
+autoos_fold_extra_failures
+installed=${#AUTOOS_RESULT_INSTALLED[@]}
+skipped=${#AUTOOS_RESULT_SKIPPED[@]}
+failed=${#AUTOOS_RESULT_FAILED[@]}
+
+# ─── 8. Report ──────────────────────────────────────────────────────────────
+ui_section "Summary"
+ui_kv "Installed"       "$installed" ok
+ui_kv "Action required" "$manual" warn
+ui_kv "Already present" "$skipped"   muted
+if (( unverified )); then ui_kv "Installed but unverified" "$unverified" warn; fi
+if (( failed )); then ui_kv "Failed" "$failed" err; else ui_kv "Failed" "0" muted; fi
+if (( failed )); then
+    printf '\n'
+    for f in "${AUTOOS_RESULT_FAILED[@]}"; do ui_err "$(autoos_result_label "$f")"; done
+    ui_muted "Re-run to retry only the failures; everything else reports as already present."
+fi
+printf '\n'
+# ─── Where it landed ────────────────────────────────────────────────────────
+# The counts above say how many, not where or how to start them. Resolved from
+# the live machine, so a blank means genuinely not found rather than a guess.
+landed=("${AUTOOS_RESULT_INSTALLED[@]+"${AUTOOS_RESULT_INSTALLED[@]}"}" \
+        "${AUTOOS_RESULT_SKIPPED[@]+"${AUTOOS_RESULT_SKIPPED[@]}"}")
+if (( ${#landed[@]} )); then
+    ui_section "Where to find them"
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "Dry run installed nothing — these are the locations as they stand now."
+    fi
+    for id in "${landed[@]}"; do
+        i="$(catalog_index_of "$id")"
+        # A retired row is not something the user can go and find; hunting for
+        # its launcher would answer "no launcher found yet" about a component
+        # that was never meant to launch anything.
+        if catalog_is_tombstone "$i"; then continue; fi
+        if launch_hint "${CAT_NAME[i]}" "${CAT_ID[i]}" "${CAT_VERIFY[i]}"; then
+            ui_kv "${CAT_NAME[i]}" "$LAUNCH_HOW"
+            [[ -n "$LAUNCH_PATH" ]] && ui_muted "                         $LAUNCH_PATH"
+        else
+            ui_kv "${CAT_NAME[i]}" "no launcher found yet" warn
+            ui_muted "                         log out and back in, or open a new shell, then re-run"
+        fi
+    done
+fi
+
+# Saved last, so a replay reflects what actually happened rather than what was
+# planned. All three buckets are id lists, and a component appears in one of them:
+# a post-install refusal moved it out of installed/skipped above.
+if [[ -n "$STATE_PATH" ]]; then
+    autoos_state_save "$STATE_PATH" "$PROFILE" "$SELECTED" \
+        "${AUTOOS_RESULT_INSTALLED[*]}" "${AUTOOS_RESULT_SKIPPED[*]}" \
+        "${AUTOOS_RESULT_FAILED[*]}" "$manual_names"
+fi
+
+ui_info "Some changes (PATH, shell, docker group) need a new login to take effect."
+ui_muted "Repeat this setup elsewhere with:  ./setup.sh --from-state $STATE_PATH"
+if (( failed )); then exit 1; fi
+exit 0

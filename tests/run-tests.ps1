@@ -1,0 +1,12319 @@
+﻿#Requires -Version 5.1
+<#
+.SYNOPSIS
+    AutoOS Windows test suite.
+
+.DESCRIPTION
+    Zero dependencies on purpose: the whole point of this repo is to run on a
+    machine where nothing is installed yet, so the tests must not need Pester.
+
+    No test installs anything. Providers are asserted on the PLANNED command,
+    never on system state, and PATH tests run against a scratch copy rather
+    than the real environment.
+
+.EXAMPLE
+    pwsh tests\run-tests.ps1
+.EXAMPLE
+    powershell -File tests\run-tests.ps1 -Filter catalog
+.EXAMPLE
+    powershell -File tests\run-tests.ps1 -Filter usb,catalog
+    Comma = OR (shard union for parallel worktree runs).
+#>
+[CmdletBinding()]
+param([string]$Filter = '')
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$Root = Split-Path -Parent $PSScriptRoot
+$Lib  = Join-Path $Root 'lib\windows'
+
+Import-Module (Join-Path $Lib 'AutoOS.Ui.psm1')      -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.Detect.psm1')  -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.Catalog.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.Install.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.Download.psm1') -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.Serve.psm1')   -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.State.psm1')   -Force -DisableNameChecking
+Import-Module (Join-Path $Lib 'AutoOS.Usb.psm1')     -Force -DisableNameChecking
+
+$script:Pass = 0
+$script:Fail = 0
+$script:Skip = 0
+$script:Current = ''
+$script:Failures = @()
+
+$useColor = -not [Console]::IsOutputRedirected
+function C { param($t, $code) if ($useColor) { "$([char]27)[${code}m$t$([char]27)[0m" } else { $t } }
+
+function Describe-Group { param([string]$Name) Write-Host ''; Write-Host (C "-- $Name" '2;38;5;245') }
+
+function Test-Case {
+    param([string]$Name, [scriptblock]$Body)
+    if ($Filter) {
+        # Comma-separated OR: -Filter usb,catalog runs the union, so shards
+        # can be disjoint partitions executed in parallel worktrees.
+        $hit = $false
+        foreach ($term in ($Filter -split ',')) {
+            if ($term -and $Name -like "*$term*") { $hit = $true; break }
+        }
+        if (-not $hit) { return }
+    }
+    $script:Current = $Name
+    try {
+        & $Body
+    } catch {
+        $script:Fail++
+        $script:Failures += $Name
+        Write-Host ("  " + (C 'X' '1;38;5;167') + " $Name")
+        Write-Host ("      " + (C $_.Exception.Message '2;38;5;245'))
+        # Without a location a bare .NET message (e.g. a NullReferenceException
+        # from inside a cmdlet) is almost impossible to trace back to a line.
+        $where = ($_.ScriptStackTrace -split "`n" | Select-Object -First 2) -join ' | '
+        if ($where) { Write-Host ("      " + (C $where '2;38;5;245')) }
+    }
+}
+
+function Pass { $script:Pass++; Write-Host ("  " + (C '+' '38;5;71') + " $script:Current") }
+function Skip { param($why) $script:Skip++; Write-Host ("  " + (C '-' '38;5;179') + " $script:Current " + (C "($why)" '2;38;5;245')) }
+
+function Assert-Equal {
+    # $Message is the caller's diagnostic (e.g. a failing unittest's output); it
+    # was once a silently ignored extra argument, so a red CI named nothing.
+    param($Actual, $Expected, [string]$Message = '')
+    if ($Actual -eq $Expected) { Pass; return }
+    $text = "expected [$Expected] but got [$Actual]"
+    if ($Message) { $text += ": $Message" }
+    throw $text
+}
+function Assert-True {
+    param($Condition, $Message = 'expected true')
+    if ($Condition) { Pass } else { throw $Message }
+}
+function Assert-Contains {
+    param($Collection, $Item)
+    if (@($Collection) -contains $Item) { Pass } else { throw "[$Item] not found in [$(@($Collection) -join ', ')]" }
+}
+function Assert-NotContains {
+    param($Collection, $Item)
+    if (@($Collection) -notcontains $Item) { Pass } else { throw "[$Item] should not be present" }
+}
+
+Write-Host (C "AutoOS Windows test suite" '2;38;5;245') -NoNewline
+Write-Host (C "  ($Root)" '2;38;5;245')
+
+$winCatalog = Get-AutoOSCatalog (Join-Path $Root 'catalog\windows.json')
+
+# ─── Catalog schema ─────────────────────────────────────────────────────────
+Describe-Group 'catalog schema'
+
+Test-Case 'Assert-Equal carries its caller message into the failure' {
+    $got = $null
+    try { Assert-Equal 1 0 'the unittest output' } catch { $got = $_.Exception.Message }
+    if ($got -ne 'expected [0] but got [1]: the unittest output') { throw "message lost: [$got]" }
+    Pass
+}
+
+Test-Case 'windows catalog validates' {
+    $p = @(Test-AutoOSCatalogSchema -Catalog $winCatalog)
+    if ($p.Count -eq 0) { Pass } else { throw ($p -join '; ') }
+}
+
+Test-Case 'linux catalog validates too' {
+    $c = Get-AutoOSCatalog (Join-Path $Root 'catalog\linux.json')
+    $p = @(Test-AutoOSCatalogSchema -Catalog $c)
+    if ($p.Count -eq 0) { Pass } else { throw ($p -join '; ') }
+}
+
+Test-Case 'a malformed catalog is rejected' {
+    $bad = @'
+{"categories":[{"id":"x","name":"X","components":[
+ {"id":"Bad_ID","name":"n","description":"d","provider":"nope","package":"p","requires":["ghost"]}]}]}
+'@ | ConvertFrom-Json
+    $p = @(Test-AutoOSCatalogSchema -Catalog $bad)
+    $joined = $p -join '; '
+    Assert-True ($joined -match 'unknown provider' -and $joined -match 'kebab-case' -and $joined -match 'ghost') `
+        "expected provider/kebab/ghost problems, got: $joined"
+}
+
+# ─── Registry models (single source of truth) ─────────────────────────
+Describe-Group 'registry models'
+
+Test-Case 'registry models are valid' {
+    # catalog/ai-registry.json `models` is a map keyed by model id, so ids are
+    # unique by construction; assert the map is non-empty and that every entry
+    # carrying a `direct` block is keyed by its own id.
+    $models = (Get-Content (Join-Path $Root 'catalog\ai-registry.json') -Raw | ConvertFrom-Json).models
+    $names = @($models.PSObject.Properties.Name)
+    Assert-True ($names.Count -ge 18) "expected >= 18 registry models, got $($names.Count)"
+    foreach ($name in $names) {
+        $m = $models.$name
+        if ($m.PSObject.Properties.Name.Contains('direct') -and $m.direct) {
+            Assert-True ($m.id -eq $name) "model key '$name' does not match its id '$($m.id)'"
+        }
+    }
+}
+
+Test-Case 'the windows installer projects the shared catalogue' {
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
+    Assert-True ($src -match 'catalog.ai-registry\.json') 'shared ai-registry.json models are not loaded'
+    foreach ($witness in @('REPO_MODELS', 'repoById', 'Get-OpenRouterModelEntry', '_profile_for')) {
+        Assert-True ($src.Contains($witness)) "'$witness' projector missing"
+    }
+    Assert-True (($src -split '_profile_for\(').Count -ge 20) 'expected >= 19 profile projections'
+}
+
+# ─── Registry model reads (A5d) ─────────────────────────────────────
+Describe-Group 'registry model reads'
+
+Test-Case 'registry model reads come from ai-registry.json models' {
+    $sh = Get-Content (Join-Path $Root 'lib\linux\install.sh') -Raw
+    $ps = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
+    Assert-True ($sh -notmatch 'llm-models\.json') 'install.sh still reads llm-models.json'
+    Assert-True ($ps -notmatch 'llm-models\.json') 'AutoOS.Install.psm1 still reads llm-models.json'
+    Assert-True ($sh -match 'ai-registry\.json') 'install.sh has no ai-registry.json read'
+    Assert-True ($ps -match 'ai-registry\.json') 'AutoOS.Install.psm1 has no ai-registry.json read'
+}
+
+Test-Case 'registry model reads project a fixture with no llm-models.json present' {
+    $fixtureDir = Join-Path ([IO.Path]::GetTempPath()) ('a5d-' + [Guid]::NewGuid().ToString('N'))
+    $fixtureCatalog = Join-Path $fixtureDir 'catalog'
+    New-Item -ItemType Directory -Path $fixtureCatalog -Force | Out-Null
+    $fixture = [ordered]@{
+        models = [ordered]@{
+            'muse-spark' = [ordered]@{
+                id = 'muse-spark'; display_name = 'Muse Spark 1.3 Contributor'
+                direct = [ordered]@{
+                    provider = 'meta'; base_url = 'https://api.meta.ai/v1'
+                    model = 'openai/muse-spark-1.3-contributor'
+                    npm = '@ai-sdk/openai'; reasoning_effort = 'high'
+                }
+                context_advertised = 1048576; output_max = 131072
+                reasoning = $true; price_in = 1e-07; price_out = 2e-07
+                price_cache_read = 2e-09
+                default_for = 'muse_key'
+            }
+            'openrouter-nemotron-ultra' = [ordered]@{
+                id = 'openrouter-nemotron-ultra'; display_name = 'Nemotron 3 Ultra (Free)'
+                direct = [ordered]@{
+                    provider = 'openrouter'
+                    model = 'nvidia/nemotron-3-ultra-550b-a55b:free'
+                }
+                context_advertised = 1000000; output_max = 32768
+                reasoning = $true; price_in = 0; price_out = 0
+                paid_price_in = 6e-07; paid_price_out = 2.4e-06
+                price_cache_read = 1.2e-07
+            }
+            'ollama-qwen2.5-coder' = [ordered]@{
+                id = 'ollama-qwen2.5-coder'; display_name = 'Qwen 2.5 Coder 7B (Local)'
+                direct = [ordered]@{
+                    provider = 'ollama'; base_url = 'http://127.0.0.1:11434/v1'
+                    model = 'ollama/qwen2.5-coder:7b'
+                    npm = '@ai-sdk/openai-compatible'
+                }
+                context_advertised = 32768; output_max = 8192
+                reasoning = $false; price_in = 0; price_out = 0
+                default_for = 'fallback'
+            }
+            'command-a-03-2025' = [ordered]@{
+                id = 'command-a-03-2025'; display_name = 'Command A'
+                context_advertised = 131072; output_max = 16384
+                reasoning = $false; price_in = 0.0; price_out = 0.0
+            }
+        }
+    }
+    $fixture | ConvertTo-Json -Depth 8 | Set-Content -Path (Join-Path $fixtureCatalog 'ai-registry.json') -Encoding UTF8
+    try {
+        Assert-True (-not (Test-Path (Join-Path $fixtureCatalog 'llm-models.json'))) 'fixture must run with no llm-models.json present'
+        # The REAL psm1 function (not an inlined copy): it loads the registry
+        # map (keyed by id) and projects the legacy field shape from registry
+        # fields (mapping doc section 1), never from llm-models.json.
+        $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw
+        Assert-True ($src -match 'catalog\\ai-registry\.json') 'psm1 model read is not on the registry'
+        Assert-True ($src -match 'legacy_models') 'psm1 does not call the shared legacy_models helper'
+        Assert-True ($src -notmatch 'def _legacy_model') 'psm1 still carries a local _legacy_model copy'
+        $reg = (Get-Content -Path (Join-Path $fixtureCatalog 'ai-registry.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models
+        $got = @(Get-AutoOSLegacyModels -RegistryModels $reg)
+        $repoById = @{}
+        foreach ($m in $got) { $repoById[$m.id] = $m }
+        Assert-True ($repoById.Count -eq 3) "expected 3 projected models, got $($repoById.Count)"
+        Assert-True (-not $repoById.ContainsKey('command-a-03-2025')) 'a model without a direct block must be skipped'
+        Assert-True ($repoById['muse-spark'].name -eq 'Muse Spark 1.3 Contributor') 'muse-spark name wrong'
+        Assert-True ($repoById['muse-spark'].context -eq 1048576 -and $repoById['muse-spark'].output -eq 131072) 'muse-spark windows wrong'
+        Assert-True ($repoById['muse-spark'].direct.provider -eq 'meta') 'muse-spark direct wrong'
+        Assert-True ($null -eq $repoById['muse-spark'].PSObject.Properties['openrouter_id']) 'muse-spark must have no openrouter_id'
+        Assert-True ($repoById['muse-spark'].PSObject.Properties['default_for'].Value -eq 'muse_key') 'muse-spark default_for wrong'
+        Assert-True ($repoById['openrouter-nemotron-ultra'].PSObject.Properties['openrouter_id'].Value -eq 'nvidia/nemotron-3-ultra-550b-a55b:free') 'openrouter_id not derived from direct.model'
+        Assert-True ($null -eq $repoById['openrouter-nemotron-ultra'].PSObject.Properties['direct']) 'openrouter entry must have no direct'
+        Assert-True ($repoById['openrouter-nemotron-ultra'].PSObject.Properties['paid_input_price'].Value -eq 6e-07) 'paid price not mapped'
+        Assert-True ($repoById['ollama-qwen2.5-coder'].direct.model -eq 'ollama/qwen2.5-coder:7b') 'ollama direct wrong'
+        Assert-True ($repoById['ollama-qwen2.5-coder'].PSObject.Properties['default_for'].Value -eq 'fallback') 'ollama default_for wrong'
+        Assert-True ($null -eq $repoById['ollama-qwen2.5-coder'].PSObject.Properties['reasoning']) 'falsy reasoning must stay absent'
+    } finally {
+        Remove-Item -Recurse -Force -Path $fixtureDir -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'registry model reads match python legacy_models on the real catalog' {
+    if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { Skip 'python3 absent'; return }
+    $tool = Join-Path $Root 'tools\registry.py'
+    $catalog = Join-Path $Root 'catalog\ai-registry.json'
+    $pyJson = & python3 -c "import importlib.util,json,sys;spec=importlib.util.spec_from_file_location('r',sys.argv[1]);r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r);print(json.dumps(r.legacy_models(json.load(open(sys.argv[2],encoding='utf-8')))))" $tool $catalog
+    Assert-True ($LASTEXITCODE -eq 0) 'python3 legacy_models failed'
+    # Windows PowerShell 5.1 emits a parsed JSON array as ONE object; enumerate it.
+    $pyModels = @($pyJson | ConvertFrom-Json | ForEach-Object { $_ })
+    $regModels = (Get-Content -Path $catalog -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    $psModels = @(Get-AutoOSLegacyModels -RegistryModels $regModels)
+    $pyById = @{}
+    foreach ($m in $pyModels) { $pyById[$m.id] = $m }
+    $psById = @{}
+    foreach ($m in $psModels) { $psById[$m.id] = $m }
+    $missing = @(@($pyById.Keys) | Where-Object { -not $psById.ContainsKey($_) })
+    $extra = @(@($psById.Keys) | Where-Object { -not $pyById.ContainsKey($_) })
+    Assert-True ($missing.Count -eq 0 -and $extra.Count -eq 0) ("id sets differ: missing [$($missing -join ',')] extra [$($extra -join ',')]")
+    foreach ($id in $pyById.Keys) {
+        $py = $pyById[$id]
+        $ps = $psById[$id]
+        Assert-True ($ps.name -eq $py.name) "$id name"
+        Assert-True ($ps.context -eq $py.context -and $ps.output -eq $py.output) "$id windows"
+        Assert-True ($ps.input_price -eq $py.input_price -and $ps.output_price -eq $py.output_price) "$id prices"
+        $psReason = $ps.PSObject.Properties['reasoning']
+        $pyReason = $py.PSObject.Properties['reasoning']
+        Assert-True (([bool]($psReason -and $psReason.Value)) -eq ([bool]($pyReason -and $pyReason.Value))) "$id reasoning"
+        $psOr = $ps.PSObject.Properties['openrouter_id']
+        $pyOr = $py.PSObject.Properties['openrouter_id']
+        $psOrVal = if ($psOr) { $psOr.Value } else { $null }
+        $pyOrVal = if ($pyOr) { $pyOr.Value } else { $null }
+        Assert-True ($psOrVal -eq $pyOrVal) "$id openrouter_id"
+        $psDirect = $ps.PSObject.Properties['direct']
+        $pyDirect = $py.PSObject.Properties['direct']
+        if ($null -eq $psDirect -and $null -eq $pyDirect) {
+            Assert-True $true "$id direct both absent"
+        } elseif ($null -ne $psDirect -and $null -ne $pyDirect) {
+            Assert-True (($psDirect.Value | ConvertTo-Json -Depth 10 -Compress) -eq ($pyDirect.Value | ConvertTo-Json -Depth 10 -Compress)) "$id direct"
+        } else {
+            throw "$id direct presence differs"
+        }
+        foreach ($opt in @('cache_read_price', 'paid_input_price', 'paid_output_price', 'default_for')) {
+            $psOpt = $ps.PSObject.Properties[$opt]
+            $pyOpt = $py.PSObject.Properties[$opt]
+            $psOptVal = if ($psOpt) { $psOpt.Value } else { $null }
+            $pyOptVal = if ($pyOpt) { $pyOpt.Value } else { $null }
+            Assert-True ($psOptVal -eq $pyOptVal) "$id $opt"
+        }
+    }
+}
+
+Test-Case 'registry: no generated file drifts' {
+    # Routing v2 spec 3.2 D11 (task A5f): every generated file must match a
+    # fresh `python3 tools/registry.py render <t> --check` (omniroute, litellm,
+    # ide, openhands, models-doc); catalog/ide-models.json is byte-exact, not
+    # only semantically (regenerate: python3 tools/registry.py render ide
+    # --out catalog/ide-models.json).
+    # TORDER 2026-10-01: combo-contract gate (fail-closed) runs here too.
+    if (-not (Get-Command python3 -ErrorAction SilentlyContinue)) { Skip 'python3 absent'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        foreach ($t in @('omniroute', 'litellm', 'ide', 'openhands', 'models-doc')) {
+            $out = & python3 (Join-Path $Root 'tools\registry.py') render $t --check 2>&1 | Out-String; $rc = $LASTEXITCODE
+            Assert-True ($rc -eq 0) "render $t drift: $out"
+        }
+        $out = & python3 (Join-Path $Root 'tools\combo-contract.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-True ($rc -eq 0) "combo-contract failed: $out"
+        # AO-DENYLEGS D1 (2026-10-08): the (f)-(i) gate's own unit tests.
+        $out = & python3 (Join-Path $Root 'tests\test_combo_contract.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-True ($rc -eq 0) "combo-contract unit tests failed: $out"
+        # AO-MIMO-CUSTOM-APPLY (2026-10-12): the declared custom models the apply
+        # paths must declare. Checks apply.ps1's block as text and runs the shell
+        # applier against a fake loopback gateway it owns — never the live one.
+        $out = & python3 (Join-Path $Root 'tests\test_custom_models_apply.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-True ($rc -eq 0) "custom-models apply tests failed: $out"
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ide-render-' + [Guid]::NewGuid().ToString('N') + '.json')
+        try {
+            $out = & python3 (Join-Path $Root 'tools\registry.py') render ide --out $tmp 2>&1 | Out-String; $rc = $LASTEXITCODE
+            Assert-True ($rc -eq 0) "render ide --out failed: $out"
+            $a = [IO.File]::ReadAllBytes($tmp)
+            $b = [IO.File]::ReadAllBytes((Join-Path $Root 'catalog\ide-models.json'))
+            $same = ($a.Length -eq $b.Length) -and (@(Compare-Object $a $b -SyncWindow 0).Length -eq 0)
+            Assert-True $same 'catalog/ide-models.json differs byte-exact from render ide (run: python3 tools/registry.py render ide --out catalog/ide-models.json)'
+        } finally {
+            Remove-Item -LiteralPath $tmp -ErrorAction SilentlyContinue
+        }
+    } finally { $ErrorActionPreference = $prev }
+}
+
+Test-Case 'every winget component has a non-empty package id' {
+    $bad = @()
+    foreach ($cat in $winCatalog.categories) {
+        foreach ($c in $cat.components) {
+            if ($c.provider -eq 'winget' -and [string]::IsNullOrWhiteSpace($c.package)) { $bad += $c.id }
+        }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+# ─── Fixture-driven filtering ───────────────────────────────────────────────
+Describe-Group 'component filtering'
+
+function New-FakeSystem {
+    param([string]$Arch = 'x64', [bool]$Headless = $false, [double]$Ram = 32, [int]$Cores = 16)
+    # Mirrors every field Get-AutoOSSystemInfo really returns, so consumers such
+    # as Get-AutoOSServeState can be tested without touching the live machine.
+    [pscustomobject]@{
+        Arch = $Arch; IsHeadless = $Headless; RamGB = $Ram; CpuCores = $Cores
+        IsAdmin = $true; HasWinget = $true; HasChoco = $false; FreeDiskGB = 200
+        VirtualizationEnabled = $true; OsBuild = 22631; WindowsMajor = 11
+        OsName = 'Microsoft Windows 11 Pro'; OsVersion = '10.0.22631'
+        Manufacturer = 'Contoso'; Model = 'TestBox 9000'
+        CpuName = 'Contoso Test CPU'; Gpu = 'none'; HasGpu = $false
+        HasDiscreteGpu = $false; IsLaptop = $false; IsVirtual = $true
+        UserName = 'testuser'; PsVersion = '5.1.0'; PsEdition = 'Desktop'
+        IsInteractive = $false; HasScoop = $false; HasGit = $true
+        HasNode = $true; HasNpm = $true; HasDocker = $false; HasWsl = $false
+        NodeVersion = 'v22.0.0'; HasMicrophone = $true; Microphone = 'Test Mic'
+    }
+}
+
+Test-Case 'x64 machine sees the full catalog' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    Assert-True ($a.Count -gt 25) "only $($a.Count) components"
+}
+
+Test-Case 'profile membership drives the default ticks' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $light = @($a | Where-Object { 'light' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-Contains $light 'claude-code'
+}
+
+Test-Case 'light profile does not include desktop customisation' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $light = @($a | Where-Object { 'light' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-NotContains $light 'windhawk'
+}
+
+Test-Case 'local-ai profile ships ollama' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $localAi = @($a | Where-Object { 'local-ai' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-Contains $localAi 'ollama'
+}
+
+Test-Case 'local-ai is not pulled in by the rescue profile' {
+    # Two orders of magnitude apart: ~400 MB of rescue tools vs 1.4-4.7 GB of
+    # model weights (B21) — a user who asked for a rescue stick has not asked
+    # for that.
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $rescue = @($a | Where-Object { 'rescue' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-NotContains $rescue 'ollama'
+}
+
+Test-Case 'every local-ai model component states its download size' {
+    $models = @($winCatalog.categories.components | Where-Object { $_.id -like 'ollama-model-*' })
+    $bad = @($models | Where-Object { $_.description -notmatch '[0-9]+(\.[0-9]+)?\s?GB' } | ForEach-Object { $_.id })
+    Assert-True ($bad.Count -eq 0) "model entries with no size in the description: $($bad -join ' ')"
+}
+
+# ─── Dependency resolution ──────────────────────────────────────────────────
+Describe-Group 'dependency resolution'
+
+$available = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+
+Test-Case 'pulls in transitive requirements' {
+    $plan = @(Resolve-AutoOSPlan -Available $available -SelectedIds @('claude-code'))
+    Assert-Contains ($plan | ForEach-Object { $_.Id }) 'nodejs'
+}
+
+Test-Case 'orders dependencies before dependents' {
+    $plan = @(Resolve-AutoOSPlan -Available $available -SelectedIds @('claude-code'))
+    $ids = @($plan | ForEach-Object { $_.Id })
+    Assert-True ($ids.IndexOf('nodejs') -lt $ids.IndexOf('claude-code')) "order was: $($ids -join ' -> ')"
+}
+
+Test-Case 'flags auto-added dependencies' {
+    $plan = @(Resolve-AutoOSPlan -Available $available -SelectedIds @('claude-code'))
+    $node = $plan | Where-Object { $_.Id -eq 'nodejs' }
+    Assert-True $node.AutoAdded 'nodejs should be marked AutoAdded'
+}
+
+Test-Case 'does not flag what was explicitly requested' {
+    $plan = @(Resolve-AutoOSPlan -Available $available -SelectedIds @('claude-code', 'nodejs'))
+    $node = $plan | Where-Object { $_.Id -eq 'nodejs' }
+    Assert-True (-not $node.AutoAdded) 'nodejs was requested, so it is not auto-added'
+}
+
+Test-Case 'resolves a multi-level chain' {
+    $plan = @(Resolve-AutoOSPlan -Available $available -SelectedIds @('oh-my-posh'))
+    $ids = @($plan | ForEach-Object { $_.Id })
+    foreach ($want in @('powershell7', 'nerd-font', 'oh-my-posh')) {
+        if ($ids -notcontains $want) { throw "missing $want in $($ids -join ', ')" }
+    }
+    Pass
+}
+
+Test-Case 'an empty selection yields an empty plan' {
+    $plan = @(Resolve-AutoOSPlan -Available $available -SelectedIds @())
+    Assert-Equal $plan.Count 0
+}
+
+Test-Case 'a dependency cycle is reported, not silently dropped' {
+    $fake = @(
+        [pscustomobject]@{ Id = 'a'; Name = 'A'; Description = 'd'; Provider = 'winget'; Package = 'A'; Requires = @('b'); Profiles = @(); PostInstall = $null; Prompt = $null; Notes = $null; Category = 'c'; CategoryId = 'c'; Source = $null }
+        [pscustomobject]@{ Id = 'b'; Name = 'B'; Description = 'd'; Provider = 'winget'; Package = 'B'; Requires = @('a'); Profiles = @(); PostInstall = $null; Prompt = $null; Notes = $null; Category = 'c'; CategoryId = 'c'; Source = $null }
+    )
+    try {
+        $null = Resolve-AutoOSPlan -Available $fake -SelectedIds @('a')
+        throw 'expected a cycle error but resolution succeeded'
+    } catch {
+        if ($_.Exception.Message -match 'cycle') { Pass } else { throw $_ }
+    }
+}
+
+# ─── Detection heuristics ───────────────────────────────────────────────────
+Describe-Group 'detection'
+
+Test-Case 'arm64 maps to the light profile' {
+    Assert-Equal (Get-AutoOSSuggestedProfile -SystemInfo (New-FakeSystem -Arch 'arm64')) 'light'
+}
+
+Test-Case 'a big x64 desktop maps to workstation' {
+    Assert-Equal (Get-AutoOSSuggestedProfile -SystemInfo (New-FakeSystem -Ram 32 -Cores 16)) 'workstation'
+}
+
+Test-Case 'an 8 GB laptop is NOT downgraded to light' {
+    # 8 GB reports ~7.4 GB usable; 'light' is for Pi-class hardware only.
+    Assert-Equal (Get-AutoOSSuggestedProfile -SystemInfo (New-FakeSystem -Ram 7.4 -Cores 8)) 'ai-coding'
+}
+
+Test-Case 'a headless machine skips desktop profiles' {
+    Assert-Equal (Get-AutoOSSuggestedProfile -SystemInfo (New-FakeSystem -Headless $true)) 'ai-coding'
+}
+
+Test-Case 'no package manager is a hard blocker' {
+    $s = New-FakeSystem
+    $s.HasWinget = $false; $s.HasChoco = $false
+    $b = @(Get-AutoOSBlockers -SystemInfo $s)
+    Assert-True (@($b | Where-Object { $_.Severity -eq 'error' }).Count -ge 1) 'expected an error blocker'
+}
+
+Test-Case 'disabled virtualisation is a warning, not a blocker' {
+    $s = New-FakeSystem
+    $s.VirtualizationEnabled = $false
+    $b = @(Get-AutoOSBlockers -SystemInfo $s)
+    $v = @($b | Where-Object { $_.Message -match 'virtualisation' })
+    Assert-Equal $v[0].Severity 'warn'
+}
+
+# ─── "Is it already installed?" ─────────────────────────────────────────────
+# Every probe below runs against a synthetic inventory rather than this machine,
+# so the suite asserts the same thing on a box where nothing is installed.
+# The bar is asymmetric on purpose: a missed install costs a re-run, a false
+# positive silently skips something the user asked for.
+
+function New-FakeInventory {
+    # Mirrors every field Get-AutoOSInstalledInventory really returns.
+    param(
+        [object[]]$Entries = @(),
+        [string[]]$Paths = @(),
+        [string[]]$Appx = @(),
+        [string[]]$Programs = @(),
+        [string[]]$WingetPackages = @()
+    )
+    [pscustomobject]@{
+        Entries = $Entries; Paths = $Paths; Appx = $Appx
+        Programs = $Programs; WingetPackages = $WingetPackages
+    }
+}
+
+function New-FakeComponent {
+    param([string]$Id = 'widget', [string]$Name = 'Widget',
+          [string]$Provider = 'winget', [string]$Package = 'Contoso.Widget',
+          [string]$Verify = '')
+    [pscustomobject]@{ Id = $Id; Name = $Name; Provider = $Provider; Package = $Package; Verify = $Verify }
+}
+
+Test-Case 'a bitness suffix on the registered name still matches' {
+    # Notepad++ registers as "Notepad++ (64-bit x64)" and went undetected.
+    Assert-True (Test-AutoOSRegisteredName 'Notepad++ (64-bit x64)' 'Notepad++') 'bitness suffix rejected'
+}
+
+Test-Case 'a release-channel suffix on the registered name still matches' {
+    # PowerToys registers as "PowerToys (Preview) x64".
+    Assert-True (Test-AutoOSRegisteredName 'PowerToys (Preview) x64' 'PowerToys') 'preview suffix rejected'
+}
+
+Test-Case 'an architecture-plus-locale suffix still matches' {
+    # "Mozilla Firefox (x64 en-US)". Widening the pattern for PowerToys dropped
+    # this case once and silently un-detected Firefox on every English install.
+    Assert-True (Test-AutoOSRegisteredName 'Mozilla Firefox (x64 en-US)' 'Mozilla Firefox') 'locale suffix rejected'
+}
+
+Test-Case 'a different product sharing a prefix is never matched' {
+    foreach ($pair in @(@('Steam Tools', 'Steam'), @('Firefox Helper', 'Firefox'),
+                        @('PowerToys Run Plugin', 'PowerToys'), @('Git Extensions', 'Git'))) {
+        if (Test-AutoOSRegisteredName $pair[0] $pair[1]) { throw "'$($pair[0])' must not match '$($pair[1])'" }
+    }
+    Pass
+}
+
+Test-Case 'the shim directories package managers use are probed even when PATH is stale' {
+    $oldProgramData = $env:ProgramData
+    $env:ProgramData = 'C:\ProgramData'
+    try {
+        $dirs = @(Get-AutoOSShimDirectory)
+        foreach ($want in @('scoop\shims', 'chocolatey\bin', 'Microsoft\WinGet\Links')) {
+            if (-not @($dirs | Where-Object { $_ -like "*$want*" })) {
+                throw "no probe directory for $want in: $($dirs -join '; ')"
+            }
+        }
+        Pass
+    } finally {
+        $env:ProgramData = $oldProgramData
+    }
+}
+
+Test-Case 'a shim directory off the persistent PATH still resolves a verify command' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    try {
+        Set-Content -LiteralPath (Join-Path $tmp 'widget.cmd') -Value '@echo off'
+        $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent -Verify 'widget --version') `
+                                            -Inventory (New-FakeInventory -Paths @($tmp))
+        Assert-Equal $status 'installed'
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'a winget package id present in the cached list counts as installed' {
+    # winget's own record, read once per run - never one probe per catalog row.
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent) `
+                                        -Inventory (New-FakeInventory -WingetPackages @('Contoso.Widget'))
+    Assert-Equal $status 'installed'
+}
+
+Test-Case 'a winget package id missing from the cached list is not-detected' {
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent -Package 'Contoso.Other') `
+                                        -Inventory (New-FakeInventory -WingetPackages @('Contoso.Widget'))
+    Assert-Equal $status 'not-detected'
+}
+
+Test-Case 'the winget list is only trusted for winget rows' {
+    # 'python' appears in that output as a moniker for something else entirely.
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent -Provider 'choco' -Package 'widget') `
+                                        -Inventory (New-FakeInventory -WingetPackages @('widget'))
+    Assert-Equal $status 'not-detected'
+}
+
+Test-Case 'a per-user install under LOCALAPPDATA\Programs counts as installed' {
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent -Name 'Obsidian' -Package 'Obsidian.Obsidian') `
+                                        -Inventory (New-FakeInventory -Programs @('obsidian'))
+    Assert-Equal $status 'installed'
+}
+
+Test-Case 'a per-user directory belonging to something else proves nothing' {
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent -Name 'Obsidian' -Package 'Obsidian.Obsidian') `
+                                        -Inventory (New-FakeInventory -Programs @('obsidianhelper'))
+    Assert-Equal $status 'not-detected'
+}
+
+Test-Case 'a per-user program directory is only believed when it holds an executable' {
+    # %APPDATA%\JAM Software outlives TreeSize by years: configuration left
+    # behind is not an installation, which is why only Programs\ is read and
+    # only when an .exe is actually in it.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path (Join-Path $tmp 'Leftovers') -Force)
+    [void](New-Item -ItemType Directory -Path (Join-Path $tmp 'RealApp') -Force)
+    try {
+        Set-Content -LiteralPath (Join-Path $tmp 'RealApp\app.exe') -Value 'x'
+        $found = @(Get-AutoOSProgramDirectoryName -Root $tmp)
+        Assert-True (($found -contains 'realapp') -and ($found -notcontains 'leftovers')) `
+            "expected only realapp, got: $($found -join ', ')"
+    } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'an appx package still wins over everything else' {
+    $c = New-FakeComponent -Name 'Slack' -Package 'SlackTechnologies.Slack'
+    Add-Member -InputObject $c -NotePropertyName InstalledAppx -NotePropertyValue @('91750D7E.Slack')
+    $status = Get-AutoOSInstalledStatus -Component $c -Inventory (New-FakeInventory -Appx @('91750D7E.Slack'))
+    Assert-Equal $status 'installed'
+}
+
+Test-Case 'nothing is guessed when every probe comes up empty' {
+    $status = Get-AutoOSInstalledStatus -Component (New-FakeComponent) -Inventory (New-FakeInventory)
+    Assert-Equal $status 'not-detected'
+}
+
+Test-Case 'the disk analyser is WizTree, and treesize is gone' {
+    $ids = @($available | ForEach-Object { $_.Id })
+    Assert-True (($ids -contains 'wiztree') -and ($ids -notcontains 'treesize')) `
+        "catalog ids were: $($ids -join ', ')"
+}
+
+Test-Case 'git and the GitHub CLI are both in the workstation profile' {
+    $ws = @($available | Where-Object { 'workstation' -in $_.Profiles } | ForEach-Object { $_.Id })
+    foreach ($want in @('git', 'gh')) {
+        if ($ws -notcontains $want) { throw "workstation is missing $want" }
+    }
+    Pass
+}
+
+Test-Case 'the windows catalog asks for a git identity and wires it to git' {
+    foreach ($key in @('git_user_name', 'git_user_email')) {
+        if ($winCatalog.prompts.PSObject.Properties.Name -notcontains $key) { throw "windows catalog never asks $key" }
+    }
+    $git = $available | Where-Object { $_.Id -eq 'git' }
+    Assert-True (($git.Prompt -split '[, ]+') -contains 'git_user_name' -and
+                 ($git.Prompt -split '[, ]+') -contains 'git_user_email') `
+        "git prompt was: [$($git.Prompt)]"
+}
+
+Test-Case 'the git post-install step exists and is callable' {
+    $git = $available | Where-Object { $_.Id -eq 'git' }
+    Assert-True ($git.PostInstall -and (Get-Command $git.PostInstall -ErrorAction SilentlyContinue)) `
+        "post-install '$($git.PostInstall)' is not a loaded function"
+}
+
+
+# ─── Catalog tombstone (a retired id stays known, installs nothing) ─────────
+Describe-Group 'catalog tombstone'
+
+$tombstoneFixture = Join-Path $Root 'tests\fixtures\catalog-tombstone.json'
+
+function New-TombstoneCatalog {
+    # The fixture, never a real catalog: this lane builds the mechanism, another
+    # lane decides which components are retired (AGENTS.md: catalog is data).
+    param([scriptblock]$Mutate = $null)
+    $cat = (Get-Content -Path $tombstoneFixture -Raw -Encoding UTF8) | ConvertFrom-Json
+    if ($Mutate) { $null = & $Mutate $cat }
+    $cat
+}
+
+function Set-TombstoneField {
+    param($Catalog, [string]$Id, [string]$Field, $Value)
+    $target = @($Catalog.categories.components | Where-Object { $_.id -eq $Id })[0]
+    $null = $target | Add-Member -NotePropertyName $Field -NotePropertyValue $Value -Force
+    $Catalog
+}
+
+$tombAvailable = @(Get-AutoOSAvailableComponents -Catalog (New-TombstoneCatalog) -SystemInfo (New-FakeSystem))
+
+Test-Case 'tombstone: a catalog with a tombstone validates' {
+    # Also the case that a tombstone may omit postInstall, prompt, requires and
+    # verify: the fixture entry does, and it must still pass.
+    $p = @(Test-AutoOSCatalogSchema -Catalog (New-TombstoneCatalog))
+    if ($p.Count -eq 0) { Pass } else { throw ($p -join '; ') }
+}
+
+Test-Case 'tombstone: a non-boolean tombstone is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'tombstone' 'yes'
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'boolean') "expected a boolean complaint, got: $joined"
+}
+
+Test-Case 'tombstone: a note on a live entry is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'keep-demo' 'note' 'orphan note'
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'only meaningful on a tombstone') "got: $joined"
+}
+
+Test-Case 'tombstone: an empty note is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'note' ''
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match "'note' is present but empty") "got: $joined"
+}
+
+Test-Case 'tombstone: an entry that requires a retired id is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'keep-demo' 'requires' @('retired-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'tombstone that installs nothing') "got: $joined"
+}
+
+Test-Case 'tombstone: projection carries the flag and the note' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-True ((Test-AutoOSTombstone -Component $t) -and ($t.RetireNote -eq 'wired by keep-demo now')) `
+        "projection lost the flag or the note: [$($t.Tombstone)] [$($t.RetireNote)]"
+}
+
+Test-Case 'tombstone: a component that never declares the field is not a tombstone' {
+    # Set-StrictMode -Version Latest throws on a missing property, and the suite
+    # hands Resolve-AutoOSPlan hand-built components that have no such field.
+    $plain = [pscustomobject]@{ Id = 'plain'; Name = 'Plain'; Provider = 'winget'; Package = 'Contoso.Plain' }
+    Assert-True (-not (Test-AutoOSTombstone -Component $plain)) 'a component with no tombstone field read as retired'
+}
+
+Test-Case 'tombstone: a truthy string is not the boolean true' {
+    # PowerShell coerces '1' -eq $true, so the predicate must test the type, not
+    # the truthiness — otherwise a typo'd catalog silently retires a live id.
+    $fake = [pscustomobject]@{ Id = 'x'; tombstone = '1' }
+    Assert-True (-not (Test-AutoOSTombstone -Component $fake)) "'1' was accepted as a tombstone"
+}
+
+Test-Case 'tombstone: a raw catalog entry is recognised too' {
+    # -Installed and -ListComponents iterate the raw JSON (lower-case field);
+    # the plan iterates the flattened projection (upper-case). Both must read it.
+    $raw = @(New-TombstoneCatalog).categories.components | Where-Object { $_.id -eq 'retired-demo' }
+    Assert-True (Test-AutoOSTombstone -Component $raw) 'the lower-case JSON field was missed'
+}
+
+Test-Case 'tombstone: a retired id is never detected as installed' {
+    $retired = New-FakeComponent -Package 'Contoso.Widget'
+    $null = $retired | Add-Member -NotePropertyName Tombstone -NotePropertyValue $true -Force
+    $status = Get-AutoOSInstalledStatus -Component $retired -Inventory (New-FakeInventory -WingetPackages @('Contoso.Widget'))
+    Assert-True ($status -ne 'installed') "a tombstone was detected as [$status]"
+}
+
+Test-Case 'tombstone: an ordinary id with the same package is still detected' {
+    # The guard above must not be paid for by breaking real detection.
+    $live = New-FakeComponent -Package 'Contoso.Widget'
+    Assert-Equal (Get-AutoOSInstalledStatus -Component $live -Inventory (New-FakeInventory -WingetPackages @('Contoso.Widget'))) 'installed'
+}
+
+Test-Case 'tombstone: a retired entry is not pre-ticked by its profile' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    $item = New-AutoOSMenuItem -Component $t -ProfileName 'workstation'
+    Assert-True (-not $item.Selected) 'a tombstone was ticked by the workstation profile'
+}
+
+Test-Case 'tombstone: an ordinary entry beside it is still pre-ticked' {
+    $k = $tombAvailable | Where-Object { $_.Id -eq 'keep-demo' }
+    $item = New-AutoOSMenuItem -Component $k -ProfileName 'workstation'
+    Assert-True $item.Selected 'keep-demo should still be ticked'
+}
+
+Test-Case 'tombstone: the menu labels a retired entry' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    $item = New-AutoOSMenuItem -Component $t -ProfileName 'workstation'
+    Assert-True ($item.Description -match '\(retired\)') "description was: [$($item.Description)]"
+}
+
+Test-Case 'tombstone: profile expansion leaves retired ids out' {
+    $ids = @(Get-AutoOSProfileDefaults -Available $tombAvailable -ProfileName 'workstation')
+    Assert-True (($ids -contains 'keep-demo') -and ($ids -notcontains 'retired-demo')) "expansion was: $($ids -join ', ')"
+}
+
+Test-Case 'tombstone: the custom profile expands to nothing still' {
+    Assert-Equal (@(Get-AutoOSProfileDefaults -Available $tombAvailable -ProfileName 'custom').Count) 0
+}
+
+Test-Case 'tombstone: a retired id is still a known id in the plan' {
+    $plan = @(Resolve-AutoOSPlan -Available $tombAvailable -SelectedIds @('retired-demo'))
+    $ids = @($plan | ForEach-Object { $_.Id })
+    Assert-Contains $ids 'retired-demo'
+}
+
+Test-Case 'tombstone: a retired id pulls no dependency' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'requires' @('pulled-demo')
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('retired-demo'))
+    $ids = @($plan | ForEach-Object { $_.Id })
+    Assert-True ($ids -notcontains 'pulled-demo') "a tombstone pulled in: $($ids -join ', ')"
+}
+
+Test-Case 'tombstone: the plan node keeps the retirement facts' {
+    # setup.ps1 prints the row and decides to skip from the plan node alone.
+    $plan = @(Resolve-AutoOSPlan -Available $tombAvailable -SelectedIds @('retired-demo'))
+    $node = $plan | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-True ((Test-AutoOSTombstone -Component $node) -and ($node.RetireNote -eq 'wired by keep-demo now')) `
+        "the plan node lost the retirement facts: [$($node.RetireNote)]"
+}
+
+Test-Case 'tombstone: the skip line names the note' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-Equal (Format-AutoOSTombstoneSkip -Component $t) 'skipped: retired (wired by keep-demo now)'
+}
+
+Test-Case 'tombstone: the skip line without a note' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'note' $null
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $t = $avail | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-Equal (Format-AutoOSTombstoneSkip -Component $t) 'skipped: retired'
+}
+
+Test-Case 'tombstone: the serve payload carries the retirement facts' {
+    # The browser page resolves dependencies itself, so it can only honour a
+    # retired id if the payload says which ids are retired and why.
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog (New-TombstoneCatalog)
+    $t = $state.components | Where-Object { $_.id -eq 'retired-demo' }
+    $k = $state.components | Where-Object { $_.id -eq 'keep-demo' }
+    Assert-True ($t.Contains('tombstone') -and $t.tombstone -eq $true) `
+        "the tombstone row says nothing about being retired: $($t | ConvertTo-Json -Compress)"
+    Assert-Equal $t.note 'wired by keep-demo now'
+    Assert-True ($k.Contains('tombstone') -and -not $k.tombstone) 'an ordinary entry is marked retired'
+    Assert-True $k.Contains('note') 'an ordinary entry has no note key at all'
+}
+
+Test-Case 'tombstone: the serve payload survives JSON round-tripping the retirement facts' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog (New-TombstoneCatalog)
+    $back = ($state | ConvertTo-Json -Depth 8 -Compress) | ConvertFrom-Json
+    $t = @($back.components | Where-Object { $_.id -eq 'retired-demo' })[0]
+    Assert-True ($t.tombstone -and $t.note -eq 'wired by keep-demo now') `
+        "after the JSON trip: $($t | ConvertTo-Json -Compress)"
+}
+
+Test-Case 'tombstone: an entry that requires a retired id is refused at resolve' {
+    # Test-AutoOSCatalogSchema rejects this, but a normal run never validates:
+    # resolving had to refuse the dependent out loud rather than drop its
+    # requirement and install it green.
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'prompted-demo' 'requires' @('retired-demo')
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('prompted-demo'))
+    $node = @($plan | Where-Object { $_.Id -eq 'prompted-demo' })[0]
+    Assert-True ($node.BlockedReason -match 'requires retired retired-demo') `
+        "no refusal recorded: [$($node.BlockedReason)]"
+    Assert-True (@($plan | Where-Object { $_.Id -eq 'retired-demo' }).Count -eq 1) `
+        'the refused row must stay in the plan; what execution refuses is never silently absent'
+    Assert-True (@($plan | Where-Object { $_.Id -eq 'retired-demo' }).AutoAdded) 'the tombstone is not marked a dependency'
+}
+
+Test-Case 'tombstone: a dependent of a refused component is refused too' {
+    $cat = New-TombstoneCatalog
+    $null = Set-TombstoneField $cat 'prompted-demo' 'requires' @('retired-demo')
+    $null = Set-TombstoneField $cat 'pulled-demo' 'requires' @('prompted-demo')
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('pulled-demo'))
+    $byId = @{}
+    foreach ($n in $plan) { $byId[$n.Id] = $n }
+    Assert-True ($byId['prompted-demo'].BlockedReason -match 'requires retired retired-demo') `
+        "the direct dependent was not refused: [$($byId['prompted-demo'].BlockedReason)]"
+    Assert-True ($byId['pulled-demo'].BlockedReason -match 'requires prompted-demo') `
+        "the dependent of the refused id was not refused: [$($byId['pulled-demo'].BlockedReason)]"
+}
+
+Test-Case 'tombstone: an ordinary resolve records no refusal' {
+    # The guard must not fire on the normal path.
+    $plan = @(Resolve-AutoOSPlan -Available $tombAvailable -SelectedIds @('keep-demo', 'retired-demo'))
+    $blocked = @($plan | Where-Object { Get-AutoOSComponentProperty $_ 'BlockedReason' '' })
+    Assert-Equal $blocked.Count 0 "refusals on a clean plan: $(@($blocked | ForEach-Object { $_.BlockedReason }) -join '; ')"
+}
+
+
+# ─── the same gates through the real setup.ps1 ─────────────────────────────
+function Invoke-TombstoneSetup {
+    <#
+      .SYNOPSIS
+        Run the real setup.ps1, with -DryRun, against the fixture in a throwaway
+        tree. The module cases above prove the rules; these prove the entry point
+        applies them - a re-implementation here would pass without setup.ps1 ever
+        calling the gate (Principle 9: verify through the path production takes).
+    #>
+    param([string[]]$SetupArgs = @(), [scriptblock]$Mutate = $null)
+    $psExe = if (Get-Command powershell -ErrorAction SilentlyContinue) { 'powershell' }
+             elseif (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' }
+             else { return $null }
+    # Not $env:TEMP: Linux and macOS pwsh does not define it, and Join-Path then
+    # throws on the null before the case has proved anything.
+    $tree = Join-Path ([IO.Path]::GetTempPath()) "autoos-tombstone-$([Guid]::NewGuid().ToString('N'))"
+    $null = New-Item -ItemType Directory -Path (Join-Path $tree 'catalog'), (Join-Path $tree 'logs'), (Join-Path $tree 'lib') -Force
+    Copy-Item -LiteralPath (Join-Path $Root 'setup.ps1') -Destination (Join-Path $tree 'setup.ps1')
+    # $Lib is already lib\windows; the tree needs it under lib\windows.
+    Copy-Item -LiteralPath $Lib -Destination (Join-Path $tree 'lib') -Recurse
+    $cat = Get-AutoOSCatalog -Path $tombstoneFixture
+    if ($Mutate) { $null = & $Mutate $cat }
+    $cat | ConvertTo-Json -Depth 100 |
+        Set-Content -LiteralPath (Join-Path $tree 'catalog\windows.json') -Encoding UTF8
+    # On a non-Windows host none of the special folders exist and detection hands
+    # them straight to Join-Path, which throws on $null; point them into the tree.
+    $saved = @{}
+    if ([Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
+        foreach ($n in @('ProgramData', 'LOCALAPPDATA', 'APPDATA', 'ProgramFiles', 'USERPROFILE', 'SystemRoot')) {
+            $saved[$n] = [Environment]::GetEnvironmentVariable($n)
+            [Environment]::SetEnvironmentVariable($n, $tree)
+        }
+    }
+    try {
+        # Local, and restored when this returns: 5.1 turns a native command's
+        # stderr into a terminating error under 'Stop', and the child warns on
+        # stderr (no winget, not elevated) on every run.
+        $ErrorActionPreference = 'Continue'
+        $out = & $psExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $tree 'setup.ps1') @SetupArgs 2>&1
+        [pscustomobject]@{ Rc = $LASTEXITCODE; Out = ($out -join "`n") }
+    } finally {
+        foreach ($n in $saved.Keys) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
+        Remove-Item -LiteralPath $tree -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'tombstone: setup.ps1 -ListComponents marks the retired id' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-ListComponents', '-NoColor')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'retired-demo.*\(retired\)' `
+                 -and $r.Out -notmatch 'keep-demo.*\(retired\)') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(400, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: setup.ps1 -Only a retired id reports skipped retired' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'retired-demo', '-Yes', '-NoColor', '-DryRun')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'skipped: retired \(wired by keep-demo now\)' `
+                 -and $r.Out -match 'Failed +0') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(400, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: a setup.ps1 profile run never plans a retired id' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Profile', 'workstation', '-Yes', '-NoColor', '-DryRun')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'Kept Component' -and $r.Out -notmatch 'Retired Component') `
+        "the profile planned a tombstone: rc=$($r.Rc)"
+}
+
+Test-Case 'tombstone: setup.ps1 asks a retired id nothing and runs no post-install' {
+    # The fixture tombstone given back the prompt and the post-install step it is
+    # allowed to omit: neither may fire for something that installs nothing.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'retired-demo', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'retired-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'prompt' -NotePropertyValue 'demo_url' -Force
+        $null = $t | Add-Member -NotePropertyName 'postInstall' -NotePropertyValue 'Invoke-TombstoneMustNotRun' -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Out -notmatch 'A few questions' -and $r.Out -notmatch 'DEMO PROMPT' `
+                 -and $r.Out -notmatch 'Invoke-TombstoneMustNotRun' -and $r.Out -match 'skipped: retired') `
+        "a tombstone asked or ran something: $($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: setup.ps1 refuses an entry that requires a retired id' {
+    # The validator is not in a normal run's path, so -Only of such a component
+    # used to install it green with its requirement quietly dropped.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'prompted-demo', '-Yes', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'prompted-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'requires' -NotePropertyValue @('retired-demo') -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 1 -and $r.Out -match 'requires retired retired-demo' `
+                 -and $r.Out -match 'Failed +1' -and $r.Out -notmatch 'Asks A Question done') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: a setup.ps1 plan row that is both dependency and retired shows both tags' {
+    # setup.sh prints both; the Windows twin had an elseif that hid "(retired)"
+    # the moment the tombstone arrived as a dependency rather than by hand.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'prompted-demo', '-Yes', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'prompted-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'requires' -NotePropertyValue @('retired-demo') -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    $row = @(($r.Out -split "`n") | Where-Object { $_ -match 'Retired Component' })[0]
+    Assert-True ($row -match '\(dependency\).*\(retired\)') "the plan row reads: [$row]"
+}
+
+Test-Case 'tombstone: setup.ps1 -FromState replays a retired id without a warning' {
+    $state = Join-Path ([IO.Path]::GetTempPath()) "autoos-tombstone-state-$([Guid]::NewGuid().ToString('N')).json"
+    Save-AutoOSState -Path $state -ProfileName 'custom' -Selected @('retired-demo', 'keep-demo') `
+        -Answers @{} -Results @{ installed = @(); skipped = @('retired-demo'); failed = @() } | Out-Null
+    $r = Invoke-TombstoneSetup -SetupArgs @('-FromState', $state, '-Yes', '-NoColor', '-DryRun')
+    Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -notmatch 'not available on this machine' `
+                 -and $r.Out -match 'skipped: retired') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(500, $r.Out.Length)))"
+}
+
+# ─── replaced_by: a replayed retirement keeps its work ─────────────────────
+# A state file saved before a retirement names the retired id and none of the ids
+# that inherited its work, so the replay booked the retirement and installed
+# nothing. `replaced-demo` is the fixture's retired-with-successors row;
+# `retired-demo` stays the retired-without-successors one.
+Test-Case 'tombstone: replaced_by naming an unknown id is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'replaced-demo' 'replaced_by' @('never-existed-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by' -and $joined -match 'unknown') "got: $joined"
+}
+
+Test-Case 'tombstone: replaced_by naming a tombstone is rejected' {
+    # A successor has to install something, or the replay loses the work one
+    # step later on another row that can only report skipped.
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'replaced-demo' 'replaced_by' @('retired-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by') "got: $joined"
+}
+
+Test-Case 'tombstone: replaced_by on a live entry is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'keep-demo' 'replaced_by' @('successor-demo')
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by' -and $joined -match 'tombstone') "got: $joined"
+}
+
+Test-Case 'tombstone: an empty replaced_by is rejected' {
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'replaced-demo' 'replaced_by' @()
+    $joined = @(Test-AutoOSCatalogSchema -Catalog $cat) -join '; '
+    Assert-True ($joined -match 'replaced_by') "got: $joined"
+}
+
+Test-Case 'tombstone: a valid replaced_by does not make the catalog fail' {
+    $p = @(Test-AutoOSCatalogSchema -Catalog (New-TombstoneCatalog))
+    if ($p.Count -eq 0) { Pass } else { throw ($p -join '; ') }
+}
+
+Test-Case 'tombstone: the projection carries replaced_by' {
+    $t = $tombAvailable | Where-Object { $_.Id -eq 'replaced-demo' }
+    $k = $tombAvailable | Where-Object { $_.Id -eq 'keep-demo' }
+    $r = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    Assert-Equal (@($t.ReplacedBy) -join ',') 'keep-demo,successor-demo' `
+        "the row lost its successors: [$(Get-AutoOSComponentProperty $t 'ReplacedBy' '<missing>' | Out-String)]"
+    Assert-Equal (@($r.ReplacedBy).Count) 0 'a tombstone with no replaced_by loaded one'
+    Assert-Equal (@($k.ReplacedBy).Count) 0 'an ordinary entry loaded a replaced_by'
+}
+
+Test-Case 'tombstone: expansion replays a tombstone as the ids that replaced it' {
+    $x = Expand-AutoOSTombstoneReplacements -Available $tombAvailable -SelectedIds @('replaced-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'replaced-demo keep-demo successor-demo' `
+        "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines)[0]) 'replaced-demo is retired: replaced by keep-demo, successor-demo' `
+        "announced: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: expansion adds nothing twice and keeps the order' {
+    # A state written by a replay already lists the successors; replaying it
+    # must not plan them a second time.
+    $x = Expand-AutoOSTombstoneReplacements -Available $tombAvailable `
+         -SelectedIds @('keep-demo', 'replaced-demo', 'successor-demo', 'prompted-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'keep-demo replaced-demo successor-demo prompted-demo' `
+        "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines).Count) 1 "lines: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: expansion leaves an id with no replacement alone' {
+    $x = Expand-AutoOSTombstoneReplacements -Available $tombAvailable `
+         -SelectedIds @('retired-demo', 'keep-demo', 'prompted-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'retired-demo keep-demo prompted-demo' `
+        "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines).Count) 0 "announced: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: expansion names only successors this machine offers' {
+    # A Windows-only successor on a Pi: promising it in the line and then
+    # planning nothing would be the same defect wearing better manners.
+    $avail = @($tombAvailable | Where-Object { $_.Id -ne 'successor-demo' })
+    $x = Expand-AutoOSTombstoneReplacements -Available $avail -SelectedIds @('replaced-demo')
+    Assert-Equal (@($x.Ids) -join ' ') 'replaced-demo keep-demo' "expanded: $(@($x.Ids) -join ', ')"
+    Assert-Equal (@($x.Lines)[0]) 'replaced-demo is retired: replaced by keep-demo' `
+        "announced: $(@($x.Lines) -join '; ')"
+}
+
+Test-Case 'tombstone: the serve payload carries replaced_by' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog (New-TombstoneCatalog)
+    $t = $state.components | Where-Object { $_.id -eq 'replaced-demo' }
+    $k = $state.components | Where-Object { $_.id -eq 'keep-demo' }
+    Assert-Equal (@($t.replaced_by) -join ',') 'keep-demo,successor-demo' `
+        "payload row: $($t | ConvertTo-Json -Compress)"
+    Assert-True $k.Contains('replaced_by') 'an ordinary entry has no replaced_by key at all'
+    Assert-Equal (@($k.replaced_by).Count) 0 'an ordinary entry carries successors'
+}
+
+Test-Case 'tombstone: setup.ps1 -Only a tombstone plans its replacements' {
+    # -Serve passes the browser's selection through as -Only, so the served
+    # replay takes this path too; a profile never names a tombstone.
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'replaced-demo', '-Yes', '-NoColor', '-DryRun')
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 `
+                 -and $r.Out -match 'Successor Component' -and $r.Out -match 'Kept Component' `
+                 -and $r.Out -match 'replaced-demo is retired: replaced by keep-demo, successor-demo' `
+                 -and $r.Out -notmatch 'Unknown component') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: setup.ps1 -FromState replays a tombstone as its replacements' {
+    $state = Join-Path ([IO.Path]::GetTempPath()) "autoos-tombstone-old-$([Guid]::NewGuid().ToString('N')).json"
+    Save-AutoOSState -Path $state -ProfileName 'custom' -Selected @('replaced-demo') `
+        -Answers @{} -Results @{ installed = @(); skipped = @('replaced-demo'); failed = @() } | Out-Null
+    $r = Invoke-TombstoneSetup -SetupArgs @('-FromState', $state, '-Yes', '-NoColor', '-DryRun')
+    Remove-Item -LiteralPath $state -Force -ErrorAction SilentlyContinue
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    $rows = @(($r.Out -split "`n") | Where-Object { $_ -match '^\s+\d+\.\s' })
+    $retiredRow = @($rows | Where-Object { $_ -match 'Replaced Component' })[0]
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'Successor Component' -and $r.Out -match 'Kept Component' `
+                 -and $r.Out -match 'replaced-demo is retired: replaced by keep-demo, successor-demo' `
+                 -and $retiredRow -match '\(retired\)' -and $r.Out -match 'Successor Component.*done' `
+                 -and $r.Out -notmatch 'not available on this machine') `
+        "rc=$($r.Rc) rows=$($rows -join ' | ') out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+Test-Case 'tombstone: the menu row for a retired id is locked and names its replacements' {
+    # The row is shown - the id is public, someone may remember the product - but
+    # it cannot be chosen, and it says in the same breath what took the work over.
+    $offered = @($tombAvailable.Id)
+    $replaced = $tombAvailable | Where-Object { $_.Id -eq 'replaced-demo' }
+    $retired  = $tombAvailable | Where-Object { $_.Id -eq 'retired-demo' }
+    $kept     = $tombAvailable | Where-Object { $_.Id -eq 'keep-demo' }
+    $i1 = New-AutoOSMenuItem -Component $replaced -ProfileName 'workstation' -OfferedIds $offered
+    $i2 = New-AutoOSMenuItem -Component $retired -ProfileName 'workstation' -OfferedIds $offered
+    $i3 = New-AutoOSMenuItem -Component $kept -ProfileName 'workstation' -OfferedIds $offered
+    Assert-True ($i1.Locked -and -not $i1.Selected) 'a retired row could be chosen'
+    Assert-True ($i1.Description -like '*(retired: replaced by keep-demo, successor-demo)*') `
+        "the row reads [$($i1.Description)]"
+    Assert-True ($i2.Locked) 'a retired row with no replacements could be chosen'
+    Assert-True ($i2.Description -like '*(retired)*') "the row reads [$($i2.Description)]"
+    Assert-True ($i2.Reason -like '*retired*') "the locked row explains itself as [$($i2.Reason)]"
+    # The lock is not a blanket: an ordinary row of the same profile stays tickable.
+    Assert-True (-not $i3.Locked -and $i3.Selected) "an ordinary row reads locked=$($i3.Locked) selected=$($i3.Selected)"
+}
+
+Test-Case 'tombstone: a locked row cannot leave the menu' {
+    # Space, 'a', 'g' and 'i' all respect Locked; the selector's non-interactive
+    # fallback read only Selected, so a ticked retired row still reached the plan
+    # when nobody was at a keyboard. One contract, both branches.
+    $env:AUTOOS_NONINTERACTIVE = '1'
+    try {
+        $items = @($tombAvailable | ForEach-Object {
+            New-AutoOSMenuItem -Component $_ -ProfileName 'workstation' -OfferedIds @($tombAvailable.Id)
+        })
+        $leaked = $items | Where-Object { $_.Id -eq 'replaced-demo' }
+        $leaked.Selected = $true
+        $res = @(Show-AutoOSMenu -Items $items -Title 'Choose what to install')
+        Assert-True (($res -contains 'keep-demo') -and -not ($res -contains 'replaced-demo') `
+                     -and -not ($res -contains 'retired-demo')) "the menu returned: $($res -join ', ')"
+    } finally { Remove-Item Env:AUTOOS_NONINTERACTIVE -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'tombstone: a retired manual-provider id resolves instead of refusing' {
+    # The guard order the review calls LOW: resolve asked whether AutoOS can
+    # install the *provider* before it asked whether the row had retired, so a
+    # retired manual entry aborted the run over a component that installs nothing.
+    $cat = Set-TombstoneField (New-TombstoneCatalog) 'retired-demo' 'provider' 'manual'
+    $null = Set-TombstoneField $cat 'retired-demo' 'notes' 'Fixture manual provider; nothing to download.'
+    $avail = @(Get-AutoOSAvailableComponents -Catalog $cat -SystemInfo (New-FakeSystem))
+    $threw = ''; $plan = @()
+    try { $plan = @(Resolve-AutoOSPlan -Available $avail -SelectedIds @('retired-demo')) }
+    catch { $threw = $_.Exception.Message }
+    Assert-True (-not $threw) "resolve refused a retired id: $threw"
+    $row = @($plan | Where-Object { $_.Id -eq 'retired-demo' })
+    Assert-Equal $row.Count 1 "the retired row is not in the plan: $(@($plan.Id) -join ', ')"
+    Assert-Equal (Format-AutoOSTombstoneSkip -Component $row[0]) 'skipped: retired (wired by keep-demo now)' `
+        'the row has no skip line to report'
+}
+
+Test-Case 'tombstone: setup.ps1 -Only a retired manual-provider id reports skipped retired' {
+    $r = Invoke-TombstoneSetup -SetupArgs @('-Only', 'retired-demo', '-Yes', '-NoColor', '-DryRun') -Mutate {
+        param($c)
+        $t = @($c.categories.components | Where-Object { $_.id -eq 'retired-demo' })[0]
+        $null = $t | Add-Member -NotePropertyName 'provider' -NotePropertyValue 'manual' -Force
+        $null = $t | Add-Member -NotePropertyName 'notes' -NotePropertyValue 'Fixture manual provider.' -Force
+        $c
+    }
+    if (-not $r) { Skip 'no PowerShell host to spawn'; return }
+    Assert-True ($r.Rc -eq 0 -and $r.Out -match 'skipped: retired' `
+                 -and $r.Out -notmatch 'AutoOS cannot install' `
+                 -and $r.Out -notmatch 'Action required: \S+ - http' `
+                 -and $r.Out -match 'Failed +0') `
+        "rc=$($r.Rc) out=$($r.Out.Substring(0, [Math]::Min(600, $r.Out.Length)))"
+}
+
+# ─── PATH handling (the critical regression) ────────────────────────────────
+Describe-Group 'PATH handling'
+
+Test-Case 'appending preserves every existing entry' {
+    # The original Ansible task replaced Path outright, wiping the user's
+    # environment. This asserts the read-modify-write behaviour directly.
+    $existing = 'C:\Windows;C:\Windows\System32;C:\Program Files\Git\cmd'
+    $parts = @($existing -split ';' | Where-Object { $_ -ne '' })
+    $toAdd = @('C:\tools\miniconda3', 'C:\tools\miniconda3\Scripts')
+    foreach ($d in $toAdd) {
+        if (@($parts | Where-Object { $_.TrimEnd('\') -ieq $d.TrimEnd('\') }).Count -eq 0) { $parts += $d }
+    }
+    $result = $parts -join ';'
+    Assert-True ($result.StartsWith($existing) -and $result -match 'miniconda3') "got: $result"
+}
+
+Test-Case 'appending the same directory twice is a no-op' {
+    $parts = @('C:\Windows', 'C:\tools\miniconda3')
+    $before = $parts.Count
+    $d = 'C:\tools\miniconda3\'   # trailing slash must still match
+    if (@($parts | Where-Object { $_.TrimEnd('\') -ieq $d.TrimEnd('\') }).Count -eq 0) { $parts += $d }
+    Assert-Equal $parts.Count $before
+}
+
+Test-Case 'Add-AutoOSPathEntry makes no change in dry run' {
+    Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+    $before = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $null = Add-AutoOSPathEntry -Directory @('C:\autoos-test-should-not-persist')
+    $after = [Environment]::GetEnvironmentVariable('Path', 'User')
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    Assert-Equal $after $before
+}
+
+# ─── UI ─────────────────────────────────────────────────────────────────────
+Describe-Group 'ui'
+
+Test-Case 'colour can be turned off completely' {
+    Set-AutoOSColor $false
+    $t = Format-AutoOSColor 'hello' 'accent'
+    Set-AutoOSColor $true
+    Assert-Equal $t 'hello'
+}
+
+Test-Case 'colour output wraps in a reset' {
+    Set-AutoOSColor $true
+    $t = Format-AutoOSColor 'hello' 'accent'
+    Assert-True ($t.EndsWith("$([char]27)[0m")) 'missing reset sequence'
+}
+
+Test-Case 'menu cursor skips group headers' {
+    $rows = New-Object System.Collections.ArrayList
+    [void]$rows.Add([pscustomobject]@{ Kind = 'header' })
+    [void]$rows.Add([pscustomobject]@{ Kind = 'item' })
+    [void]$rows.Add([pscustomobject]@{ Kind = 'header' })
+    [void]$rows.Add([pscustomobject]@{ Kind = 'item' })
+    Assert-Equal (Get-AutoOSNextItemIndex $rows 1 1) 3
+}
+
+Test-Case 'menu cursor stays put at the end of the list' {
+    $rows = New-Object System.Collections.ArrayList
+    [void]$rows.Add([pscustomobject]@{ Kind = 'item' })
+    Assert-Equal (Get-AutoOSNextItemIndex $rows 0 1) 0
+}
+
+Test-Case 'Show-AutoOSRadioMenu returns DefaultId in non-interactive mode' {
+    $env:AUTOOS_NONINTERACTIVE = '1'
+    try {
+        $items = @(
+            [pscustomobject]@{ Id = 'workstation'; Name = 'workstation'; Description = 'Full dev' },
+            [pscustomobject]@{ Id = 'light'; Name = 'light'; Description = 'Minimal' }
+        )
+        $res = Show-AutoOSRadioMenu -Items $items -Title 'Profile' -DefaultId 'light'
+        Assert-Equal $res 'light'
+    } finally {
+        Remove-Item Env:\AUTOOS_NONINTERACTIVE -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Read-AutoOSConfirm returns default in non-interactive mode' {
+    $env:AUTOOS_NONINTERACTIVE = '1'
+    try {
+        Assert-True (Read-AutoOSConfirm -Question 'Proceed?' -Default $true)
+        Assert-True (-not (Read-AutoOSConfirm -Question 'Proceed?' -Default $false))
+    } finally {
+        Remove-Item Env:\AUTOOS_NONINTERACTIVE -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'log lines are classified for the browser UI' {
+    Assert-Equal (Get-AutoOSLineLevel '  + installed') 'ok'
+}
+
+Test-Case 'plain log lines get no class' {
+    Assert-Equal (Get-AutoOSLineLevel 'just some text') ''
+}
+
+# ─── End to end ─────────────────────────────────────────────────────────────
+Describe-Group 'end-to-end (dry run only)'
+
+$setup = Join-Path $Root 'setup.ps1'
+
+Test-Case '--CheckCatalog succeeds' {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CheckCatalog | Out-Null
+    Assert-Equal $LASTEXITCODE 0
+}
+
+Test-Case 'a dry run exits cleanly' {
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $setup -DryRun -Profile light -Yes -NoColor 2>&1
+    Assert-True ($LASTEXITCODE -eq 0) "exit $LASTEXITCODE : $($out | Select-Object -Last 3)"
+}
+
+Test-Case 'a dry run reports the plan' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -DryRun -Profile light -Yes -NoColor 2>&1) -join "`n"
+    Assert-True ($out -match 'DRY RUN') 'no dry-run banner in output'
+}
+
+Test-Case 'two consecutive dry runs produce the same plan' {
+    $re = '^\s+\d+\.\s'
+    $a = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -DryRun -Profile light -Yes -NoColor 2>&1) -match $re
+    $b = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -DryRun -Profile light -Yes -NoColor 2>&1) -match $re
+    Assert-Equal ($a -join '|') ($b -join '|')
+}
+
+Test-Case 'an unknown component id is rejected' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -Only 'definitely-not-a-thing' -Yes -NoColor 2>&1) -join "`n"
+    Assert-True ($LASTEXITCODE -ne 0 -and $out -match 'Unknown component') "exit=$LASTEXITCODE out=$out"
+}
+
+# ─── Run state, verification, undo ──────────────────────────────────────────
+Describe-Group 'state, verify and undo'
+
+Test-Case 'macos catalog validates' {
+    $c = Get-AutoOSCatalog (Join-Path $Root 'catalog\macos.json')
+    $p = @(Test-AutoOSCatalogSchema -Catalog $c)
+    if ($p.Count -eq 0) { Pass } else { throw ($p -join '; ') }
+}
+
+Test-Case 'brew is an accepted provider' {
+    $c = Get-AutoOSCatalog (Join-Path $Root 'catalog\macos.json')
+    $p = @(Test-AutoOSCatalogSchema -Catalog $c)
+    Assert-True (($p -join ';') -notmatch "unknown provider 'brew'") "brew was rejected: $($p -join '; ')"
+}
+
+Test-Case 'cask is projected onto the component' {
+    $c = Get-AutoOSCatalog (Join-Path $Root 'catalog\macos.json')
+    $a = @(Get-AutoOSAvailableComponents -Catalog $c -SystemInfo (New-FakeSystem -Arch 'arm64'))
+    $docker = $a | Where-Object { $_.Id -eq 'docker' }
+    Assert-True $docker.Cask 'docker should be a cask'
+}
+
+Test-Case 'verify commands survive catalog projection' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $git = $a | Where-Object { $_.Id -eq 'git' }
+    Assert-Equal $git.Verify 'git --version'
+}
+
+Test-Case 'a component with no verify command is unchecked' {
+    Assert-Equal (Test-AutoOSComponentWorks -VerifyCommand '' -Name 'x') 'unchecked'
+}
+
+Test-Case 'verification passes for something that is installed' {
+    Assert-Equal (Test-AutoOSComponentWorks -VerifyCommand 'cmd /c ver' -Name 'cmd') 'verified'
+}
+
+Test-Case 'verification reports unverified for a missing binary' {
+    Assert-Equal (Test-AutoOSComponentWorks -VerifyCommand 'definitely-not-a-real-binary --version' -Name 'ghost') 'unverified'
+}
+
+Test-Case '-NoVerify skips the check entirely' {
+    Set-AutoOSVerify $false
+    $r = Test-AutoOSComponentWorks -VerifyCommand 'definitely-not-a-real-binary' -Name 'ghost'
+    Set-AutoOSVerify $true
+    Assert-Equal $r 'unchecked'
+}
+
+Test-Case 'a dry run verifies nothing' {
+    Assert-Equal (Test-AutoOSComponentWorks -VerifyCommand 'cmd /c ver' -Name 'cmd' -DryRun $true) 'unchecked'
+}
+
+Test-Case 'state survives a save/load round trip' {
+    $tmp = Join-Path $env:TEMP "autoos-state-test-$([Guid]::NewGuid().ToString('N')).json"
+    Save-AutoOSState -Path $tmp -ProfileName 'light' -Selected @('git', 'nodejs') `
+        -Answers @{ omnigraph_url = 'https://example.invalid' } `
+        -Results @{ installed = @('git'); skipped = @('nodejs'); failed = @() } | Out-Null
+    $back = Import-AutoOSState -Path $tmp
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Assert-Equal "$($back.Profile)|$($back.Selected -join ',')|$($back.Answers['omnigraph_url'])" `
+                 'light|git,nodejs|https://example.invalid'
+}
+
+Test-Case 'a dry run saves no state' {
+    $tmp = Join-Path $env:TEMP "autoos-state-test-$([Guid]::NewGuid().ToString('N')).json"
+    Save-AutoOSState -Path $tmp -ProfileName 'light' -Selected @('git') -DryRun $true | Out-Null
+    $existed = Test-Path $tmp
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    Assert-True (-not $existed) 'dry run wrote a state file'
+}
+
+Test-Case 'backups are grouped newest-per-original' {
+    $scratch = Join-Path $env:TEMP "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    'original' | Out-File (Join-Path $scratch 'profile.ps1') -Encoding utf8
+    'v1' | Out-File (Join-Path $scratch 'profile.ps1.autoos-backup-20260101-000000') -Encoding utf8
+    'v2' | Out-File (Join-Path $scratch 'profile.ps1.autoos-backup-20260202-000000') -Encoding utf8
+    $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+    Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    Assert-True ($b.Count -eq 1 -and $b[0].Backup -match '20260202') "got: $($b | ConvertTo-Json -Compress)"
+}
+
+# Get-AutoOSBackups: what "newest" means. Copy-AutoOSBackup appends -1, -2, ...
+# on a same-second clash, and Copy-Item keeps the ORIGINAL's LastWriteTime, so
+# neither a name sort (-10 lands before -2) nor the file time (a backup of a
+# just-restored old file looks old) picks the backup taken last.
+function New-BackupFixture {
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Name, [Parameter(Mandatory)][DateTime]$When)
+    $path = Join-Path $Dir $Name
+    [IO.File]::WriteAllText($path, $Name)
+    (Get-Item -LiteralPath $path).LastWriteTimeUtc = $When
+}
+
+Test-Case 'Get-AutoOSBackups: the newest per original counts -10 after -2 (the suffix is a number)' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $t0 = [DateTime]::UtcNow.AddDays(-30)
+        $names = @('x.autoos-backup-20260101-000000', 'x.autoos-backup-20260101-000000-1', 'x.autoos-backup-20260101-000000-2', 'x.autoos-backup-20260101-000000-10')
+        for ($i = 0; $i -lt $names.Count; $i++) { New-BackupFixture -Dir $scratch -Name $names[$i] -When $t0.AddMinutes($i) }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1 -or $b[0].Count -ne 4) { throw "want one original with 4 backups, got: $($b | ConvertTo-Json -Compress)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260101-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want ...-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Get-AutoOSBackups: equal file times, the higher numeric suffix wins' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $when = [DateTime]::UtcNow.AddDays(-30)
+        foreach ($n in @('x.autoos-backup-20260101-000000', 'x.autoos-backup-20260101-000000-1', 'x.autoos-backup-20260101-000000-2', 'x.autoos-backup-20260101-000000-10')) {
+            New-BackupFixture -Dir $scratch -Name $n -When $when
+        }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1) { throw "want one original, got $($b.Count)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260101-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want ...-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Get-AutoOSBackups: the stamp in the name decides, not the copied file time' {
+    # Copy-Item keeps the original's LastWriteTime: the backup taken LAST of a
+    # file that was just restored from an old copy carries an OLD file time.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-undo-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $old = [DateTime]::UtcNow.AddDays(-30)
+        New-BackupFixture -Dir $scratch -Name 'x.autoos-backup-20260101-000000' -When $old.AddDays(20)
+        foreach ($n in @('x.autoos-backup-20260202-000000', 'x.autoos-backup-20260202-000000-2', 'x.autoos-backup-20260202-000000-10')) {
+            New-BackupFixture -Dir $scratch -Name $n -When $old
+        }
+        $b = @(Get-AutoOSBackups -SearchRoot $scratch)
+        if ($b.Count -ne 1) { throw "want one original, got $($b.Count)" }
+        if ((Split-Path -Leaf $b[0].Backup) -cne 'x.autoos-backup-20260202-000000-10') { throw "newest backup = [$(Split-Path -Leaf $b[0].Backup)], want 20260202-000000-10" }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'undo never uninstalls anything' {
+    # The safety property, asserted on the source rather than by removing software.
+    $src = Get-Content (Join-Path $Lib 'AutoOS.State.psm1') -Raw
+    Assert-True ($src -notmatch 'winget\s+uninstall|choco\s+uninstall|npm\s+uninstall') `
+        'the undo path contains an uninstall command'
+}
+
+# ─── Browser UI payload ─────────────────────────────────────────────────────
+Describe-Group 'browser UI'
+
+Test-Case 'every component has a homepage link' {
+    $bad = @()
+    foreach ($f in @('windows.json', 'linux.json', 'macos.json')) {
+        $c = Get-AutoOSCatalog (Join-Path $Root "catalog\$f")
+        foreach ($cat in $c.categories) {
+            foreach ($comp in $cat.components) {
+                if (-not $comp.PSObject.Properties.Name.Contains('homepage')) { $bad += "$f`:$($comp.id)" }
+            }
+        }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'a non-URL homepage is rejected' {
+    $bad = @'
+{"categories":[{"id":"x","name":"X","components":[
+ {"id":"thing","name":"Thing","description":"d","provider":"winget","package":"p","homepage":"not-a-url"}]}]}
+'@ | ConvertFrom-Json
+    $p = @(Test-AutoOSCatalogSchema -Catalog $bad)
+    Assert-True (($p -join '; ') -match 'homepage') "expected a homepage complaint, got: $($p -join '; ')"
+}
+
+Test-Case 'the serve payload carries what the UI needs' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    $cc = $state.components | Where-Object { $_.id -eq 'claude-code' }
+    foreach ($k in @('requires', 'homepage', 'verify', 'category', 'provider')) {
+        if (-not $cc.Contains($k)) { throw "serve payload is missing '$k'" }
+    }
+    Pass
+}
+
+Test-Case 'the serve payload keeps the dependency edges' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    $cc = $state.components | Where-Object { $_.id -eq 'claude-code' }
+    Assert-Contains $cc.requires 'nodejs'
+}
+
+Test-Case 'the serve payload survives JSON round-tripping' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    $back = ($state | ConvertTo-Json -Depth 8 -Compress) | ConvertFrom-Json
+    $cc = $back.components | Where-Object { $_.id -eq 'claude-code' }
+    Assert-Contains @($cc.requires) 'nodejs'
+}
+
+Test-Case 'the Windows payload reports WSL as host, not guest' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    # Windows is never the WSL guest; the field must say so rather than be absent.
+    Assert-True ($state.wsl.Contains('isWsl') -and -not $state.wsl.isWsl) `
+        "wsl block: $($state.wsl | ConvertTo-Json -Compress)"
+}
+
+Test-Case 'the Windows payload reports whether WSL is available' {
+    $sys = New-FakeSystem
+    $sys.HasWsl = $true
+    $state = Get-AutoOSServeState -SystemInfo $sys -Catalog $winCatalog
+    Assert-True $state.wsl.available 'HasWsl should surface as wsl.available'
+}
+
+Test-Case 'the Windows payload carries an environment field' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    Assert-True ($state.system.Contains('environment')) 'system.environment missing'
+}
+
+Test-Case 'the serve payload labels platform availability' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    $handy = $state.components | Where-Object { $_.id -eq 'handy' }
+    foreach ($p in @('windows', 'linux', 'macos')) {
+        if (@($handy.platforms) -notcontains $p) {
+            throw "handy platforms were: $(@($handy.platforms) -join ',')"
+        }
+    }
+    Pass
+}
+
+Test-Case 'a Windows-only component is labelled as such' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    $wh = $state.components | Where-Object { $_.id -eq 'windhawk' }
+    Assert-Equal (@($wh.platforms) -join ',') 'windows'
+}
+
+Test-Case 'Handy is offered for dictation in the coding profiles' {
+    $handy = $null
+    foreach ($cat in $winCatalog.categories) {
+        foreach ($c in $cat.components) { if ($c.id -eq 'handy') { $handy = $c } }
+    }
+    if (-not $handy) { throw 'handy is not in the catalog' }
+    Assert-Equal "$($handy.package)|$(($handy.profiles | Sort-Object) -join ',')" `
+                 'cjpais.Handy|ai-coding,workstation'
+}
+
+Test-Case 'Handy says it needs a microphone rather than being hidden' {
+    # It installs fine without one, so it is noted, not filtered out.
+    $handy = $null
+    foreach ($cat in $winCatalog.categories) {
+        foreach ($c in $cat.components) { if ($c.id -eq 'handy') { $handy = $c } }
+    }
+    Assert-True ($handy.notes -match 'microphone') "notes were: $($handy.notes)"
+}
+
+Test-Case 'the payload reports the microphone' {
+    $state = Get-AutoOSServeState -SystemInfo (New-FakeSystem) -Catalog $winCatalog
+    Assert-Equal $state.system.microphone 'Test Mic'
+}
+
+$serveSource = Get-Content -Path (Join-Path $Root 'lib\windows\AutoOS.Serve.psm1') -Raw -Encoding UTF8
+$pageSource  = Get-Content -Path (Join-Path $Root 'web\index.html')             -Raw -Encoding UTF8
+
+Test-Case 'a busy port moves the server on instead of failing' {
+    # The listener is opened in a walk, not a single Start(), so an already-taken
+    # 8777 costs a line of output rather than the whole run.
+    if ($serveSource -notmatch 'foreach \(\$candidatePort in') { throw 'no port walk in Start-AutoOSServer' }
+    if ($serveSource -notmatch 'already in use - serving on')    { throw 'a moved port is never announced' }
+    Pass
+}
+
+Test-Case 'a missing URL reservation stops the walk immediately' {
+    # ERROR_ACCESS_DENIED will not be cured by the next port along; retrying
+    # nineteen more times just delays the message that actually helps.
+    Assert-True ($serveSource -match 'ErrorCode -eq 5') 'access-denied is not singled out'
+}
+
+Test-Case 'the installer output is drained without a reader thread' {
+    # A PowerShell scriptblock has no runspace on a raw .NET thread: it does not
+    # fail the read, it kills the process. This test is the tripwire for anyone
+    # reaching for [System.Threading.Thread] here again.
+    if ($serveSource -match '\[System\.Threading\.Thread\]') { throw 'a raw thread is back in the serve module' }
+    if ($serveSource -notmatch 'ReadLineAsync')                 { throw 'nothing is draining the installer output' }
+    Pass
+}
+
+Test-Case 'the server answers a heartbeat the page can poll' {
+    if ($serveSource -notmatch "'/api/ping'") { throw 'no /api/ping route' }
+    if ($pageSource  -notmatch '/api/ping')    { throw 'the page never polls a heartbeat' }
+    Pass
+}
+
+Test-Case 'config save: a changed POST backs up once under a rankable name and writes' {
+    # Behavioural drive of Save-AutoOSWebConfig (the extracted body of POST
+    # /api/config): a save that changes the file must take exactly one backup
+    # under the standard <file>.autoos-backup-yyyyMMdd-HHmmss[-N] name and
+    # write the merged result, and a real value change inside answers counts
+    # as a change even when no top-level key is new.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-cfgsave-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        $cfg = Join-Path $scratch 'autoos.config.json'
+        [IO.File]::WriteAllText($cfg, '{"version":1}')
+        $updates = '{"version":1,"profile":"workstation","answers":{"git_user_name":"Alice"}}' | ConvertFrom-Json
+        $result = Save-AutoOSWebConfig -Path $cfg -Updates $updates
+        Assert-True $result.ok 'a changed save did not report ok'
+        if ($result.ContainsKey('unchanged')) { throw 'a changed save claimed unchanged' }
+        $backups = @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*')
+        Assert-Equal $backups.Count 1
+        Assert-True ($backups[0].Name -match '^autoos\.config\.json\.autoos-backup-\d{8}-\d{6}(-\d{1,3})?$') "backup name not rankable: $($backups[0].Name)"
+        Assert-Equal ((Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).answers.git_user_name) 'Alice'
+        # A changed value inside answers (no new top-level key) is a change too.
+        $updates2 = '{"answers":{"git_user_name":"Bob"}}' | ConvertFrom-Json
+        $result2 = Save-AutoOSWebConfig -Path $cfg -Updates $updates2
+        if ($result2.ContainsKey('unchanged')) { throw 'an answers-value change claimed unchanged' }
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*').Count 2
+        Assert-Equal ((Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).answers.git_user_name) 'Bob'
+    } finally {
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'config save: an unchanged POST backs up and rewrites nothing' {
+    # Behavioural drive of Save-AutoOSWebConfig: the identical save again must
+    # create no backup and leave the bytes alone - and so must a save whose
+    # merge only REORDERS keys. Add-Member -Force moves an existing property
+    # to the end, so merging {version,answers{a,b}} into a file holding
+    # {version,profile,answers{a,b}} yields an object whose key order differs
+    # while every value is equal; an order-sensitive text compare treats that
+    # no-op save as a change and churns a backup + rewrite.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-cfgsave-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        $cfg = Join-Path $scratch 'autoos.config.json'
+        [IO.File]::WriteAllText($cfg, '{"version":1,"profile":"workstation","answers":{"a":"x","b":"y"}}')
+        $reorder = '{"version":1,"answers":{"a":"x","b":"y"}}' | ConvertFrom-Json
+        $result = Save-AutoOSWebConfig -Path $cfg -Updates $reorder
+        Assert-True $result.ok 'the reorder-only save did not report ok'
+        Assert-True $result.ContainsKey('unchanged') 'the reorder-only save was treated as a change'
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*').Count 0
+        Assert-Equal ([IO.File]::ReadAllText($cfg)) '{"version":1,"profile":"workstation","answers":{"a":"x","b":"y"}}'
+        $again = Save-AutoOSWebConfig -Path $cfg -Updates $reorder
+        Assert-True $again.ContainsKey('unchanged') 'the identical re-save was treated as a change'
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*').Count 0
+    } finally {
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'config save: an empty object in the config is compared, not a crash' {
+    # ConvertTo-AutoOSCanonicalJson once read $obj.PSObject.Properties.Name:
+    # member enumeration over zero properties throws under Set-StrictMode, so
+    # a config holding "answers": {} turned every save into a 500.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-cfgsave-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        $cfg = Join-Path $scratch 'autoos.config.json'
+        [IO.File]::WriteAllText($cfg, '{"version":1,"answers":{}}')
+        $result = Save-AutoOSWebConfig -Path $cfg -Updates ('{"version":1,"answers":{}}' | ConvertFrom-Json)
+        Assert-True $result.ContainsKey('unchanged') 'an identical save with an empty object was treated as a change'
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Filter 'autoos.config.json.autoos-backup-*').Count 0
+        Assert-Equal (ConvertTo-AutoOSCanonicalJson ('{}' | ConvertFrom-Json)) '{}'
+    } finally {
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'config save: the Serve module temp name is unpredictable and a planted link is never followed' {
+    # The old line was $tmpPath = "$Path.tmp", a fixed and guessable name: a
+    # symlink planted there took the config bytes - a write into a file the
+    # caller never chose - and the rename then moved the link itself onto the
+    # config path, so the config BECAME that file. A GUID in the name leaves
+    # nothing predictable to plant.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ('autoos-cfgsave-' + [Guid]::NewGuid().ToString('N'))
+    # paths before the try: the finally has to be able to name them even when an
+    # assertion threw first, and Set-StrictMode makes an unset one fatal
+    $cfg = Join-Path $scratch 'autoos.config.json'
+    $victim = Join-Path $scratch 'victim.txt'
+    $link = "$cfg.tmp"
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        if ($serveSource -match '\$tmpPath = "\$Path\.tmp"') { throw 'the fixed temp name is back' }
+        if ($serveSource -notmatch '\$tmpPath = "\$Path\.\$\(\[[Gg]uid\]::NewGuid') { throw 'the temp name is not unique per call' }
+        [IO.File]::WriteAllText($victim, 'DO NOT TOUCH')
+        [IO.File]::WriteAllText($cfg, '{"version":1}')
+        $planted = $false
+        try { New-Item -ItemType SymbolicLink -Path $link -Target $victim | Out-Null; $planted = $true } catch { }
+        $result = Save-AutoOSWebConfig -Path $cfg -Updates ('{"version":1,"profile":"workstation","answers":{"git_user_name":"Alice"}}' | ConvertFrom-Json)
+        Assert-True $result.ok 'a changed save did not report ok'
+        Assert-Equal ((Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).answers.git_user_name) 'Alice'
+        $cfgItem = Get-Item -LiteralPath $cfg
+        if (($cfgItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'the saved config is a reparse point, not a regular file' }
+        if (@(Get-ChildItem -LiteralPath $scratch -Filter '*.tmp' | Where-Object { $_.Name -ne 'autoos.config.json.tmp' }).Count) { throw 'a temp file was left beside the config' }
+        if (-not $planted) {
+            Skip 'the host refuses unprivileged symlinks (Windows needs privilege or developer mode)'
+            return
+        }
+        if ([IO.File]::ReadAllText($victim) -ne 'DO NOT TOUCH') { throw 'the save wrote through the planted link' }
+        $linkItem = Get-Item -LiteralPath $link
+        if (($linkItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) { throw 'the planted link was replaced' }
+        # a second changing save claims its own name; the planted link stays alone
+        $null = Save-AutoOSWebConfig -Path $cfg -Updates ('{"profile":"light"}' | ConvertFrom-Json)
+        Assert-Equal ((Get-Content -LiteralPath $cfg -Raw | ConvertFrom-Json).profile) 'light'
+        if ([IO.File]::ReadAllText($victim) -ne 'DO NOT TOUCH') { throw 'the second save wrote through the planted link' }
+    } finally {
+        # drop the planted link before the recursive delete, so nothing follows it
+        if (Test-Path -LiteralPath $link) { Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue }
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'a page whose server has gone tears itself down' {
+    if ($pageSource -notmatch 'function serverGone') { throw 'the page has no teardown path' }
+    if ($pageSource -notmatch 'window\.close')       { throw 'the page never tries to close itself' }
+    Pass
+}
+
+Test-Case 'the output can be copied without selecting it by hand' {
+    if ($pageSource -notmatch 'id="copyLog"')    { throw 'no copy button on the output card' }
+    if ($pageSource -notmatch 'function copyLog'){ throw 'the copy button does nothing' }
+    # innerText returns nothing while the Output card is collapsed, so the text
+    # has to be read off the child elements instead.
+    if ($pageSource -notmatch 'function logText'){ throw 'the log text is not gathered safely' }
+    if ($pageSource -notmatch 'execCommand')     { throw 'no fallback for a non-secure context' }
+    Pass
+}
+
+Test-Case 'a verify command resolves to the file that will run' {
+    $hint = Get-AutoOSLaunchHint -Component ([pscustomobject]@{
+        Id = 'powershell7'; Name = 'PowerShell 7'; Verify = 'powershell -Command' })
+    if ($hint.How -ne 'run  powershell') { throw "how was: $($hint.How)" }
+    Assert-True ($hint.Path -match '\.exe$') "path was: $($hint.Path)"
+}
+
+Test-Case 'a component that is not here reports nothing rather than guessing' {
+    # A blank is honest. A plausible-looking path that does not exist is worse
+    # than saying nothing, because it reads like a fact.
+    $hint = Get-AutoOSLaunchHint -Component ([pscustomobject]@{
+        Id = 'autoos-nonesuch-xyz'; Name = 'AutoOS Nonesuch XYZ'; Verify = 'autoos-nonesuch-xyz' })
+    if ($hint.How -ne '' -or $hint.Path -ne '') { throw "invented: $($hint.How) / $($hint.Path)" }
+    Pass
+}
+
+Test-Case 'the report says where things landed' {
+    $setupSource = Get-Content -Path (Join-Path $Root 'setup.ps1') -Raw -Encoding UTF8
+    if ($setupSource -notmatch 'Where to find them')   { throw 'no launch section in the report' }
+    if ($setupSource -notmatch 'Get-AutoOSLaunchHint') { throw 'the report never resolves a location' }
+    Pass
+}
+
+Test-Case '-Only accepts a comma-separated list through -File' {
+    # powershell -File passes every argument literally, so "a,b" arrives as one
+    # string. The browser UI shells out exactly that way, so a multi-component
+    # install used to fail as "unknown component id(s): a,b".
+    $pwshExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
+    $out = & $pwshExe -NoProfile -ExecutionPolicy Bypass -File $setup `
+             -Only 'git,nodejs' -Yes -NoColor -DryRun 2>&1
+    Assert-True ($LASTEXITCODE -eq 0 -and ($out -join "`n") -notmatch 'Unknown component') `
+                "exit $LASTEXITCODE : $($out | Select-Object -Last 3)"
+}
+
+Test-Case 'a page whose scripts are blocked says so' {
+    # Everything on the page is driven by one inline script. Without it the
+    # header would sit at "connecting..." for ever and explain nothing.
+    if ($pageSource -notmatch '<noscript>')            { throw 'no noscript fallback' }
+    if ($pageSource -notmatch 'JavaScript is blocked')  { throw 'the noscript fallback says nothing useful' }
+    Pass
+}
+
+# ─── MCP wiring ────────────────────────────────────────────────────
+Describe-Group 'MCP wiring'
+
+$installSource = Get-Content -Path (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+
+Test-Case 'graphify is registered once, at user scope' {
+    # The command is cwd-relative, so one definition serves every repository its
+    # own graph. A per-repo entry would pin one repo's graph for all of them.
+    if ($installSource -notmatch "Name 'graphify' -Command 'uv' -Scope 'user'") {
+        throw 'graphify is not registered at user scope'
+    }
+    if ($installSource -notmatch 'graphify-out/graph.json') { throw 'graphify is not cwd-relative' }
+    Pass
+}
+
+Test-Case 'omnigraph env file and its backup keep only the user''s access (icacls)' {
+    # Review finding 2026-09-25: the token file inherited the profile's ACLs.
+    $src = (Get-Command Set-AutoOSOmnigraphEnv).ScriptBlock.ToString()
+    $n = ([regex]::Matches($src, 'Protect-AutoOSUserFile')).Count
+    Assert-True ($n -ge 3) "Set-AutoOSOmnigraphEnv protects the file after writes, backup and unchanged path ($n calls)"
+    $helper = (Get-Command Protect-AutoOSUserFile -ErrorAction SilentlyContinue)
+    Assert-True ($null -ne $helper) 'Protect-AutoOSUserFile missing'
+    $body = $helper.ScriptBlock.ToString()
+    Assert-True ($body -match '/inheritance:r') 'inheritance not removed'
+    # Re-review 2026-09-25: a domain or AzureAD account needs DOMAIN\user, and
+    # the owner keeps full control so later writes and backups still work.
+    Assert-True ($body -match 'USERDOMAIN') 'principal is not domain-qualified'
+    Assert-True ($body -match ':\(F\)') 'owner must keep full control'
+    Assert-True ($src -match "Protect-AutoOSUserFile[^\n]*\) -eq 'failed'") 'a failed icacls is not reported'
+    Assert-True ($body -match "ErrorActionPreference = 'Continue'") 'icacls stderr would be terminating under Stop (5.1)'
+}
+
+Test-Case 'omnigraph is never registered at user scope' {
+    # A user-scope omnigraph silently wins over the per-repo one and answers
+    # from the wrong graph, which looks identical to it working.
+    if ($installSource -match "Register-AutoOSMcpServer[^\r\n]*'omnigraph'") {
+        throw 'omnigraph is being registered as a user server'
+    }
+    if ($installSource -notmatch 'claude mcp remove omnigraph') { throw 'the shadowing case is never called out' }
+    Pass
+}
+
+Test-Case 'a project MCP server is approved, not just declared' {
+    # A tracked .mcp.json cannot approve itself; Claude Code skips an unapproved
+    # project server silently.
+    if ($installSource -notmatch 'enabledMcpjsonServers') { throw 'nothing writes the approval list' }
+    Pass
+}
+
+Test-Case 'approving a server keeps the rest of the settings file' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-mcp-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path (Join-Path $tmp '.claude') -Force | Out-Null
+    $file = Join-Path $tmp '.claude\settings.local.json'
+    '{"permissions":{"allow":["Bash(ls:*)"]},"enabledMcpjsonServers":["already"]}' |
+        Out-File -FilePath $file -Encoding utf8
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Enable-AutoOSProjectMcpServer -RepoPath $tmp -Name 'omnigraph' 6>$null | Out-Null
+        $after = Get-Content -Path $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (-not $after.permissions) { throw 'the unrelated permissions block was dropped' }
+        Assert-Contains $after.enabledMcpjsonServers 'omnigraph'
+    } finally {
+        Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'approving twice adds nothing the second time' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-mcp-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Enable-AutoOSProjectMcpServer -RepoPath $tmp -Name 'omnigraph' 6>$null | Out-Null
+        Enable-AutoOSProjectMcpServer -RepoPath $tmp -Name 'omnigraph' 6>$null | Out-Null
+        $after = Get-Content -Path (Join-Path $tmp '.claude\settings.local.json') -Raw -Encoding UTF8 |
+                 ConvertFrom-Json
+        Assert-Equal @($after.enabledMcpjsonServers).Count 1
+    } finally {
+        Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'backup-once: Enable-AutoOSProjectMcpServer does not back up again when nothing changed' {
+    # settings.local.json is the user's own file. The first run that changes it
+    # takes ONE backup; an identical second run must not back up again, must
+    # leave the file byte-identical and must say skipped. The pause keeps a
+    # second-run backup from reusing the first one's per-second timestamp,
+    # which would make an extra backup overwrite (and hide behind) the first.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $claudeDir = Join-Path $scratch '.claude'
+    $file = Join-Path $claudeDir 'settings.local.json'
+    $log1 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $log2 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $claudeDir -Force
+    [IO.File]::WriteAllText($file, '{"permissions":{"allow":["Bash(ls:*)"]}}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+    $run = {
+        param($LogPath)
+        Initialize-AutoOSLog -Path $LogPath
+        Enable-AutoOSProjectMcpServer -RepoPath $scratch -Name 'omnigraph'
+        Get-Content -LiteralPath $LogPath -Raw -Encoding utf8
+    }
+    try {
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        $null = & $run $log1
+        $backups1 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*').Count
+        $backup1B64 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
+        $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        Start-Sleep -Milliseconds 1100
+        $out2 = & $run $log2
+        $backups2 = @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.local.json.autoos-backup-*').Count
+        $hash2 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (@($s.enabledMcpjsonServers) -notcontains 'omnigraph') { throw 'run 1 did not approve the server' }
+        if (@($s.permissions.allow) -notcontains 'Bash(ls:*)') { throw 'run 1 dropped the existing permissions' }
+        if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
+        if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
+        if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log1, $log2 -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'the Antigravity config is merged, not replaced' {
+    # It used to be written from scratch, which silently deleted every other MCP
+    # server the user had configured there.
+    if ($installSource -notmatch 'cfg\.Contains\(''mcpServers''\)') {
+        throw 'Set-AutoOSAntigravityMcp does not read the existing servers back'
+    }
+    Pass
+}
+
+Test-Case 'no bearer token is ever invented' {
+    # This repository is public. A real-looking secret in it is a leak whether
+    # or not it happens to work, and a guessed one fails as an unexplainable 401.
+    if ($installSource -match "OMNIGRAPH_TOKEN\s*=\s*'[^']") { throw 'a token literal is present' }
+    if ($installSource -notmatch 'OMNIGRAPH_TOKEN is not set') { throw 'a missing token is never reported' }
+    Pass
+}
+
+Test-Case 'Install-AutoOSAgentSkills links skills to Antigravity and Claude Code' {
+    # Since WS-SKILLWIN both directories are destinations of
+    # Sync-AutoOSAgentSkillTargets; the functional test "links into
+    # ~/.claude\skills and ~/.gemini\config\skills" proves the links.
+    if ((Get-Command Install-AutoOSAgentSkills).Definition -notmatch 'Sync-AutoOSAgentSkillTargets -Source') {
+        throw 'Install-AutoOSAgentSkills does not call Sync-AutoOSAgentSkillTargets'
+    }
+    $body = (Get-Command Sync-AutoOSAgentSkillTargets).Definition
+    if ($body -notmatch [regex]::Escape("'.gemini\config\skills'")) { throw 'Antigravity skills dir is not a destination' }
+    if ($body -notmatch [regex]::Escape("'.claude\skills'")) { throw 'Claude Code skills dir is not a destination' }
+    Pass
+}
+
+Test-Case 'agent-skills is never cloned' {
+    # SPEC-OMNI D14: the clone is the defect this lane removes. Asserted on the
+    # installer's own body, so a re-clone anywhere else in the function still
+    # fails, and on the whole module, so the retired URL cannot come back.
+    $fn = [regex]::Match($installSource, '(?s)function Install-AutoOSAgentSkills \{.*?\n\}').Value
+    Assert-True ($fn.Length -gt 0) 'Install-AutoOSAgentSkills is gone from the source'
+    Assert-True ($fn -notmatch "'clone'") 'Install-AutoOSAgentSkills still runs a clone'
+    Assert-True ($fn -notmatch "'git'") 'Install-AutoOSAgentSkills still shells out to git'
+    Assert-True ($fn -notmatch 'agent-skills\.git') 'the retired repository is still named'
+    Assert-True ($fn -notmatch 'Ch3fUlrich') 'a live clone target of the retired tree is still there'
+    Assert-True ($installSource -notmatch 'Ch3fUlrich') 'lib/ still names the retired clone repository'
+    Pass
+}
+
+Test-Case 'agent-skills: the Windows catalog entry is a tombstone with its successors' {
+    # A7: the same retirement Linux and macOS carry. Windows has no
+    # agent-skill-links/omnigraph-client twin, so the four mcp-* components are
+    # the whole successor set - naming others would make the plan promise work
+    # this platform does not ship.
+    $e = @($winCatalog.categories.components | Where-Object { $_.id -eq 'agent-skills' })[0]
+    Assert-True ($e.tombstone -eq $true) "the entry is not tombstoned: [$($e.tombstone)]"
+    Assert-True ([string]$e.note -match 'mcp-\*') "the note does not say where the work went: [$($e.note)]"
+    Assert-Equal (@($e.replaced_by) -join ',') 'mcp-graphify,mcp-serena,mcp-playwright,mcp-context7'
+    # A tombstone carries no installer hooks; one left behind is work the plan
+    # would still try to run.
+    foreach ($dead in @('postInstall', 'prompt', 'requires', 'verify')) {
+        Assert-True (-not $e.PSObject.Properties[$dead]) "a tombstone still carries $dead"
+    }
+    Pass
+}
+
+Test-Case 'vendored .agents/skills wins as skills source' {
+    if ($installSource -notmatch 'Join-Path \$script:RepoRoot ''\.agents\\skills''') {
+        throw 'Get-AutoOSSkillsSource does not prefer the vendored skills dir'
+    }
+    Pass
+}
+
+Test-Case 'repo skills link into project .claude/skills as junctions' {
+    if ($installSource -notmatch 'repoClaudeSkills = Join-Path \$script:RepoRoot ''\.claude\\skills''') {
+        throw 'no repo-local .claude/skills link step'
+    }
+    if ($installSource -notmatch 'New-Item -ItemType Junction -Path \$target -Target \$s\.FullName') {
+        throw 'repo skill links are not guarded junctions'
+    }
+    Pass
+}
+
+Test-Case 'Test-AutoOSInstalled checks both Documents\code and Documents\Code' {
+    if ((Get-Content (Join-Path $Root 'lib/windows/AutoOS.Detect.psm1') -Raw) -notmatch 'Code\\agent-skills') {
+        throw 'Test-AutoOSInstalled does not check both Code and code paths'
+    }
+    Pass
+}
+
+# ─── Claude autostart & session tracking ───────────────────────────────────
+Describe-Group 'claude autostart'
+
+Import-Module (Join-Path $Root 'lib\windows\AutoOS.ClaudeAutostart.psm1') -DisableNameChecking -Force
+
+# A fixture transcript tree shaped exactly like %USERPROFILE%\.claude\projects:
+# one directory per working directory, one *.jsonl per session, with cwd and
+# sessionId carried in the records themselves (ADR 0001). The first line has no
+# cwd, like a real transcript, so discovery has to read forward to find one.
+function New-ClaudeFixture {
+    param([Parameter(Mandatory)][string]$Root, [Parameter(Mandatory)][object[]]$Sessions)
+    foreach ($s in $Sessions) {
+        $slug = ($s.Cwd -replace '[^A-Za-z0-9]', '-')
+        $dir = Join-Path $Root "projects\$slug"
+        [void](New-Item -ItemType Directory -Path $dir -Force)
+        $file = Join-Path $dir "$($s.Uuid).jsonl"
+        $lines = @(
+            (@{ type = 'queue-operation'; sessionId = $s.Uuid } | ConvertTo-Json -Compress)
+            (@{ sessionId = $s.Uuid; cwd = $s.Cwd; gitBranch = 'main'; type = 'user' } | ConvertTo-Json -Compress)
+        )
+        [System.IO.File]::WriteAllLines($file, $lines)
+        (Get-Item $file).LastWriteTime = (Get-Date).AddMinutes(-1 * $s.AgeMinutes)
+    }
+}
+
+function Use-ClaudeFixture {
+    param([Parameter(Mandatory)][object[]]$Sessions, [int]$LiveCount = 1, [Parameter(Mandatory)][scriptblock]$Body)
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    try {
+        New-ClaudeFixture -Root $tmp -Sessions $Sessions
+        $env:AUTOOS_CLAUDE_HOME = $tmp
+        $env:AUTOOS_CLAUDE_LIVE_COUNT = "$LiveCount"
+        $env:AUTOOS_CLAUDE_STATE_FILE = Join-Path $tmp 'state.json'
+        & $Body $tmp
+    }
+    finally {
+        Remove-Item Env:\AUTOOS_CLAUDE_HOME, Env:\AUTOOS_CLAUDE_LIVE_COUNT, Env:\AUTOOS_CLAUDE_STATE_FILE -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'claude-autostart component exists in the Windows catalog' {
+    $cat = Get-Content (Join-Path $Root 'catalog\windows.json') -Raw | ConvertFrom-Json
+    $comp = $cat.categories.components | Where-Object { $_.id -eq 'claude-autostart' }
+    Assert-Equal $comp.provider 'script'
+}
+
+Test-Case 'claude-autostart is absent from the macOS catalog' {
+    # It routes through lib/linux/install.sh, which writes systemd units; on a Mac
+    # that reported `installed` while doing nothing.
+    $cat = Get-Content (Join-Path $Root 'catalog\macos.json') -Raw | ConvertFrom-Json
+    $comp = @($cat.categories.components | Where-Object { $_.id -eq 'claude-autostart' })
+    Assert-Equal $comp.Count 0
+}
+
+Test-Case 'discovery reads the cwd out of each transcript' {
+    # The previous implementation parsed process command lines. Win32_Process has
+    # no working directory, so it found nothing at all - 0 of 6 live sessions on a
+    # real machine. This is that regression, pinned.
+    Use-ClaudeFixture -LiveCount 2 -Sessions @(
+        @{ Cwd = 'C:\work\alpha'; Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 2 }
+        @{ Cwd = 'C:\work\beta';  Uuid = '22222222-2222-2222-2222-222222222222'; AgeMinutes = 3 }
+    ) -Body {
+        $found = @(Find-AutoOSClaudeSessions | Sort-Object cwd)
+        Assert-Equal $found.Count 2
+        Assert-Equal $found[0].cwd 'C:\work\alpha'
+        Assert-Equal $found[0].session_uuid '11111111-1111-1111-1111-111111111111'
+        Assert-Equal $found[0].name 'alpha'
+    }
+}
+
+Test-Case 'a transcript older than the liveness window is not restored' {
+    Use-ClaudeFixture -Sessions @(
+        @{ Cwd = 'C:\work\fresh'; Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 5 }
+        @{ Cwd = 'C:\work\stale'; Uuid = '22222222-2222-2222-2222-222222222222'; AgeMinutes = 900 }
+    ) -Body {
+        $found = @(Find-AutoOSClaudeSessions)
+        Assert-Equal $found.Count 1
+        Assert-Equal $found[0].cwd 'C:\work\fresh'
+    }
+}
+
+Test-Case 'nothing is discovered while no Claude process is running' {
+    Use-ClaudeFixture -LiveCount 0 -Sessions @(
+        @{ Cwd = 'C:\work\alpha'; Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 2 }
+    ) -Body {
+        Assert-Equal @(Find-AutoOSClaudeSessions).Count 0
+    }
+}
+
+Test-Case 'one session is recorded once even when it left transcripts in two places' {
+    # Observed on a real machine: the same session id under two project slugs.
+    # Restoring it twice opens two terminals fighting over one conversation.
+    Use-ClaudeFixture -Sessions @(
+        @{ Cwd = 'C:\work\proj';         Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 4 }
+        @{ Cwd = 'C:\work\proj\scratch'; Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 2 }
+    ) -Body {
+        $found = @(Find-AutoOSClaudeSessions)
+        Assert-Equal $found.Count 1
+        Assert-Equal $found[0].cwd 'C:\work\proj\scratch'
+    }
+}
+
+Test-Case 'max_sessions keeps the most recently active, not an arbitrary slice' {
+    Use-ClaudeFixture -LiveCount 3 -Sessions @(
+        @{ Cwd = 'C:\work\a'; Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 30 }
+        @{ Cwd = 'C:\work\b'; Uuid = '22222222-2222-2222-2222-222222222222'; AgeMinutes = 2 }
+        @{ Cwd = 'C:\work\c'; Uuid = '33333333-3333-3333-3333-333333333333'; AgeMinutes = 10 }
+    ) -Body {
+        $config = Get-AutoOSClaudeConfig
+        $config['max_sessions'] = 2
+        $found = @(Find-AutoOSClaudeSessions -Config $config)
+        Assert-Equal $found.Count 2
+        Assert-Equal (($found | ForEach-Object { $_.name }) -join ',') 'b,c'
+    }
+}
+
+Test-Case 'Save-AutoOSClaudeSnapshot records the sessions it is given' {
+    # It used to ignore its argument and re-derive from the process table, which
+    # is what made the hook path a silent no-op that wrote "sessions": [].
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $file = Join-Path $tmp 'state.json'
+    try {
+        $mine = @([pscustomobject]@{
+            session_uuid = '44444444-4444-4444-4444-444444444444'
+            name = 'given'; cwd = 'C:\work\given'; remote_control = $false; last_active = 1
+        })
+        [void](Save-AutoOSClaudeSnapshot -Sessions $mine -Path $file)
+        $doc = Get-Content $file -Raw | ConvertFrom-Json
+        Assert-Equal @($doc.sessions).Count 1
+        Assert-Equal $doc.sessions[0].name 'given'
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'a snapshot with nothing live never clobbers a good one' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $file = Join-Path $tmp 'state.json'
+    try {
+        $mine = @([pscustomobject]@{
+            session_uuid = '44444444-4444-4444-4444-444444444444'
+            name = 'kept'; cwd = 'C:\work\kept'; remote_control = $false; last_active = 1
+        })
+        [void](Save-AutoOSClaudeSnapshot -Sessions $mine -Path $file)
+        # The timer fires again mid-boot, before anything is up.
+        [void](Save-AutoOSClaudeSnapshot -Sessions @() -Path $file)
+        $doc = Get-Content $file -Raw | ConvertFrom-Json
+        Assert-Equal @($doc.sessions).Count 1
+        Assert-Equal $doc.sessions[0].name 'kept'
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'remote_control=never strips --rc from a session recorded with it' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $file = Join-Path $tmp 'state.json'
+    try {
+        $session = @([pscustomobject]@{
+            session_uuid = '55555555-5555-5555-5555-555555555555'
+            name = 'alpha'; cwd = 'C:\work\alpha'; remote_control = $true; last_active = 1
+        })
+        [void](Save-AutoOSClaudeSnapshot -Sessions $session -Path $file)
+        $config = Get-AutoOSClaudeConfig
+        $config['remote_control'] = 'never'
+        $plan = @(Get-AutoOSClaudeRestorePlan -Config $config -Path $file)
+        Assert-Equal $plan.Count 1
+        Assert-Equal $plan[0].Action 'START'
+        Assert-Equal $plan[0].RemoteControl $false
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'a session with no recorded id is skipped with a reason, not started' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $file = Join-Path $tmp 'state.json'
+    try {
+        $doc = [pscustomobject]@{
+            version = 2; captured_at = 1; captured_at_iso = 'x'
+            sessions = @([pscustomobject]@{ session_uuid = ''; name = 'broken'; cwd = 'C:\work\broken'; remote_control = $false })
+        }
+        [IO.File]::WriteAllText($file, ($doc | ConvertTo-Json -Depth 10))
+        $plan = @(Get-AutoOSClaudeRestorePlan -Path $file)
+        Assert-Equal $plan[0].Action 'SKIP'
+        Assert-True ($plan[0].Reason -like '*no session id*')
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'discovery skips sessions whose working directory does not exist' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $real = Join-Path $tmp 'real'
+    [void](New-Item -ItemType Directory -Path $real -Force)
+    $ghost = Join-Path $tmp 'ghost'
+    try {
+        Use-ClaudeFixture -Sessions @(
+            @{ Cwd = $real;  Uuid = '11111111-1111-1111-1111-111111111111'; AgeMinutes = 2 }
+            @{ Cwd = $ghost; Uuid = '22222222-2222-2222-2222-222222222222'; AgeMinutes = 2 }
+        ) -Body {
+            $env:AUTOOS_CLAUDE_TEST_EXISTENCE = '1'
+            try {
+                $found = @(Find-AutoOSClaudeSessions)
+                Assert-Equal $found.Count 1
+                Assert-Equal $found[0].session_uuid '11111111-1111-1111-1111-111111111111'
+            } finally {
+                Remove-Item Env:\AUTOOS_CLAUDE_TEST_EXISTENCE -ErrorAction SilentlyContinue
+            }
+        }
+    } finally {
+        Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'the defaults come from the shipped example config, not a second copy' {
+    # Three homes for these values (here, claude_sessions.py, the example file) is
+    # how the web UI ended up writing keys nothing read.
+    $example = Get-Content (Join-Path $Root 'autoos.config.example.json') -Raw | ConvertFrom-Json
+    $defaults = Get-AutoOSClaudeDefaults
+    foreach ($p in $example.claude_autostart.PSObject.Properties) {
+        Assert-Equal $defaults[$p.Name] $p.Value
+    }
+}
+
+Test-Case 'Set-AutoOSClaudeConfig merges and never drops the keys it does not set' {
+    # The web card's first version replaced the whole object, silently discarding
+    # fallback_cwd, fallback_name and terminal_host on every save.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    $file = Join-Path $tmp 'autoos.config.json'
+    try {
+        $seed = [pscustomobject]@{
+            version = 1; profile = 'workstation'
+            answers = [pscustomobject]@{ git_user_name = 'Keep Me' }
+            claude_autostart = [pscustomobject]@{ fallback_cwd = 'C:\keep'; resume_mode = 'full' }
+        }
+        [IO.File]::WriteAllText($file, ($seed | ConvertTo-Json -Depth 10))
+        [void](Set-AutoOSClaudeConfig -Settings @{ resume_mode = 'summary'; max_sessions = 3 } -ConfigPath $file)
+
+        $after = Get-Content $file -Raw | ConvertFrom-Json
+        Assert-Equal $after.claude_autostart.resume_mode 'summary'
+        Assert-Equal $after.claude_autostart.max_sessions 3
+        Assert-Equal $after.claude_autostart.fallback_cwd 'C:\keep'
+        Assert-Equal $after.answers.git_user_name 'Keep Me'
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSClaudeConfig refuses a setting that nothing reads' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('N'))
+    [void](New-Item -ItemType Directory -Path $tmp -Force)
+    try {
+        $threw = $false
+        try { [void](Set-AutoOSClaudeConfig -Settings @{ resume_prompt_mode = 'full' } -ConfigPath (Join-Path $tmp 'c.json')) }
+        catch { $threw = $true }
+        Assert-True $threw 'an unknown key should be rejected, not written where no reader looks'
+    }
+    finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'the scheduled-task arguments are stable, so a second run can skip' {
+    $a = Get-AutoOSClaudeTaskArguments -Action 'restore'
+    $b = Get-AutoOSClaudeTaskArguments -Action 'restore'
+    Assert-Equal $a $b
+    Assert-True ($a -like '*-Action restore*')
+    # Hidden launcher, visible terminal: the window the user needs is the one
+    # wt.exe opens, not this one (ADR 0002).
+    Assert-True ($a -like '*-WindowStyle Hidden*')
+}
+
+Test-Case 'an unregistered task never counts as current' {
+    # If Get-ScheduledTask does not exist (e.g. on Linux/WSL), it safely returns false.
+    Assert-Equal (Test-AutoOSClaudeTaskCurrent -TaskName 'AutoOS-Claude-DoesNotExist' -Arguments 'x') $false
+}
+
+Test-Case 'restore starts nothing when there is no terminal host' {
+    # Windows Terminal is what a restored TUI appears in; with none, restore has
+    # to refuse rather than orphan a process nobody can see (ADR 0002).
+    $config = Get-AutoOSClaudeConfig
+    $config['terminal_host'] = 'herdr'   # not a Windows host, so none resolves
+    Assert-True ($null -eq (Get-AutoOSClaudeTerminalHost -Config $config))
+}
+
+Test-Case 'the live-process probe answers on this machine without throwing' {
+    # Principle 9: the AUTOOS_CLAUDE_LIVE_COUNT seam every test above uses must
+    # not be the only path that is ever exercised.
+    Assert-True ((Get-AutoOSClaudeLiveCount) -ge 0)
+}
+
+Test-Case 'the claude card, chooser and configure affordance are present in the page' {
+    $html = Get-Content (Join-Path $Root 'web\index.html') -Raw
+    Assert-True ($html -match 'id="cardClaudeAutostart"')
+    Assert-True ($html -match 'id="cardChooserBar"')
+    Assert-True ($html -match 'data-configure-card')
+}
+
+Test-Case 'the web UI introduces no inline onclick handlers' {
+    $html = Get-Content (Join-Path $Root 'web\index.html') -Raw
+    Assert-True (-not ($html -match 'onclick="'))
+}
+
+Test-Case 'the reduced-motion guard for the progress bar survives' {
+    $html = Get-Content (Join-Path $Root 'web\index.html') -Raw
+    Assert-True ($html -match 'prefers-reduced-motion:reduce\)\{\.bar\.indeterminate>div\{animation:none')
+}
+
+Test-Case 'a round-trip timestamp is read back as the date it was written' {
+    # A bare [datetime]::TryParse uses the current culture, which read the ISO
+    # string 2026-09-11T12:04 back as 2026-11-09 - the status screen showed a
+    # snapshot two months in the future next to rows dated correctly.
+    $written = (Get-Date '2026-09-11T12:04:33.0000000+02:00').ToString('o')
+    $shown = Format-AutoOSTimestamp $written
+    Assert-True ($shown -like '2026-09-11 *') "expected 2026-09-11, got [$shown]"
+}
+
+Test-Case 'dry run is off by default' {
+    $html = Get-Content (Join-Path $Root 'web\index.html') -Raw
+    Assert-True ($html -match '<input type="checkbox" id="dryRun">')
+}
+
+# ─── Verified download (Task 3) ─────────────────────────────────────────────
+Describe-Group 'verified download'
+
+function ConvertTo-AutoOSTestFileUri {
+    param([string]$Path)
+    ([Uri]$Path).AbsoluteUri
+}
+
+Test-Case 'a checksum mismatch fails and leaves nothing behind' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_dl_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'
+    Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $uri = ConvertTo-AutoOSTestFileUri $src
+    $threw = $false
+    try {
+        Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 ('0' * 68) | Out-Null
+    } catch {
+        $threw = $true
+    }
+    Assert-True ($threw -and -not (Test-Path -LiteralPath $out)) `
+        "threw=$threw, out exists=$(Test-Path -LiteralPath $out)"
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+
+Test-Case 'a matching checksum succeeds' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_dl_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'
+    Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $uri = ConvertTo-AutoOSTestFileUri $src
+    $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+    Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 $sum | Out-Null
+    Assert-True ((Test-Path -LiteralPath $out) -and (Get-Item -LiteralPath $out).Length -gt 0) `
+        "verified download did not produce the file"
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+
+Test-Case 'a cached, already-verified file is skipped, not refetched' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_dl_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'
+    Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $uri = ConvertTo-AutoOSTestFileUri $src
+    $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+    Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 $sum | Out-Null
+
+    # Get-AutoOSVerifiedFile reports through Write-AutoOSLine, which writes
+    # straight to [Console]::Out rather than the pipeline, so the skip
+    # message is captured by redirecting the real Console stream - the
+    # PowerShell equivalent of the bash suite capturing fetch_verified's own
+    # combined stdout+stderr.
+    $sw = [IO.StringWriter]::new()
+    $origOut = [Console]::Out
+    [Console]::SetOut($sw)
+    try {
+        Get-AutoOSVerifiedFile -Uri $uri -Destination $out -Sha256 $sum | Out-Null
+    } finally {
+        [Console]::SetOut($origOut)
+    }
+    $text = $sw.ToString()
+    Assert-True ($text -like '*skipped*') "expected to contain [skipped] in [$text]"
+    Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+}
+
+function Start-AutoOSTestHttpServer {
+    # A throwaway HTTP server on 127.0.0.1 and an OS-assigned port, serving
+    # GET of the files under -Directory. Mirror of tests/run-tests.sh's
+    # _start_test_http_server, but written in PowerShell on a TcpListener
+    # inside a background job: the first version launched python via
+    # Start-Process and never got a port back on the windows-latest CI
+    # runner. No python, no HttpListener URL ACL, nothing to install.
+    # Returns @{ Job; Port; StopFile }; the caller must Stop-AutoOSTestHttpServer it.
+    # -Hang makes every accepted request stall forever: the connection is
+    # accepted and the request read, then nothing is ever sent until teardown.
+    # That is the stalled-mirror shape the download timeout exists for.
+    param([Parameter(Mandatory)][string]$Directory, [switch]$Hang)
+    # Read the switch into a plain boolean in THIS scope: the job below reaches
+    # it with $using:, so the parameter is genuinely used here even though the
+    # job scriptblock is where the value is consumed.
+    $hangRequested = [bool]$Hang
+    $portFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_port_' + [Guid]::NewGuid().ToString('N'))
+    $stopFile = Join-Path ([IO.Path]::GetTempPath()) ('aos_stop_' + [Guid]::NewGuid().ToString('N'))
+    $job = Start-Job -ArgumentList $Directory, $portFile -ScriptBlock {
+        param($dir, $portFile)
+        $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+        $listener.Start()
+        [IO.File]::WriteAllText($portFile, [string]$listener.LocalEndpoint.Port)
+        # AcceptTcpClient() blocks in native code and is not interruptible, so
+        # Remove-Job -Force on a job parked in it waits the full 120 s job
+        # stop/close timeout (found 2026-10-01). Poll a stop-file instead and
+        # leave the accept loop cooperatively: Stop-AutoOSTestHttpServer writes
+        # it, the job exits on its own, and Remove-Job returns at once.
+        while (-not (Test-Path -LiteralPath $using:stopFile)) {
+            if (-not $listener.Pending()) { Start-Sleep -Milliseconds 25; continue }
+            $client = $listener.AcceptTcpClient()
+            try {
+                $stream = $client.GetStream()
+                $reader = [IO.StreamReader]::new($stream)
+                $request = $reader.ReadLine()
+                while ($true) { $h = $reader.ReadLine(); if ($null -eq $h -or $h -eq '') { break } }
+                if ($using:hangRequested) {
+                    # Hold the socket open, answer nothing, and leave only when
+                    # teardown writes the stop-file (the cooperative stop the
+                    # 2026-10-01 harness fix requires: an uninterruptible job
+                    # makes Remove-Job -Force wait the full 120 s).
+                    while (-not (Test-Path -LiteralPath $using:stopFile)) { Start-Sleep -Milliseconds 50 }
+                    continue
+                }
+                $status = '404 Not Found'; $body = [byte[]]::new(0)
+                if ($request -match '^GET\s+(\S+)') {
+                    $path = [Uri]::UnescapeDataString(($Matches[1] -split '\?')[0]).TrimStart('/').Replace('/', '\')
+                    $full = Join-Path $dir $path
+                    if ((Test-Path -LiteralPath $full -PathType Container)) { $full = Join-Path $full 'index.html' }
+                    if (Test-Path -LiteralPath $full -PathType Leaf) {
+                        $body = [IO.File]::ReadAllBytes($full); $status = '200 OK'
+                    }
+                }
+                $head = [Text.Encoding]::ASCII.GetBytes("HTTP/1.0 $status`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n")
+                $stream.Write($head, 0, $head.Length)
+                if ($body.Length) { $stream.Write($body, 0, $body.Length) }
+                $stream.Flush()
+            } catch {
+                # A client that hangs up mid-request is not the server's problem.
+                Write-Verbose "test http server: $($_.Exception.Message)"
+            } finally {
+                $client.Close()
+            }
+        }
+        $listener.Stop()
+    }
+    $port = $null
+    for ($i = 0; $i -lt 100; $i++) {
+        if ((Test-Path -LiteralPath $portFile) -and (Get-Item -LiteralPath $portFile).Length -gt 0) {
+            $port = [int](Get-Content -LiteralPath $portFile -Raw).Trim(); break
+        }
+        if ($job.State -in @('Failed', 'Completed', 'Stopped')) { break }
+        Start-Sleep -Milliseconds 100
+    }
+    Remove-Item -LiteralPath $portFile -Force -ErrorAction SilentlyContinue
+    if (-not $port) {
+        $why = (Receive-Job $job -ErrorAction SilentlyContinue | Out-String).Trim()
+        # Release the job the same cooperative way, or this error path pays the
+        # same 120 s stop timeout it is reporting on.
+        Set-Content -LiteralPath $stopFile -Value 'stop' -ErrorAction SilentlyContinue
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
+        throw "test http server did not report a port (job state $($job.State)) $why"
+    }
+    @{ Job = $job; Port = $port; StopFile = $stopFile }
+}
+
+function Stop-AutoOSTestHttpServer {
+    param($Server)
+    if ($Server -and $Server.Job) {
+        # Ask the job to leave its accept loop before forcing it. Without this
+        # it is parked in AcceptTcpClient() (native, uninterruptible) and
+        # Remove-Job -Force waits the full 120 s job stop/close timeout. The
+        # written stop-file makes the job exit on its own, so removal is
+        # immediate (measured 0.02 s, 2026-10-01).
+        if ($Server.StopFile) { Set-Content -LiteralPath $Server.StopFile -Value 'stop' -ErrorAction SilentlyContinue }
+        Remove-Job -Job $Server.Job -Force -ErrorAction SilentlyContinue
+        if ($Server.StopFile) { Remove-Item -LiteralPath $Server.StopFile -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'test http server: Stop-AutoOSTestHttpServer returns promptly, never the 120 s job stop timeout' {
+    # Regression for the harness teardown bug (2026-10-01): the fixture used to
+    # block in AcceptTcpClient(), which Remove-Job -Force cannot interrupt, so
+    # every one of the 13 server-starting cases stalled ~120 s on teardown.
+    # 15 s is a generous bound: the bug is 120 s, the fix is well under 1 s.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_http_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp
+    try {
+        [IO.File]::WriteAllText((Join-Path $tmp 'ping.txt'), 'pong')
+        # One real request proves the poll loop actually serves, not just exits.
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$($srv.Port)/ping.txt" -UseBasicParsing -TimeoutSec 5
+        # The fixture sends no Content-Type, so .Content is a byte[] not text.
+        $served = if ($resp.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($resp.Content) } else { [string]$resp.Content }
+        Assert-True ($served -eq 'pong') "the poll loop did not serve a request: [$served]"
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        Stop-AutoOSTestHttpServer $srv
+        $sw.Stop()
+        $srv = $null   # already stopped; the finally must not stop it twice
+        Assert-True ($sw.Elapsed.TotalSeconds -lt 15) ("teardown took {0:N1}s, expected < 15s" -f $sw.Elapsed.TotalSeconds)
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: a stalled endpoint fails within the wall-clock bound instead of hanging (timeout)' {
+    # 2026-10-01 defect, failing-first: Get-AutoOSRawDownload shelled out to
+    # curl / Invoke-WebRequest with no time bound, so a mirror that accepted
+    # the connection and then sent nothing pinned the provision forever. The
+    # bound is injectable through AUTOOS_DOWNLOAD_TIMEOUT_SEC exactly so this
+    # is provable without waiting an hour: with a 2 s ceiling the fetch must
+    # fail fast, with a transport-failure message, and leave no .part behind.
+    # Against the pre-fix code this test has no bound to honour and hangs.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_stall_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp -Hang
+    $prev = $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC
+    $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC = '2'
+    try {
+        $out = Join-Path $tmp 'out.bin'
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $threw = $false; $msg = ''
+        try { Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/stall.bin" -Destination $out | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        $sw.Stop()
+        # Two-sided window: >= 1 s proves the stall actually happened (a
+        # connection-refused or DNS failure returns in well under a second and
+        # would otherwise satisfy the assertion without exercising the bound);
+        # < 30 s is generous for the injected 2 s bound plus curl's bounded
+        # retries, where the unfixed behaviour is unbounded.
+        Assert-True ($threw -and $sw.Elapsed.TotalSeconds -ge 1 -and $sw.Elapsed.TotalSeconds -lt 30 -and $msg -like '*transport failure*' -and -not (Test-Path -LiteralPath "$out.part")) `
+            ("threw={0} elapsed={1:N1}s part={2} msg=[{3}]" -f $threw, $sw.Elapsed.TotalSeconds, (Test-Path -LiteralPath "$out.part"), $msg)
+    } finally {
+        if ($null -eq $prev) { Remove-Item Env:\AUTOOS_DOWNLOAD_TIMEOUT_SEC -ErrorAction SilentlyContinue } else { $env:AUTOOS_DOWNLOAD_TIMEOUT_SEC = $prev }
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'every production network fetch in lib\windows carries a wall-clock bound' {
+    # The same 2026-10-01 defect class, enforced structurally so a NEW unbounded
+    # call site fails here instead of hanging a real provision: every shipped
+    # Invoke-WebRequest/Invoke-RestMethod invocation needs -TimeoutSec, and every
+    # direct curl invocation needs --max-time. Comment lines are skipped; only
+    # invocation lines are judged.
+    #
+    # It is a tripwire, not a proof: it matches '-Uri' on the same line as the
+    # verb, so a splatted, aliased (iwr/irm) or line-continued invocation, or a
+    # bare 'curl'/'--output', would slip past. That is the deliberate trade for
+    # a zero-dependency, readable guard; the behavioural stall test above is
+    # what actually exercises the bound.
+    $dir = Join-Path $Root 'lib\windows'
+    $bad = @()
+    foreach ($file in Get-ChildItem -Path $dir -Filter '*.psm1') {
+        $n = 0
+        foreach ($line in Get-Content -LiteralPath $file.FullName) {
+            $n++
+            $code = $line.Trim()
+            if ($code.StartsWith('#')) { continue }
+            if ($code -match 'Invoke-WebRequest\s+-Uri' -and $code -notmatch '-TimeoutSec') {
+                $bad += "$($file.Name):$n Invoke-WebRequest without -TimeoutSec"
+            } elseif ($code -match 'Invoke-RestMethod\s+-Uri' -and $code -notmatch '-TimeoutSec') {
+                $bad += "$($file.Name):$n Invoke-RestMethod without -TimeoutSec"
+            } elseif ($code -match '(&\s*\$curl\.Source|curl\.exe).*?-o\s' -and $code -notmatch '--max-time') {
+                $bad += "$($file.Name):$n curl without --max-time"
+            }
+        }
+    }
+    Assert-True ($bad.Count -eq 0) ($bad -join '; ')
+}
+
+Test-Case 'verified download: an http URL is streamed to disk through curl.exe and verifies (http)' {
+    # Windows PowerShell 5.1's Invoke-WebRequest -OutFile buffers the whole
+    # response in memory - unusable for a 6 GB ISO (found on the first real
+    # run, 2026-09-17). Get-AutoOSRawDownload must take the curl.exe route
+    # for http(s); this proves it against a loopback server, no internet.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_http_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp
+    try {
+        $src = Join-Path $tmp 'src.bin'
+        [IO.File]::WriteAllBytes($src, [byte[]](1..200000 | ForEach-Object { $_ % 251 }))
+        $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+        $out = Join-Path $tmp 'out.bin'
+        Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/src.bin" -Destination $out -Sha256 $sum | Out-Null
+        Assert-True ((Test-Path -LiteralPath $out) -and ((Get-FileHash -Algorithm SHA256 -LiteralPath $out).Hash -eq $sum)) 'downloaded file missing or digest differs'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: an http 404 is a transport failure that leaves no .part behind (http)' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_http_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $srv = Start-AutoOSTestHttpServer -Directory $tmp
+    try {
+        $out = Join-Path $tmp 'out.bin'
+        $threw = $false; $msg = ''
+        try { Get-AutoOSVerifiedFile -Uri "http://127.0.0.1:$($srv.Port)/does-not-exist.bin" -Destination $out -Sha256 ('0' * 64) | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*transport failure*' -and -not (Test-Path -LiteralPath "$out.part") -and -not (Test-Path -LiteralPath $out)) "threw=$threw msg=[$msg]"
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: an uncached (FILE_FLAG_NO_BUFFERING) read hashes identically to a cached one at every sector and chunk boundary (uncached)' {
+    # No-buffering reads must be sector-aligned in buffer and count, so the
+    # classic bugs live exactly at these sizes: an empty file, one byte,
+    # either side of a 512/4096 sector, and either side of a chunk. (It does
+    # NOT exercise the tail clamp: removing the clamp still passes, because
+    # ReadFile returns only valid bytes at end of file - see the C# comment.)
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_unc_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $rng = [System.Random]::new(4242)
+        $bad = @()
+        foreach ($n in @(0, 1, 511, 512, 513, 4095, 4096, 4097, 1048575, 1048576, 1048577, 3150001)) {
+            $p = Join-Path $tmp "f$n.bin"
+            $buf = [byte[]]::new($n); $rng.NextBytes($buf)
+            [IO.File]::WriteAllBytes($p, $buf)
+            $want = Get-AutoOSFileSha256 -Path $p
+            if ((Get-AutoOSUncachedFileSha256 -Path $p) -ne $want) { $bad += "$n(1MiB chunk)" }
+            if ((Get-AutoOSUncachedFileSha256 -Path $p -ChunkSize 4096) -ne $want) { $bad += "$n(4KiB chunk)" }
+        }
+        $refused = $false
+        try { Get-AutoOSUncachedFileSha256 -Path (Join-Path $tmp 'f4096.bin') -ChunkSize 1000 | Out-Null } catch { $refused = $true }
+        Assert-True ($bad.Count -eq 0 -and $refused) "mismatched sizes: $($bad -join ', '); unaligned chunk refused: $refused"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: hashes and verifies a file under Windows PowerShell 5.1, the engine setup.ps1 actually runs in (5.1)' {
+    # This suite runs under pwsh 7; setup.ps1 is launched with powershell.exe
+    # 5.1 (elevated launches in particular). The first real 6 GB download on
+    # 2026-09-17 completed and then failed in the 5.1 process with
+    # "Get-FileHash is not recognized" - a path no test had ever run under
+    # 5.1. The hash now goes through .NET; this proves the whole
+    # download-and-verify path under the real engine.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_51_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $src = Join-Path $tmp 'src'; Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+        $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $src).Hash
+        $out = Join-Path $tmp 'out'
+        $probe = Join-Path $tmp 'probe.ps1'
+        $mod = Join-Path $Root 'lib\windows\AutoOS.Download.psm1'
+        $lines = @(
+            'Set-StrictMode -Version Latest',
+            "`$ErrorActionPreference = 'Stop'",
+            "Import-Module '$mod' -DisableNameChecking -Force",
+            "Get-AutoOSVerifiedFile -Uri '$(([Uri]$src).AbsoluteUri)' -Destination '$out' -Sha256 '$sum' | Out-Null",
+            "'VERIFIED-51 ' + (Get-AutoOSFileSha256 -Path '$out')"
+        )
+        [IO.File]::WriteAllText($probe, ($lines -join "`r`n") + "`r`n", [Text.Encoding]::ASCII)
+        $res = (& powershell -NoProfile -ExecutionPolicy Bypass -File $probe 2>&1) -join "`n"
+        Assert-True ($LASTEXITCODE -eq 0 -and $res -like "*VERIFIED-51 $($sum.ToLowerInvariant())*" -and (Test-Path -LiteralPath $out)) "exit=$LASTEXITCODE out=$res"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: gpg stderr chatter (gpg-agent directory created) is not a failure, only the exit code is (gpg)' {
+    # The first real run on 2026-09-17 died here: gpg prints "gpg-agent[n]:
+    # directory '...' created" to stderr on every fresh GNUPGHOME, and under
+    # the module's $ErrorActionPreference = 'Stop' that became a terminating
+    # NativeCommandError before any signature was checked (handoff L6). A
+    # fake gpg.cmd on PATH that chatters on stderr and exits 0 reproduces it
+    # without a keyserver or a real key.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_gpg_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $shim = Join-Path $tmp 'gpg.cmd'
+    [IO.File]::WriteAllText($shim, "@echo gpg-agent[1234]: directory 'private-keys-v1.d' created 1>&2`r`n@exit /b 0`r`n")
+    $src = Join-Path $tmp 'src'; Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $sig = Join-Path $tmp 'src.gpg'; Set-Content -LiteralPath $sig -Value 'not-a-real-signature' -NoNewline
+    $prevPath = $env:Path
+    $env:Path = "$tmp;$prevPath"
+    try {
+        $ok = Test-AutoOSGpgSignature -Path $src -SignatureUri (ConvertTo-AutoOSTestFileUri $sig) -Fingerprint 'ABCDEF0123456789'
+        Assert-True ($ok -eq $true) "expected `$true from a gpg that exits 0 despite stderr chatter, got [$ok]"
+    } finally {
+        $env:Path = $prevPath
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'verified download: a signature check that throws leaves no .part behind (gpg)' {
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_gpg_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $src = Join-Path $tmp 'src'; Set-Content -LiteralPath $src -Value 'hello' -NoNewline
+    $out = Join-Path $tmp 'out'
+    $prevPath = $env:Path
+    # An empty PATH dir first and no gpg anywhere: Get-Command gpg fails and
+    # Test-AutoOSGpgSignature throws 'gpg not found' - the throwing path.
+    $env:Path = (Join-Path $tmp 'nothing')
+    try {
+        $threw = $false; $msg = ''
+        try { Get-AutoOSVerifiedFile -Uri (ConvertTo-AutoOSTestFileUri $src) -Destination $out -SignatureUri 'file:///nonexistent.sig' -GpgFingerprint 'ABCDEF0123456789' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*signature verification failed*' -and -not (Test-Path -LiteralPath "$out.part") -and -not (Test-Path -LiteralPath $out)) "threw=$threw msg=[$msg] part=$(Test-Path -LiteralPath "$out.part")"
+    } finally {
+        $env:Path = $prevPath
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── image_resolve (Task 4B) ────────────────────────────────────────────────
+# Mirrors lib/linux/download.sh's own "image_resolve" test block one-for-one
+# (same fixtures under tests\helpers\image_index_fixtures, same scenarios).
+# file:// is fine here (unlike the bash suite's loopback-server workaround):
+# Resolve-AutoOSImageUrl does its own string-joining of relative hrefs
+# against the page's own directory URI, so a fixture-tree file:// URI
+# behaves identically to a live server's for every case tested below - no
+# real network is ever touched.
+Describe-Group 'image_resolve'
+
+function ConvertTo-AutoOSTestDirUri {
+    param([string]$Path)
+    ([Uri]($Path.TrimEnd('\') + '\')).AbsoluteUri
+}
+
+$imgFixtureRoot = Join-Path $Root 'tests\helpers\image_index_fixtures'
+
+function New-AutoOSImageTestCatalog {
+    param(
+        [string]$Id, [string]$FixtureSubdir, [string]$FileRegex,
+        [string]$Sums = 'SHA256SUMS', [string]$Sig = '-', [string]$Leaf = ''
+    )
+    $indexUri = ConvertTo-AutoOSTestDirUri (Join-Path $imgFixtureRoot $FixtureSubdir)
+    $path = Join-Path ([IO.Path]::GetTempPath()) ('aos_img_cat_' + [Guid]::NewGuid().ToString('N') + '.json')
+    $entry = @{ id = $Id; index = $indexUri; file = $FileRegex; sums = $Sums; sig = $Sig }
+    # Omitted (default '') the same way every pre-existing caller above uses
+    # it: left out of the entry entirely, mirroring the bash suite's
+    # _image_resolve_test_catalog and the "absent means ''" catalog contract.
+    if ($Leaf) { $entry['leaf'] = $Leaf }
+    @{ images = @($entry) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $path -Encoding UTF8
+    $path
+}
+
+Test-Case 'image_resolve: an LTS entry picks the current LTS release, never an interim one' {
+    $cat = New-AutoOSImageTestCatalog -Id 'ubuntu-desktop-lts' -FixtureSubdir 'ubuntu_releases' `
+        -FileRegex 'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.gpg'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat
+        # One Assert-True per Test-Case, same convention as every other test
+        # in this suite (Pass/Fail print $script:Current, so more than one
+        # assertion per case would double-count and re-print the name).
+        $ok = ($r.File -eq 'ubuntu-26.04.1-desktop-amd64.iso') -and
+            ($r.Url -like '*26.04.1/ubuntu-26.04.1-desktop-amd64.iso') -and
+            ($r.Sig -like '*26.04.1/SHA256SUMS.gpg') -and
+            ($r.Url -notlike '*25.10*') -and ($r.Url -notlike '*24.04.5*')
+        Assert-True $ok "file=$($r.File) url=$($r.Url) sig=$($r.Sig)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case "image_resolve: Debian's current/ symlink shape resolves with no directory recursion" {
+    $cat = New-AutoOSImageTestCatalog -Id 'debian-netinst-stable' -FixtureSubdir 'debian_iso_cd' `
+        -FileRegex 'debian-[0-9]+\.[0-9]+\.[0-9]+-amd64-netinst\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.sign'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'debian-netinst-stable' -CatalogPath $cat
+        $ok = ($r.File -eq 'debian-13.1.0-amd64-netinst.iso') -and ($r.Sig -like '*debian_iso_cd/SHA256SUMS.sign')
+        Assert-True $ok "file=$($r.File) sig=$($r.Sig)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: a pattern matching nothing throws loudly, never guesses' {
+    $cat = New-AutoOSImageTestCatalog -Id 'nothing-here' -FixtureSubdir 'no_match' -FileRegex 'nonexistent-[0-9]+\.iso$'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'nothing-here' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*matched nothing*') "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: a pattern matching several files that differ by more than a version throws, never a silent first-match' {
+    # Same version, different arch - a regex broader than its author meant.
+    # No ordering rule applies here, unlike the point-release case below.
+    $cat = New-AutoOSImageTestCatalog -Id 'ambiguous' -FixtureSubdir 'multiple_match' `
+        -FileRegex 'debian-[0-9]+\.[0-9]+\.[0-9]+-(amd64|arm64)-netinst\.iso$'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'ambiguous' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*matched multiple*' -and $msg -like '*debian-13.2.0-amd64-netinst.iso*' -and $msg -like '*debian-13.2.0-arm64-netinst.iso*') `
+            "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: a point release listed beside its .0 release in one directory resolves to the highest version (live 26.04.1 shape)' {
+    # Found on the first real run, 2026-09-17: releases.ubuntu.com/26.04.1/
+    # lists ubuntu-26.04-desktop-amd64.iso AND ubuntu-26.04.1-desktop-amd64.iso.
+    # Names identical except for one dotted version number are the same
+    # artefact at different point releases - the highest wins (26.04 < 26.04.1).
+    $cat = New-AutoOSImageTestCatalog -Id 'ubuntu-desktop-lts' -FixtureSubdir 'ubuntu_point_release' `
+        -FileRegex 'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.gpg'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat
+        Assert-True ($r.File -eq 'ubuntu-26.04.1-desktop-amd64.iso' -and $r.Url -like '*/ubuntu_point_release/ubuntu-26.04.1-desktop-amd64.iso' -and $r.Sums -like '*/SHA256SUMS') "got: $($r | ConvertTo-Json -Compress)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: an -lts id with only interim directories present throws instead of picking one' {
+    $cat = New-AutoOSImageTestCatalog -Id 'ubuntu-desktop-lts' -FixtureSubdir 'ubuntu_only_interim' `
+        -FileRegex 'ubuntu-[0-9]+\.[0-9]+(\.[0-9]+)?-desktop-amd64\.iso$' -Sums 'SHA256SUMS' -Sig 'SHA256SUMS.gpg'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'ubuntu-desktop-lts' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no LTS release directory*') "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case "image_resolve: a fedora-shaped entry resolves via 'leaf' to the ISO and CHECKSUM three directories below the chosen version dir, picking the highest of 43/44" {
+    # Real upstream shape (verified 2026-09-18): releases/ lists bare-integer
+    # version dirs (44/, no dot), and the ISO sits three levels below the
+    # chosen one (Workstation/x86_64/iso/) - 'leaf' is what lets a single
+    # recursion step land there directly.
+    $cat = New-AutoOSImageTestCatalog -Id 'fedora-workstation' -FixtureSubdir 'fedora_releases' `
+        -FileRegex 'Fedora-Workstation-Live-[0-9]+-[0-9.]+\.x86_64\.iso$' `
+        -Sums 'Fedora-Workstation-[0-9]+-[0-9.]+-x86_64-CHECKSUM$' -Sig '-' -Leaf 'Workstation/x86_64/iso/'
+    try {
+        $r = Resolve-AutoOSImageUrl -ImageId 'fedora-workstation' -CatalogPath $cat
+        $ok = ($r.File -eq 'Fedora-Workstation-Live-44-1.7.x86_64.iso') -and
+            ($r.Url -like '*/44/Workstation/x86_64/iso/Fedora-Workstation-Live-44-1.7.x86_64.iso') -and
+            ($r.Sums -like '*/44/Workstation/x86_64/iso/Fedora-Workstation-44-1.7-x86_64-CHECKSUM') -and
+            ($r.Url -notlike '*/43/*') -and ($r.Url -notlike '*/test/*')
+        Assert-True $ok "file=$($r.File) url=$($r.Url) sums=$($r.Sums)"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case "image_resolve: a bare-integer version directory (Fedora's '44/') is never LTS-eligible - it has no .04, so it must be ineligible" {
+    $cat = New-AutoOSImageTestCatalog -Id 'fedora-workstation-lts' -FixtureSubdir 'fedora_releases' `
+        -FileRegex 'Fedora-Workstation-Live-[0-9]+-[0-9.]+\.x86_64\.iso$' `
+        -Sums 'Fedora-Workstation-[0-9]+-[0-9.]+-x86_64-CHECKSUM$' -Sig '-'
+    try {
+        $threw = $false; $msg = ''
+        try { Resolve-AutoOSImageUrl -ImageId 'fedora-workstation-lts' -CatalogPath $cat | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no LTS release directory*') "threw=$threw msg=$msg"
+    } finally { Remove-Item -Force $cat -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'image_resolve: custom-url is a specific refusal, not a crash' {
+    $threw = $false; $msg = ''
+    try { Resolve-AutoOSImageUrl -ImageId 'custom-url' | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=$msg"
+}
+
+Test-Case 'image_resolve: custom-local is a specific refusal, not a crash' {
+    $threw = $false; $msg = ''
+    try { Resolve-AutoOSImageUrl -ImageId 'custom-local' | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*UI affordance*') "threw=$threw msg=$msg"
+}
+
+Test-Case 'image_resolve: an unknown image id throws a clear error, not a crash' {
+    $threw = $false; $msg = ''
+    try { Resolve-AutoOSImageUrl -ImageId 'totally-not-a-real-image-id' -CatalogPath (Join-Path $Root 'catalog\images.json') | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*no catalog entry*') "threw=$threw msg=$msg"
+}
+
+# ─── USB device enumeration and the safety guard ────────────────────────────
+# Task 5 of plan 2026-09-11-installer-usb-and-rescue-profile: Assert-
+# AutoOSUsbSafe is the only thing standing between the installer-USB writer
+# and a live workstation disk, so this block gets the most tests and no
+# shortcuts — the exact mirror of lib/linux/usb.sh's "usb safety" tests.
+# Every fixture is synthetic ($env:AUTOOS_FAKE_DISKS) — this suite must
+# never enumerate the real machine's disks (AGENTS.md §5). Every test name
+# carries "usb" so `-Filter usb` actually reaches it.
+Describe-Group 'usb safety'
+
+function New-FakeUsbDisk {
+    param(
+        [int]$Number, [string]$Model, [long]$Size, [string]$BusType,
+        [bool]$IsBoot = $false, [bool]$IsSystem = $false, [bool]$IsRemovable = $false,
+        [string]$DriveLetter = $null,
+        # FileSystem/IsReadOnly (Task 6): what Assert-AutoOSUsbSafe's
+        # 'MountedFat32Writable' mode (the uefi-copy engine's guard mode)
+        # checks — the exact mirror of tests/helpers/fake_usb.py's
+        # fstype/ro fields.
+        [string]$FileSystem = '',
+        [bool]$IsReadOnly = $false
+    )
+    # Every field _Get-AutoOSUsbRawDisks/_ConvertTo-AutoOSUsbRecord reads is
+    # present explicitly - Set-StrictMode turns a missing one into a hard
+    # error rather than a silently-$null one, which is the point: an
+    # incomplete fixture must fail loudly, never quietly under-test the guard.
+    [pscustomobject]@{
+        Number      = $Number
+        Model       = $Model
+        Size        = $Size
+        BusType     = $BusType
+        IsBoot      = $IsBoot
+        IsSystem    = $IsSystem
+        IsRemovable = $IsRemovable
+        Partitions  = @([pscustomobject]@{
+            DriveLetter = $DriveLetter
+            FileSystem  = $FileSystem
+            IsReadOnly  = $IsReadOnly
+        })
+    }
+}
+
+# The internal boot disk present in every fixture below, distinct from the
+# "Disk 5" target every other fixture uses — the same shape the plan brief
+# measured on the human partner's real machine (five non-removable internal
+# disks alongside the one real USB target). Every fixture except
+# root_is_boot_disk names a DIFFERENT DeviceId to Assert-AutoOSUsbSafe than
+# this one, so its presence is what proves the guard looks past "some system
+# disk exists" to "is THIS the system disk".
+function New-FakeBootDisk {
+    New-FakeUsbDisk -Number 0 -Model 'Boot SSD' -Size 256060514304 -BusType 'NVMe' `
+        -IsBoot $true -IsSystem $true -DriveLetter 'C'
+}
+
+function Get-FakeUsbDisksJson {
+    param([Parameter(Mandatory)][string]$Fixture)
+
+    $bootDisk = New-FakeBootDisk
+    $disks = switch ($Fixture) {
+        # The most dangerous case: disk 0 itself is the system/boot disk.
+        'root_is_boot_disk' { @($bootDisk) }
+
+        # A second internal disk, distinct from the boot disk: not
+        # removable, not USB/SCSI. Must be refused even though it does not
+        # hold Windows.
+        'internal_nvme' {
+            @($bootDisk, (New-FakeUsbDisk -Number 1 -Model 'WD Black SN850' `
+                -Size 1000204886016 -BusType 'NVMe'))
+        }
+
+        # Removable, USB, but has an assigned drive letter — must refuse
+        # until the caller unmounts it.
+        'usb_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'SanDisk Ultra' `
+                -Size 32017047552 -BusType 'USB' -IsRemovable $true -DriveLetter 'E'))
+        }
+
+        # Removable, USB, unmounted — but smaller than the image the caller
+        # asks for ($env:AUTOOS_IMAGE_BYTES in the test).
+        'tiny_stick' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Kingston DataTraveler' `
+                -Size 4000000000 -BusType 'USB' -IsRemovable $true))
+        }
+
+        # The real target, measured on the human partner's machine:
+        # Disk 5, "Intenso Office Line", BusType USB, IsSystem False,
+        # IsBoot False, 31,437,766,656 bytes, unmounted.
+        'good_stick' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true))
+        }
+
+        # Finding A10: a USB SSD (commonly behind a UAS/UASP bridge)
+        # enumerates as BusType 'SCSI' with IsRemovable=$false. Must still be
+        # surfaced by Get-AutoOSUsbDevice - BusType alone is the signal.
+        'usb_ssd_fixed' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Samsung T7 (USB enclosure)' `
+                -Size 2000398934016 -BusType 'SCSI' -IsRemovable $false))
+        }
+
+        # Task 6 (B16): the uefi-copy engine writes onto an EXISTING
+        # mounted FAT32 volume rather than the raw disk, so
+        # Assert-AutoOSUsbSafe's 'MountedFat32Writable' mode wants the
+        # opposite of every fixture above — mounted, not unmounted. This is
+        # the human partner's real stick shape: Disk 5, FAT32, writable,
+        # already mounted at J:.
+        'usb_fat32_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter 'J' `
+                -FileSystem 'FAT32' -IsReadOnly $false))
+        }
+
+        # Same target, but its mounted volume is NTFS, not FAT32 — the
+        # guard must name the actual filesystem so the refusal is actionable.
+        'usb_wrong_fs_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter 'J' `
+                -FileSystem 'NTFS' -IsReadOnly $false))
+        }
+
+        # FAT32, mounted, but read-only — uefi-copy needs to write to it.
+        'usb_fat32_readonly' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter 'J' `
+                -FileSystem 'FAT32' -IsReadOnly $true))
+        }
+
+        # Finding F2': mounted, FAT32, writable, on a real USB/removable
+        # disk that is neither IsBoot nor IsSystem — every other check in
+        # MountedFat32Writable mode accepts this, but its drive letter is
+        # the live system drive, the Windows analogue of a USB-hosted
+        # /boot/efi (lib/linux/usb.sh's own F2' fixture).
+        'usb_system_drive_mounted' {
+            @($bootDisk, (New-FakeUsbDisk -Number 5 -Model 'Intenso Office Line' `
+                -Size 31437766656 -BusType 'USB' -IsRemovable $true -DriveLetter $env:SystemDrive.TrimEnd(':') `
+                -FileSystem 'FAT32' -IsReadOnly $false))
+        }
+
+        default { throw "unknown fake-usb fixture: $Fixture" }
+    }
+    ConvertTo-Json -InputObject @($disks) -Depth 6
+}
+
+function Invoke-WithFakeUsbEnv {
+    # Sets the AUTOOS_FAKE_* environment variables for the duration of
+    # $Body, then always clears them - $env: vars persist for the whole
+    # session (unlike bash's `VAR=x cmd` subshell scoping), so a test that
+    # forgot to clean up would silently contaminate every test after it.
+    param(
+        [string]$Fixture,
+        [Nullable[long]]$ImageBytes = $null,
+        [scriptblock]$Body
+    )
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture $Fixture
+    if ($null -ne $ImageBytes) { $env:AUTOOS_IMAGE_BYTES = [string]$ImageBytes }
+    try {
+        & $Body
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-AutoOSCapturedConsole {
+    # Write-AutoOSLine writes straight to [Console]::Out rather than the
+    # pipeline (see the verified-download tests above), so a function's own
+    # progress/refusal lines are captured by redirecting the real Console
+    # stream for the duration of -Body. Returns the captured text; -Body's
+    # own exception, if any, is rethrown after the stream is restored.
+    param([scriptblock]$Body)
+    # Both streams: Write-AutoOSLine -Level error goes to [Console]::Error.
+    $sw = [IO.StringWriter]::new()
+    $origOut = [Console]::Out
+    $origErr = [Console]::Error
+    [Console]::SetOut($sw)
+    [Console]::SetError($sw)
+    try { & $Body | Out-Null } finally { [Console]::SetOut($origOut); [Console]::SetError($origErr) }
+    $sw.ToString()
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses the disk holding the system volume' {
+    Invoke-WithFakeUsbEnv -Fixture 'root_is_boot_disk' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE0' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*system disk*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses a non-removable internal disk' {
+    Invoke-WithFakeUsbEnv -Fixture 'internal_nvme' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE1' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*not removable*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses a usb disk with a mounted volume' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*mounted*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe refuses a usb stick smaller than the image' {
+    Invoke-WithFakeUsbEnv -Fixture 'tiny_stick' -ImageBytes 8000000000 -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*too small*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'Assert-AutoOSUsbSafe accepts a real removable usb stick that is big enough' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $result = Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5'
+        Assert-True ($null -ne $result -and $result.DeviceId -eq '\\.\PHYSICALDRIVE5') 'rejected a valid target'
+    }
+}
+
+Test-Case 'Get-AutoOSUsbDevice still offers a USB SSD reporting as fixed (A10)' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_ssd_fixed' -Body {
+        $devices = @(Get-AutoOSUsbDevice)
+        Assert-Contains ($devices | ForEach-Object { $_.DeviceId }) '\\.\PHYSICALDRIVE5'
+    }
+}
+
+Test-Case 'Assert-AutoOSElevated refuses to plan a usb write without admin (B10)' {
+    $env:AUTOOS_FAKE_ELEVATED = '0'
+    try {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSElevated | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*Administrator*') "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Assert-AutoOSElevated is satisfied for a usb write when already admin (B10)' {
+    $env:AUTOOS_FAKE_ELEVATED = '1'
+    try {
+        $result = Assert-AutoOSElevated
+        Assert-True $result.IsElevated 'refused an already-elevated session'
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── Engine-aware guard modes (Task 6, B16) ─────────────────────────────────
+# The real-hardware bug that started Task 6: Assert-AutoOSUsbSafe correctly
+# refused every internal disk, then refused the legitimate USB stick too,
+# because the only mode it knew was "must be unmounted" — wrong for
+# uefi-copy, which writes onto a volume that is ALREADY mounted. The -Mode
+# parameter is what fixes this; every branch gets its own fixture and test.
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) accepts an already-mounted writable FAT32 target' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_fat32_mounted' -Body {
+        $result = Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable
+        Assert-True ($null -ne $result) 'rejected a valid uefi-copy target'
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a target with nothing mounted' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no mounted volume*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a mounted volume that is not FAT32' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_wrong_fs_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*not FAT32*' -and $msg -like '*NTFS*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a read-only FAT32 volume' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_fat32_readonly' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*read-only*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe still defaults to Unmounted mode when none is given' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*mounted*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: Assert-AutoOSUsbSafe (MountedFat32Writable) refuses a volume mounted at the system drive, regardless of bus (finding F2-prime)' {
+    Invoke-WithFakeUsbEnv -Fixture 'usb_system_drive_mounted' -Body {
+        $threw = $false; $msg = ''
+        try { Assert-AutoOSUsbSafe -DeviceId '\\.\PHYSICALDRIVE5' -Mode MountedFat32Writable | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*system drive*') "threw=$threw msg=[$msg]"
+    }
+}
+
+# ─── The write planner (Task 6) ─────────────────────────────────────────────
+# New-AutoOSUsbPlan turns (image, kind, engine, device) into the exact
+# write commands, checks every compatibility/platform/lock/safety question
+# first, and runs nothing — the exact mirror of lib/linux/usb.sh's
+# usb_plan(). Every test name below carries "usb" so `-Filter usb` reaches it.
+Test-Case 'usb: New-AutoOSUsbPlan names the device and Ventoy for a dry run' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $plan = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' `
+            -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        $joined = $plan -join "`n"
+        Assert-True ($joined -like '*PHYSICALDRIVE5*') "device missing from plan: $joined"
+        Assert-True ($joined -like '*Ventoy2Disk*') "Ventoy2Disk missing from plan: $joined"
+        Assert-True ($joined -notlike '*installed*') "unexpected 'installed' in plan: $joined"
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan fetches and verifies the image as its first line, before anything touches the device (plan fetch)' {
+    # The seam the 2026-09-17 handoff names as the single gap stopping the
+    # headline feature: Resolve-AutoOSImageUrl existed, Get-AutoOSVerifiedFile
+    # existed, and the plan named a cache path nobody ever filled.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $env:AUTOOS_CACHE_DIR = 'C:\scratch\images'
+        try {
+            $plan = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' `
+                -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        } finally {
+            Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue
+        }
+        Assert-Equal $plan[0] 'Invoke-AutoOSUsbFetchImage ubuntu-desktop-lts C:\scratch\images\ubuntu-desktop-lts.iso'
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan pins the device identity and emits a re-verify step immediately before the destructive lines (F3/F6, plan reverify)' {
+    # Mirror of the bash F3/F6 test: until 2026-09-17 the Windows plan had
+    # no re-verify at all. The fetch line precedes it (the hour-long step
+    # must not sit between the re-verify and the write).
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $env:AUTOOS_FAKE_DISK_ID = 'serial-XYZ'
+        try {
+            $plan = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        } finally { Remove-Item Env:\AUTOOS_FAKE_DISK_ID -ErrorAction SilentlyContinue }
+        $rev = [array]::IndexOf($plan, 'Invoke-AutoOSUsbReverify \\.\PHYSICALDRIVE5 Unmounted 6000000000 serial-XYZ')
+        $ventoy = [array]::IndexOf($plan, 'Ventoy2Disk.exe -I -G \\.\PHYSICALDRIVE5')
+        Assert-True ($rev -ge 1 -and $ventoy -eq ($rev + 1) -and $plan[0] -like 'Invoke-AutoOSUsbFetchImage *') "plan=$($plan -join ' | ')"
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbReverify refuses when the device identity no longer matches what was pinned (F3/F6 TOCTOU, reverify)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_FAKE_DISK_ID = 'serial-CURRENT'
+        try {
+            $threw = $false; $msg = ''
+            try { Invoke-AutoOSUsbReverify -DeviceId '\\.\PHYSICALDRIVE5' -Mode 'Unmounted' -ImageBytes 0 -PinnedId 'serial-PINNED' }
+            catch { $threw = $true; $msg = $_.Exception.Message }
+            Assert-True ($threw -and $msg -like '*identity changed*') "threw=$threw msg=[$msg]"
+        } finally { Remove-Item Env:\AUTOOS_FAKE_DISK_ID -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbReverify accepts when the device identity still matches, and a plan line dispatches to it (reverify)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_FAKE_DISK_ID = 'serial-SAME'
+        try {
+            Invoke-AutoOSUsbReverify -DeviceId '\\.\PHYSICALDRIVE5' -Mode 'Unmounted' -ImageBytes 0 -PinnedId 'serial-SAME'
+            # Through the executor, as the real plan line, with nothing
+            # destructive after it: dispatch must reach the function (a
+            # malformed/unknown line would throw), and it must not throw.
+            $threw = $false; $msg = ''
+            try { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbReverify \\.\PHYSICALDRIVE5 Unmounted 0 serial-SAME') | Out-Null }
+            catch { $threw = $true; $msg = $_.Exception.Message }
+            Assert-True (-not $threw) "unexpected throw: $msg"
+        } finally { Remove-Item Env:\AUTOOS_FAKE_DISK_ID -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan adds the Ventoy persistence step for live-persistent only (plan persistence)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $live = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'live-persistent' -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        $inst = @(New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' -DeviceId '\\.\PHYSICALDRIVE5' -DryRun)
+        Assert-True ($live[-1] -eq 'Add-AutoOSUsbVentoyPersistence \\.\PHYSICALDRIVE5' -and $live[-2] -like 'Invoke-AutoOSUsbCopyImage *' -and (($inst -join "`n") -notlike '*Persistence*')) "live=$($live -join ' | ') inst=$($inst -join ' | ')"
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan never plans a raw image onto ventoy''s copy path' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $threw = $false; $msg = ''
+        try { New-AutoOSUsbPlan -ImageId 'proxmox-ve' -Kind 'installer' -Engine 'ventoy' `
+            -DeviceId '\\.\PHYSICALDRIVE5' -DryRun | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*raw*') "threw=$threw msg=[$msg]"
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan refuses a full-os kind on an engine that cannot build one' {
+    $threw = $false; $msg = ''
+    try { New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'full-os' -Engine 'ventoy' `
+        -DeviceId '\\.\PHYSICALDRIVE5' -DryRun | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*cannot build*') "threw=$threw msg=[$msg]"
+}
+
+Test-Case 'usb: the ventoy engine is hidden on arm64, not offered and broken' {
+    $env:AUTOOS_FAKE_ARCH = 'arm64'
+    try {
+        $ids = @(Get-AutoOSUsbEngineList -Platform 'windows' -Arch (Get-AutoOSUsbCurrentArch) | ForEach-Object { $_.id })
+        Assert-NotContains $ids 'ventoy'
+        Assert-Contains $ids 'native'
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: New-AutoOSUsbPlan refuses a second write while one is already in progress' {
+    $env:AUTOOS_FAKE_RUN_ACTIVE = '1'
+    try {
+        $threw = $false; $msg = ''
+        try { New-AutoOSUsbPlan -ImageId 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' `
+            -DeviceId '\\.\PHYSICALDRIVE5' -DryRun | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*already in progress*') "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_RUN_ACTIVE -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: setup.ps1 -CreateUsb dry run names the device and Ventoy' {
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture 'good_stick'
+    $env:AUTOOS_IMAGE_BYTES = '4000000000'
+    try {
+        $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb `
+            -Image 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' `
+            -UsbDevice '\\.\PHYSICALDRIVE5' -DryRun -NoColor 2>&1) -join "`n"
+        Assert-True ($out -like '*PHYSICALDRIVE5*' -and $out -like '*Ventoy2Disk*') "out=$out"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── setup.ps1 actually executing a plan ───────────────────────────────────
+# Until 2026-09-17 a -CreateUsb WITHOUT -DryRun printed the plan and exited
+# 0 - a "create" that created nothing; Invoke-AutoOSUsbPlan had no caller
+# outside the tests. These two prove the wiring without a dry-run flag,
+# which AGENTS.md §5 otherwise reserves for end-to-end tests: both are
+# guaranteed to run no step - the first refuses before Invoke-AutoOSUsbPlan
+# is ever reached, the second is stopped by AUTOOS_FORCE_FAIL on the very
+# first step - both run against the synthetic disk fixture with elevation
+# faked, and both assert the scratch cache dir came out exactly as it went in.
+function Invoke-AutoOSSetupUsbRealRun {
+    param([string[]]$ExtraArgs, [string]$Scratch)
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture 'good_stick'
+    $env:AUTOOS_IMAGE_BYTES = '4000000000'
+    $env:AUTOOS_FAKE_ELEVATED = '1'
+    $env:AUTOOS_CACHE_DIR = $Scratch
+    try {
+        $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb `
+            -Image 'ubuntu-desktop-lts' -Kind 'installer' -Engine 'ventoy' `
+            -UsbDevice '\\.\PHYSICALDRIVE5' -NoColor @ExtraArgs 2>&1) -join "`n"
+        [pscustomobject]@{ Out = $out; ExitCode = $LASTEXITCODE }
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_IMAGE_BYTES -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: setup.ps1 -CreateUsb without -WipeTargetDisk shows the plan, then refuses before running any step (execute)' {
+    $scratch = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_usb_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $r = Invoke-AutoOSSetupUsbRealRun -Scratch $scratch -ExtraArgs @()
+        $left = @(Get-ChildItem -LiteralPath $scratch -Recurse -Force).Count
+        Assert-True ($r.ExitCode -ne 0 -and $r.Out -like '*-WipeTargetDisk*' -and $r.Out -like '*Invoke-AutoOSUsbFetchImage*' `
+            -and $r.Out -notlike '*TRACE*' -and $r.Out -notlike '*Ready to boot*' -and $left -eq 0) "exit=$($r.ExitCode) left=$left out=$($r.Out)"
+    } finally {
+        Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: setup.ps1 -CreateUsb with -WipeTargetDisk hands the printed plan to Invoke-AutoOSUsbPlan (execute)' {
+    $scratch = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_usb_" + [Guid]::NewGuid().ToString('N')))).FullName
+    $env:AUTOOS_FORCE_FAIL = '1'
+    $env:AUTOOS_TRACE = '1'
+    try {
+        $r = Invoke-AutoOSSetupUsbRealRun -Scratch $scratch -ExtraArgs @('-WipeTargetDisk')
+        $left = @(Get-ChildItem -LiteralPath $scratch -Recurse -Force).Count
+        # The forced failure must land on the FETCH step - proof that the
+        # first thing a real run does is download, not touch the device.
+        Assert-True ($r.ExitCode -ne 0 -and $r.Out -like '*TRACE Invoke-AutoOSUsbFetchImage ubuntu-desktop-lts*' `
+            -and $r.Out -like '*forced failure*' -and $r.Out -notlike '*Ready to boot*' -and $left -eq 0) "exit=$($r.ExitCode) left=$left out=$($r.Out)"
+    } finally {
+        Remove-Item Env:\AUTOOS_FORCE_FAIL -ErrorAction SilentlyContinue
+        Remove-Item Env:\AUTOOS_TRACE -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── Invoke-AutoOSUsbFetchImage: the resolver-to-downloader bridge ──────────
+# Mirror of the bash suite's "usb fetch" block: a scratch release directory
+# (a tiny text file standing in for the ISO plus a real SHA256SUMS computed
+# from it) reached over file:// the same way the image_resolve tests above
+# reach their fixtures, and a scratch catalog whose one entry points at it.
+# No test here reaches the real internet or the real catalog. Every test
+# name carries "usb" and "fetch" so `-Filter usb` and `-Filter fetch` both
+# reach them.
+function New-AutoOSUsbFetchFixture {
+    # -Mode good lists the image's real digest, bad an all-zero one, missing
+    # a different filename entirely. -Sums '-' models a catalog entry with
+    # no checksum manifest at all.
+    param([string]$Mode = 'good', [string]$Sums = 'SHA256SUMS', [string[]]$Mirrors = @())
+    $rel = Join-Path ([IO.Path]::GetTempPath()) ('aos_fetch_' + [Guid]::NewGuid().ToString('N'))
+    $dir = Join-Path $rel '1.0'
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $iso = Join-Path $dir 'testos-1.0-amd64.iso'
+    [IO.File]::WriteAllText($iso, "AUTOOS TEST IMAGE - not a real ISO`n")
+    $sum = (Get-FileHash -Algorithm SHA256 -LiteralPath $iso).Hash.ToLowerInvariant()
+    $line = switch ($Mode) {
+        'good'    { "$sum *testos-1.0-amd64.iso" }
+        'bad'     { ('0' * 64) + ' *testos-1.0-amd64.iso' }
+        'missing' { "$sum *something-else.iso" }
+    }
+    [IO.File]::WriteAllText((Join-Path $dir 'SHA256SUMS'), "$line`n")
+    $html = '<html><body><pre><a href="../">../</a>' + "`n" +
+            '<a href="testos-1.0-amd64.iso">testos-1.0-amd64.iso</a>' + "`n" +
+            '<a href="SHA256SUMS">SHA256SUMS</a>' + "`n" + '</pre></body></html>'
+    [IO.File]::WriteAllText((Join-Path $dir 'index.html'), $html)
+    $cat = Join-Path $rel 'images.json'
+    $entry = @{ id = 'testos'; name = 'Test OS'; homepage = 'http://127.0.0.1/'
+                index = (ConvertTo-AutoOSTestDirUri $dir); file = 'testos-[0-9.]+-amd64\.iso$'
+                sums = $Sums; sig = '-'; key = '-'; kinds = @('installer'); writeMode = 'hybrid'; sizeGb = 0.001 }
+    if ($Mirrors.Count -gt 0) { $entry['mirrors'] = @($Mirrors) }
+    @{ images = @($entry) } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cat -Encoding UTF8
+    [pscustomobject]@{ Root = $rel; Catalog = $cat; Iso = $iso; Dir = $dir; Dest = (Join-Path $rel 'cache\testos.iso') }
+}
+
+function New-AutoOSUsbFetchMirror {
+    # A second release dir with the same 1.0\ layout served over loopback
+    # http as a "mirror": an exact copy, or one whose image bytes differ
+    # from what the canonical manifest publishes. Returns @{ Root; Server }.
+    param([Parameter(Mandatory)][string]$FixtureDir, [string]$Mode = 'good')
+    $m = Join-Path ([IO.Path]::GetTempPath()) ('aos_mirror_' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path (Join-Path $m '1.0') -Force | Out-Null
+    Copy-Item -Path (Join-Path $FixtureDir '*') -Destination (Join-Path $m '1.0') -Force
+    if ($Mode -eq 'corrupt') { [IO.File]::WriteAllText((Join-Path $m '1.0\testos-1.0-amd64.iso'), "CORRUPT MIRROR COPY`n") }
+    $srv = Start-AutoOSTestHttpServer -Directory $m
+    # Url is the mirror's equivalent of the catalog `index` (the release
+    # directory itself), so the resolved relative filename appends cleanly.
+    @{ Root = $m; Server = $srv; Url = "http://127.0.0.1:$($srv.Port)/1.0/" }
+}
+
+Test-Case 'usb: Get-AutoOSUsbSumsDigest reads coreutils, starred and BSD-style manifests and ignores non-SHA-256 lines (fetch)' {
+    $m = Join-Path ([IO.Path]::GetTempPath()) ('aos_sums_' + [Guid]::NewGuid().ToString('N'))
+    $d = { param($n) ([string]$n) * 64 }
+    $lines = @(
+        'd41d8cd98f00b204e9800998ecf8427e *plain.iso',
+        "$(& $d 1)  plain.iso",
+        "$(& $d 2) *starred.iso",
+        "$(& $d 3)  ./dotslash.iso",
+        "SHA256 (bsd.iso) = $(& $d 4)"
+    )
+    [IO.File]::WriteAllText($m, ($lines -join "`n") + "`n")
+    try {
+        $r1 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'plain.iso'
+        $r2 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'starred.iso'
+        $r3 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'dotslash.iso'
+        $r4 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'bsd.iso'
+        $r5 = Get-AutoOSUsbSumsDigest -ManifestPath $m -FileName 'absent.iso'
+        Assert-True ($r1 -eq (& $d 1) -and $r2 -eq (& $d 2) -and $r3 -eq (& $d 3) -and $r4 -eq (& $d 4) -and $null -eq $r5) "plain=$r1 starred=$r2 dotslash=$r3 bsd=$r4 absent=[$r5]"
+    } finally {
+        Remove-Item -Force $m -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage downloads the image, verifies it against the published SHA256SUMS and keeps the manifest beside it (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    try {
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog }
+        $same = (Test-Path -LiteralPath $fx.Dest) -and ((Get-FileHash -LiteralPath $fx.Dest).Hash -eq (Get-FileHash -LiteralPath $fx.Iso).Hash)
+        Assert-True ($same -and (Test-Path -LiteralPath "$($fx.Dest).sums") -and $text -like '*verified image*') "same=$same out=$text"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage reports a second run as skipped, never a refetch (fetch idempotent)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    try {
+        Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog }
+        Assert-True ($text -like '*skipped: testos.iso already downloaded*') "out=$text"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage refuses a checksum mismatch and leaves nothing at the destination (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode bad
+    try {
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*checksum mismatch*' -and -not (Test-Path -LiteralPath $fx.Dest) -and -not (Test-Path -LiteralPath "$($fx.Dest).part")) "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage refuses a manifest that does not list the image before any image download (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode missing
+    try {
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*does not list*' -and -not (Test-Path -LiteralPath $fx.Dest)) "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage refuses a catalog entry with no checksum manifest, nothing fetched (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good -Sums '-'
+    try {
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*no checksum manifest*' -and -not (Test-Path -LiteralPath $fx.Dest) -and -not (Test-Path -LiteralPath "$($fx.Dest).sums")) "threw=$threw msg=[$msg]"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage: custom-local without its source and digest is a specific refusal, not a fetch attempt (fetch)' {
+    # custom-local / custom-url are real images now, but only through
+    # Invoke-AutoOSUsbFetchCustomImage. Called the catalog way they must
+    # refuse by name, never fall through to Resolve-AutoOSImageUrl.
+    $threw = $false; $msg = ''
+    try { Invoke-AutoOSUsbFetchImage -ImageId 'custom-local' -Destination 'C:\nowhere\x.iso' | Out-Null }
+    catch { $threw = $true; $msg = $_.Exception.Message }
+    Assert-True ($threw -and $msg -like '*needs its source and digest*') "threw=$threw msg=[$msg]"
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbPlan routes a fetch line to the fetch, keeping a path with spaces as one argument (fetch)' {
+    # The error naming the WHOLE spaced path is the proof the line reached
+    # the function with the path intact: a dispatcher that split on spaces
+    # would have reported only "dir\x.iso", or bound "C:\some" to the wrong
+    # parameter. custom-local's line carries the path LAST precisely so a
+    # Windows path may contain spaces. Driven through the exported
+    # Invoke-AutoOSUsbPlan since the per-step dispatcher is module-private.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $threw = $false; $msg = ''
+        try {
+            Invoke-AutoOSCapturedConsole {
+                Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbFetchImage custom-local - C:\some dir\x.iso')
+            } | Out-Null
+        } catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*C:\some dir\x.iso is no longer a readable file*') "threw=$threw msg=[$msg]"
+    }
+}
+
+# ─── custom-url / custom-local (an image the catalog does not describe) ────
+# Mirror of the bash suite's "usb custom image" block. Every name carries
+# "usb" and "custom" so -Filter usb and -Filter custom both reach them.
+function New-AutoOSCustomImageFixture {
+    # A throwaway image in a directory whose name contains a SPACE, because
+    # a Windows path may legitimately contain one and the plan must carry it.
+    $dir = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos custom " + [Guid]::NewGuid().ToString('N')))).FullName
+    $img = Join-Path $dir 'my image.iso'
+    [IO.File]::WriteAllText($img, "AUTOOS CUSTOM TEST IMAGE`n")
+    [pscustomobject]@{ Dir = $dir; Image = $img; Sha = (Get-AutoOSFileSha256 -Path $img); Bytes = (Get-Item -LiteralPath $img).Length }
+}
+
+function Invoke-AutoOSCustomPlan {
+    # Returns @{ Plan; Error } so a refusal is asserted on its message.
+    param([hashtable]$Arguments)
+    try {
+        [pscustomobject]@{ Plan = @(New-AutoOSUsbPlan -Kind installer -DeviceId '\\.\PHYSICALDRIVE5' -DryRun @Arguments); Error = '' }
+    } catch {
+        [pscustomobject]@{ Plan = @(); Error = $_.Exception.Message }
+    }
+}
+
+Test-Case 'usb custom: custom-local plans the file itself as the write source, with its real size and "-" for no digest' {
+    $fx = New-AutoOSCustomImageFixture
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        try {
+            $r = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = $fx.Image; WriteMode = 'hybrid' }
+            $joined = $r.Plan -join "`n"
+            Assert-True ($r.Plan[0] -eq "Invoke-AutoOSUsbFetchImage custom-local - $($fx.Image)" `
+                -and $joined -like "*Invoke-AutoOSUsbReverify \\.\PHYSICALDRIVE5 Unmounted $($fx.Bytes) *" `
+                -and $joined -like "*Invoke-AutoOSUsbCopyImage \\.\PHYSICALDRIVE5 $($fx.Image)*") "error=[$($r.Error)] plan=$joined"
+        } finally { Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb custom: a custom image refuses without -WriteMode, and a raw one is refused on Ventoy but planned on native (A11)' {
+    $fx = New-AutoOSCustomImageFixture
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        try {
+            $noMode = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = $fx.Image }
+            $rawVentoy = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = $fx.Image; WriteMode = 'raw' }
+            $rawNative = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'native'; ImagePath = $fx.Image; WriteMode = 'raw' }
+            $badMode = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = $fx.Image; WriteMode = 'iso' }
+            Assert-True ($noMode.Error -like '*needs -WriteMode*' -and $rawVentoy.Error -like "*cannot write a 'raw' image*" `
+                -and ($rawNative.Plan -join "`n") -like '*Write-AutoOSUsbRaw*' -and $badMode.Error -like "*must be 'hybrid' or 'raw'*") `
+                "noMode=[$($noMode.Error)] rawVentoy=[$($rawVentoy.Error)] rawNative=[$($rawNative.Plan -join ' | ')] badMode=[$($badMode.Error)]"
+        } finally { Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb custom: custom-local refuses a missing file and an empty file' {
+    $fx = New-AutoOSCustomImageFixture
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        try {
+            $empty = Join-Path $fx.Dir 'empty.iso'; [IO.File]::WriteAllBytes($empty, [byte[]]::new(0))
+            $missing = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = (Join-Path $fx.Dir 'nope.iso'); WriteMode = 'hybrid' }
+            $emptyR = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-local'; Engine = 'ventoy'; ImagePath = $empty; WriteMode = 'hybrid' }
+            Assert-True ($missing.Error -like '*is not a readable file*' -and $emptyR.Error -like '*is empty*') "missing=[$($missing.Error)] empty=[$($emptyR.Error)]"
+        } finally { Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb custom: custom-url refuses without a digest, with a malformed digest, and with a non-http scheme; plans a digest-keyed cache path otherwise' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $sha = 'ab' * 32
+        $env:AUTOOS_CACHE_DIR = 'C:\scratch\images'
+        try {
+            $noSha = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-url'; Engine = 'ventoy'; ImageUrl = 'https://example.invalid/x.iso'; WriteMode = 'hybrid' }
+            $badSha = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-url'; Engine = 'ventoy'; ImageUrl = 'https://example.invalid/x.iso'; WriteMode = 'hybrid'; ImageSha256 = 'nothex' }
+            $ftp = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-url'; Engine = 'ventoy'; ImageUrl = 'ftp://example.invalid/x.iso'; WriteMode = 'hybrid'; ImageSha256 = $sha }
+            $ok = Invoke-AutoOSCustomPlan @{ ImageId = 'custom-url'; Engine = 'ventoy'; ImageUrl = 'https://example.invalid/x.iso'; WriteMode = 'hybrid'; ImageSha256 = $sha.ToUpperInvariant() }
+        } finally { Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue }
+        Assert-True ($noSha.Error -like '*needs -ImageSha256*' -and $badSha.Error -like '*64 hexadecimal*' -and $ftp.Error -like '*http:// or https://*' `
+            -and $ok.Plan[0] -eq "Invoke-AutoOSUsbFetchImage custom-url $sha https://example.invalid/x.iso C:\scratch\images\custom-url-$($sha.Substring(0,16)).iso") `
+            "noSha=[$($noSha.Error)] badSha=[$($badSha.Error)] ftp=[$($ftp.Error)] ok=[$($ok.Plan -join ' | ')]"
+    }
+}
+
+Test-Case 'usb custom: executing custom-local verifies the digest - a wrong one stops before any write, "not touched"' {
+    $fx = New-AutoOSCustomImageFixture
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        try {
+            $good = @(New-AutoOSUsbPlan -ImageId custom-local -Kind installer -Engine ventoy -DeviceId '\\.\PHYSICALDRIVE5' -DryRun -ImagePath $fx.Image -WriteMode hybrid -ImageSha256 $fx.Sha)
+            $bad = @(New-AutoOSUsbPlan -ImageId custom-local -Kind installer -Engine ventoy -DeviceId '\\.\PHYSICALDRIVE5' -DryRun -ImagePath $fx.Image -WriteMode hybrid -ImageSha256 ('0' * 64))
+            $goodText = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @($good[0]) }
+            $script:customBadMsg = ''
+            $badText = Invoke-AutoOSCapturedConsole {
+                try { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @($bad[0]) } catch { $script:customBadMsg = $_.Exception.Message }
+            }
+            Assert-True ($goodText -like '*verified image*' -and $script:customBadMsg -like '*does not match the SHA-256 you supplied*' -and $badText -like '*not touched*') `
+                "good=[$goodText] badMsg=[$($script:customBadMsg)] bad=[$badText]"
+        } finally { Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'usb custom: executing custom-url downloads and verifies against the supplied digest, and a second run is skipped' {
+    $fx = New-AutoOSCustomImageFixture
+    $srv = Start-AutoOSTestHttpServer -Directory $fx.Dir
+    $cache = Join-Path $fx.Dir 'cache'
+    $url = "http://127.0.0.1:$($srv.Port)/my%20image.iso"
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_CACHE_DIR = $cache
+        try {
+            $plan = @(New-AutoOSUsbPlan -ImageId custom-url -Kind installer -Engine ventoy -DeviceId '\\.\PHYSICALDRIVE5' -DryRun -ImageUrl $url -WriteMode hybrid -ImageSha256 $fx.Sha)
+            $first = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @($plan[0]) }
+            $second = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @($plan[0]) }
+            $dest = Join-Path $cache ('custom-url-' + $fx.Sha.Substring(0, 16) + '.iso')
+            $same = (Test-Path -LiteralPath $dest) -and ((Get-AutoOSFileSha256 -Path $dest) -eq $fx.Sha)
+            Assert-True ($same -and $first -like '*verified image*' -and $second -like '*skipped*') "same=$same first=[$first] second=[$second]"
+        } finally {
+            Remove-Item Env:\AUTOOS_CACHE_DIR -ErrorAction SilentlyContinue
+            Stop-AutoOSTestHttpServer $srv
+            Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Test-Case 'usb custom: setup.ps1 -CreateUsb with a custom-local image and -DryRun shows the plan and writes nothing' {
+    $fx = New-AutoOSCustomImageFixture
+    $env:AUTOOS_FAKE_DISKS = Get-FakeUsbDisksJson -Fixture 'good_stick'
+    try {
+        $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb -Image custom-local -ImagePath $fx.Image `
+            -WriteMode hybrid -Engine ventoy -UsbDevice '\\.\PHYSICALDRIVE5' -DryRun -NoColor 2>&1) -join "`n"
+        $code = $LASTEXITCODE
+        Assert-True ($code -eq 0 -and $out -like "*Invoke-AutoOSUsbFetchImage custom-local - $($fx.Image)*") "exit=$code out=$out"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_DISKS -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $fx.Dir -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbPlan refuses a plan step with an unrecognised command shape and never executes it (finding F4, execute)' {
+    # Windows half of F4: the dispatcher used Invoke-Expression for every
+    # line it did not special-case, so a line shaped like "cmd; other-cmd"
+    # would have run both halves. Now every known shape is matched
+    # explicitly and anything else is refused - the marker must not exist.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $marker = Join-Path $env:TEMP ('aos_f4_' + [Guid]::NewGuid().ToString('N'))
+        $threw = $false; $msg = ''
+        try { Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @("Write-Host pwned; New-Item -ItemType File -Path '$marker'") } | Out-Null }
+        catch { $threw = $true; $msg = $_.Exception.Message }
+        Assert-True ($threw -and $msg -like '*known command shape*' -and -not (Test-Path -LiteralPath $marker)) "threw=$threw msg=[$msg] marker=$(Test-Path -LiteralPath $marker)"
+        Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbPlan reports a fetch-step failure as "not touched", never "rewrite from wipefs" (fetch)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_FORCE_FAIL = '1'
+        try {
+            $script:usbFetchFailThrew = $false
+            $text = Invoke-AutoOSCapturedConsole {
+                try { Invoke-AutoOSUsbPlan -DeviceId '\\.\PHYSICALDRIVE5' -Plan @('Invoke-AutoOSUsbFetchImage ubuntu-desktop-lts C:\x\y.iso') }
+                catch { $script:usbFetchFailThrew = $true }
+            }
+            Assert-True ($script:usbFetchFailThrew -and $text -like '*not touched*' -and $text -notlike '*wipefs*') "threw=$($script:usbFetchFailThrew) text=$text"
+        } finally {
+            Remove-Item Env:\AUTOOS_FORCE_FAIL -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage uses a healthy mirror before the canonical source, verified against the canonical manifest (fetch mirror)' {
+    # The canonical copy is corrupted AFTER its manifest was written: were
+    # the canonical source tried first, the digest check would fail.
+    # Success therefore proves the mirror served the bytes.
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    $mir = New-AutoOSUsbFetchMirror -FixtureDir $fx.Dir -Mode good
+    try {
+        $fx2 = New-AutoOSUsbFetchFixture -Mode good -Mirrors @($mir.Url)
+        [IO.File]::WriteAllText($fx2.Iso, "CANONICAL COPY NOW CORRUPT`n")
+        # Same bytes on the mirror as fx2's manifest expects: both fixtures
+        # write the identical test image, so their digests agree.
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx2.Dest -CatalogPath $fx2.Catalog }
+        $same = (Test-Path -LiteralPath $fx2.Dest) -and ((Get-FileHash -LiteralPath $fx2.Dest).Hash -eq (Get-FileHash -LiteralPath $fx.Iso).Hash)
+        Assert-True ($same -and $text -like "*from $($mir.Url)testos-1.0-amd64.iso*" -and $text -like '*verified image*') "same=$same out=$text"
+        Remove-Item -Recurse -Force $fx2.Root -ErrorAction SilentlyContinue
+    } finally {
+        Stop-AutoOSTestHttpServer $mir.Server
+        Remove-Item -Recurse -Force $fx.Root, $mir.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips an unreachable mirror with a warning and uses the canonical source (fetch mirror)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good -Mirrors @('http://127.0.0.1:1/1.0/')
+    try {
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx.Dest -CatalogPath $fx.Catalog }
+        Assert-True ((Test-Path -LiteralPath $fx.Dest) -and $text -like '*http://127.0.0.1:1/1.0/testos-1.0-amd64.iso failed*' -and $text -like '*trying the next source*' -and $text -like '*verified image*') "out=$text"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage skips a mirror whose bytes do not match the manifest, the canonical copy wins (fetch mirror)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    $mir = New-AutoOSUsbFetchMirror -FixtureDir $fx.Dir -Mode corrupt
+    try {
+        $fx2 = New-AutoOSUsbFetchFixture -Mode good -Mirrors @($mir.Url)
+        $text = Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $fx2.Dest -CatalogPath $fx2.Catalog }
+        $same = (Test-Path -LiteralPath $fx2.Dest) -and ((Get-FileHash -LiteralPath $fx2.Dest).Hash -eq (Get-FileHash -LiteralPath $fx2.Iso).Hash)
+        Assert-True ($same -and $text -like '*checksum mismatch*' -and $text -like '*trying the next source*') "same=$same out=$text"
+        Remove-Item -Recurse -Force $fx2.Root -ErrorAction SilentlyContinue
+    } finally {
+        Stop-AutoOSTestHttpServer $mir.Server
+        Remove-Item -Recurse -Force $fx.Root, $mir.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: the read-back hashes the destination uncached, and when that is impossible still compares and warns exactly once (copy readback uncached)' {
+    # The default path must NOT warn (it took the uncached read); a forced
+    # refusal must still catch a corrupted file - a fallback that skipped
+    # the comparison would be worse than no read-back at all - and must say
+    # so once, not once per file.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_rbu_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $src = Join-Path $tmp 'src'; $dst = Join-Path $tmp 'dst'
+        New-Item -ItemType Directory -Path $src, $dst -Force | Out-Null
+        $bytes = [byte[]](1..20000 | ForEach-Object { $_ % 251 })
+        foreach ($name in @('a.bin', 'b.bin', 'c.bin')) {
+            [IO.File]::WriteAllBytes((Join-Path $src $name), $bytes); [IO.File]::WriteAllBytes((Join-Path $dst $name), $bytes)
+        }
+        $script:rbDefault = $null
+        $textDefault = Invoke-AutoOSCapturedConsole { $script:rbDefault = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst) }
+
+        $corrupt = [byte[]]$bytes.Clone(); $corrupt[9000] = [byte](255 - $corrupt[9000])
+        [IO.File]::WriteAllBytes((Join-Path $dst 'b.bin'), $corrupt)
+        $env:AUTOOS_FAKE_NO_UNCACHED = '1'
+        try {
+            $script:rbForced = $null
+            $textForced = Invoke-AutoOSCapturedConsole { $script:rbForced = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst) }
+        } finally {
+            Remove-Item Env:\AUTOOS_FAKE_NO_UNCACHED -ErrorAction SilentlyContinue
+        }
+        # A phrase that occurs once per warning (the warning embeds the
+        # exception text, which also says "uncached read").
+        $warnings = ([regex]::Matches($textForced, 'comparing through the file cache instead')).Count
+        $forcedBad = @($script:rbForced | ForEach-Object { "$($_.Path)=$($_.Reason)" })
+        Assert-True ($script:rbDefault.Count -eq 0 -and $textDefault -notlike '*comparing through the file cache*' `
+            -and $forcedBad.Count -eq 1 -and $forcedBad[0] -eq 'b.bin=content' -and $warnings -eq 1) `
+            "default=$($script:rbDefault.Count) defaultText=[$textDefault] forced=$($forcedBad -join ',') warnings=$warnings"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Test-AutoOSUsbCopyReadback reports a file whose bytes differ at the same size, a missing file and a size change, and nothing for an identical tree (copy readback)' {
+    # The second real build on 2026-09-17 finished and printed "Ready to
+    # boot" while the stick had silently replaced one 16 KB cluster of
+    # md5sum.txt with garbage at the same size. Only reading back catches
+    # that, so the read-back is a pure dir-vs-dir function tested here.
+    $tmp = (New-Item -ItemType Directory -Path (Join-Path $env:TEMP ("aos_rb_" + [Guid]::NewGuid().ToString('N')))).FullName
+    try {
+        $src = Join-Path $tmp 'src'; $dst = Join-Path $tmp 'dst'
+        foreach ($d in @("$src\casper", "$dst\casper", "$src\EFI\boot", "$dst\EFI\boot")) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+        $bytes = [byte[]](1..40000 | ForEach-Object { $_ % 253 })
+        foreach ($rel in @('md5sum.txt', 'casper\minimal.squashfs', 'EFI\boot\bootx64.efi', 'casper\vmlinuz')) {
+            [IO.File]::WriteAllBytes((Join-Path $src $rel), $bytes); [IO.File]::WriteAllBytes((Join-Path $dst $rel), $bytes)
+        }
+        $clean = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst)
+        # Same size, one "cluster" of garbage in the middle - the live shape.
+        $corrupt = [byte[]]$bytes.Clone(); for ($i = 8192; $i -lt 24576; $i++) { $corrupt[$i] = [byte](255 - $corrupt[$i]) }
+        [IO.File]::WriteAllBytes((Join-Path $dst 'md5sum.txt'), $corrupt)
+        Remove-Item -LiteralPath (Join-Path $dst 'casper\vmlinuz') -Force
+        [IO.File]::WriteAllBytes((Join-Path $dst 'EFI\boot\bootx64.efi'), $bytes[0..999])
+        $bad = @(Test-AutoOSUsbCopyReadback -SourceRoot $src -DestRoot $dst)
+        $byPath = @{}; foreach ($b in $bad) { $byPath[$b.Path] = $b.Reason }
+        Assert-True ($clean.Count -eq 0 -and $bad.Count -eq 3 -and $byPath['md5sum.txt'] -eq 'content' -and $byPath['casper\vmlinuz'] -eq 'missing' -and $byPath['EFI\boot\bootx64.efi'] -eq 'size') "clean=$($clean.Count) bad=$(($bad | ForEach-Object { "$($_.Path)=$($_.Reason)" }) -join ',')"
+    } finally {
+        Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Test-AutoOSRobocopyFailed treats only exit codes 0..7 as success - negative and out-of-range codes are failures (copy)' {
+    # robocopy killed or losing its destination mid-copy can exit with a
+    # negative or otherwise out-of-range code; "-ge 8" read those as
+    # success. 0..7 is the documented success bitmask (copied/extras/
+    # mismatches); 8 = some files failed, 16 = fatal.
+    $ok = @(0, 1, 2, 3, 4, 5, 6, 7) | ForEach-Object { Test-AutoOSRobocopyFailed -ExitCode $_ }
+    $bad = @(8, 9, 16, 24, -1, -1073741510, 259) | ForEach-Object { Test-AutoOSRobocopyFailed -ExitCode $_ }
+    Assert-True ((@($ok | Where-Object { $_ }).Count -eq 0) -and (@($bad | Where-Object { -not $_ }).Count -eq 0)) "ok=$($ok -join ',') bad=$($bad -join ',')"
+}
+
+Test-Case 'usb: Invoke-AutoOSUsbFetchImage creates a cache directory that does not exist yet, as on a first run (fetch)' {
+    $fx = New-AutoOSUsbFetchFixture -Mode good
+    try {
+        $dest = Join-Path $fx.Root 'brand\new\dir\testos.iso'
+        Invoke-AutoOSCapturedConsole { Invoke-AutoOSUsbFetchImage -ImageId 'testos' -Destination $dest -CatalogPath $fx.Catalog } | Out-Null
+        Assert-True (Test-Path -LiteralPath $dest) "expected $dest to exist"
+    } finally {
+        Remove-Item -Recurse -Force $fx.Root -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb chooser: image items name every real image and exclude the custom pseudo-entries (chooser)' {
+    $items = @(Get-AutoOSUsbChooserImageItem)
+    $ids = @($items | ForEach-Object { $_.Id })
+    $ubuntu = $items | Where-Object { $_.Id -eq 'ubuntu-desktop-lts' }
+    Assert-True (($ids -contains 'ubuntu-desktop-lts') -and ($ids -notcontains 'custom-url') -and ($ids -notcontains 'custom-local') -and $ubuntu.Description -like '*installer, live-persistent*6 GB*') "ids=$($ids -join ',') desc=$($ubuntu.Description)"
+}
+
+Test-Case 'usb chooser: engine items list what Windows can build for the kind; rufus is offered to the terminal, badged interactive (chooser)' {
+    $env:AUTOOS_FAKE_ARCH = 'x64'
+    try {
+        $hybrid = @(Get-AutoOSUsbChooserEngineItem -Kind 'installer' -WriteMode 'hybrid')
+        $raw = @(Get-AutoOSUsbChooserEngineItem -Kind 'installer' -WriteMode 'raw')
+        $rufus = $hybrid | Where-Object { $_.Id -eq 'rufus' }
+        $ventoy = $hybrid | Where-Object { $_.Id -eq 'ventoy' }
+        Assert-True ($rufus.Badge -eq 'interactive' -and $ventoy.Badge -eq 'default' -and (@($hybrid.Id) -contains 'uefi-copy') -and (@($raw.Id) -notcontains 'ventoy') -and (@($raw.Id) -contains 'native')) "hybrid=$($hybrid.Id -join ',') raw=$($raw.Id -join ',')"
+    } finally { Remove-Item Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'usb chooser: a non-interactive run takes the default at every step and never consents to the write itself (chooser)' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -Body {
+        $env:AUTOOS_NONINTERACTIVE = '1'; $env:AUTOOS_FAKE_ARCH = 'x64'
+        try {
+            $text = Invoke-AutoOSCapturedConsole { $script:chooserResult = Invoke-AutoOSUsbChooser }
+            $dry = $null
+            $textDry = Invoke-AutoOSCapturedConsole { $script:chooserDry = Invoke-AutoOSUsbChooser -DryRun }
+            $dry = $script:chooserDry
+            Assert-True (($null -eq $script:chooserResult) -and $text -like '*Not confirmed*' `
+                -and $dry.Image -eq 'ubuntu-desktop-lts' -and $dry.Kind -eq 'installer' -and $dry.Engine -eq 'ventoy' -and $dry.Device -eq '\\.\PHYSICALDRIVE5' -and (-not $dry.Wipe) `
+                -and $textDry -like '*PHYSICALDRIVE5*' -and $textDry -like '*GB*') "result=$($script:chooserResult) text=$text dry=$($dry | ConvertTo-Json -Compress) textDry=$textDry"
+        } finally {
+            Remove-Item Env:\AUTOOS_NONINTERACTIVE, Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Test-Case 'usb chooser: the profile menu offers Create installer USB and a non-interactive -CreateUsb without flags still refuses (chooser)' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -CreateUsb -NoColor 2>&1) -join "`n"
+    Assert-True ($LASTEXITCODE -eq 2 -and $out -like '*requires -Image*' -and ((Get-Content $setup -Raw) -like "*Id = 'create-usb'; Name = 'Create installer USB'*")) "exit=$LASTEXITCODE out=$out"
+}
+
+Test-Case 'usb: setup.ps1 -Undo states plainly that a USB write cannot be undone' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -Undo -DryRun -NoColor 2>&1) -join "`n"
+    Assert-True ($out -like '*USB*') "out=$out"
+}
+
+# ─── Browser UI: the three USB endpoints (Task 11b) ────────────────────────
+# Task 11 shipped web/index.html's "Create installer USB" button and
+# lib/linux/serve.py's three endpoints, but never mirrored them into
+# AutoOS.Serve.psm1 - the button 404'd on every call on the platform the
+# human partner actually runs. Get-AutoOSServeUsbCatalog/-UsbDevices/
+# -UsbCreateResult are the module-level, exported, directly-callable mirror
+# of serve.py's usb_images_response/usb_devices_response/
+# usb_create_response, for the identical reason those are module-level in
+# serve.py: a test can call them without starting a real HttpListener.
+# Every test name below carries "usb" so `-Filter usb` reaches it.
+function Invoke-WithModuleScope {
+    # Reaches into AutoOS.Serve.psm1's module scope to set/clear
+    # $script:RunInfo.Running directly - the in-memory run-lock
+    # /api/install and /api/usb/create both check - without spinning up a
+    # real installer/usb-create subprocess just to flip one flag.
+    param([scriptblock]$Body)
+    $mod = Get-Module AutoOS.Serve
+    & $mod $Body
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCatalog excludes the interactive rufus engine' {
+    $env:AUTOOS_FAKE_ARCH = 'x64'
+    try {
+        $catalog = Get-AutoOSServeUsbCatalog -RepoRoot $Root
+        $ids = @($catalog.engines | ForEach-Object { $_.id })
+        Assert-NotContains $ids 'rufus'
+        Assert-Contains $ids 'ventoy'
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ARCH -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbDevices reports elevated=false with a reason when unelevated' {
+    $env:AUTOOS_FAKE_ELEVATED = '0'
+    try {
+        $result = Get-AutoOSServeUsbDevices
+        Assert-True (-not $result.elevated) 'expected elevated=false'
+        Assert-True ([string]$result.reason -like '*Administrator*') "reason=$($result.reason)"
+    } finally {
+        Remove-Item Env:\AUTOOS_FAKE_ELEVATED -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult refuses a device Assert-AutoOSUsbSafe would refuse' {
+    Invoke-WithFakeUsbEnv -Fixture 'root_is_boot_disk' -Body {
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE0'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 400 -and [string]$result.Payload.error -like '*system disk*') `
+            "code=$($result.Code) error=$($result.Payload.error)"
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult guards the device before checking image/engine' {
+    Invoke-WithFakeUsbEnv -Fixture 'root_is_boot_disk' -Body {
+        # No image/engine at all - if the guard ran second this would come
+        # back "image and engine are both required" instead.
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE0' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 400 -and [string]$result.Payload.error -like '*system disk*') `
+            "code=$($result.Code) error=$($result.Payload.error)"
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult refuses a device smaller than the image (finding F12)' {
+    # Finding F12 (mirror of lib/linux/serve.py's usb_create_response): this
+    # used to call Assert-AutoOSUsbSafe with no $env:AUTOOS_IMAGE_BYTES at
+    # all, so the size check compared against 0 and a device smaller than
+    # the image still got a 202. tiny_stick is 4 GB; ubuntu-desktop-lts
+    # declares sizeGb: 6 in catalog\images.json.
+    Invoke-WithFakeUsbEnv -Fixture 'tiny_stick' -Body {
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 400 -and [string]$result.Payload.error -like '*too small*') `
+            "code=$($result.Code) error=$($result.Payload.error)"
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult returns 409 while a run is already in progress' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        Invoke-WithModuleScope { $script:RunInfo.Running = $true }
+        try {
+            $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+            $result = Get-AutoOSServeUsbCreateResult -Body $body
+            Assert-True ($result.Code -eq 409 -and [string]$result.Payload.error -like '*already in progress*') `
+                "code=$($result.Code) error=$($result.Payload.error)"
+        } finally {
+            Invoke-WithModuleScope { $script:RunInfo.Running = $false }
+        }
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult returns 409 for a second write, not just during an install' {
+    # /api/install and /api/usb/create share one in-memory run flag - this
+    # is the "409 while an install runs" half of that contract, exercised
+    # from the usb-create side.
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        Invoke-WithModuleScope { $script:RunInfo.Running = $true; $script:RunInfo.Summary = 'installing components' }
+        try {
+            $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+            $result = Get-AutoOSServeUsbCreateResult -Body $body
+            Assert-True ($result.Code -eq 409) "expected 409 while an install runs, got $($result.Code)"
+        } finally {
+            Invoke-WithModuleScope { $script:RunInfo.Running = $false; $script:RunInfo.Summary = '' }
+        }
+    }
+}
+
+Test-Case 'usb: Get-AutoOSServeUsbCreateResult accepts a valid request and reports the device' {
+    Invoke-WithFakeUsbEnv -Fixture 'good_stick' -ImageBytes 4000000000 -Body {
+        $body = [pscustomobject]@{ device = '\\.\PHYSICALDRIVE5'; image = 'ubuntu-desktop-lts'; kind = 'installer'; engine = 'ventoy' }
+        $result = Get-AutoOSServeUsbCreateResult -Body $body
+        Assert-True ($result.Code -eq 202 -and $result.Payload.device -eq '\\.\PHYSICALDRIVE5') `
+            "code=$($result.Code) payload=$($result.Payload | ConvertTo-Json -Compress)"
+    }
+}
+
+# ─── Static analysis ────────────────────────────────────────────────────────
+Describe-Group 'static analysis'
+
+Test-Case 'PSScriptAnalyzer is clean' {
+    if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+        Skip 'PSScriptAnalyzer not installed'
+        return
+    }
+    $files = @(Get-ChildItem -Path (Join-Path $Root 'lib\windows') -Filter *.psm1) +
+             @(Get-Item $setup)
+    $issues = @()
+    $ruleCrashes = @()
+    foreach ($f in $files) {
+        # PSUseSingularNouns is excluded deliberately: these functions return
+        # collections, and Get-AutoOSAvailableComponent(s) reads worse singular.
+        # Everything else, including PSAvoidAssignmentToAutomaticVariable and
+        # PSReviewUnusedParameter, is treated as a real failure.
+        #
+        # -ErrorVariable, not $ErrorActionPreference='Stop': the analyzer emits a
+        # non-terminating RULE_ERROR when one of its own rules throws internally
+        # (it does so here on a loaded module, with no single rule reproducing it).
+        # Diagnostics still come through, so they stay the pass criterion - but a
+        # crashed rule is reported rather than silently swallowed.
+        $analyzerErrors = $null
+        $issues += Invoke-ScriptAnalyzer -Path $f.FullName -Severity Error, Warning `
+                   -ExcludeRule PSUseShouldProcessForStateChangingFunctions,
+                                PSAvoidUsingWriteHost,
+                                PSUseSingularNouns `
+                   -ErrorVariable analyzerErrors -ErrorAction SilentlyContinue
+        if ($analyzerErrors) { $ruleCrashes += $f.Name }
+    }
+    if ($issues.Count -gt 0) {
+        throw (($issues | Select-Object -First 8 |
+                ForEach-Object { "$($_.ScriptName):$($_.Line) $($_.RuleName)" }) -join '; ')
+    }
+    Pass
+    if ($ruleCrashes.Count -gt 0) {
+        Write-Host ("      " + (C ("note: a PSScriptAnalyzer rule threw internally on " +
+                    ($ruleCrashes -join ', ') + " - diagnostics were still collected") '38;5;179'))
+    }
+}
+
+Test-Case 'every PowerShell file has a UTF-8 BOM' {
+    # Windows PowerShell 5.1 decodes .ps1/.psm1 as ANSI without one, which turns
+    # every box-drawing character into a parse error.
+    $missing = @()
+    foreach ($f in Get-ChildItem -Path $Root -Include *.ps1, *.psm1 -Recurse -File) {
+        if ($f.FullName -match '\\\.git\\') { continue }
+        $bytes = [IO.File]::ReadAllBytes($f.FullName)
+        if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xEF -or $bytes[1] -ne 0xBB -or $bytes[2] -ne 0xBF) {
+            $missing += $f.Name
+        }
+    }
+    Assert-Equal ($missing -join ',') ''
+}
+
+Test-Case 'Resolve-AutoOSOllamaBaseUrl: OLLAMA_BASE_URL wins and is normalised to /v1' {
+    $saved = $env:OLLAMA_BASE_URL
+    try {
+        $env:OLLAMA_BASE_URL = 'http://gpu-box:11434/'
+        Assert-Equal (Resolve-AutoOSOllamaBaseUrl -Probe { param($u) $true }) 'http://gpu-box:11434/v1'
+    } finally { $env:OLLAMA_BASE_URL = $saved }
+}
+
+Test-Case 'Resolve-AutoOSOllamaBaseUrl: host.docker.internal only when Ollama answers there' {
+    $saved = $env:OLLAMA_BASE_URL
+    try {
+        $env:OLLAMA_BASE_URL = $null
+        Assert-Equal (Resolve-AutoOSOllamaBaseUrl -Probe { param($u) $u -like '*host.docker.internal:11434/api/version' }) 'http://host.docker.internal:11434/v1'
+        # No answer there (native Ollama bound to 127.0.0.1, no Docker Desktop):
+        # $null keeps the catalog's 127.0.0.1, which a host-run agent-canvas needs.
+        Assert-Equal (Resolve-AutoOSOllamaBaseUrl -Probe { param($u) $false }) $null
+    } finally { $env:OLLAMA_BASE_URL = $saved }
+}
+
+function Get-AutoOSConsoleCapture {
+    <#
+      .SYNOPSIS Run a scriptblock while Console.Out is redirected, returning what it wrote.
+      .DESCRIPTION
+        Write-AutoOSLine writes via [Console]::WriteLine/Write, not Write-Information,
+        so `6>&1` alone does not capture it (verified: only actual Write-Information/
+        Write-Host output crosses stream 6 - a bare Console.WriteLine bypasses the
+        PowerShell stream pipeline entirely). Redirecting Console.Out for the
+        duration of the call is the only way to capture that text in-process.
+    #>
+    param([Parameter(Mandatory)][scriptblock]$Body)
+    $origOut = [Console]::Out
+    $sw = New-Object IO.StringWriter
+    [Console]::SetOut($sw)
+    try { & $Body | Out-Null } finally { [Console]::SetOut($origOut) }
+    $sw.ToString()
+}
+
+# Omnigraph reachability (measured 2026-09-24): the bridge refuses to start
+# without OMNIGRAPH_BASE_URL and OMNIGRAPH_GRAPH_ID (the client only says
+# "Connection closed"), and answers health without a token, so clients show
+# "connected" while every read fails.
+Test-Case 'the omnigraph env file is merged, carries the token, and is stable on a re-run' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-og-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    $realToken = $env:OMNIGRAPH_TOKEN
+    try {
+        $envFile = Join-Path $scratch '.autoos-omnigraph.env'
+        [IO.File]::WriteAllText($envFile, "KEEP_ME=1`nOMNIGRAPH_BASE_URL=http://old.invalid`n")
+        $env:OMNIGRAPH_TOKEN = 'test-token-value'
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        $first = Get-AutoOSConsoleCapture { Set-AutoOSOmnigraphEnv -BaseUrl 'http://localhost:8080' -EnvFile $envFile -NoUserVariable 6>&1 }
+        $second = Get-AutoOSConsoleCapture { Set-AutoOSOmnigraphEnv -BaseUrl 'http://localhost:8080' -EnvFile $envFile -NoUserVariable 6>&1 }
+        $lines = @([IO.File]::ReadAllLines($envFile) | Sort-Object)
+        Assert-Equal ($lines -join ' ') 'KEEP_ME=1 OMNIGRAPH_BASE_URL=http://localhost:8080 OMNIGRAPH_TOKEN=test-token-value'
+        Assert-Equal @(Get-ChildItem $scratch -Force -Filter '*.autoos-backup-*').Count 1 'one backup, from the first change only'
+        Assert-True ("$second" -match 'unchanged') "second run was not reported unchanged: $second"
+        Assert-True ("$first$second" -notmatch 'test-token-value') 'the token was printed'
+    } finally {
+        $env:OMNIGRAPH_TOKEN = $realToken
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'the omnigraph user variable is set by name only, never PATH-style wholesale' {
+    $fn = [regex]::Match($installSource, '(?s)function Set-AutoOSOmnigraphEnv \{.*?\n\}').Value
+    Assert-True ($fn -match "GetEnvironmentVariable\('OMNIGRAPH_TOKEN', 'User'\)") 'the user variable is not read first'
+    Assert-True ($fn -match "SetEnvironmentVariable\('OMNIGRAPH_TOKEN', \`$token, 'User'\)") 'the user variable is not written by name'
+    Assert-True ($installSource -match 'Set-AutoOSOmnigraphEnv -BaseUrl \$baseUrl\r?\n') 'the installer does not call it for real'
+}
+
+Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)" {
+    $realAppData = $env:APPDATA
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-agy-" + [Guid]::NewGuid().ToString('N'))
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSAntigravityMcp 6>$null | Out-Null
+        $cfg = Get-Content (Join-Path $scratch 'Antigravity\mcp_config.json') -Raw | ConvertFrom-Json
+        Assert-Equal $cfg.mcpServers.omnigraph.env.OMNIGRAPH_GRAPH_ID 'autoos'
+    } finally {
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when nothing changed' {
+    # mcp_config.json is the user's own file. The first run that changes it takes
+    # ONE backup; an identical second run must not back up again, must leave the
+    # file byte-identical and must say skipped. The pause keeps a second-run
+    # backup from reusing the first one's per-second timestamp, which would make
+    # an extra backup overwrite (and hide behind) the first.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log1 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $log2 = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+    $run = {
+        param($LogPath)
+        Initialize-AutoOSLog -Path $LogPath
+        Set-AutoOSAntigravityMcp
+        Get-Content -LiteralPath $LogPath -Raw -Encoding utf8
+    }
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        $null = & $run $log1
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
+        $backup1B64 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
+        $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        Start-Sleep -Milliseconds 1100
+        $out2 = & $run $log2
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
+        $hash2 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (($s.PSObject.Properties.Name -join ',') -ne 'mcpServers,theme') { throw "top-level keys reordered or lost: [$($s.PSObject.Properties.Name -join ',')]" }
+        if (($s.mcpServers.PSObject.Properties.Name -join ',') -ne 'other,omnigraph') { throw "servers reordered or lost: [$($s.mcpServers.PSObject.Properties.Name -join ',')]" }
+        if ($s.mcpServers.other.command -ne 'node') { throw 'the existing server was not kept' }
+        if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
+        if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
+        if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log1, $log2 -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up again when nothing changed' {
+    # mcp_config.json is the user's own file. The first run that changes it takes
+    # ONE backup; an identical second run must not back up again, must leave the
+    # file byte-identical and must say skipped. The pause keeps a second-run
+    # backup from reusing the first one's per-second timestamp, which would make
+    # an extra backup overwrite (and hide behind) the first. A third run finds the
+    # same entry hand-formatted with its keys in another order (which is all a
+    # [hashtable] parameter guarantees across processes): still nothing to do.
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $logs = @(1..3 | ForEach-Object { Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log') })
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+    $run = {
+        param($LogPath)
+        Initialize-AutoOSLog -Path $LogPath
+        # An [ordered] spec, as the Install-AutoOSMcp* callers pass it.
+        Register-AutoOSAntigravityMcpServer -Name 'example' -Spec ([ordered]@{
+            command      = 'npx'
+            args         = @('-y', 'example-mcp-server')
+            env          = @{ EXAMPLE_HOME = 'example-home' }
+            excludeTools = @('tool_a', 'tool_b')
+        })
+        Get-Content -LiteralPath $LogPath -Raw -Encoding utf8
+    }
+    $countBackups = { @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count }
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        $null = & $run $logs[0]
+        $backups1 = & $countBackups
+        $backup1B64 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*') | Select-Object -First 1 |
+            ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) }
+        $hash1 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        Start-Sleep -Milliseconds 1100
+        $out2 = & $run $logs[1]
+        $backups2 = & $countBackups
+        $hash2 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        if (($s.PSObject.Properties.Name -join ',') -ne 'mcpServers,theme') { throw "top-level keys reordered or lost: [$($s.PSObject.Properties.Name -join ',')]" }
+        if (($s.mcpServers.PSObject.Properties.Name -join ',') -ne 'other,example') { throw "servers reordered or lost: [$($s.mcpServers.PSObject.Properties.Name -join ',')]" }
+        if ($s.mcpServers.other.command -ne 'node') { throw 'the existing server was not kept' }
+        if ($s.mcpServers.example.command -ne 'npx') { throw 'the new server was not written' }
+        if ($backups1 -ne 1) { throw "run 1 made $backups1 backup(s) (want 1: it changed a file that already existed)" }
+        if ($backup1B64 -cne $seedB64) { throw 'run 1 backup does not hold the original file byte for byte (backed up after the write?)' }
+        if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
+        if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+
+        $hand = @'
+{
+  "theme": "mine",
+  "mcpServers": {
+    "example": {
+      "excludeTools": ["tool_a", "tool_b"],
+      "env": { "EXAMPLE_HOME": "example-home" },
+      "args": ["-y", "example-mcp-server"],
+      "command": "npx"
+    },
+    "other": { "command": "node", "args": ["srv.js"] }
+  }
+}
+'@
+        [IO.File]::WriteAllText($file, $hand)
+        $hash3 = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        $out3 = & $run $logs[2]
+        if ((& $countBackups) -ne $backups1) { throw 'run 3 backed up a file that already held the entry' }
+        if ((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $hash3) { throw 'run 3 rewrote a file that already held the entry' }
+        if ($out3 -notmatch 'skipped') { throw "run 3 did not report skipped: [$out3]" }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $logs -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Copy-AutoOSBackup never overwrites a same-second backup' {
+    # Every writer names its backup to the second. Two changes inside one second
+    # used to share a name, and Copy-Item -Force made the later copy overwrite the
+    # earlier one, so the user's ORIGINAL was lost. -Stamp forces that clash
+    # without touching the clock.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $file = Join-Path $scratch 'config.json'
+    $stamp = '20260101-000000'
+    $null = New-Item -ItemType Directory -Path $scratch -Force
+    try {
+        $paths = @()
+        foreach ($content in 'A', 'B', 'C') {
+            [IO.File]::WriteAllText($file, $content)
+            $paths += @(Copy-AutoOSBackup -Path $file -Stamp $stamp)
+        }
+        if ($paths.Count -ne 3) { throw "expected 3 returned paths, got $($paths.Count): [$($paths -join ', ')]" }
+        if (@($paths | Select-Object -Unique).Count -ne 3) { throw "backup paths are not distinct: [$($paths -join ', ')]" }
+        $want = @("$file.autoos-backup-$stamp", "$file.autoos-backup-$stamp-1", "$file.autoos-backup-$stamp-2")
+        for ($i = 0; $i -lt 3; $i++) {
+            if ($paths[$i] -cne $want[$i]) { throw "backup $($i + 1) is named [$($paths[$i])] (want [$($want[$i])])" }
+        }
+        $wantText = @('A', 'B', 'C')
+        for ($i = 0; $i -lt 3; $i++) {
+            if (-not (Test-Path -LiteralPath $paths[$i])) { throw "backup $($i + 1) does not exist: $($paths[$i])" }
+            $got = [Convert]::ToBase64String([IO.File]::ReadAllBytes($paths[$i]))
+            $exp = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($wantText[$i]))
+            if ($got -cne $exp) { throw "backup $($i + 1) does not hold '$($wantText[$i])' (an earlier backup was overwritten)" }
+        }
+        if (@(Get-ChildItem -LiteralPath $scratch -Filter '*.autoos-backup-*').Count -ne 3) { throw 'expected exactly 3 backup files on disk' }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'shell: managed files keep rankable same-second backups' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-shell-backup-" + [Guid]::NewGuid().ToString('N'))
+    $file = Join-Path $scratch 'profile.ps1'
+    $null = New-Item -ItemType Directory -Path $scratch -Force
+    try {
+        Import-Module (Join-Path $Lib 'AutoOS.Shell.psm1') -DisableNameChecking
+        [IO.File]::WriteAllText($file, 'original')
+        while ((Get-Date).Millisecond -gt 100) { Start-Sleep -Milliseconds 10 }
+        Set-AutoOSManagedFile -Path $file -Content 'first'
+        Set-AutoOSManagedFile -Path $file -Content 'second'
+        Set-AutoOSManagedFile -Path $file -Content 'second'
+
+        $backups = @(Get-ChildItem -LiteralPath $scratch -Filter 'profile.ps1.autoos-backup-*')
+        if ($backups.Count -ne 2) { throw "expected two backups after two changed writes, got $($backups.Count)" }
+        foreach ($backup in $backups) {
+            if ($backup.Name -notmatch '^profile\.ps1\.autoos-backup-\d{8}-\d{6}(?:-\d{1,3})?$') {
+                throw "backup name is not rankable: $($backup.Name)"
+            }
+        }
+        $contents = @($backups | ForEach-Object { [IO.File]::ReadAllText($_.FullName) })
+        if (@($contents | Where-Object { $_ -ceq 'original' }).Count -ne 1) { throw 'the original content was overwritten' }
+        if (@($contents | Where-Object { $_ -ceq 'first' }).Count -ne 1) { throw 'the intermediate content was overwritten' }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case "backup-once: five Antigravity MCP writes in one second keep the user's original" {
+    # One setup pass writes mcp_config.json five times (Set-AutoOSAntigravityMcp,
+    # then Register-AutoOSAntigravityMcpServer for serena, graphify, playwright
+    # and context7), and each one changes the file. Backups named to the second
+    # used to overwrite each other, so the user's own file survived nowhere. The
+    # wait starts the writes early in a second, so all five share one timestamp
+    # without any mocking of the clock.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    [IO.File]::WriteAllText($file, '{"mcpServers":{"other":{"command":"node","args":["srv.js"]}},"theme":"mine"}')
+    $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        while ((Get-Date).Millisecond -gt 250) { Start-Sleep -Milliseconds 20 }
+        Set-AutoOSAntigravityMcp
+        foreach ($n in 'serena', 'graphify', 'playwright', 'context7') {
+            Register-AutoOSAntigravityMcpServer -Name $n -Spec ([ordered]@{ command = 'npx'; args = @('-y', "$n-mcp-server") })
+        }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        $holdsOriginal = $false
+        foreach ($b in $backups) {
+            if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($b.FullName)) -ceq $seedB64) { $holdsOriginal = $true }
+        }
+        if (-not $holdsOriginal) { throw "none of the $($backups.Count) backup(s) holds the user's original file byte for byte (an earlier backup was overwritten)" }
+        if ($backups.Count -ne 5) { throw "$($backups.Count) backup(s) after 5 writes that each changed the file (want 5)" }
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $names = ($s.mcpServers.PSObject.Properties.Name -join ',')
+        if ($names -ne 'other,omnigraph,serena,graphify,playwright,context7') { throw "servers lost or reordered: [$names]" }
+        if ($s.mcpServers.other.command -ne 'node') { throw 'the foreign server was not kept' }
+        if ($s.theme -ne 'mine') { throw 'the foreign top-level key was not kept' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs only in case' {
+    # JSON is case-sensitive and PowerShell's -eq on strings is not: a file whose
+    # omnigraph entry says "NPX" compared equal to the entry the writer produces
+    # ("npx"), so the writer reported skipped and left the wrong command behind.
+    $realAppData = $env:APPDATA
+    $realToken = $env:OMNIGRAPH_TOKEN
+    $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    try {
+        $env:APPDATA = $scratch
+        $env:OMNIGRAPH_TOKEN = $null
+        $env:OMNIGRAPH_GRAPH_ID = $null
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        # The entry the writer produces, except that the command is in capitals.
+        $seedEntry = [ordered]@{
+            command = 'NPX'
+            args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
+            env     = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://localhost:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
+        }
+        [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ omnigraph = $seedEntry } } | ConvertTo-Json -Depth 12))
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+        Set-AutoOSAntigravityMcp
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $cmd = $s.mcpServers.omnigraph.command
+        if ($cmd -cne 'npx') { throw "the file still says [$cmd] (want npx): an entry that differs only in case was treated as unchanged" }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "$($backups.Count) backup(s) after the rewrite (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName)) -cne $seedB64) { throw 'the backup does not hold the seeded file byte for byte' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        $env:OMNIGRAPH_TOKEN = $realToken
+        $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer rewrites an entry that differs only in case' {
+    # Same trap as above, in the comparison of the canonical strings of the
+    # entry in the file and the spec being registered.
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
+    $cfgDir = Join-Path $scratch 'Antigravity'
+    $file = Join-Path $cfgDir 'mcp_config.json'
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N') + '.log')
+    $null = New-Item -ItemType Directory -Path $cfgDir -Force
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        $seedEntry = [ordered]@{ command = 'NPX'; args = @('-y', 'example-mcp-server') }
+        [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ example = $seedEntry } } | ConvertTo-Json -Depth 12))
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
+        Register-AutoOSAntigravityMcpServer -Name 'example' -Spec ([ordered]@{ command = 'npx'; args = @('-y', 'example-mcp-server') })
+        $s = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+        $cmd = $s.mcpServers.example.command
+        if ($cmd -cne 'npx') { throw "the file still says [$cmd] (want npx): an entry that differs only in case was treated as unchanged" }
+        $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "$($backups.Count) backup(s) after the rewrite (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName)) -cne $seedB64) { throw 'the backup does not hold the seeded file byte for byte' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSZedProxy 6>$null | Out-Null
+        $s = Get-Content (Join-Path $scratch 'Zed\settings.json') -Raw | ConvertFrom-Json
+        $e = $s.context_servers.omnigraph.env
+        Assert-True ($null -ne $e) 'omnigraph context server has no env'
+        Assert-Equal $e.OMNIGRAPH_GRAPH_ID 'autoos'
+        Assert-True ([bool]$e.OMNIGRAPH_BASE_URL) 'no base URL'
+        Assert-True ($null -eq $e.PSObject.Properties['OMNIGRAPH_TOKEN']) 'a token landed in Zed settings'
+    } finally {
+        $env:APPDATA = $realAppData
+        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+
+# tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
+# YAML shapes both Set-AutoOSSerenaExclusions (here) and ensure_serena_exclusions
+# (tests/run-tests.sh) are graded against, so the two implementations cannot
+# quietly drift apart. Comparison is byte-for-byte (base64 of the raw bytes),
+# not line-based - CRLF, a UTF-8 BOM or a trailing blank line is a real diff.
+$autoosSerenaFixtureDir = Join-Path $Root 'tests\fixtures\serena'
+Get-ChildItem -Path $autoosSerenaFixtureDir -Filter '*.yml' | Where-Object { $_.Name -notlike '*.expected.yml' } | ForEach-Object {
+    $fixtureFile = $_
+    $fixtureName = $_.BaseName
+    $expectedPath = Join-Path $autoosSerenaFixtureDir "$fixtureName.expected.yml"
+
+    Test-Case "Set-AutoOSSerenaExclusions matches fixture '$fixtureName' byte-for-byte (serena)" {
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-fx-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        $p = Join-Path $tmp 'config.yml'
+        Copy-Item -Path $fixtureFile.FullName -Destination $p
+        try {
+            Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+            Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+            $gotB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+            $expB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($expectedPath))
+            Assert-Equal $gotB64 $expB64
+        } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+
+    Test-Case "Set-AutoOSSerenaExclusions second run on fixture '$fixtureName' skips and writes nothing (serena)" {
+        $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-fx-" + [Guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        $p = Join-Path $tmp 'config.yml'
+        Copy-Item -Path $fixtureFile.FullName -Destination $p
+        try {
+            Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+            Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+            $hash1 = (Get-FileHash -Path $p -Algorithm SHA256).Hash
+            $out = Get-AutoOSConsoleCapture { Set-AutoOSSerenaExclusions -ConfigPath $p 6>&1 }
+            $hash2 = (Get-FileHash -Path $p -Algorithm SHA256).Hash
+            Assert-True ($out -like '*skipped*') "expected 'skipped' in output, got: [$out]"
+            Assert-Equal $hash2 $hash1
+            Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 1
+        } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+Test-Case 'Set-AutoOSSerenaExclusions creates a missing config with just the key (serena)' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'nested\serena_config.yml'
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+
+        $got = @(Get-Content -Path $p) | Where-Object { $_ -match '^- ' } | ForEach-Object { $_ -replace '^- ', '' }
+        $want = @('create_text_file', 'read_file', 'execute_shell_command', 'list_dir', 'search_for_pattern',
+            'find_file', 'replace_content', 'replace_in_files', 'onboarding', 'write_memory', 'read_memory',
+            'list_memories', 'edit_memory', 'rename_memory', 'delete_memory')
+        Assert-Equal ($got -join ',') ($want -join ',')
+        Assert-Equal @(Get-Content -Path $p).Count 16
+        Assert-Equal @(Get-ChildItem -Path $tmp -Recurse -Filter '*.autoos-backup-*').Count 0
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSSerenaExclusions skips on the first run when all 15 are already present, any order (serena)' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'serena_config.yml'
+    $body = "excluded_tools:`r`n- delete_memory`r`n- create_text_file`r`n- read_file`r`n- execute_shell_command`r`n" +
+            "- list_dir`r`n- search_for_pattern`r`n- find_file`r`n- replace_content`r`n- replace_in_files`r`n" +
+            "- onboarding`r`n- write_memory`r`n- read_memory`r`n- list_memories`r`n- edit_memory`r`n- rename_memory`r`n"
+    [IO.File]::WriteAllText($p, $body)
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        $hash1 = (Get-FileHash -Path $p -Algorithm SHA256).Hash
+        $out = Get-AutoOSConsoleCapture { Set-AutoOSSerenaExclusions -ConfigPath $p 6>&1 }
+        $hash2 = (Get-FileHash -Path $p -Algorithm SHA256).Hash
+        Assert-True ($out -like '*skipped*') "expected 'skipped' in output, got: [$out]"
+        Assert-Equal $hash2 $hash1
+        Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 0
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSSerenaExclusions on a directory path warns and writes nothing (serena)' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $adir = Join-Path $tmp 'adir'
+    New-Item -ItemType Directory -Path $adir -Force | Out-Null
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        $out = Get-AutoOSConsoleCapture { Set-AutoOSSerenaExclusions -ConfigPath $adir 6>&1 }
+        Assert-True ($out -like '*directory*') "expected a directory warning, got: [$out]"
+        Assert-True (Test-Path $adir -PathType Container) 'the directory itself must survive'
+        Assert-Equal @(Get-ChildItem -Path $adir -Force).Count 0
+        Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 0
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+# CRLF and a raw non-UTF-8 byte can't live in a committed *.yml fixture -
+# .gitattributes forces `*.yml text eol=lf`, which would silently rewrite a
+# checked-in CRLF fixture to LF and defeat the point of the test. These two
+# build their own bytes at run time instead, exactly like their bash twins.
+Test-Case 'Set-AutoOSSerenaExclusions preserves CRLF line endings and untouched content byte-for-byte (serena)' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'serena_config.yml'
+    $enc = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllBytes($p, $enc.GetBytes("# top comment`r`nother_key: 1`r`nexcluded_tools:`r`n- read_file`r`n- my_tool`r`nlast_key: x`r`n"))
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+        $bytes = [IO.File]::ReadAllBytes($p)
+        $cr = @($bytes | Where-Object { $_ -eq 0x0D }).Count
+        $lf = @($bytes | Where-Object { $_ -eq 0x0A }).Count
+        Assert-Equal $cr $lf
+        Assert-True ($cr -gt 0) 'expected at least one CRLF pair'
+        $firstLine = (Get-Content -Path $p)[0]
+        Assert-Equal $firstLine '# top comment'
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case "Set-AutoOSSerenaExclusions keeps each line's own ending outside the edited block (mixed CRLF/LF) (serena)" {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'serena_config.yml'
+    $enc = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllBytes($p, $enc.GetBytes("a_setting: 1`nb_setting: 2`r`nexcluded_tools:`r`n- read_file`r`ntrailer_key: keep_me`n"))
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+        $text = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes($p))
+        Assert-True ($text.StartsWith("a_setting: 1`nb_setting: 2`r`nexcluded_tools:")) "the lines before the block changed: [$text]"
+        Assert-True ($text.EndsWith("`ntrailer_key: keep_me`n") -and -not $text.EndsWith("`r`n")) "the LF trailer changed: [$text]"
+        Assert-True ($text.Contains('- delete_memory')) 'the canonical list was not merged'
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSSerenaExclusions preserves a non-UTF-8 byte outside the block untouched (serena)' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'serena_config.yml'
+    $prefix = [Text.Encoding]::ASCII.GetBytes("excluded_tools:`n- read_file`n#comment with byte: ")
+    $suffix = [Text.Encoding]::ASCII.GetBytes("`nlast_key: x`n")
+    $bytes = $prefix + [byte[]](0xE9) + $suffix
+    [IO.File]::WriteAllBytes($p, $bytes)
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+        $result = [IO.File]::ReadAllBytes($p)
+        $expectedTail = [Text.Encoding]::ASCII.GetBytes("#comment with byte: ") + [byte[]](0xE9) + [Text.Encoding]::ASCII.GetBytes("`nlast_key: x`n")
+        $tail = $result[($result.Length - $expectedTail.Length)..($result.Length - 1)]
+        Assert-Equal ([BitConverter]::ToString($tail)) ([BitConverter]::ToString($expectedTail))
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Add-AutoOSProfileLine -Prepend puts the line first, exactly once' {
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
+    Set-Content -Path $p -Value 'Write-Host slow-profile' -Encoding utf8
+    $line = "if (`$env:AI_AGENT -eq 'openhands') { return }"
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line $line -Marker "AI_AGENT -eq 'openhands'" 6>$null
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line $line -Marker "AI_AGENT -eq 'openhands'" 6>$null
+        $lines = @(Get-Content -Path $p)
+        Assert-Equal $lines[0] '# added by AutoOS'
+        Assert-Equal $lines[1] $line
+        Assert-Equal @($lines | Where-Object { $_ -like '*AI_AGENT*' }).Count 1
+        Assert-Contains $lines 'Write-Host slow-profile'
+        # rule 5: the user's profile was backed up before the first write, once
+        Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 1
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Add-AutoOSProfileLine -Prepend keeps an ANSI profile byte-for-byte' {
+    # A Windows PowerShell 5.1 profile without a BOM is read as the ANSI code page.
+    # Re-encoding it as UTF-8 would turn every non-ASCII byte into U+FFFD.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
+    $orig = [byte[]](0x23, 0x20, 0x93, 0x20, 0x81, 0x66, 0xE9, 0x0D, 0x0A)   # cp1252 quote, a byte cp1252 leaves undefined, é
+    [IO.File]::WriteAllBytes($p, $orig)
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line 'X-GUARD' -Marker 'X-GUARD' 6>$null
+        $after = [IO.File]::ReadAllBytes($p)
+        $tail = $after[($after.Length - $orig.Length)..($after.Length - 1)]
+        Assert-Equal ([BitConverter]::ToString($tail)) ([BitConverter]::ToString($orig))
+        Assert-True ($after[0] -eq 0x23) 'a BOM was added to an ANSI profile'
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Add-AutoOSProfileLine -Prepend goes after a using/param preamble' {
+    # `using` and `param` must be a script's first statements; a guard above them
+    # would make every PowerShell start fail with a parse error.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
+    [IO.File]::WriteAllText($p, "using namespace System.Text`r`nparam([string]`$x)`r`nWrite-Host slow-profile`r`n")
+    $line = "if (`$env:AI_AGENT -eq 'openhands') { return }"
+    try {
+        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
+        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line $line -Marker "AI_AGENT -eq 'openhands'" 6>$null
+        $lines = @(Get-Content -Path $p)
+        Assert-Equal $lines[0] 'using namespace System.Text'
+        Assert-Equal $lines[1] 'param([string]$x)'
+        Assert-Equal $lines[3] $line
+        Assert-Equal $lines[4] 'Write-Host slow-profile'
+        $errs = $null
+        [void][Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs)
+        Assert-Equal @($errs).Count 0
+    } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'Set-AutoOSOpenHandsConfig prepends the OpenHands guard to all four existing profiles' {
+    $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
+    Assert-True ($body -match 'Add-AutoOSProfileLine -Prepend') 'no -Prepend guard call'
+    Assert-True ($body -match "PowerShell\\Microsoft\.PowerShell_profile\.ps1") 'pwsh profile not guarded'
+    Assert-True ($body -match "'PowerShell\\profile\.ps1'") 'pwsh all-hosts profile.ps1 not guarded'
+    Assert-True ($body -match "WindowsPowerShell\\Microsoft\.PowerShell_profile\.ps1") 'Windows PowerShell profile not guarded'
+    Assert-True ($body -match "WindowsPowerShell\\profile\.ps1") 'Windows PowerShell all-hosts profile.ps1 not guarded'
+}
+
+Describe-Group 'mcp pins'
+
+Test-Case 'mcp pins: lib/ carries no floating package spec' {
+    $needles = @('serena-agent', 'graphifyy[mcp]', '@playwright/mcp', '@upstash/context7-mcp', '@modernrelay/omnigraph-mcp')
+    $files = @(Get-ChildItem -Path $Lib -Filter '*.psm1' -File) +
+             @(Get-ChildItem -Path (Join-Path $Root 'lib\linux') -Filter '*.sh' -File)
+    foreach ($f in $files) {
+        $text = Get-Content -Path $f.FullName -Raw -Encoding UTF8
+        foreach ($needle in $needles) {
+            if ($text.Contains($needle)) { throw "$($f.FullName) still contains '$needle'" }
+        }
+    }
+    Pass
+}
+
+Test-Case 'mcp pins: no pinned version string appears under lib/' {
+    $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $versions = @()
+    foreach ($p in $harness.mcp_servers.PSObject.Properties) {
+        $pkg = $p.Value.package
+        if ($pkg -match '@([0-9][^@]*)$') { $versions += $Matches[1] }
+        elseif ($pkg -match '==(.+)$') { $versions += $Matches[1] }
+    }
+    $files = @(Get-ChildItem -Path (Join-Path $Root 'lib') -Recurse -File)
+    foreach ($f in $files) {
+        $text = Get-Content -Path $f.FullName -Raw -Encoding UTF8
+        foreach ($v in $versions) {
+            if ($text.Contains($v)) { throw "$($f.FullName) still contains pinned version '$v'" }
+        }
+    }
+    Pass
+}
+
+Test-Case 'mcp pins: the client excludeTools list equals serena.excluded_tools' {
+    $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $want = @($harness.mcp_servers.serena.excluded_tools)
+    Assert-Equal (@(Get-AutoOSSerenaExcludedTools) -join ',') ($want -join ',')
+    Assert-Equal (Get-AutoOSMcpPackage -Name 'serena') $harness.mcp_servers.serena.package
+    $src = Get-Content (Join-Path $Lib 'AutoOS.Install.psm1') -Raw -Encoding UTF8
+    Assert-True ($src -match 'excludeTools\s*=\s*@\(Get-AutoOSSerenaExcludedTools\)') 'the Antigravity serena spec does not use Get-AutoOSSerenaExcludedTools'
+    Assert-True ($src -match '\$canonical = @\(Get-AutoOSSerenaExcludedTools\)') 'Set-AutoOSSerenaExclusions does not use Get-AutoOSSerenaExcludedTools'
+    Assert-True ($src -notmatch "excludeTools\s*=\s*@\('onboarding'") 'a hardcoded excludeTools list is still present'
+}
+
+Test-Case 'the embedded OpenHands setup script writes the resolved Ollama address' {
+    # Runs the real here-string against a temp ~/.openhands. USERPROFILE, HOME
+    # and LOCALAPPDATA point into the temp dir too, so its uv-cache walk finds
+    # nothing and no file outside the temp dir is read or written.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+    $script = [regex]::Match($src, "(?s)\`$setupScript = @'\r?\n(.*?)\r?\n'@").Groups[1].Value
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-e2e-$PID"
+    $oh = Join-Path $tmp '.openhands'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $oh 'profiles'), (Join-Path $oh 'agent-profiles')
+    $saved = @{ OLLAMA_BASE_URL = $env:OLLAMA_BASE_URL; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME; LOCALAPPDATA = $env:LOCALAPPDATA }
+    try {
+        $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
+        $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
+        & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root *> $null
+        $profile = Get-Content (Join-Path $oh 'profiles\ollama-qwen2.5-coder.json') -Raw | ConvertFrom-Json
+        $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
+        # LiteLLM's ollama routes append /api/...: a /v1 base gives 404 (measured 2026-09-19);
+        # ollama_chat/ uses /api/chat, which supports tool calls. OpenCode keeps /v1.
+        Assert-Equal $profile.base_url 'http://ollama:11434'
+        Assert-Equal $profile.model 'ollama_chat/qwen2.5-coder:7b'
+        Assert-Equal $settings.agent_settings.llm.base_url 'http://ollama:11434'
+        Assert-Equal $settings.agent_settings.llm.model 'ollama_chat/qwen2.5-coder:7b'
+        Assert-True (Test-Path (Join-Path $oh 'agent-profiles\claude-sonnet.json')) 'non-role vendored agent profile not copied'
+        Assert-True (-not (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json'))) 'role profile copied by the embedded script instead of the generator'
+        # OpenHands ignores an MCP timeout today and may soon read it as milliseconds (#3254)
+        Assert-True (-not @($settings.agent_settings.mcp_config.PSObject.Properties.Value | Where-Object { $_.PSObject.Properties.Name -contains 'timeout' })) 'an MCP server still has a timeout'
+        # every MCP server is pinned: a floating npx/uvx spec changes under the user.
+        # Expected specs come from the harness, the one source of truth for the pins.
+        $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $pins = [ordered]@{}
+        foreach ($p in $harness.mcp_servers.PSObject.Properties) { $pins[$p.Name] = $p.Value.package }
+        foreach ($k in $pins.Keys) { Assert-Contains $settings.agent_settings.mcp_config.$k.args $pins[$k] }
+    } finally {
+        foreach ($k in $saved.Keys) {
+            # an unset variable must be unset again, not left pointing at $tmp
+            if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            else { Set-Item "env:$k" -Value $saved[$k] }
+        }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
+    # Tier profiles (omniroute-tier* + litellm-tier*) route OpenHands through
+    # the gateways for the 3-level hierarchy. Same temp-dir isolation as the
+    # Ollama test.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+    $script = [regex]::Match($src, "(?s)\`$setupScript = @'\r?\n(.*?)\r?\n'@").Groups[1].Value
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-tier-$PID"
+    $oh = Join-Path $tmp '.openhands'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $oh 'profiles'), (Join-Path $oh 'agent-profiles')
+    $saved = @{ OLLAMA_BASE_URL = $env:OLLAMA_BASE_URL; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME; LOCALAPPDATA = $env:LOCALAPPDATA }
+    try {
+        $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
+        $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
+        & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-omni-key' *> $null
+        $t1 = Get-Content (Join-Path $oh 'profiles\l1-orchestrator.json') -Raw | ConvertFrom-Json
+        $t3 = Get-Content (Join-Path $oh 'profiles\l3-driver.json') -Raw | ConvertFrom-Json
+        Assert-Equal $t1.model 'openai/l1-orchestrator'
+        Assert-Equal $t1.base_url 'http://host.docker.internal:20128/v1'
+        Assert-Equal $t1.api_key 'test-omni-key'
+        Assert-Equal $t1.reasoning_effort 'high'
+        Assert-Equal $t3.model 'openai/l3-driver'
+        Assert-Equal $t3.reasoning_effort 'none'
+        Assert-True ($t3.enable_encrypted_reasoning -eq $false) 't3 thinking not opted out'
+        Assert-True (Test-Path (Join-Path $oh 'profiles\l2-worker-clean.json')) 'clean twin missing'
+        $lp = (Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json).llm_profiles
+        Assert-True ($null -ne $lp.profiles.'l1-orchestrator') 't1 not published to llm_profiles'
+        Assert-Equal $lp.active 'l1-orchestrator'
+    } finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            else { Set-Item "env:$k" -Value $saved[$k] }
+        }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'the embedded OpenHands setup script writes no tier profiles without a key' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+    $script = [regex]::Match($src, "(?s)\`$setupScript = @'\r?\n(.*?)\r?\n'@").Groups[1].Value
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-notier-$PID"
+    $oh = Join-Path $tmp '.openhands'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $oh 'profiles'), (Join-Path $oh 'agent-profiles')
+    $saved = @{ OLLAMA_BASE_URL = $env:OLLAMA_BASE_URL; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME; LOCALAPPDATA = $env:LOCALAPPDATA }
+    try {
+        $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
+        $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
+        & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'null' *> $null
+        Assert-True (-not (Test-Path (Join-Path $oh 'profiles\l1-orchestrator.json'))) 'tier profile written without a key'
+    } finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            else { Set-Item "env:$k" -Value $saved[$k] }
+        }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'tier profiles come from the spec, installer and tool agree' {
+    # configuration/openhands/tier-profiles.json is the single source; the
+    # embedded installer and tools/sync-openhands-profiles.py must project it
+    # byte-identically for the same key, or install-time and start-time drift.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    # The expected tiers are the registry's own render: membership follows
+    # provider servability, the push-priority ORDER is the human-approved pin in
+    # tools/registry.py OPENHANDS_TIER_ORDER. Derived, never re-pinned, so the
+    # next provider flip needs no edit here (lesson PROVPIN 2026-09-27).
+    $derive = @'
+import json, os, sys
+root = sys.argv[1]
+sys.path.insert(0, os.path.join(root, 'tools'))
+import registry
+reg = json.load(open(os.path.join(root, 'catalog', 'ai-registry.json'), encoding='utf-8'))
+spec = json.load(open(os.path.join(root, 'configuration', 'openhands', 'tier-profiles.json'), encoding='utf-8'))
+tiers = spec.get('tiers') or []
+if not tiers:
+    print('spec-empty')
+else:
+    print(','.join(registry.openhands_diff(registry.render_openhands(reg), spec)))
+'@
+    $derivePath = Join-Path ([IO.Path]::GetTempPath()) "autoos-tierspec-derive-$PID.py"
+    [IO.File]::WriteAllText($derivePath, $derive)
+    try {
+        $deriveOut = & $py.Source $derivePath $Root 2>&1 | Out-String
+    } finally {
+        Remove-Item $derivePath -Force -ErrorAction SilentlyContinue
+    }
+    Assert-Equal $deriveOut.Trim() '' 'tier-profiles.json is not the registry render (run: python3 tools/registry.py render openhands)'
+    # Base URLs are infrastructure, not provider state - pinned on purpose.
+    Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
+    Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
+    foreach ($t in $spec.tiers) {
+        # Every tier names a provider-qualified model; which providers answer is
+        # registry state (checked by the render above), not a list repeated here.
+        Assert-True ($t.model -match '/') "$($t.id) model is not provider-qualified"
+    }
+    $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
+    Assert-True ($body -match 'tier-profiles\.json') 'installer does not read the tier spec (inline tiers drift)'
+    $tmpA = Join-Path ([IO.Path]::GetTempPath()) "autoos-tierspecA-$PID"
+    $tmpB = Join-Path ([IO.Path]::GetTempPath()) "autoos-tierspecB-$PID"
+    $keys = Join-Path $tmpB 'api-keys.yml'
+    $litEnv = Join-Path $tmpB '.env'
+    # The generator prefers env over the keys file: force the fixture path by
+    # hiding any ambient key (the suite never asserts on live system state).
+    $realOmniKey = $env:AUTOOS_OMNIROUTE_KEY
+    $realLitKey = $env:LITELLM_MASTER_KEY
+    $realLitApiKey = $env:AUTOOS_LITELLM_API_KEY
+    $realHostName = $env:AUTOOS_HOST_NAME
+    try {
+        $null = New-Item -ItemType Directory -Force -Path $tmpA, $tmpB
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        'omniroute_testhost: test-omni-key' | Out-File $keys -Encoding utf8
+        'openrouter: test-or-key' | Out-File $keys -Append -Encoding utf8
+        'LITELLM_MASTER_KEY=test-lit-key' | Out-File $litEnv -Encoding utf8
+        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+        try { & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys --litellm-env $litEnv *> $null }
+        finally { $ErrorActionPreference = $prev }
+        Assert-Equal $LASTEXITCODE 0 'generator failed'
+        # Every spec tier has a key in the fixture, so exactly one profile per
+        # tier must come out - derived from the spec, never a pinned count.
+        Assert-Equal (@(Get-ChildItem (Join-Path $tmpA 'profiles') -Filter '*.json').Count) @($spec.tiers).Count 'generator wrote a different number of profiles than the spec lists'
+        # The spec's own tier ids are the expected filenames — derived, never a
+        # pinned list of profile names.
+        foreach ($t in @($spec.tiers)) {
+            Assert-True (Test-Path (Join-Path $tmpA "profiles\$($t.id).json")) "$($t.id).json missing"
+        }
+        # Project one gateway tier and one litellm tier (whichever the registry
+        # currently renders) to prove the key and endpoint wiring, instead of
+        # naming tiers that go stale when a provider flips.
+        $gwTier = @($spec.tiers | Where-Object { $_.id -notlike 'litellm-*' }) | Select-Object -First 1
+        $litTier = @($spec.tiers | Where-Object { $_.id -like 'litellm-*' }) | Select-Object -First 1
+        $t1 = Get-Content (Join-Path $tmpA "profiles\$($gwTier.id).json") -Raw | ConvertFrom-Json
+        Assert-Equal $t1.model $gwTier.model
+        Assert-Equal $t1.api_key 'test-omni-key'
+        $lt = Get-Content (Join-Path $tmpA "profiles\$($litTier.id).json") -Raw | ConvertFrom-Json
+        Assert-Equal $lt.model $litTier.model
+        Assert-Equal $lt.base_url 'http://host.docker.internal:4000/v1'
+        Assert-Equal $lt.api_key 'test-lit-key'
+        # A direct-provider tier (the only kind that carries its own base_url)
+        # takes its OWN key and endpoint, not the gateway's - the effort-ladder
+        # surface. Derived from the spec, so it asserts whatever the registry
+        # renders today and needs no re-pin when that route flips.
+        foreach ($d in @($spec.tiers | Where-Object { $_.PSObject.Properties.Name -contains 'base_url' })) {
+            $directProfile = Get-Content (Join-Path $tmpA "profiles\$($d.id).json") -Raw | ConvertFrom-Json
+            Assert-Equal $directProfile.base_url $d.base_url
+            Assert-Equal $directProfile.model $d.model
+            Assert-True ($directProfile.api_key -and $directProfile.api_key -ne 'test-omni-key' -and $directProfile.api_key -ne 'test-lit-key') "$($d.id) direct profile reused a gateway key"
+        }
+        # The same behaviour on a synthetic one-tier spec, so it is exercised
+        # even while the committed spec renders no direct tier.
+        $realOrKey = $env:OPENROUTER_API_KEY
+        try {
+            $syn = Join-Path $tmpB 'synthetic'
+            $null = New-Item -ItemType Directory -Force -Path $syn
+            [IO.File]::WriteAllText((Join-Path $syn 'spec.json'), '{"gateway_base_url": "http://gateway.invalid:20128/v1", "litellm_base_url": "http://litellm.invalid:4000/v1", "tiers": [{"id": "openrouter-muse-spark-1.3-contributor", "gateway": "openrouter", "base_url": "https://openrouter.ai/api/v1", "model": "openrouter/meta/muse-spark-1.3-contributor", "max_input_tokens": 131072, "max_output_tokens": 32768, "reasoning": true}]}')
+            Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+            & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --spec (Join-Path $syn 'spec.json') --openhands-dir (Join-Path $syn 'oh') --keys-file $keys --litellm-env $litEnv *> $null
+            Assert-Equal $LASTEXITCODE 0 'synthetic generator failed'
+            $direct = Get-Content (Join-Path $syn 'oh\profiles\openrouter-muse-spark-1.3-contributor.json') -Raw | ConvertFrom-Json
+            Assert-Equal $direct.api_key 'test-or-key'
+            Assert-Equal $direct.base_url 'https://openrouter.ai/api/v1'
+            Assert-Equal $direct.model 'openrouter/meta/muse-spark-1.3-contributor'
+        } finally {
+            if ($null -eq $realOrKey) { Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue }
+            else { $env:OPENROUTER_API_KEY = $realOrKey }
+        }
+    } finally {
+        if ($null -eq $realHostName) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_HOST_NAME = $realHostName }
+        if ($null -eq $realOmniKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_KEY = $realOmniKey }
+        if ($null -eq $realLitKey) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
+        else { $env:LITELLM_MASTER_KEY = $realLitKey }
+        if ($null -eq $realLitApiKey) { Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_LITELLM_API_KEY = $realLitApiKey }
+        Remove-Item $tmpA, $tmpB -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'autoos-agent plans tier runs without spawning or leaking a key' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $tool = Join-Path $Root 'tools\autoos-agent.py'
+    $out = & $py.Source $tool run --tier 2 --dry-run t 2>&1 | Out-String
+    Assert-Equal $LASTEXITCODE 0 "dry run failed: $out"
+    Assert-True ($out -match '--standalone --agent l2-worker --model omniroute/l2-(worker|orchestrator) ') 'l2-worker not paired with its model'
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source $tool run --tier 3 --clean --dry-run t 2>&1 | Out-String }
+    finally { $ErrorActionPreference = $prev }
+    Assert-True ($out -match '--model omniroute/l3-driver-clean ') 'clean twin not chosen'
+    $env:AUTOOS_OMNIROUTE_KEY = 'never-print-this-key'
+    try { $out = & $py.Source $tool run --tier 2 --free --isolate --dry-run t 2>&1 | Out-String }
+    finally { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+    Assert-True ($out -match 'one-commit materialisation of allowed HEAD files') 'isolation is not a materialisation'
+    Assert-True ($out -notmatch 'worktree add|never-print-this-key') 'plan used a worktree or printed the key'
+    # The refusal goes to stderr; under Stop, Windows PowerShell turns native
+    # stderr into a terminating error (it failed CI on the windows runner).
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { & $py.Source $tool run --tier 2 --free --clean --dry-run t 2>&1 | Out-Null; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 2
+}
+
+Test-Case 'autoos-agent spawner unit tests: card routing, clients, depth' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_spawner.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "spawner unit tests failed: $out"
+}
+
+Test-Case 'autoos_redact span: PEM block masking keeps the report and its VERDICT (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_redact_span.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "redact span unit tests failed: $out"
+}
+
+Test-Case 'ready main-CI freeze gate: red main blocks, fixes-main waives (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_ready_main_freeze.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "ready main-freeze unit tests failed: $out"
+}
+
+Test-Case 'autoos_card: section order, line caps, header fields, the card check verb (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_card.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "card unit tests failed: $out"
+}
+
+Test-Case 'autoos_inbox: records, positions, late flags, the inbox verb, dispatch table (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_inbox.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "inbox unit tests failed: $out"
+}
+
+Test-Case 'autoos-agent spawner windows prompt delivery and shim resolution (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_win_prompt_spawn.py') 2>&1 | Out-String; $rc = $LASTEXITCODE; if ($rc -eq 0) { $out = & $py.Source (Join-Path $Root 'tests\test_win_prompt_spawn_more.py') 2>&1 | Out-String; $rc = $LASTEXITCODE } }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "win prompt spawn unit tests failed: $out"
+}
+
+Test-Case 'claude_cli_lag: host Claude Code version vs the newest release, the autoupdater state, no pin (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_claude_cli_lag.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "claude-cli-lag unit tests failed: $out"
+}
+
+Test-Case 'autoos_risk: diff classifier, risk rules, audit draw, risk verb (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_risk.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "risk unit tests failed: $out"
+}
+
+Test-Case 'autoos_writer_rule: R-scale judgement plus writer allow-list (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_writer_rule.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "writer-rule unit tests failed: $out"
+}
+
+Test-Case 'autoos_brief: ops brief render, R3 clause, field guards (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_brief.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "brief unit tests failed: $out"
+}
+
+Test-Case 'autoos_writer_ledger: verdict ledger, demotion, probe, rollup (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_writer_ledger.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "writer-ledger unit tests failed: $out"
+}
+
+Test-Case 'autoos_ready_guards + autoos_verdict: FILES scope, diff fence, verdict grammar (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_ready_guards.py') 2>&1 | Out-String; $rc = $LASTEXITCODE; if ($rc -eq 0) { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_verdict.py') 2>&1 | Out-String; $rc = $LASTEXITCODE } }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "ready-guards unit tests failed: $out"
+}
+
+Test-Case 'autoos_recovery: run classify, stall clock, attempt budget, continue task, plan (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_recovery.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "recovery unit tests failed: $out"
+}
+
+Test-Case 'ready callers: tracked invocations name --brief and --report (lint)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_ready_callers.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "ready-caller lint failed: $out"
+}
+
+Test-Case 'autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_heartbeat.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "heartbeat unit tests failed: $out"
+}
+
+Test-Case 'sync_memory_graph: ledger-gated NDJSON emit, hub edges, merge-only load (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_sync_memory_graph.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "sync_memory_graph unit tests failed: $out"
+}
+
+Test-Case 'serena_shared_server_no_memory: shared SSE server hides memory tools (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_serena_shared_server_no_memory.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "serena_shared_server_no_memory unit tests failed: $out"
+}
+
+Test-Case 't1-credit fix2: narrow guards, total fallback, usage exit 3 (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_t1_credit_fix2.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "t1-credit fix2 unit tests failed: $out"
+}
+
+Test-Case 't1-credit fix6: per-provider pricing for credit legs (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_t1_credit_fix6.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "t1-credit fix6 unit tests failed: $out"
+}
+
+Test-Case 't1-credit fix7: review findings R1-R5 on fix6 (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_t1_credit_fix7.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "t1-credit fix7 unit tests failed: $out"
+}
+
+Test-Case 't1-credit fix10: real meter without the manage key, paid cap, cache-read billing (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_t1_credit_fix10.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "t1-credit fix10 unit tests failed: $out"
+}
+
+Test-Case 't1-credit fix14: stale balance ledger fails closed (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_t1_credit_fix14.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "t1-credit fix14 unit tests failed: $out"
+}
+
+Test-Case 't1-credit fix16: never govern from old data + fail-closed fallbacks (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_t1_credit_fix16.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "t1-credit fix16 unit tests failed: $out"
+}
+
+Test-Case 't1-credit fix17: present-but-unusable balance entries + overlay except wrap (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_t1_credit_fix17.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "t1-credit fix17 unit tests failed: $out"
+}
+
+Test-Case 't2-record-pin: record pin round-trip and conflict resolution (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_t2_record_pin.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "t2-record-pin unit tests failed: $out"
+}
+
+Test-Case 'fleet-agents: foreign-repo sandboxes get the AutoOS agent definitions (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_fleet_sandbox_agents.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "fleet-agents unit tests failed: $out"
+}
+
+Test-Case 'deepinfra-wire-min: MiMo-V2.6-Flash writer pin, prepaid hard stop, no Claude/-clean legs (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_deepinfra_wire_min.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "deepinfra-wire-min unit tests failed: $out"
+}
+
+Test-Case 'gateway-key exec: child runs with the key in its env only (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_gateway_key_exec.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "gateway-key exec unit tests failed: $out"
+}
+
+Test-Case 'review-call: one tool-less gateway review call, key only via exec (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_review_call.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "review-call unit tests failed: $out"
+}
+
+Test-Case 'diff-guard: report-only drift rules R0..R5 over a git revision range (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_diff_guard.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "diff-guard unit tests failed: $out"
+}
+
+Test-Case 'debtcap nebius: provider excluded from free/trial tiers (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_debtcap_nebius.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "debtcap nebius unit tests failed: $out"
+}
+
+Test-Case 'gateway quota patch: loud-fail substitution for quota windows without a total (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_gateway_quota_patch.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "gateway quota patch unit tests failed: $out"
+}
+
+Test-Case 'gateway quota patch CLI: CLI invocation, arguments, and dry-run (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_gateway_quota_patch_cli.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "gateway quota patch CLI unit tests failed: $out"
+}
+
+Test-Case 'credential files: vertex/service-account JSONs are ignored, never tracked (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_credential_files_ignored.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "credential-files unit tests failed: $out"
+}
+
+Test-Case 'public ids: no real GCP project id or service-account address ships (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_public_ids.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "public-ids unit tests failed: $out"
+}
+
+Test-Case 'omnigraph gateway policy: static refusal and least-privilege checks (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_gateway_policy.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "gateway policy unit tests failed: $out"
+}
+
+Test-Case 'bash-guard: PreToolUse heredoc + claude --bg/-p/--print guard (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_bash_guard.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "bash-guard unit tests failed: $out"
+}
+
+Test-Case 'opencode bash-guard: OpenCode plugin hook guard (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_opencode_bash_guard.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "opencode bash-guard unit tests failed: $out"
+}
+
+Test-Case 'oc_l1 launcher: config and render (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l1.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "test_oc_l1 unit tests failed: $out"
+}
+
+Test-Case 'oc_l1 launcher: start (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l1_serve.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "test_oc_l1_serve unit tests failed: $out"
+}
+
+Test-Case 'oc_l1 launcher: status (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l1_status.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "test_oc_l1_status unit tests failed: $out"
+}
+
+Test-Case 'oc_l1 launcher: bash-guard canary (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l1_canary.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "test_oc_l1_canary unit tests failed: $out"
+}
+
+Test-Case 'oc_l1 launcher: rendered opencode config shape (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l1_render.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "test_oc_l1_render unit tests failed: $out"
+}
+
+Test-Case 'oc_l2 L2 phase lane: start, stop, inbox (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l2.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "test_oc_l2 unit tests failed: $out"
+}
+
+Test-Case 'agent MCP tool profile (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_agent_mcp_tool_profile.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "test_agent_mcp_tool_profile unit tests failed: $out"
+}
+
+Test-Case 'cost guard: run and daily budget evaluations (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_run_budget.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "run_budget unit tests failed: $out"
+}
+
+Test-Case 'cost guard: edge inputs, classification and price file (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_run_budget_more.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "run_budget_more unit tests failed: $out"
+}
+
+Test-Case 'cost guard: spawner refusal and daily gate integration (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_run_budget_spawner.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "run_budget_spawner unit tests failed: $out"
+}
+
+Test-Case 'cost guard: CLI output, exit codes and boundaries (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_run_budget_v3.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "run_budget_v3 unit tests failed: $out"
+}
+
+Test-Case 'cost guard: rotate-on-last-call, day bad-row accumulation, gateway handling and provider/model pins (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_run_budget_v3b.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "run_budget_v3b unit tests failed: $out"
+}
+
+Test-Case 'cost guard: spawner gate numeric values, no-override rule and model sources (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_run_budget_spawner_v3.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "run_budget_spawner_v3 unit tests failed: $out"
+}
+
+Test-Case 'cost gate: price table, unpriced-at-highest-flash-rate and price file (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_run_budget_prices.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "run_budget_prices unit tests failed: $out"
+}
+
+Test-Case 'cost gate: refresh script, atomic gate file, status line and config handling (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_cost_gate_refresh.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "cost_gate_refresh unit tests failed: $out"
+}
+
+Test-Case 'cost gate: rows pass-through and the status/staleness alarm script (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_cost_gate_refresh_more.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "cost_gate_refresh_more unit tests failed: $out"
+}
+
+Test-Case 'cost gate: default gate path rule and fail-open reason (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_cost_gate_default_path.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "cost_gate_default_path unit tests failed: $out"
+}
+
+Test-Case 'cost gate: Linux installer, user units and catalog entry (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_cost_gate_units.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "cost_gate_units unit tests failed: $out"
+}
+
+Test-Case 'cost gate: additional Linux tests (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_cost_gate_units_more.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "cost_gate_units_more unit tests failed: $out"
+}
+
+Test-Case 'cost gate: additional Linux tests 2 (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_cost_gate_units_more2.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "cost_gate_units_more2 unit tests failed: $out"
+}
+
+Test-Case 'cost gate: Windows live run (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_cost_gate_windows_run.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "cost_gate_windows_run unit tests failed: $out"
+}
+
+Test-Case 'cost gate: Windows culture invariance and export completeness (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_cost_gate_culture.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "cost_gate_culture unit tests failed: $out"
+}
+
+Test-Case 'cost gate: Windows module, export wrapper and scheduled task (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_cost_gate_windows.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "cost_gate_windows unit tests failed: $out"
+}
+
+Test-Case 'autoos-agent: git subprocess calls on MCP paths do not inherit stdin (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_mcp_stdin_devnull.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "mcp_stdin_devnull unit tests failed: $out"
+}
+
+Test-Case 'mirror-litellm-env projects keys without printing them' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-litenv-$PID"
+    try {
+        $null = New-Item -ItemType Directory -Force -Path $tmp
+        $keys = Join-Path $tmp 'api-keys.yml'
+        $envFile = Join-Path $tmp '.env'
+        "groq: dummy-groq-1`nmeta: dummy-meta-2`ncohere: dummy-cohere-3`nSambaNova: dummy-samba-4`nzen: REPLACE_WITH_ZEN_KEY" | Out-File $keys -Encoding utf8
+        $out = & $py.Source (Join-Path $Root 'tools\mirror-litellm-env.py') --keys $keys --env $envFile 2>&1 | Out-String
+        Assert-Equal $LASTEXITCODE 0 "mirror failed: $out"
+        Assert-True ($out -notmatch 'dummy-') 'a key value leaked into output'
+        $got = Get-Content $envFile -Raw -Encoding utf8
+        Assert-True ($got -match 'GROQ_API_KEY=dummy-groq-1') 'groq not mirrored'
+        Assert-True ($got -match 'META_API_KEY=dummy-meta-2') 'meta not mirrored'
+        Assert-True ($got -match 'COHERE_API_KEY=dummy-cohere-3') 'cohere not mirrored'
+        Assert-True ($got -match 'SAMBANOVA_API_KEY=dummy-samba-4') 'SambaNova case not mirrored'
+        Assert-True ($got -match 'OPENCODE_ZEN_API_KEY=REPLACE') 'missing key not a placeholder'
+        Assert-True ($got -match 'LITELLM_MASTER_KEY=(?!REPLACE)\S+') 'master key not generated'
+        & $py.Source (Join-Path $Root 'tools\mirror-litellm-env.py') --check --keys $keys --env $envFile *> $null
+        Assert-Equal $LASTEXITCODE 0 'freshly written file fails --check'
+    } finally { Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case "mirror-litellm-env's unit tests pass (registry-sourced, task A5c)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_mirror_litellm_env_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "mirror-litellm-env registry unit tests failed: $out"
+}
+
+Test-Case 'the embedded OpenHands setup script defaults to the gateway with a key' {
+    # Same temp-dir isolation as the Ollama test. With an OmniRoute key the
+    # default LLM must mirror the opencode t1 setup (openai/l1-orchestrator via the
+    # container-side gateway) instead of falling back to local Ollama.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+    $script = [regex]::Match($src, "(?s)\`$setupScript = @'\r?\n(.*?)\r?\n'@").Groups[1].Value
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-gw-$PID"
+    $oh = Join-Path $tmp '.openhands'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $oh 'profiles'), (Join-Path $oh 'agent-profiles')
+    $saved = @{ OLLAMA_BASE_URL = $env:OLLAMA_BASE_URL; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME; LOCALAPPDATA = $env:LOCALAPPDATA }
+    try {
+        $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
+        $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
+        & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-gw-key' *> $null
+        $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $settings.agent_settings.llm.model 'openai/l1-orchestrator'
+        Assert-Equal $settings.agent_settings.llm.base_url 'http://host.docker.internal:20128/v1'
+        Assert-Equal $settings.agent_settings.llm.api_key 'test-gw-key'
+        Assert-Equal $settings.agent_settings.llm.reasoning_effort 'high'
+    } finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            else { Set-Item "env:$k" -Value $saved[$k] }
+        }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'the embedded OpenHands setup script points omnigraph at the host, not at the container itself' {
+    # The app and its sandboxes run in Docker, where localhost is the container:
+    # omnigraph-server (published on the host's :8080) is reached through
+    # host.docker.internal, like the gateway URL the same file carries.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+    $script = [regex]::Match($src, "(?s)\`$setupScript = @'\r?\n(.*?)\r?\n'@").Groups[1].Value
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-omni-$PID"
+    $oh = Join-Path $tmp '.openhands'
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $oh 'profiles'), (Join-Path $oh 'agent-profiles')
+    $saved = @{ OLLAMA_BASE_URL = $env:OLLAMA_BASE_URL; USERPROFILE = $env:USERPROFILE; HOME = $env:HOME; LOCALAPPDATA = $env:LOCALAPPDATA }
+    try {
+        $env:OLLAMA_BASE_URL = 'http://ollama:11434/v1'
+        $env:USERPROFILE = $tmp; $env:HOME = $tmp; $env:LOCALAPPDATA = $tmp
+        & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root 'test-gw-key' *> $null
+        $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $settings.agent_settings.mcp_config.omnigraph.env.OMNIGRAPH_BASE_URL 'http://host.docker.internal:8080'
+        Assert-Equal $settings.agent_settings.mcp_config.omnigraph.env.OMNIGRAPH_GRAPH_ID 'autoos'
+    } finally {
+        foreach ($k in $saved.Keys) {
+            if ($null -eq $saved[$k]) { Remove-Item "env:$k" -ErrorAction SilentlyContinue }
+            else { Set-Item "env:$k" -Value $saved[$k] }
+        }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'agent harness installers: the OpenHands writer calls the generator and skips role profiles' {
+    Assert-True ($body -match "agent_harness\.py[\s'\)]*openhands") 'Set-AutoOSOpenHandsConfig does not call agent_harness.py openhands'
+    Assert-True ($body -match '_role_profiles') 'Set-AutoOSOpenHandsConfig does not skip role profiles'
+}
+
+Test-Case 'opencode user config carries global gateway providers without secrets' {
+    # Tier routing must work in EVERY cwd, not just checkouts carrying the
+    # repo opencode.jsonc. The Linux twin test runs the writer for real
+    # (HOME is read-only in this harness, so here we pin the definition);
+    # both writers must emit omniroute/litellm with {env:} key placeholders.
+    $body = (Get-Command Set-AutoOSOpenCodeConfig).Definition
+    Assert-True ($body -match [regex]::Escape('http://127.0.0.1:20128/v1')) 'omniroute baseURL missing'
+    Assert-True ($body -match [regex]::Escape('http://127.0.0.1:4000/v1')) 'litellm baseURL missing'
+    Assert-True ($body -match [regex]::Escape('{env:AUTOOS_OMNIROUTE_KEY}')) 'omni key not an env placeholder'
+    Assert-True ($body -match [regex]::Escape('{env:LITELLM_MASTER_KEY}')) 'lit key not an env placeholder'
+    # Tier ids, names and windows come from catalog/ide-models.json at run
+    # time (Get-AutoOSIdeModel), never as literals in the writer.
+    Assert-True ($body -match "Get-AutoOSIdeModel\b.*-Surface 'opencode'") 'writer does not read catalog/ide-models.json'
+    Assert-True ($body -notmatch "'l3-driver-clean'") 'writer carries a literal tier list again'
+    $cat = @((Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models)
+    $ids = @($cat | Where-Object { $null -ne $_.surfaces.PSObject.Properties['omniroute'] -and @($_.surfaces.omniroute) -contains 'opencode' } | ForEach-Object { $_.id })
+    foreach ($t in @('l1-orchestrator', 'l3-driver-clean', 'auto/smart')) {
+        Assert-Contains $ids $t
+    }
+    Assert-True ($body -match "@\('deepseek'\)") 'retired-provider prune missing'
+    Assert-True ($body -match 'muse-spark') 'muse-spark contributor provider missing'
+}
+
+Test-Case 'opencode user config: the direct meta provider needs META_API_KEY to exist' {
+    # REVROUTE (S2) item 4, measured on L1-backlog: a {env:META_API_KEY}
+    # placeholder with no such variable in the environment does not resolve to a
+    # string, and opencode then fails the WHOLE user config ("Expected string at
+    # [META_API_KEY]") in every cwd. The writer may emit it only when the key it
+    # names exists, and must take back the one a keyed run left behind. Muse
+    # stays selectable as omniroute/spark-1.3-contributor either way. The Linux
+    # twin runs the writer for real; HOME is read-only here, so this pins the
+    # definition.
+    $body = (Get-Command Set-AutoOSOpenCodeConfig).Definition
+    Assert-True ($body -match 'if\s*\(\s*\$env:META_API_KEY\s*\)') `
+        'the meta provider is not guarded by the environment variable it names'
+    Assert-True ($body -match "Remove\('meta'\)") `
+        'a meta provider with an unfillable placeholder is never pruned'
+}
+
+Test-Case 'agent harness installers: the OpenCode writer calls the generator' {
+    $body = (Get-Command Set-AutoOSOpenCodeConfig).Definition
+    $hands = (Get-Command Set-AutoOSOpenHandsConfig).Definition
+    Assert-True ($body -match 'agent_harness\.py') 'Set-AutoOSOpenCodeConfig does not call agent_harness.py'
+    # LastIndexOf: the function's help comment also mentions %APPDATA%, so only
+    # the final occurrence is the actual copy guard.
+    Assert-True ($body.IndexOf('agent_harness.py') -lt $body.LastIndexOf('APPDATA')) 'agent_harness.py is not invoked before the APPDATA copy'
+    Assert-True ($body -match 'Get-AutoOSSkillsSource') 'Set-AutoOSOpenCodeConfig does not use Get-AutoOSSkillsSource'
+    Assert-True ($hands -match 'Get-AutoOSSkillsSource') 'Set-AutoOSOpenHandsConfig does not use Get-AutoOSSkillsSource'
+}
+
+Test-Case 'ConvertFrom-AutoOSJsonc: comments and trailing commas, // inside a string survives' {
+    # Windows PowerShell 5.1 has no JSONC parser and the repo opencode.jsonc is
+    # JSONC. Comments and commas go only where they are syntax: a URL's "//"
+    # and a ",}" inside a string are text. (The Linux writer's _strip_jsonc
+    # strips the same way; it does not protect a ",}" inside a string.)
+    $text = @'
+{
+  // a line comment
+  "url": "http://x/a", /* a block
+     comment */
+  "note": "keep // this, /* this */ and ,} this",
+  "esc": "a \" // still inside",
+  "path": "c:\\dir\\", // comment after an escaped backslash
+  "list": [1, 2, 3,],
+  "obj": { "k": "v", // comment before a trailing comma
+  },
+}
+'@
+    $o = ConvertFrom-AutoOSJsonc -Text $text
+    if ($o.url -cne 'http://x/a') { throw "url did not survive: [$($o.url)]" }
+    if ($o.note -cne 'keep // this, /* this */ and ,} this') { throw "a string with comment markers changed: [$($o.note)]" }
+    if ($o.esc -cne 'a " // still inside') { throw "an escaped quote ended the string early: [$($o.esc)]" }
+    if ($o.path -cne 'c:\dir\') { throw "an escaped backslash broke the string: [$($o.path)]" }
+    if (@($o.list).Count -ne 3 -or $o.list[2] -ne 3) { throw 'the trailing comma in an array was not removed' }
+    if ($o.obj.k -cne 'v') { throw 'the trailing comma in an object was not removed' }
+    $bom = ConvertFrom-AutoOSJsonc -Text ([string][char]0xFEFF + '{"a":1,}')
+    if ($bom.a -ne 1) { throw 'a leading BOM was not tolerated' }
+
+    # The real file. Expected value parsed independently of the function under
+    # test: the file has whole-line comments only and no trailing commas.
+    $raw = Get-Content -LiteralPath (Join-Path $Root 'opencode.jsonc') -Raw -Encoding UTF8
+    if ($raw -notmatch '(?m)^\s*//') { throw 'opencode.jsonc has no comment lines left: this test proves nothing' }
+    $real = ConvertFrom-AutoOSJsonc -Text $raw
+    $plain = ($raw -replace '(?m)^\s*//.*$', '') | ConvertFrom-Json
+    $a = $real | ConvertTo-Json -Depth 100 -Compress
+    $b = $plain | ConvertTo-Json -Depth 100 -Compress
+    if ($a -cne $b) { throw 'opencode.jsonc parsed differently from the comment-free reading' }
+    if ($real.providers.omniroute.settings.baseURL -cne 'http://127.0.0.1:20128/v1') { throw "the gateway URL lost its //: [$($real.providers.omniroute.settings.baseURL)]" }
+    Pass
+}
+
+Test-Case 'ConvertFrom-AutoOSJsonc: an unterminated string is rejected at once, not after a regex stall' {
+    # A string literal matched with a nested quantifier backtracks exponentially
+    # when its closing quote is missing (26 characters took four seconds).
+    # Warm up first; 30 characters would stall about a minute, so a 20 s limit
+    # still catches it without flaking on a loaded runner (5.8 s seen, CI 36253266736).
+    $null = ConvertFrom-AutoOSJsonc -Text '{"a": "b"}'
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $threw = $false
+    try { $null = ConvertFrom-AutoOSJsonc -Text ('{"a": "' + ('x' * 30)) } catch { $threw = $true }
+    $sw.Stop()
+    if ($sw.ElapsedMilliseconds -gt 20000) { throw "an unterminated string took $($sw.ElapsedMilliseconds) ms to reject" }
+    if (-not $threw) { throw 'an unterminated string was accepted' }
+    Pass
+}
+
+Test-Case "agent harness: the generator's unit tests pass" {
+    $py = Get-Command python, py -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-harness-tests-$PID.log"
+    $prevAction = $ErrorActionPreference
+    try {
+        # unittest reports on stderr, and under the suite's 'Stop'
+        # preference PS 5.1 turns native stderr into a terminating error
+        # even when it is redirected to a file — so drop to Continue for
+        # exactly this call and judge by the exit code instead.
+        $ErrorActionPreference = 'Continue'
+        & $py.Source (Join-Path $Root 'tests\test_agent_harness.py') *> $log
+        $rc = $LASTEXITCODE
+        if ($rc -eq 0) {
+            Pass
+        } else {
+            $tail = (Get-Content $log -Tail 20) -join "`n"
+            throw "generator unit tests failed (exit $rc):`n$tail"
+        }
+    } finally { $ErrorActionPreference = $prevAction; Remove-Item $log -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'the embedded OpenHands setup script is valid Python' {    # Set-AutoOSOpenHandsConfig pipes a literal here-string to `python -c`.
+    # Nothing else parses it before a real install, so a missing `except`
+    # once shipped and silently broke every Windows OpenHands setup.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
+    $m = [regex]::Match($src, "(?s)\`$setupScript = @'\r?\n(.*?)\r?\n'@")
+    Assert-True $m.Success 'setupScript here-string not found'
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-setup-$PID.py"
+    [IO.File]::WriteAllText($tmp, $m.Groups[1].Value)
+    try {
+        # NOTE: single-quoted -c string with doubled '' survives Windows
+        # PowerShell 5.1 native-argument quote stripping, which eats inner
+        # double quotes (NameError: name 'utf' is not defined).
+        $out = & $py.Source -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding=''utf-8'').read())' $tmp 2>&1
+        Assert-True ($LASTEXITCODE -eq 0) "embedded python does not parse: $out"
+        # No BARE double quote may appear in the embedded script: PowerShell
+        # 5.1 truncates a native argument at the first one it cannot marshal,
+        # silently cutting the script mid-file (measured 2026-09-21: 13677
+        # chars sent, 11107 received, IndentationError at the cut). Backslash-
+        # escaped quotes (\") travel as literal characters and are allowed.
+        $bare = [regex]::Matches($m.Groups[1].Value, '(?<!\\)"')
+        Assert-Equal $bare.Count 0 'bare double quote in embedded python (5.1 truncates there)'
+        # No 'enabled' key on OpenHands mcp_config entries: the live MCPServer
+        # schema forbids it (extra_forbidden -> /api/v1/settings 500s).
+        # (The opencode writer's PowerShell 'enabled = $true' is a different,
+        # schema-legal shape and is not matched here.)
+        $enb = [regex]::Matches($m.Groups[1].Value, "'enabled': True")
+        Assert-Equal $enb.Count 0 'enabled key in OpenHands mcp_config (live schema forbids it)'
+    } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
+}
+
+function Remove-TestDirLinks {
+    # Delete every link directly under $Directory WITHOUT following it. Windows
+    # PowerShell 5.1 follows a junction inside Remove-Item -Recurse and deletes
+    # what the junction points at (here: the repo's own skills), so a scratch
+    # tree that holds skill links is unlinked before it is removed.
+    param([string]$Directory)
+    if (-not $Directory -or -not (Test-Path -LiteralPath $Directory)) { return }
+    foreach ($child in @(Get-ChildItem -LiteralPath $Directory -Force -ErrorAction SilentlyContinue)) {
+        if ($child.LinkType) {
+            try { $child.Delete() } catch { Write-Host "      could not unlink $($child.FullName): $($_.Exception.Message)" }
+        }
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenHandsConfig does not back up again when nothing changed' {
+    # The real writer with its real embedded setup script and agent generator,
+    # against a scratch home: HOME, USERPROFILE and LOCALAPPDATA point into a temp
+    # dir, the skills directory already exists (the writer links the repo skills
+    # into it; the links go before the tree does), Ollama's
+    # address is pinned (no probe), and every key the writer reads is a dummy or
+    # unset (so the repo's git-ignored api-keys.yml is never consulted).
+    # The one thing no variable redirects is the PowerShell profile under the real
+    # Documents folder, which the writer edits when one exists: skip on such a host.
+    $pyCmd = @(Get-Command python, py -ErrorAction SilentlyContinue)
+    $py3 = $null
+    if ($pyCmd.Count -eq 0) {
+        # A host that only has python3 (most Linux): the writer looks for `python`.
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { $py3 = Get-Command python3 -ErrorAction SilentlyContinue }
+        if (-not $py3) { Skip 'no python on PATH'; return }
+    }
+    # (Empty on a Linux home without a Documents folder: nothing to protect there.)
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    if ($docs) {
+        foreach ($rel in @('PowerShell\Microsoft.PowerShell_profile.ps1', 'PowerShell\profile.ps1', 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1', 'WindowsPowerShell\profile.ps1')) {
+            if (Test-Path -LiteralPath (Join-Path $docs $rel)) { Skip 'a real PowerShell profile exists and the writer would edit it'; return }
+        }
+    }
+    $envNames = @('USERPROFILE', 'HOME', 'LOCALAPPDATA', 'PATH', 'OLLAMA_BASE_URL', 'AUTOOS_OMNIROUTE_KEY', 'OPENROUTER_API_KEY', 'LITELLM_MASTER_KEY',
+                  'AUTOOS_LITELLM_API_KEY', 'META_API_KEY', 'MUSE_API_KEY', 'DEEPSEEK_API_KEY', 'CONTEXT7_API_KEY', 'OMNIGRAPH_TOKEN')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohbackup-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $ohDir = Join-Path $scratch '.openhands'
+    $settingsFile = Join-Path $ohDir 'settings.json'
+    # What an earlier AutoOS run leaves, plus a key and an MCP server of the user's own.
+    # enable_sub_agents is already there so the agent generator, which would add it,
+    # has nothing to rewrite: the only backup of run 1 is the writer's own.
+    # The theme is non-ASCII and the file is written with an explicit BOM: a backup
+    # that lost either would still read as the same text, so it is judged on bytes.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    $seed = '{"schema_version":2,"theme":"@THEME@","agent_settings":{"schema_version":4,"enable_sub_agents":true,"llm":{"model":"ollama_chat/qwen2.5-coder:7b","base_url":"http://127.0.0.1:11434"},"mcp_config":{"mine":{"transport":"stdio","command":"mine-mcp","args":[]}}}}'.Replace('@THEME@', $theme)
+    $runLogged = {
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohbackup-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            $null = Set-AutoOSOpenHandsConfig
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
+    }
+    try {
+        # skills: exists up front. Documents: on Linux .NET only resolves
+        # the Documents folder when it exists, and the writer joins paths onto it.
+        $null = New-Item -ItemType Directory -Path $bin, (Join-Path $ohDir 'skills'), (Join-Path $scratch 'Documents') -Force
+        if ($py3) {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexec '$($py3.Source)' `"`$@`"`n")
+            & chmod +x $fake
+        }
+        [IO.File]::WriteAllText($settingsFile, $seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($settingsFile)
+        $seedB64 = [Convert]::ToBase64String($seedBytes)
+        if ($seedBytes.Length -lt 4 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191 -or @($seedBytes | Where-Object { $_ -gt 127 }).Count -le 3) { throw 'the seed must carry a BOM and a non-ASCII character, or the byte compare has nothing to lose' }
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch; $env:LOCALAPPDATA = $scratch
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'; $env:OPENROUTER_API_KEY = 'test-or-key'; $env:LITELLM_MASTER_KEY = 'test-lit-key'
+        foreach ($n in @('AUTOOS_LITELLM_API_KEY', 'META_API_KEY', 'MUSE_API_KEY', 'DEEPSEEK_API_KEY', 'CONTEXT7_API_KEY', 'OMNIGRAPH_TOKEN')) {
+            Remove-Item "env:$n" -ErrorAction SilentlyContinue
+        }
+        # The writer reads $HOME, which the environment does not set on every
+        # host: prove the module sees the scratch home before it writes anything.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+
+        $out1 = & $runLogged
+        $sha1 = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash
+        $backups1 = @(Get-ChildItem -LiteralPath $ohDir -Filter 'settings.json.autoos-backup-*')
+        $all1 = @(Get-ChildItem -LiteralPath $ohDir -Recurse -Filter '*.autoos-backup-*').Count
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($settingsFile)) -ceq $seedB64) { throw 'the first run left settings.json unchanged' }
+        if ($backups1.Count -ne 1) { throw "settings.json backups after run 1 = $($backups1.Count) (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the original file, byte for byte (a BOM or a non-ASCII byte was lost)' }
+        $written = Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($written.theme -cne $theme -or $null -eq $written.agent_settings.mcp_config.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
+        if ($null -eq $written.agent_settings.mcp_config.PSObject.Properties['serena']) { throw 'run 1 did not write the MCP servers' }
+
+        # Backup names carry whole seconds: without this pause a wrongly repeated
+        # backup would overwrite the first one and the count could not tell.
+        Start-Sleep -Milliseconds 1200
+        $out2 = & $runLogged
+        $sha2 = (Get-FileHash -LiteralPath $settingsFile -Algorithm SHA256).Hash
+        $backups2 = @(Get-ChildItem -LiteralPath $ohDir -Filter 'settings.json.autoos-backup-*')
+        $all2 = @(Get-ChildItem -LiteralPath $ohDir -Recurse -Filter '*.autoos-backup-*').Count
+        if ($backups2.Count -ne $backups1.Count) { throw "settings.json backups after run 2 = $($backups2.Count), after run 1 = $($backups1.Count) (an unchanged run must not back up again)" }
+        if ($all2 -ne $all1) { throw "backups under ~/.openhands after run 2 = $all2, after run 1 = $all1" }
+        if ($sha2 -ne $sha1) { throw 'run 2 rewrote settings.json (SHA256 differs from run 1)' }
+        # The generator also prints 'skipped' for settings.json: name the writer's own lines.
+        if ($out1 -notmatch 'openhands settings: updated') { throw "run 1 did not report the settings.json update: [$out1]" }
+        if ($out2 -notmatch 'openhands settings: skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-TestDirLinks -Directory (Join-Path $ohDir 'skills')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+# --- OpenHands skills mirror and settings reader (Windows twin of the Linux `openhands:` tests) ---
+Describe-Group 'openhands skills'
+
+function New-TestDirLink {
+    # A directory junction on Windows (what the writer makes), a symlink elsewhere
+    # (the suite also runs under pwsh on Linux, where a junction cannot be made).
+    param([string]$Path, [string]$Target)
+    $type = 'SymbolicLink'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $type = 'Junction' }
+    $null = New-Item -ItemType $type -Path $Path -Target $Target
+}
+
+function New-TestDanglingLink {
+    # A link whose target is gone: link to a real directory, then remove it.
+    param([string]$Path, [string]$Target)
+    $null = New-Item -ItemType Directory -Path $Target -Force
+    New-TestDirLink -Path $Path -Target $Target
+    Remove-Item -LiteralPath $Target -Force
+}
+
+function New-TestSkillRepo {
+    # A scratch repo with two skills (alpha, beta) and one directory without a
+    # SKILL.md (nofile) that is not a skill.
+    param([string]$Repo)
+    foreach ($n in @('alpha', 'beta')) {
+        $d = Join-Path $Repo ".agents\skills\$n"
+        $null = New-Item -ItemType Directory -Path $d -Force
+        [IO.File]::WriteAllText((Join-Path $d 'SKILL.md'), "---`nname: $n`ndescription: demo`n---`n")
+    }
+    $d = Join-Path $Repo '.agents\skills\nofile'
+    $null = New-Item -ItemType Directory -Path $d -Force
+    [IO.File]::WriteAllText((Join-Path $d 'README.md'), "not a skill`n")
+}
+
+function Invoke-LoggedSkillSync {
+    # Sync-AutoOSSkillDirs with its output captured from the log, like the
+    # writer tests capture theirs.
+    param([string]$Source, [string]$Destination)
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        Initialize-AutoOSLog -Path $log
+        $null = Sync-AutoOSSkillDirs -Source $Source -Destination $Destination
+        Get-Content -LiteralPath $log -Raw -Encoding utf8
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+$script:HomeNotRedirected = '::home-not-redirected::'
+
+function Invoke-LoggedSkillTargetSync {
+    # Calls Sync-AutoOSAgentSkillTargets under a redirected $HOME and returns
+    # what it logged. The caller supplies a scratch home whose .agents/skills
+    # dir may or may not exist yet; the function creates nothing it does not
+    # have to (including the scratch home itself when DryRun says no).
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$ScratchHome
+    )
+    $savedHome = & (Get-Module AutoOS.Install) { $HOME }
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        Set-Variable -Name HOME -Value $ScratchHome -Force -Scope Global
+        $env:HOME = $ScratchHome
+        # Never run the writer against the real home: if the module does not
+        # see the scratch home (PS 5.1 may refuse the redirect), sync nothing
+        # and tell the caller, which skips (same guard as the other sites).
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $ScratchHome) { return $script:HomeNotRedirected }
+        Initialize-AutoOSLog -Path $log
+        $null = Sync-AutoOSAgentSkillTargets -Source $Source
+        Get-Content -LiteralPath $log -Raw -Encoding utf8
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        $env:HOME = $savedHome
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-TestLinkTarget {
+    # The full path a link points at ('' when the item is not a link). Target is
+    # a string[] in Windows PowerShell 5.1 and may be relative for a symlink.
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item -or -not $item.LinkType) { return '' }
+    $t = @($item.Target)[0]
+    if (-not $t) { return '' }
+    if (-not [IO.Path]::IsPathRooted($t)) { $t = Join-Path (Split-Path -Parent $Path) $t }
+    [IO.Path]::GetFullPath($t).TrimEnd('\', '/')
+}
+
+function Get-RepoSkillName {
+    # The skills of THIS repo: direct children of .agents/skills that hold a SKILL.md.
+    @(Get-ChildItem -LiteralPath (Join-Path $Root '.agents\skills') -Directory |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'SKILL.md') -PathType Leaf } |
+        Sort-Object Name | ForEach-Object { $_.Name })
+}
+
+function Invoke-WithOpenHandsScratch {
+    # Runs -Body against the real Set-AutoOSOpenHandsConfig, its real embedded
+    # setup script and agent generator, in a scratch home (see the backup-once
+    # test above for why each variable is pinned). Body gets one argument: an
+    # object with Scratch, OhDir, Settings, Skills and Run (a scriptblock that
+    # runs the writer once and returns what it logged). Unlike that test the
+    # `skills` directory is NOT created up front: the writer makes it. Returns
+    # $false after calling Skip when this host cannot run the writer hermetically.
+    param([Parameter(Mandatory)][scriptblock]$Body)
+    $pyCmd = @(Get-Command python, py -ErrorAction SilentlyContinue)
+    $py3 = $null
+    if ($pyCmd.Count -eq 0) {
+        if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { $py3 = Get-Command python3 -ErrorAction SilentlyContinue }
+        if (-not $py3) { Skip 'no python on PATH'; return $false }
+    }
+    $docs = [Environment]::GetFolderPath('MyDocuments')
+    if ($docs) {
+        foreach ($rel in @('PowerShell\Microsoft.PowerShell_profile.ps1', 'PowerShell\profile.ps1', 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1', 'WindowsPowerShell\profile.ps1')) {
+            if (Test-Path -LiteralPath (Join-Path $docs $rel)) { Skip 'a real PowerShell profile exists and the writer would edit it'; return $false }
+        }
+    }
+    $envNames = @('USERPROFILE', 'HOME', 'LOCALAPPDATA', 'PATH', 'OLLAMA_BASE_URL', 'AUTOOS_OMNIROUTE_KEY', 'OPENROUTER_API_KEY', 'LITELLM_MASTER_KEY',
+                  'AUTOOS_LITELLM_API_KEY', 'META_API_KEY', 'MUSE_API_KEY', 'DEEPSEEK_API_KEY', 'CONTEXT7_API_KEY', 'OMNIGRAPH_TOKEN')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $ohDir = Join-Path $scratch '.openhands'
+    $runLogged = {
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            $null = Set-AutoOSOpenHandsConfig
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
+    }
+    $ctx = [pscustomobject]@{
+        Scratch  = $scratch
+        OhDir    = $ohDir
+        Settings = (Join-Path $ohDir 'settings.json')
+        Skills   = (Join-Path $ohDir 'skills')
+        Run      = $runLogged
+    }
+    try {
+        # Documents: on Linux .NET only resolves the Documents folder when it exists.
+        $null = New-Item -ItemType Directory -Path $bin, (Join-Path $scratch 'Documents') -Force
+        if ($py3) {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexec '$($py3.Source)' `"`$@`"`n")
+            & chmod +x $fake
+        }
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch; $env:LOCALAPPDATA = $scratch
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'; $env:OPENROUTER_API_KEY = 'test-or-key'; $env:LITELLM_MASTER_KEY = 'test-lit-key'
+        foreach ($n in @('AUTOOS_LITELLM_API_KEY', 'META_API_KEY', 'MUSE_API_KEY', 'DEEPSEEK_API_KEY', 'CONTEXT7_API_KEY', 'OMNIGRAPH_TOKEN')) {
+            Remove-Item "env:$n" -ErrorAction SilentlyContinue
+        }
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return $false }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $null = & $Body $ctx
+        return $true
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-TestDirLinks -Directory (Join-Path $ohDir 'skills')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'openhands skills: Set-AutoOSOpenHandsConfig links every repo skill into ~/.openhands/skills' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $expected = @(Get-RepoSkillName)
+        if ($expected.Count -eq 0) { throw 'this repo has no skills under .agents/skills' }
+        # A symlink needs administrator rights on Windows (a CI runner has them, a
+        # user often does not), so there the link must be a Junction, not just "a link".
+        $onWindows = ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT)
+        $out = & $ctx.Run
+        $dest = Get-Item -LiteralPath $ctx.Skills -Force -ErrorAction SilentlyContinue
+        if (-not $dest) { throw "$($ctx.Skills) was not created" }
+        if ($dest.LinkType) { throw "$($ctx.Skills) is a $($dest.LinkType), not a real directory" }
+        foreach ($name in $expected) {
+            $link = Join-Path $ctx.Skills $name
+            $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+            if (-not $item) { throw "skill '$name' was not linked" }
+            if (@('Junction', 'SymbolicLink') -notcontains [string]$item.LinkType) { throw "skill '$name' is not a junction (LinkType: [$($item.LinkType)])" }
+            if ($onWindows -and [string]$item.LinkType -cne 'Junction') { throw "skill '$name' is a $($item.LinkType), not a Junction (a symlink needs administrator rights, so the writer must make a junction on Windows)" }
+            $want = [IO.Path]::GetFullPath((Join-Path $Root ".agents\skills\$name")).TrimEnd('\', '/')
+            $got = Get-TestLinkTarget -Path $link
+            if ($got -ne $want) { throw "skill '$name' points at [$got], want [$want]" }
+            if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$name' does not resolve through its link" }
+            if ($out -notmatch "(?m)^\[[\d:]+\] OK\s+linked $([regex]::Escape($name)) ") { throw "no 'linked $name' line in the log" }
+        }
+        $extra = @(Get-ChildItem -LiteralPath $ctx.Skills -Force | Where-Object { $expected -notcontains $_.Name })
+        if ($extra.Count -gt 0) { throw "entries that are not repo skills: $(($extra | ForEach-Object { $_.Name }) -join ', ')" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands skills: a second run is skipped and adds no linked line' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $null = & $ctx.Run
+        $names = @(Get-RepoSkillName)
+        $mtime1 = [IO.Directory]::GetLastWriteTimeUtc($ctx.Skills).Ticks
+        $targets1 = ($names | ForEach-Object { Get-TestLinkTarget -Path (Join-Path $ctx.Skills $_) }) -join '|'
+        $out2 = & $ctx.Run
+        $mtime2 = [IO.Directory]::GetLastWriteTimeUtc($ctx.Skills).Ticks
+        $targets2 = ($names | ForEach-Object { Get-TestLinkTarget -Path (Join-Path $ctx.Skills $_) }) -join '|'
+        if ($out2 -match '(?m)^\[[\d:]+\] \S+\s+(linked|repointed) [a-z]') { throw "the second run logged a linked/repointed line: [$out2]" }
+        if ($out2 -notmatch 'skipped \d+ skill link') { throw "the second run never says skipped: [$out2]" }
+        if ($mtime1 -ne $mtime2) { throw 'the skills directory changed on the second run' }
+        if ($targets1 -ne $targets2) { throw "a link changed on the second run: [$targets1] -> [$targets2]" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case "openhands skills: a user's own skill directory and foreign link are kept" {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $names = @(Get-RepoSkillName)
+        if ($names.Count -lt 2) { throw 'this test needs two repo skills' }
+        $own = $names[0]; $foreign = $names[1]
+        $null = New-Item -ItemType Directory -Path (Join-Path $ctx.Skills $own), (Join-Path $ctx.Skills 'mine'), (Join-Path $ctx.Scratch 'theirs') -Force
+        [IO.File]::WriteAllText((Join-Path $ctx.Skills "$own\SKILL.md"), 'my own copy')
+        [IO.File]::WriteAllText((Join-Path $ctx.Skills 'mine\SKILL.md'), 'my own skill')
+        New-TestDirLink -Path (Join-Path $ctx.Skills $foreign) -Target (Join-Path $ctx.Scratch 'theirs')
+        $foreignBefore = Get-TestLinkTarget -Path (Join-Path $ctx.Skills $foreign)
+        $null = & $ctx.Run
+        if ((Get-Item -LiteralPath (Join-Path $ctx.Skills $own) -Force).LinkType) { throw "the user's own '$own' directory was replaced by a link" }
+        if ([IO.File]::ReadAllText((Join-Path $ctx.Skills "$own\SKILL.md")) -ne 'my own copy') { throw "the user's own '$own' skill changed" }
+        if ([IO.File]::ReadAllText((Join-Path $ctx.Skills 'mine\SKILL.md')) -ne 'my own skill') { throw "the user's own 'mine' skill changed" }
+        if ((Get-TestLinkTarget -Path (Join-Path $ctx.Skills $foreign)) -ne $foreignBefore) { throw "a foreign link named '$foreign' was rewritten" }
+        foreach ($name in @($names | Where-Object { $_ -ne $own -and $_ -ne $foreign })) {
+            $item = Get-Item -LiteralPath (Join-Path $ctx.Skills $name) -Force -ErrorAction SilentlyContinue
+            if (-not $item -or -not $item.LinkType) { throw "repo skill '$name' was not linked beside the user's own" }
+        }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands skills: a dangling link into the repo is repaired and a foreign one is left alone' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $dest -Force
+        # Ours: the exact shape Sync-AutoOSSkillDirs creates (<checkout>\.agents\skills\<name>)
+        # into a checkout that has since moved or been renamed, so it dangles.
+        New-TestDanglingLink -Path (Join-Path $dest 'alpha') -Target (Join-Path $scratch 'moved-checkout\.agents\skills\alpha')
+        New-TestDanglingLink -Path (Join-Path $dest 'beta') -Target (Join-Path $scratch 'elsewhere\beta')
+        $foreignBefore = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $want = [IO.Path]::GetFullPath((Join-Path $repo '.agents\skills\alpha')).TrimEnd('\', '/')
+        $got = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        if ($got -ne $want) { throw "alpha still points at [$got], want [$want]" }
+        if (-not (Test-Path -LiteralPath (Join-Path $dest 'alpha\SKILL.md'))) { throw 'alpha does not resolve after the repair' }
+        if ((Get-TestLinkTarget -Path (Join-Path $dest 'beta')) -ne $foreignBefore) { throw 'a foreign dangling link was rewritten' }
+        if ($log -notmatch 'repointed alpha') { throw "no 'repointed alpha' line: [$log]" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+# Only a link this function made is ours (AGENTS.md hard rule 4): it dangles AND
+# has the exact shape ...\.agents\skills\<name> for the same skill. A live link,
+# or a dangling one of another shape, is the user's and stays as it is - even
+# when it points inside the repo's own .agents directory. (Here a symlink stands
+# in for the junction off Windows; the junction itself is only exercised by
+# Windows CI.)
+Test-Case 'openhands skills: a live link of your own into .agents\custom is kept' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $custom = Join-Path $repo '.agents\custom\alpha'
+        $null = New-Item -ItemType Directory -Path $custom, $dest -Force
+        [IO.File]::WriteAllText((Join-Path $custom 'SKILL.md'), 'my own alpha')
+        New-TestDirLink -Path (Join-Path $dest 'alpha') -Target $custom      # live, inside the repo's .agents, not our shape
+        $before = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $got = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        if ($got -ne $before) { throw "the user's live link now points at [$got], was [$before]" }
+        if ([IO.File]::ReadAllText((Join-Path $dest 'alpha\SKILL.md')) -ne 'my own alpha') { throw "alpha no longer resolves to the user's own skill" }
+        if ($log -match 'repointed') { throw "the live link was reported as repointed: [$log]" }
+        if ($log -notmatch ('kept ' + [regex]::Escape((Join-Path $dest 'alpha')))) { throw "no 'kept ...alpha' line, the user is not told it was left alone: [$log]" }
+        $wantBeta = [IO.Path]::GetFullPath((Join-Path $repo '.agents\skills\beta')).TrimEnd('\', '/')
+        if ((Get-TestLinkTarget -Path (Join-Path $dest 'beta')) -ne $wantBeta) { throw "beta was not linked next to the user's link" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case "openhands skills: a live link into another checkout's skills is kept" {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $dest -Force
+        # Another checkout with the same skills layout. One sits beside this repo,
+        # one is nested under this repo's own .agents directory (a worktree kept
+        # there): both are live and both have the shape we would create.
+        New-TestSkillRepo -Repo (Join-Path $scratch 'other')
+        New-TestSkillRepo -Repo (Join-Path $repo '.agents\nested')
+        New-TestDirLink -Path (Join-Path $dest 'alpha') -Target (Join-Path $repo '.agents\nested\.agents\skills\alpha')
+        New-TestDirLink -Path (Join-Path $dest 'beta') -Target (Join-Path $scratch 'other\.agents\skills\beta')
+        $alphaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $alphaNow = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaNow = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        if ($alphaNow -ne $alphaBefore) { throw "the link into the nested checkout now points at [$alphaNow], was [$alphaBefore]" }
+        if ($betaNow -ne $betaBefore) { throw "the link into the other checkout now points at [$betaNow], was [$betaBefore]" }
+        if ($log -match 'repointed') { throw "a live link was reported as repointed: [$log]" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'openhands skills: a dangling link of another shape is kept' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $dest -Force
+        New-TestDanglingLink -Path (Join-Path $dest 'alpha') -Target (Join-Path $scratch 'nowhere\other\alpha')          # dangling, outside the repo
+        New-TestDanglingLink -Path (Join-Path $dest 'beta') -Target (Join-Path $repo '.agents\skills\beta-renamed')     # dangling, inside the repo, not the shape of beta
+        $alphaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $alphaNow = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $betaNow = Get-TestLinkTarget -Path (Join-Path $dest 'beta')
+        if ($alphaNow -ne $alphaBefore) { throw "the dangling link outside the repo now points at [$alphaNow], was [$alphaBefore]" }
+        if ($betaNow -ne $betaBefore) { throw "the dangling link of another shape now points at [$betaNow], was [$betaBefore]" }
+        if ($log -match 'repointed') { throw "a link of another shape was reported as repointed: [$log]" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'openhands skills: Sync-AutoOSSkillDirs owns a link by its shape, not by a prefix, and unlinks without recursing' {
+    # Static twin of the three tests above, for the parts a Linux run cannot
+    # exercise (a junction is only made on Windows): no repo-prefix ownership test,
+    # the exact .agents/skills/<name> shape, and a deletion that stays on the link.
+    $body = (Get-Command Sync-AutoOSSkillDirs).Definition
+    if ($body -match 'ownRoot|StartsWith') { throw 'Sync-AutoOSSkillDirs still decides ownership by a path prefix' }
+    if ($body -notmatch [regex]::Escape('.agents/skills/')) { throw 'Sync-AutoOSSkillDirs does not test the .agents/skills/<name> shape' }
+    if ($body -notmatch 'Test-Path -LiteralPath \$have') { throw 'Sync-AutoOSSkillDirs does not require the old target to be gone before repointing' }
+    if ($body -notmatch '\$item\.Delete\(\)') { throw 'the reparse-point-safe junction deletion is gone' }
+    if ($body -match 'Remove-Item') { throw 'Remove-Item on a junction can follow it into the target' }
+    Pass
+}
+
+Test-Case 'openhands skills: an existing whole-dir link is not written through' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $clone = Join-Path $scratch 'clone-skills'
+    $dest = Join-Path $scratch 'dest'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $clone -Force
+        New-TestDirLink -Path $dest -Target $clone            # the old whole-directory layout
+        $repoBefore = (Get-ChildItem -LiteralPath (Join-Path $repo '.agents\skills') -Force | ForEach-Object { $_.Name }) -join ','
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        if (-not (Get-Item -LiteralPath $dest -Force).LinkType) { throw 'the whole-dir link was replaced' }
+        if ((Get-TestLinkTarget -Path $dest) -ne [IO.Path]::GetFullPath($clone).TrimEnd('\', '/')) { throw 'the whole-dir link was repointed' }
+        $inClone = @(Get-ChildItem -LiteralPath $clone -Force)
+        if ($inClone.Count -gt 0) { throw "links were written through it into the clone: $(($inClone | ForEach-Object { $_.Name }) -join ', ')" }
+        $repoAfter = (Get-ChildItem -LiteralPath (Join-Path $repo '.agents\skills') -Force | ForEach-Object { $_.Name }) -join ','
+        if ($repoAfter -ne $repoBefore) { throw "the repo's skills directory changed: [$repoBefore] -> [$repoAfter]" }
+        $hints = [regex]::Matches($log, 'rmdir').Count
+        if ($hints -ne 1) { throw "expected one warning naming the rmdir command, got $hints in [$log]" }
+    } finally {
+        $d = Get-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+        if ($d -and $d.LinkType) { try { $d.Delete() } catch { Write-Host "      could not unlink ${dest}: $($_.Exception.Message)" } }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'openhands skills: a dry run links nothing' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'home\.openhands\skills'
+    try {
+        New-TestSkillRepo -Repo $repo
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        if (Test-Path -LiteralPath (Join-Path $scratch 'home')) { throw 'a dry run created the home directory' }
+        if ($log -notmatch 'would link') { throw "no 'would link' line: [$log]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'openhands skills: the writer no longer runs an unconditional mklink /J' {
+    if ($installSource -match 'mklink') { throw 'lib\windows\AutoOS.Install.psm1 still shells out to mklink (a false "Linked" line on failure)' }
+    Pass
+}
+
+Describe-Group 'agent-skills targets'
+
+Test-Case 'agent-skills targets: links repo skills into ~/.agents\skills' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'home\.agents\skills'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        $destItem = Get-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+        if (-not $destItem) { throw "$dest was not created" }
+        if ($destItem.LinkType) { throw "$dest is a $($destItem.LinkType), not a real directory" }
+        foreach ($n in @('alpha', 'beta')) {
+            $link = Join-Path $dest $n
+            $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+            if (-not $item) { throw "skill '$n' was not linked" }
+            if (@('Junction', 'SymbolicLink') -notcontains [string]$item.LinkType) { throw "skill '$n' is not a junction (LinkType: [$($item.LinkType)])" }
+            $wantTarget = [IO.Path]::GetFullPath((Join-Path $repo ".agents\skills\$n")).TrimEnd('\', '/')
+            if ((Get-TestLinkTarget -Path $link) -ne $wantTarget) { throw "skill '$n' points at [$((Get-TestLinkTarget -Path $link))], expected [$wantTarget]" }
+            if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$n'/SKILL.md is unreadable through the link" }
+        }
+        if (Test-Path -LiteralPath (Join-Path $dest 'nofile')) { throw "nofile (no SKILL.md) was linked" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: links into ~/.claude\skills and ~/.gemini\config\skills (WS-SKILLWIN)' {
+    # Before WS-SKILLWIN these two were linked from the retired agent-skills
+    # clone by Install-AutoOSAgentSkills, so edits to .agents/skills never
+    # reached Claude Code or Antigravity on Windows. Linux already lists both
+    # in agent_skill_link_dests.
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $homeDir = Join-Path $scratch 'home'
+    $dests = @((Join-Path $homeDir '.claude\skills'), (Join-Path $homeDir '.gemini\config\skills'))
+    try {
+        New-TestSkillRepo -Repo $repo
+        $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
+        foreach ($dest in $dests) {
+            foreach ($n in @('alpha', 'beta')) {
+                $want = [IO.Path]::GetFullPath((Join-Path $repo ".agents\skills\$n")).TrimEnd('\', '/')
+                $got = Get-TestLinkTarget -Path (Join-Path $dest $n)
+                if ($got -ne $want) { throw "$dest\$n points at [$got], expected [$want]" }
+            }
+        }
+    } finally {
+        foreach ($dest in $dests) { Remove-TestDirLinks -Directory $dest }
+        Remove-TestDirLinks -Directory (Join-Path $homeDir '.agents\skills')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Install-AutoOSAgentSkills no longer links global skills from the agent-skills clone' {
+    $body = (Get-Command Install-AutoOSAgentSkills).Definition
+    if ($body -match "Join-Path \`$dest 'skills'") { throw 'global skills still link from the agent-skills clone' }
+    Pass
+}
+
+Test-Case 'retired agent-skills links: only the known clone path, live or dangling, swapped safely, recorded after the move' {
+    # Muse review of 28a835b: a dangling link never converged, a suffix match
+    # took a user's own checkout, and the old link was gone when the new one
+    # could not be made. Retired roots are passed explicitly: never the real ones.
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $src = Join-Path $repo '.agents\skills'
+    $clone = Join-Path $scratch 'Documents\Code\agent-skills\skills'
+    $mine = Join-Path $scratch 'my\agent-skills\skills'
+    $dests = @{}
+    foreach ($d in @('main', 'foreign', 'optout', 'dry', 'fail')) { $dests[$d] = Join-Path $scratch "dest-$d" }
+    $full = { param($p) [IO.Path]::GetFullPath($p).TrimEnd('\', '/') }
+    $records = { param($d) @(Get-ChildItem -LiteralPath $scratch -Filter "$(Split-Path $d -Leaf).autoos-backup-*") }
+    $savedEnv = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+    $mod = Get-Module AutoOS.Install
+    $realLink = & $mod { ${function:script:New-AutoOSSkillLink} }
+    try {
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $null
+        New-TestSkillRepo -Repo $repo
+        foreach ($n in @('alpha', 'beta', 'other')) { $null = New-Item -ItemType Directory -Path (Join-Path $clone $n) -Force }
+        $null = New-Item -ItemType Directory -Path (Join-Path $mine 'alpha') -Force
+        foreach ($d in $dests.Values) { $null = New-Item -ItemType Directory -Path $d -Force }
+        # main: alpha live into the clone; beta dangling into the clone (the clone's
+        # beta is deleted after the link is made - junctions need a target to exist).
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.main 'alpha') -Target (Join-Path $clone 'alpha')
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.main 'beta') -Target (Join-Path $clone 'beta')
+        Remove-Item -LiteralPath (Join-Path $clone 'beta') -Recurse -Force
+        # foreign: a user's own checkout that merely ends in agent-skills\skills\alpha,
+        # and a clone link under ANOTHER skill's name.
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.foreign 'alpha') -Target (Join-Path $mine 'alpha')
+        $null = New-Item -ItemType Junction -Path (Join-Path $dests.foreign 'beta') -Target (Join-Path $clone 'other')
+        foreach ($d in @('optout', 'dry', 'fail')) {
+            $null = New-Item -ItemType Junction -Path (Join-Path $dests[$d] 'alpha') -Target (Join-Path $clone 'alpha')
+        }
+
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.main -RetargetRetiredClone -RetiredSkillRoots $clone
+        foreach ($n in @('alpha', 'beta')) {
+            $got = Get-TestLinkTarget -Path (Join-Path $dests.main $n)
+            if ($got -ne (& $full (Join-Path $src $n))) { throw "main: $n points at [$got]" }
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $clone 'alpha'))) { throw 'the old link target was deleted' }
+        $rec = @(& $records $dests.main)
+        if ($rec.Count -ne 1) { throw "main: expected one record, found $($rec.Count)" }
+        $text = Get-Content -LiteralPath $rec[0].FullName -Raw
+        foreach ($n in @('alpha', 'beta')) {
+            if ($text -notmatch [regex]::Escape((& $full (Join-Path $clone $n)))) { throw "main: the record does not name the old $n target" }
+        }
+        if (@(Get-ChildItem -LiteralPath $dests.main -Filter '*.autoos-new-*' -Force).Count) { throw 'main: a staged link was left behind' }
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.main -RetargetRetiredClone -RetiredSkillRoots $clone
+        if (@(& $records $dests.main).Count -ne 1) { throw 'main: a second run wrote another record' }
+
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.foreign -RetargetRetiredClone -RetiredSkillRoots $clone
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.foreign 'alpha')) -ne (& $full (Join-Path $mine 'alpha'))) { throw "foreign: a user's own checkout was retargeted" }
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.foreign 'beta')) -ne (& $full (Join-Path $clone 'other'))) { throw 'foreign: a link under another name was retargeted' }
+
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = '0'
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.optout -RetargetRetiredClone -RetiredSkillRoots $clone
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $null
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.optout 'alpha')) -ne (& $full (Join-Path $clone 'alpha'))) { throw 'optout: =0 did not stop the switch' }
+
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.dry -RetargetRetiredClone -RetiredSkillRoots $clone
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.dry 'alpha')) -ne (& $full (Join-Path $clone 'alpha'))) { throw 'dry: a dry run retargeted' }
+
+        # A new link that cannot be made leaves the old one and writes no record.
+        & $mod { Set-Item function:script:New-AutoOSSkillLink { param($Path, $Target) $false } }
+        $null = Sync-AutoOSSkillDirs -Source $src -Destination $dests.fail -RetargetRetiredClone -RetiredSkillRoots $clone
+        & $mod { param($f) Set-Item function:script:New-AutoOSSkillLink $f } $realLink
+        if ((Get-TestLinkTarget -Path (Join-Path $dests.fail 'alpha')) -ne (& $full (Join-Path $clone 'alpha'))) { throw 'fail: the old link is gone' }
+        if (@(& $records $dests.fail).Count) { throw 'fail: a record was written for a move that did not happen' }
+        foreach ($d in @('foreign', 'optout', 'dry', 'fail')) {
+            if (@(& $records $dests[$d]).Count) { throw "${d}: a record was written" }
+        }
+    } finally {
+        & $mod { param($f) Set-Item function:script:New-AutoOSSkillLink $f } $realLink
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $savedEnv
+        foreach ($d in $dests.Values) { Remove-TestDirLinks -Directory $d }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: setup retargets a retired agent-skills link by default; =0 keeps it (Q-018)' {
+    # Operator Q-018 (2026-09-28): setup moves recognised links into the retired
+    # clone, with a backup record. AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 opts out.
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $saved = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS
+    foreach ($case in @(@{ Env = $null; Moved = $true }, @{ Env = '0'; Moved = $false })) {
+        $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+        $repo = Join-Path $scratch 'repo'
+        $homeDir = Join-Path $scratch 'home'
+        $claude = Join-Path $homeDir '.claude\skills'
+        # Where Get-AutoOSRetiredSkillRoots looks under the redirected home.
+        $old = Join-Path $homeDir 'Documents\Code\agent-skills\skills\alpha'
+        try {
+            New-TestSkillRepo -Repo $repo
+            $null = New-Item -ItemType Directory -Path $old, $claude -Force
+            $null = New-Item -ItemType Junction -Path (Join-Path $claude 'alpha') -Target $old
+            $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $case.Env
+            $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+            if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
+            $want = if ($case.Moved) { Join-Path $repo '.agents\skills\alpha' } else { $old }
+            $want = [IO.Path]::GetFullPath($want).TrimEnd('\', '/')
+            $got = Get-TestLinkTarget -Path (Join-Path $claude 'alpha')
+            if ($got -ne $want) { throw "env=[$($case.Env)]: alpha points at [$got], expected [$want]" }
+            if (-not (Test-Path -LiteralPath $old)) { throw 'the old target was deleted' }
+            $records = @(Get-ChildItem -LiteralPath (Split-Path $claude) -Filter 'skills.autoos-backup-*')
+            if ($case.Moved -and $records.Count -ne 1) { throw "expected one backup record, found $($records.Count)" }
+            if (-not $case.Moved -and $records.Count) { throw 'opt-out run wrote a backup record' }
+            if ($case.Moved) {
+                $null = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+                if (@(Get-ChildItem -LiteralPath (Split-Path $claude) -Filter 'skills.autoos-backup-*').Count -ne 1) { throw 'a second run wrote another backup record' }
+            }
+        } finally {
+            $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS = $saved
+            foreach ($d in @($claude, (Join-Path $homeDir '.gemini\config\skills'), (Join-Path $homeDir '.agents\skills'))) { Remove-TestDirLinks -Directory $d }
+            Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: links into ~/.codex\skills when codex dir exists' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $homeDir = Join-Path $scratch 'home'
+    $dest = Join-Path $homeDir '.agents\skills'
+    $codexDir = Join-Path $homeDir '.codex'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $codexDir -Force
+        $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        if ($log -eq $script:HomeNotRedirected) { Skip 'HOME cannot be redirected for the installer module'; return }
+        # Verify .agents\skills
+        foreach ($n in @('alpha', 'beta')) {
+            $link = Join-Path $dest $n
+            if (-not (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) { throw "skill '$n' not linked into .agents\skills" }
+        }
+        # Verify .codex\skills was created alongside
+        $codexSkills = Join-Path $codexDir 'skills'
+        $codexItem = Get-Item -LiteralPath $codexSkills -Force -ErrorAction SilentlyContinue
+        if (-not $codexItem) { throw ".codex\skills was not created" }
+        if ($codexItem.LinkType) { throw ".codex\skills is a $($codexItem.LinkType), not a real directory" }
+        foreach ($n in @('alpha', 'beta')) {
+            $link = Join-Path $codexSkills $n
+            $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
+            if (-not $item) { throw "skill '$n' not linked into .codex\skills" }
+            if (-not (Test-Path -LiteralPath (Join-Path $link 'SKILL.md'))) { throw "skill '$n'/SKILL.md unreadable through .codex\skills link" }
+        }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-TestDirLinks -Directory (Join-Path $codexDir 'skills')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: creates no ~/.codex when codex is absent' {
+    # No ~/.codex and no codex on PATH: the codex target is skipped entirely
+    # (a directory for a tool the machine lacks is worse than nothing).
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $homeDir = Join-Path $scratch 'home'
+    $dest = Join-Path $homeDir '.agents\skills'
+    $emptyBin = Join-Path $scratch 'bin'
+    $savedPath = $env:PATH
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path $emptyBin -Force
+        $env:PATH = $emptyBin
+        $log = Invoke-LoggedSkillTargetSync -Source (Join-Path $repo '.agents\skills') -ScratchHome $homeDir
+        if ($log -eq $script:HomeNotRedirected) { $env:PATH = $savedPath; Skip 'HOME cannot be redirected for the installer module'; return }
+        $env:PATH = $savedPath
+        if (Test-Path -LiteralPath (Join-Path $homeDir '.codex')) { throw '.codex was created without codex' }
+        if (-not (Get-Item -LiteralPath (Join-Path $dest 'alpha') -Force -ErrorAction SilentlyContinue)) { throw '.agents\skills not linked, so the sync did not run' }
+    } finally {
+        $env:PATH = $savedPath
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: second run reports skipped for ~/.agents\skills' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'home\.agents\skills'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        # Snapshot before second run
+        $before = @{}
+        foreach ($n in @('alpha', 'beta')) {
+            $link = Join-Path $dest $n
+            $before["$n-target"] = Get-TestLinkTarget -Path $link
+            $before["$n-mtime"] = (Get-Item -LiteralPath $link -Force).LastWriteTimeUtc
+        }
+        $out = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        # Verify nothing changed
+        foreach ($n in @('alpha', 'beta')) {
+            $link = Join-Path $dest $n
+            $afterTarget = Get-TestLinkTarget -Path $link
+            $afterMtime = (Get-Item -LiteralPath $link -Force).LastWriteTimeUtc
+            if ($afterTarget -ne $before["$n-target"]) { throw "skill '$n' target changed from [$($before["$n-target"])] to [$afterTarget]" }
+            if ($afterMtime -ne $before["$n-mtime"]) { throw "skill '$n' was touched (mtime changed)" }
+        }
+        if ($out -notmatch 'skipped') { throw "second run never says skipped: [$out]" }
+        if ($out -match '(?i)\b(linked|repointed) (alpha|beta)\b') { throw "second run printed a linked/repointed line: [$out]" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: keeps a user''s own skill in ~/.agents\skills' {
+    Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'home\.agents\skills'
+    try {
+        New-TestSkillRepo -Repo $repo
+        $null = New-Item -ItemType Directory -Path (Join-Path $dest 'alpha'), (Join-Path $dest 'mine') -Force
+        [IO.File]::WriteAllText((Join-Path $dest 'alpha\SKILL.md'), 'my own alpha')
+        [IO.File]::WriteAllText((Join-Path $dest 'mine\SKILL.md'), 'my own skill')
+        $alphaBefore = Get-TestLinkTarget -Path (Join-Path $dest 'alpha')
+        $alphaDir = Test-Path -LiteralPath (Join-Path $dest 'alpha') -PathType Container
+        $mineBefore = Get-TestLinkTarget -Path (Join-Path $dest 'mine')
+        $mineContent = [IO.File]::ReadAllText((Join-Path $dest 'mine\SKILL.md'))
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        # alpha (repo has it) was a user dir: not replaced
+        $alphaNow = Get-Item -LiteralPath (Join-Path $dest 'alpha') -Force
+        if ($alphaNow.LinkType) { throw "the user's own alpha was replaced with a link (LinkType: $($alphaNow.LinkType))" }
+        if ([IO.File]::ReadAllText((Join-Path $dest 'alpha\SKILL.md')) -ne 'my own alpha') { throw "the user's alpha content changed" }
+        if ($log -notmatch ('kept .*[\\/]alpha')) { throw "no 'kept ...alpha' line: [$log]" }
+        # beta (repo has it) was absent: linked
+        $wantBeta = [IO.Path]::GetFullPath((Join-Path $repo '.agents\skills\beta')).TrimEnd('\', '/')
+        if ((Get-TestLinkTarget -Path (Join-Path $dest 'beta')) -ne $wantBeta) { throw "beta was not linked next to the user's skills" }
+        # mine (repo does not have) was a user dir: left alone
+        $mineNow = Get-Item -LiteralPath (Join-Path $dest 'mine') -Force
+        if ($mineNow.LinkType) { throw "the user's mine was replaced with a link" }
+        if ([IO.File]::ReadAllText((Join-Path $dest 'mine\SKILL.md')) -ne $mineContent) { throw "the user's mine content changed" }
+    } finally {
+        Remove-TestDirLinks -Directory $dest
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'agent-skills targets: a dry run links nothing' {
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ohskills-$([Guid]::NewGuid().ToString('N'))"
+    $repo = Join-Path $scratch 'repo'
+    $dest = Join-Path $scratch 'home\.agents\skills'
+    try {
+        New-TestSkillRepo -Repo $repo
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $log = Invoke-LoggedSkillSync -Source (Join-Path $repo '.agents\skills') -Destination $dest
+        if (Test-Path -LiteralPath (Join-Path $scratch 'home')) { throw 'a dry run created the home directory' }
+        if ($log -notmatch 'would link') { throw "no 'would link' line: [$log]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case "openhands settings: a BOM'd settings.json keeps the user's keys" {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $null = New-Item -ItemType Directory -Path $ctx.OhDir -Force
+        $json = '{"custom_user_key": "keep-me", "schema_version": 2}'
+        [IO.File]::WriteAllText($ctx.Settings, $json, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($seedBytes.Length -lt 3 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191) { throw 'the seed must start with a BOM, or the rewrite has none to drop' }
+        $null = & $ctx.Run
+        $written = Get-Content -LiteralPath $ctx.Settings -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $written.PSObject.Properties['custom_user_key'] -or $written.custom_user_key -ne 'keep-me') { throw "the user's key was lost from a BOM'd settings.json" }
+        if ($null -eq $written.PSObject.Properties['agent_settings']) { throw 'the writer did not merge its own settings' }
+        # "Written back plain" (the embedded script) and the agent generator both write
+        # UTF-8 without a BOM: the rewritten file must not start with EF BB BF.
+        $rewritten = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($rewritten.Length -ge 3 -and $rewritten[0] -eq 239 -and $rewritten[1] -eq 187 -and $rewritten[2] -eq 191) { throw "the rewritten settings.json still starts with the BOM (239,187,191): the user's BOM'd file was not written back plain" }
+
+        # The agent generator rewrites this file as well (it adds enable_sub_agents),
+        # so the check above cannot say which writer dropped the BOM. With
+        # enable_sub_agents already set the generator has nothing to change, and only
+        # the embedded settings script rewrites the file.
+        $json2 = '{"custom_user_key": "keep-me-too", "schema_version": 2, "agent_settings": {"enable_sub_agents": true}}'
+        [IO.File]::WriteAllText($ctx.Settings, $json2, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $null = & $ctx.Run
+        $written2 = Get-Content -LiteralPath $ctx.Settings -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $written2.PSObject.Properties['custom_user_key'] -or $written2.custom_user_key -ne 'keep-me-too') { throw "the user's key was lost from a BOM'd settings.json that the generator leaves alone" }
+        if ($null -eq $written2.agent_settings.PSObject.Properties['llm']) { throw 'the settings script did not rewrite the file, so the BOM check below proves nothing' }
+        $rewritten2 = [IO.File]::ReadAllBytes($ctx.Settings)
+        if ($rewritten2.Length -ge 3 -and $rewritten2[0] -eq 239 -and $rewritten2[1] -eq 187 -and $rewritten2[2] -eq 191) { throw "the settings script kept the BOM (239,187,191) when it rewrote a BOM'd settings.json" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: the user original survives the writer and the agent generator in one second' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        # No enable_sub_agents: the agent generator that runs after the embedded
+        # script therefore rewrites settings.json too, and backs it up too.
+        # The original has a BOM and a non-ASCII value, so a backup that lost either
+        # differs in bytes although it reads as the same text.
+        $null = New-Item -ItemType Directory -Path $ctx.OhDir -Force
+        $seed = '{"custom_user_key": "keep-me-@V@", "schema_version": 2}'.Replace('@V@', "$([char]0x00E9)$([char]0x2603)")
+        [IO.File]::WriteAllText($ctx.Settings, $seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ctx.Settings))
+        $null = & $ctx.Run
+        $backups = @(Get-ChildItem -LiteralPath $ctx.OhDir -Filter 'settings.json.autoos-backup-*')
+        $holdsOriginal = @($backups | Where-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_.FullName)) -ceq $seedB64 })
+        if ($holdsOriginal.Count -eq 0) { throw "none of the $($backups.Count) backup(s) holds the user's original file byte for byte (an earlier backup was overwritten, or a BOM / non-ASCII byte was lost)" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+# The closing line must say what happened. "written" only when a file was
+# written; a run that changed nothing says it is up to date; a run whose script
+# failed (or that had no python) says so and prints neither.
+Test-Case 'openhands settings: the final line says written only when something was written' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        # Every file under ~/.openhands as name=SHA-256, sorted. The skills directory
+        # holds links into the repo (not files of this tree) and is left out.
+        $snapshot = {
+            $skillsPrefix = $ctx.Skills + [IO.Path]::DirectorySeparatorChar
+            $lines = @()
+            foreach ($f in @(Get-ChildItem -LiteralPath $ctx.OhDir -Recurse -File -Force -ErrorAction SilentlyContinue)) {
+                if ($f.FullName.StartsWith($skillsPrefix, [StringComparison]::Ordinal)) { continue }
+                $lines += ($f.FullName.Substring($ctx.OhDir.Length) + '=' + (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash)
+            }
+            @($lines | Sort-Object)
+        }
+        $out1 = & $ctx.Run
+        $before = @(& $snapshot)
+        if (@($before | Where-Object { $_ -like '*settings.json=*' }).Count -ne 1 -or $before.Count -lt 5) { throw "the snapshot of the first run's files is too thin to prove anything: [$($before -join '; ')]" }
+        $out2 = & $ctx.Run
+        $after = @(& $snapshot)
+        if ($out1 -notmatch 'OpenHands configuration and profiles written to') { throw "the first run never says written: [$out1]" }
+        if ($out1 -match 'already up to date') { throw "the first run also says it is up to date: [$out1]" }
+        if ($out2 -notmatch 'openhands settings: skipped') { throw "the second run did not skip the settings writer, so this test proves nothing: [$out2]" }
+        if ($out2 -match 'OpenHands configuration and profiles written to') { throw "the second run still says written although nothing changed: [$out2]" }
+        if ($out2 -notmatch 'OpenHands configuration already up to date') { throw "the second run does not say it is up to date: [$out2]" }
+        # The log lines are only what the writers say; the files are what they did.
+        $changed = @(Compare-Object -ReferenceObject $before -DifferenceObject $after | ForEach-Object { $_.InputObject.Substring(0, $_.InputObject.LastIndexOf('=')) } | Select-Object -Unique)
+        if ($changed.Count -gt 0) { throw "the second run changed, added or removed $($changed.Count) file(s) under .openhands (a second run must neither rewrite a file nor take a backup), first: $(@($changed | Select-Object -First 4) -join '; ')" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: a profile file that had to be recreated counts as written' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $null = & $ctx.Run
+        $profile = Join-Path $ctx.OhDir 'profiles\openrouter-free.json'
+        if (-not (Test-Path -LiteralPath $profile)) { throw 'the first run did not write profiles\openrouter-free.json' }
+        Remove-Item -LiteralPath $profile -Force
+        $out = & $ctx.Run
+        if (-not (Test-Path -LiteralPath $profile)) { throw 'the second run did not recreate the profile' }
+        if ($out -notmatch 'OpenHands configuration and profiles written to') { throw "a recreated profile file is not reported as written: [$out]" }
+        if ($out -match 'already up to date') { throw "a run that recreated a file says it is up to date: [$out]" }
+        if ($out -notmatch 'openhands profiles: 1 written') { throw "the writer does not report the one profile it wrote: [$out]" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: a failing settings script is reported, not called written' {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { Skip 'the stub is a POSIX shell script'; return }
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        $real = @(Get-Command python3, python -All -ErrorAction SilentlyContinue | Where-Object { $_.Source -and -not $_.Source.StartsWith($ctx.Scratch) })
+        if ($real.Count -eq 0) { Skip 'no real python to pass the other calls through to'; return }
+        # First on PATH: fail the embedded settings script (python -c ...), pass
+        # everything else (the agent generator runs a script file) through.
+        $stub = Join-Path $ctx.Scratch 'bin/python'
+        [IO.File]::WriteAllText($stub, "#!/bin/sh`nif [ `"`$1`" = `"-c`" ]; then echo `"stub: the settings script failed`" >&2; exit 1; fi`nexec '$($real[0].Source)' `"`$@`"`n")
+        & chmod +x $stub
+        $null = New-Item -ItemType Directory -Path $ctx.OhDir -Force
+        $seed = '{"custom_user_key": "keep-me", "schema_version": 2}'
+        [IO.File]::WriteAllText($ctx.Settings, $seed)
+        $out = & $ctx.Run
+        if ([IO.File]::ReadAllText($ctx.Settings) -ne $seed) { throw 'settings.json changed although its writer failed' }
+        if (@(Get-ChildItem -LiteralPath $ctx.OhDir -Filter 'settings.json.autoos-backup-*').Count -ne 0) { throw 'a backup was taken for a file that was not written' }
+        if ($out -notmatch 'not written to [^\r\n]*settings\.json') { throw "no warning naming settings.json: [$out]" }
+        if ($out -match 'OpenHands configuration and profiles written to') { throw "the success line was printed after the writer failed: [$out]" }
+        if ($out -match 'already up to date') { throw "the up-to-date line was printed after the writer failed: [$out]" }
+        if ($out -match 'agent-harness openhands:') { throw "the agent generator ran after the writer failed: [$out]" }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+Test-Case 'openhands settings: a missing python is reported, not called written' {
+    $ran = Invoke-WithOpenHandsScratch -Body {
+        param($ctx)
+        # Nothing on PATH but an empty directory: no python, no py.
+        Remove-Item -LiteralPath (Join-Path $ctx.Scratch 'bin/python') -Force -ErrorAction SilentlyContinue
+        $env:PATH = Join-Path $ctx.Scratch 'bin'
+        $out = & $ctx.Run
+        if ($out -notmatch 'python was not found') { throw "no warning that python is missing: [$out]" }
+        if ($out -match 'OpenHands configuration and profiles written to') { throw "the success line was printed without python: [$out]" }
+        if ($out -match 'already up to date') { throw "the up-to-date line was printed without python: [$out]" }
+        if (Test-Path -LiteralPath $ctx.Settings) { throw 'settings.json exists although python never ran' }
+    }
+    if (-not $ran) { return }
+    Pass
+}
+
+# --- AI routing stack (omniroute / litellm / zed / opencode) ---
+Describe-Group 'ai routing'
+
+function Get-AutoOSWinComponent {
+    param([string]$Id)
+    foreach ($cat in $winCatalog.categories) {
+        foreach ($c in $cat.components) { if ($c.id -eq $Id) { return $c } }
+    }
+    return $null
+}
+
+Test-Case 'ai routing components exist with the right providers' {
+    $zed = Get-AutoOSWinComponent 'zed'
+    $lit = Get-AutoOSWinComponent 'litellm'
+    $oc = Get-AutoOSWinComponent 'opencode-cli'
+    $om = Get-AutoOSWinComponent 'omniroute'
+    $oh = Get-AutoOSWinComponent 'openhands-docker'
+    Assert-True ($null -ne $zed -and $null -ne $lit -and $null -ne $oc -and $null -ne $om -and $null -ne $oh) 'missing component'
+    Assert-Equal "$($zed.provider)|$($lit.provider)|$($oc.provider)|$($om.provider)|$($oh.provider)" 'winget|custom|npm|npm|custom'
+    Assert-Equal "$($zed.package)|$($oc.package)|$($om.package)" 'ZedIndustries.Zed|@opencode/cli|omniroute'
+    Assert-Equal $oh.postInstall 'Install-AutoOSOpenHands'
+    Assert-True ($oh.verify -match 'docker\.openhands\.dev') 'openhands verify does not check the current image'
+}
+
+Test-Case 'zed routes through litellm and both ride ai-coding' {
+    $zed = Get-AutoOSWinComponent 'zed'
+    Assert-Contains $zed.requires 'litellm'
+    Assert-Contains $zed.profiles 'ai-coding'
+    Assert-Contains (Get-AutoOSWinComponent 'litellm').profiles 'ai-coding'
+    Assert-Contains (Get-AutoOSWinComponent 'omniroute').profiles 'ai-coding'
+}
+
+Test-Case 'opencode-cli is the headless fallback on light' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $light = @($a | Where-Object { 'light' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-Contains $light 'opencode-cli'
+}
+
+Test-Case 'ai postInstall hooks are exported' {
+    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSClaudeGateway', 'Set-AutoOSOmniRouteCliKey', 'Set-AutoOSApiKeyEnv', 'Install-AutoOSQoderCli', 'Install-AutoOSOmniRouteRouting', 'Set-AutoOSZedProxy')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn missing"
+    }
+    Pass
+}
+
+Test-Case 'litellm installer announces instead of running in dry run' {
+    Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+    # Write-AutoOSLine goes to the console and the module log, not the output
+    # stream: capture it through a scratch log file, the only reliable way.
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-dry-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'would install litellm') 'no dry-run announcement in the log'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    }
+}
+
+Test-Case 'zed routing writes nothing in dry run' {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        Set-AutoOSZedProxy
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Assert-Equal (Test-Path (Join-Path $scratch 'Zed\settings.json')) $false
+    } finally { $env:APPDATA = $realAppData }
+}
+
+# Claude Code gateway routing is opt-in and reversible (catalog prompt
+# claude_gateway_routing, default 'login'). ANTHROPIC_BASE_URL/AUTH_TOKEN in
+# ~/.claude/settings.json "env" disable the claude.ai connectors, so every answer
+# other than 'gateway' takes exactly those two keys out again. A backup is taken
+# only by a run that changes the file, so each fixture below sees at most ONE
+# modifying run and the exact backup count is safe from the per-second timestamp
+# collision fixed in 0bb5952. Scratch homes only - never the real profile.
+function New-ClaudeGatewayScratch {
+    param([string]$Json, [switch]$NoClaudeDir)
+    $dir = Join-Path ([IO.Path]::GetTempPath()) "autoos-claudegw-$([Guid]::NewGuid().ToString('N'))"
+    if ($NoClaudeDir) { $null = New-Item -ItemType Directory -Path $dir -Force; return $dir }
+    $null = New-Item -ItemType Directory -Path (Join-Path $dir '.claude') -Force
+    if ($Json) { [IO.File]::WriteAllText((Join-Path (Join-Path $dir '.claude') 'settings.json'), $Json) }
+    $dir
+}
+function Get-ClaudeGatewaySettingsPath { param([string]$Dir) Join-Path (Join-Path $Dir '.claude') 'settings.json' }
+function Get-ClaudeGatewayBackupCount {
+    param([string]$Dir)
+    $claudeDir = Join-Path $Dir '.claude'
+    if (-not (Test-Path -LiteralPath $claudeDir)) { return 0 }
+    @(Get-ChildItem -LiteralPath $claudeDir -Filter 'settings.json.autoos-backup-*').Count
+}
+function Invoke-ClaudeGatewayLogged {
+    <# Runs Set-AutoOSClaudeGateway against $env:USERPROFILE; returns what it logged. #>
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-claudegw-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSClaudeGateway
+        Get-Content -LiteralPath $log -Raw -Encoding utf8
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Set-AutoOSClaudeGateway (default login answer) strips only the two gateway keys' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $scratch = New-ClaudeGatewayScratch -Json '{"theme":"mine","permissions":{"allow":["Bash(ls)"]},"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:20128","ANTHROPIC_AUTH_TOKEN":"test-omni-key","KEEP_ME":"1"}}'
+    $scratch2 = New-ClaudeGatewayScratch -Json '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}'
+    try {
+        # A key in the environment must not matter any more: no answer means login.
+        $env:USERPROFILE = $scratch; $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $out1 = Invoke-ClaudeGatewayLogged
+        $out2 = Invoke-ClaudeGatewayLogged
+        $s = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch) -Raw | ConvertFrom-Json
+        if ($s.theme -ne 'mine') { throw "theme lost: [$($s.theme)]" }
+        if (@($s.permissions.allow) -notcontains 'Bash(ls)') { throw 'permissions lost' }
+        if ($s.env.KEEP_ME -ne '1') { throw 'unrelated env key lost' }
+        foreach ($k in @('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN')) {
+            if ($null -ne $s.env.PSObject.Properties[$k]) { throw "$k still present" }
+        }
+        $backups = Get-ClaudeGatewayBackupCount $scratch
+        if ($backups -ne 1) { throw "backups=$backups (want 1: the second run must not back up)" }
+        $backupText = Get-Content -LiteralPath (Get-ChildItem -LiteralPath (Join-Path $scratch '.claude') -Filter 'settings.json.autoos-backup-*' | Select-Object -First 1).FullName -Raw
+        if ($backupText -notmatch 'ANTHROPIC_AUTH_TOKEN') { throw 'backup is not the original file' }
+        if ($out1 -notmatch 'removed') { throw "first run did not report the removal: [$out1]" }
+        if ($out2 -notmatch 'skipped' -or $out2 -match 'removed') { throw "second run did not report skipped: [$out2]" }
+        # "env" holding nothing but the two keys disappears entirely.
+        $env:USERPROFILE = $scratch2
+        $null = Invoke-ClaudeGatewayLogged
+        $s2 = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch2) -Raw | ConvertFrom-Json
+        if ($null -ne $s2.PSObject.Properties['env']) { throw 'empty env block was left behind' }
+        if ($s2.theme -ne 'mine') { throw 'theme lost when env was dropped' }
+    } finally {
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch, $scratch2 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway (default login answer) leaves a file without the keys untouched' {
+    $realHome = $env:USERPROFILE
+    $json = '{"theme":"mine","env":{"KEEP_ME":"1"}}'
+    $scratch = New-ClaudeGatewayScratch -Json $json
+    $scratch2 = New-ClaudeGatewayScratch -NoClaudeDir
+    try {
+        $env:USERPROFILE = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $out = Invoke-ClaudeGatewayLogged
+        $after = [IO.File]::ReadAllText((Get-ClaudeGatewaySettingsPath $scratch))
+        if ($after -ne $json) { throw "file was rewritten: [$after]" }
+        $backups = Get-ClaudeGatewayBackupCount $scratch
+        if ($backups -ne 0) { throw "backups=$backups (want 0)" }
+        if ($out -notmatch 'skipped') { throw "did not report skipped: [$out]" }
+        # No settings file at all: nothing is created, not even ~/.claude.
+        $env:USERPROFILE = $scratch2
+        $null = Invoke-ClaudeGatewayLogged
+        if (Test-Path -LiteralPath (Join-Path $scratch2 '.claude')) { throw 'created ~/.claude for nothing' }
+    } finally {
+        $env:USERPROFILE = $realHome
+        Remove-Item -LiteralPath $scratch, $scratch2 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway (gateway answer) points Claude Code at OmniRoute, second run skipped' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $scratch = New-ClaudeGatewayScratch -Json '{"theme":"mine","env":{"KEEP_ME":"1"}}'
+    $scratch2 = New-ClaudeGatewayScratch -NoClaudeDir
+    try {
+        $env:USERPROFILE = $scratch; $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ claude_gateway_routing = 'gateway' } -RepoRoot $Root
+        $null = Invoke-ClaudeGatewayLogged
+        $out2 = Invoke-ClaudeGatewayLogged
+        $s = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch) -Raw | ConvertFrom-Json
+        if ($s.theme -ne 'mine') { throw 'theme lost' }
+        if ($s.env.KEEP_ME -ne '1') { throw 'unrelated env key lost' }
+        if ($s.env.ANTHROPIC_BASE_URL -ne 'http://127.0.0.1:20128') { throw "base url: [$($s.env.ANTHROPIC_BASE_URL)]" }
+        if ($s.env.ANTHROPIC_AUTH_TOKEN -ne 'test-omni-key') { throw 'auth token not written' }
+        $backups = Get-ClaudeGatewayBackupCount $scratch
+        if ($backups -ne 1) { throw "backups=$backups (want 1: the second run must not back up)" }
+        if ($out2 -notmatch 'skipped') { throw "second run did not report skipped: [$out2]" }
+        # Gateway mode still needs the key: without it nothing is written.
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY
+        $env:USERPROFILE = $scratch2
+        $nokey = Invoke-ClaudeGatewayLogged
+        if (Test-Path -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch2)) { throw 'settings written without a key' }
+        if ($nokey -notmatch 'AUTOOS_OMNIROUTE_KEY not set') { throw "no missing-key warning: [$nokey]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch, $scratch2 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway dry run announces and writes nothing in either mode' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $loginJson = '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}'
+    $gwJson = '{"theme":"mine"}'
+    $scratch = New-ClaudeGatewayScratch -Json $loginJson
+    $scratch2 = New-ClaudeGatewayScratch -Json $gwJson
+    $scratch3 = New-ClaudeGatewayScratch -NoClaudeDir
+    try {
+        $env:USERPROFILE = $scratch
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $loginOut = Invoke-ClaudeGatewayLogged
+        $env:USERPROFILE = $scratch2; $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        Initialize-AutoOSInstaller -DryRun $true -Answers @{ claude_gateway_routing = 'gateway' } -RepoRoot $Root
+        $gwOut = Invoke-ClaudeGatewayLogged
+        $env:USERPROFILE = $scratch3
+        $null = Invoke-ClaudeGatewayLogged
+        if ([IO.File]::ReadAllText((Get-ClaudeGatewaySettingsPath $scratch)) -ne $loginJson) { throw 'login dry run rewrote the file' }
+        if ([IO.File]::ReadAllText((Get-ClaudeGatewaySettingsPath $scratch2)) -ne $gwJson) { throw 'gateway dry run rewrote the file' }
+        $backups = (Get-ClaudeGatewayBackupCount $scratch) + (Get-ClaudeGatewayBackupCount $scratch2)
+        if ($backups -ne 0) { throw "dry run made $backups backup(s)" }
+        if (Test-Path -LiteralPath (Join-Path $scratch3 '.claude')) { throw 'dry run created ~/.claude' }
+        if ($loginOut -notmatch 'would remove') { throw "login dry run did not announce: [$loginOut]" }
+        if ($gwOut -notmatch 'would point') { throw "gateway dry run did not announce: [$gwOut]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch, $scratch2, $scratch3 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway login mode works without AUTOOS_OMNIROUTE_KEY' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $scratch = New-ClaudeGatewayScratch -Json '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y","KEEP_ME":"1"}}'
+    try {
+        $env:USERPROFILE = $scratch
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ claude_gateway_routing = 'login' } -RepoRoot $Root
+        $out = Invoke-ClaudeGatewayLogged
+        $s = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch) -Raw | ConvertFrom-Json
+        if ($s.env.KEEP_ME -ne '1') { throw 'unrelated env key lost' }
+        foreach ($k in @('ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN')) {
+            if ($null -ne $s.env.PSObject.Properties[$k]) { throw "$k still present" }
+        }
+        if ($out -match 'AUTOOS_OMNIROUTE_KEY') { throw "login mode asked for the key: [$out]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway leaves an unreadable settings file untouched in either mode' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $broken = '{"theme": "mine", "env": {"ANTHROPIC_BASE_URL": '
+    $scratch = New-ClaudeGatewayScratch -Json $broken
+    try {
+        $env:USERPROFILE = $scratch; $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $loginOut = Invoke-ClaudeGatewayLogged
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ claude_gateway_routing = 'gateway' } -RepoRoot $Root
+        $gwOut = Invoke-ClaudeGatewayLogged
+        if ([IO.File]::ReadAllText((Get-ClaudeGatewaySettingsPath $scratch)) -ne $broken) { throw 'broken file was rewritten' }
+        $backups = Get-ClaudeGatewayBackupCount $scratch
+        if ($backups -ne 0) { throw "backups=$backups (want 0)" }
+        if ($loginOut -notmatch 'left untouched') { throw "login mode did not warn: [$loginOut]" }
+        if ($gwOut -notmatch 'left untouched') { throw "gateway mode did not warn: [$gwOut]" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway trims and lower-cases the answer, like the bash side' {
+    $realHome = $env:USERPROFILE; $realKey = $env:AUTOOS_OMNIROUTE_KEY
+    $scratch = New-ClaudeGatewayScratch -Json '{"theme":"mine"}'
+    $scratch2 = New-ClaudeGatewayScratch -Json '{"theme":"mine","env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}'
+    try {
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        $env:USERPROFILE = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ claude_gateway_routing = ' Gateway ' } -RepoRoot $Root
+        $null = Invoke-ClaudeGatewayLogged
+        $s = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch) -Raw | ConvertFrom-Json
+        if ($null -eq $s.PSObject.Properties['env'] -or $s.env.ANTHROPIC_AUTH_TOKEN -ne 'test-omni-key') { throw "' Gateway ' did not mean gateway" }
+        # Inner whitespace is not stripped: "gate way" is not gateway, so it means login.
+        $env:USERPROFILE = $scratch2
+        Initialize-AutoOSInstaller -DryRun $false -Answers @{ claude_gateway_routing = 'gate way' } -RepoRoot $Root
+        $null = Invoke-ClaudeGatewayLogged
+        $s2 = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch2) -Raw | ConvertFrom-Json
+        if ($null -ne $s2.PSObject.Properties['env']) { throw "'gate way' did not mean login" }
+    } finally {
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realKey }
+        Remove-Item -LiteralPath $scratch, $scratch2 -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSClaudeGateway keeps deeply nested settings intact and leaves no temp file' {
+    # ConvertTo-Json -Depth 10 turned anything deeper into a "@{...}" string.
+    $realHome = $env:USERPROFILE
+    $deep = '{"k":"leaf"}'
+    foreach ($n in @('l', 'k2', 'j', 'i', 'h', 'g', 'f', 'e', 'd', 'c', 'b', 'a')) { $deep = "{""$n"":$deep}" }
+    $scratch = New-ClaudeGatewayScratch -Json ('{"theme":"mine","deep":' + $deep + ',"env":{"ANTHROPIC_BASE_URL":"x","ANTHROPIC_AUTH_TOKEN":"y"}}')
+    try {
+        $env:USERPROFILE = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $null = Invoke-ClaudeGatewayLogged
+        $s = Get-Content -LiteralPath (Get-ClaudeGatewaySettingsPath $scratch) -Raw | ConvertFrom-Json
+        $leaf = $s.deep.a.b.c.d.e.f.g.h.i.j.k2.l
+        if ($leaf -isnot [System.Management.Automation.PSCustomObject] -or $leaf.k -ne 'leaf') { throw "nested settings were flattened: [$leaf]" }
+        if ($null -ne $s.PSObject.Properties['env']) { throw 'gateway keys not removed' }
+        $left = @(Get-ChildItem -LiteralPath (Join-Path $scratch '.claude') -Filter 'settings.json.tmp.*')
+        if ($left.Count -ne 0) { throw "temp file left behind: $($left.Name -join ', ')" }
+    } finally {
+        $env:USERPROFILE = $realHome
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'claude_gateway_routing is asked by claude-code and omniroute, default login' {
+    $spec = $winCatalog.prompts.PSObject.Properties['claude_gateway_routing']
+    if ($null -eq $spec) { throw 'windows catalog never asks claude_gateway_routing' }
+    if ($spec.Value.default -ne 'login') { throw "default is [$($spec.Value.default)], not login" }
+    foreach ($id in @('claude-code', 'omniroute')) {
+        $c = $winCatalog.categories | ForEach-Object { $_.components } | Where-Object { $_.id -eq $id }
+        $keys = @([string](Get-AutoOSComponentProperty $c 'prompt' '') -split '[, ]+')
+        if ($keys -notcontains 'claude_gateway_routing') { throw "$id does not ask claude_gateway_routing" }
+    }
+    Pass
+}
+
+Test-Case 'Set-AutoOSOmniRouteCliKey exports the client key once' {
+    $realVal = [Environment]::GetEnvironmentVariable('OMNIROUTE_API_KEY', 'Process')
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-omnikey-$PID.yml"
+    try {
+        'omniroute: test-client-key' | Out-File $tmp -Encoding utf8
+        Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue
+        Set-AutoOSOmniRouteCliKey -KeysFile $tmp -Scope Process
+        Assert-Equal $env:OMNIROUTE_API_KEY 'test-client-key'
+        'omniroute: rotated-key' | Out-File $tmp -Encoding utf8
+        Set-AutoOSOmniRouteCliKey -KeysFile $tmp -Scope Process
+        Assert-Equal $env:OMNIROUTE_API_KEY 'test-client-key'
+        Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item $tmp -Force
+        Set-AutoOSOmniRouteCliKey -KeysFile $tmp -Scope Process
+        Assert-True ([string]::IsNullOrEmpty($env:OMNIROUTE_API_KEY)) 'key written without a keys file'
+    } finally {
+        if ($null -eq $realVal) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:OMNIROUTE_API_KEY = $realVal }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'Install-AutoOSQoderCli announces without writing in dry run' {
+    $realHome = $env:USERPROFILE
+    $realPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $scratch = Join-Path $env:TEMP "autoos-qoder-$([Guid]::NewGuid().ToString('N'))"
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-qoderkey-$PID.yml"
+    # A host with qodercli set up already carries the PAT in its env (WS-OS11,
+    # 2026-09-28): the leak check below must start from an empty variable, or it
+    # fails on the host's own value, not on anything the dry run did.
+    $realPat = $env:QODER_PERSONAL_ACCESS_TOKEN
+    try {
+        $env:QODER_PERSONAL_ACCESS_TOKEN = $null
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $env:USERPROFILE = $scratch
+        'qoder_pat: dummy-pat' | Out-File $tmp -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-qoder-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            Install-AutoOSQoderCli -KeysFile $tmp
+            $text = Get-Content $log -Raw -Encoding utf8
+            Assert-True ($text -match 'https://qoder\.com/install\.ps1') 'no download announcement'
+            Assert-True ($text -match 'QODER_PERSONAL_ACCESS_TOKEN') 'no PAT announcement'
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item $log -Force -ErrorAction SilentlyContinue
+        }
+        Assert-True ([string]::IsNullOrEmpty($env:QODER_PERSONAL_ACCESS_TOKEN)) 'PAT leaked into process env'
+    } finally {
+        # Restores first: a throw from Initialize-AutoOSInstaller must not leave
+        # the run with a scratch USERPROFILE or without the host's PAT.
+        $env:QODER_PERSONAL_ACCESS_TOKEN = $realPat
+        $env:USERPROFILE = $realHome
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+    # HKCU\Environment\Path is REG_EXPAND_SZ and [Environment] re-resolves its
+    # %USERPROFILE% tokens against the *current* env, so this comparison only means
+    # anything once USERPROFILE is back to the real home — otherwise a runner whose
+    # PATH is stored as %USERPROFILE%\… fails while nothing was written.
+    Assert-Equal ([Environment]::GetEnvironmentVariable('Path', 'User')) $realPath
+    Pass
+}
+
+Test-Case 'Install-AutoOSOmniRouteRouting announces without writing in dry run' {
+    $realShort = $env:AUTOOS_OMNIROUTE_KEY
+    $realCli = $env:OMNIROUTE_API_KEY
+    # The keys file is git-ignored, so the real one exists on a dev box and not on
+    # CI; without it the export step warns out before announcing anything. Name it.
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-routingkey-$PID.yml"
+    try {
+        'omniroute: test-client-key' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        $env:OMNIROUTE_API_KEY = 'test-omni-key'
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-routing-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            Install-AutoOSOmniRouteRouting -KeysFile $tmp
+            $text = Get-Content $log -Raw -Encoding utf8
+            Assert-True ($text -match 'user-managed|would export') 'no client-key step announced'
+            Assert-True ($text -match 'Claude Code') 'no claude step announced'
+            Assert-True ($text -match 'Qwen Code') 'no qwen step announced'
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item $log -Force -ErrorAction SilentlyContinue
+        }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+    } finally {
+        if ($null -eq $realShort) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_KEY = $realShort }
+        if ($null -eq $realCli) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:OMNIROUTE_API_KEY = $realCli }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'backup-once: Install-AutoOSOmniRouteRouting does not back up again when nothing changed' {
+    # AutoOS does not write .qwen\settings.json itself: the external `omniroute
+    # setup-qwen` does, so stub `qwen` and `omniroute` on a PATH that is put back in
+    # finally. The keys file names no key, so Set-AutoOSOmniRouteCliKey exports nothing
+    # to the User environment. The stub always writes the same fixture, like the real
+    # CLI does once a file is routed. The backup name carries a second-resolution
+    # timestamp, so run 2 (same second) and run 3 (a later second) both must leave the
+    # ORIGINAL file as the only backup.
+    $realHome = $env:USERPROFILE
+    $realPath = $env:PATH
+    $realShort = $env:AUTOOS_OMNIROUTE_KEY
+    $realCli = $env:OMNIROUTE_API_KEY
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $stub = Join-Path $scratch 'bin'
+        $fakeHome = Join-Path $scratch 'home'
+        $qdir = Join-Path $fakeHome '.qwen'
+        $qcfg = Join-Path $qdir 'settings.json'
+        $noKeys = Join-Path $scratch 'no-keys.yml'
+        $null = New-Item -ItemType Directory -Path $stub, $qdir -Force
+        $seed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}}}'
+        $routed = '{"theme":"mine","security":{"auth":{"selectedType":"openai"}},"model":{"name":"l2-worker"}}'
+        [IO.File]::WriteAllText($qcfg, $seed)
+        [IO.File]::WriteAllText((Join-Path $stub 'qwen-settings.json'), $routed)
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [IO.File]::WriteAllText((Join-Path $stub 'qwen.cmd'), (@('@echo off', 'exit /b 0') -join "`r`n"))
+            [IO.File]::WriteAllText((Join-Path $stub 'omniroute.cmd'), (@(
+                '@echo off',
+                'if not exist "%USERPROFILE%\.qwen" mkdir "%USERPROFILE%\.qwen"',
+                'copy /y "%~dp0qwen-settings.json" "%USERPROFILE%\.qwen\settings.json" >nul',
+                'exit /b 0') -join "`r`n"))
+        } else {
+            [IO.File]::WriteAllText((Join-Path $stub 'qwen'), (@('#!/bin/sh', 'exit 0') -join "`n") + "`n")
+            [IO.File]::WriteAllText((Join-Path $stub 'omniroute'), (@(
+                '#!/bin/sh',
+                'mkdir -p "$USERPROFILE/.qwen"',
+                'cp "$(dirname "$0")/qwen-settings.json" "$USERPROFILE/.qwen/settings.json"',
+                'exit 0') -join "`n") + "`n")
+            & chmod +x (Join-Path $stub 'qwen') (Join-Path $stub 'omniroute')
+        }
+        $env:USERPROFILE = $fakeHome
+        $env:PATH = "$stub$([IO.Path]::PathSeparator)$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $log = Join-Path $scratch 'run.log'
+        $run = {
+            Initialize-AutoOSLog -Path $log
+            Install-AutoOSOmniRouteRouting -KeysFile $noKeys | Out-Null
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        }
+        $out1 = & $run
+        $backups1 = @(Get-ChildItem -LiteralPath $qdir -Filter 'settings.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        if ([IO.File]::ReadAllText($backups1[0].FullName) -ne $seed) { throw 'run 1 backup is not the original file' }
+        if ([IO.File]::ReadAllText($qcfg) -ne $routed) { throw 'the omniroute stub was not run (settings.json is not the routed fixture)' }
+        if ($out1 -notmatch 'Qwen Code routed') { throw "run 1 did not report the routing: [$out1]" }
+        $hash1 = (Get-FileHash -LiteralPath $qcfg -Algorithm SHA256).Hash
+        foreach ($n in 2, 3) {
+            if ($n -eq 3) { Start-Sleep -Milliseconds 1100 }
+            $out = & $run
+            $backups = @(Get-ChildItem -LiteralPath $qdir -Filter 'settings.json.autoos-backup-*')
+            if ($backups.Count -ne 1) { throw "run ${n}: backups=$($backups.Count) (want 1: nothing changed, so no new backup)" }
+            if ([IO.File]::ReadAllText($backups[0].FullName) -ne $seed) { throw "run ${n} replaced the run 1 backup: it is no longer the original file" }
+            if ((Get-FileHash -LiteralPath $qcfg -Algorithm SHA256).Hash -ne $hash1) { throw "run ${n} changed settings.json although nothing needed changing" }
+            if ($out -notmatch 'Qwen Code[^\r\n]*skipped') { throw "run ${n} did not report the Qwen step as skipped: [$out]" }
+        }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        $env:USERPROFILE = $realHome
+        if ($null -eq $realShort) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $realShort }
+        if ($null -eq $realCli) { Remove-Item Env:OMNIROUTE_API_KEY -ErrorAction SilentlyContinue } else { $env:OMNIROUTE_API_KEY = $realCli }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Describe-Group 'gateway key (gwkey)'
+
+# WS-OMNIREMOTE: the client key field is named by gateway (omniroute_server
+# for a non-local gateway, omniroute_<host> for the local one). Fixtures only
+# (sk-test-*): the resolved VALUE is asserted, while notices, deprecations
+# and errors must name the FIELD and never a value or the URL. Messages travel
+# through Write-AutoOSLine, so they are asserted on a fresh log file, not on
+# the console ([Console]::WriteLine bypasses the output streams).
+
+Test-Case 'gwkey: local gateway resolves omniroute_<host>' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-$PID.yml"
+    try {
+        'omniroute_testhost: sk-test-local' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Assert-Equal (Get-AutoOSClientKeyField) 'omniroute_testhost'
+        Assert-Equal (Get-AutoOSClientKey -KeysFile $tmp) 'sk-test-local'
+    } finally {
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: non-local gateway resolves omniroute_server' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-$PID.yml"
+    try {
+        'omniroute_server: sk-test-server' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'https://gw.example.com'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Assert-Equal (Get-AutoOSClientKeyField) 'omniroute_server'
+        Assert-Equal (Get-AutoOSClientKey -KeysFile $tmp) 'sk-test-server'
+    } finally {
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: legacy local omniroute warns once and resolves' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-$PID.yml"
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        'omniroute: sk-test-legacy' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        & (Get-Module AutoOS.Install) { $script:AutoOSNoticed = @{} }  # notices print once per session; start clean
+        $key = Get-AutoOSClientKey -KeysFile $tmp
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-Equal $key 'sk-test-legacy'
+        $warns = @(Select-String -Path $log -Pattern 'deprecated' -SimpleMatch)
+        Assert-Equal $warns.Count 1
+        Assert-True ($warns[0].Line -like "*'omniroute'*'omniroute_testhost'*") "no old+new field in [$($warns[0].Line)]"
+        Assert-True ($text -notmatch 'sk-test-legacy') 'the value leaked into the log'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: legacy server omniroute_client_<host> warns once and resolves' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-$PID.yml"
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        'omniroute_client_testhost: sk-test-legacy' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'https://gw.example.com'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        & (Get-Module AutoOS.Install) { $script:AutoOSNoticed = @{} }  # notices print once per session; start clean
+        $key = Get-AutoOSClientKey -KeysFile $tmp
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-Equal $key 'sk-test-legacy'
+        $warns = @(Select-String -Path $log -Pattern 'deprecated' -SimpleMatch)
+        Assert-Equal $warns.Count 1
+        Assert-True ($warns[0].Line -like "*'omniroute_client_testhost'*'omniroute_server'*") "no old+new field in [$($warns[0].Line)]"
+        Assert-True ($text -notmatch 'sk-test-legacy') 'the value leaked into the log'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: missing key names the expected field, never the value or URL' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-$PID.yml"
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        'unrelated: sk-test-decoy' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        $env:AUTOOS_OMNIROUTE_URL = 'https://gw.example.com'
+        Assert-True ($null -eq (Get-AutoOSClientKey -KeysFile $tmp)) 'server case resolved without a key'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Assert-True ($null -eq (Get-AutoOSClientKey -KeysFile $tmp)) 'local case resolved without a key'
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -like "*Expected field 'omniroute_server'*") 'no server field in the log'
+        Assert-True ($text -like '*non-local*') 'no non-local reason in the log'
+        Assert-True ($text -like "*Expected field 'omniroute_testhost'*") 'no local field in the log'
+        Assert-True ($text -notmatch 'gw\.example\.com') 'the URL leaked into the log'
+        Assert-True ($text -notmatch '127\.0\.0\.1') 'the URL leaked into the log'
+        Assert-True ($text -notmatch 'sk-test-decoy') 'the value leaked into the log'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: explicit URL classification matches WS-OMNIREMOTE table' {
+    # WS-OMNIREMOTE r3: this table must match the bash is_local_gateway behavior
+    # and the Python is_local_gateway behavior exactly. No key/URL values in output.
+    $testCases = @(
+        @{ Url = ''; Expected = $true; Desc = 'empty URL -> local' }
+        @{ Url = 'http://127.0.0.1:20128'; Expected = $true; Desc = '127.0.0.1 -> local' }
+        @{ Url = 'http://localhost:20128'; Expected = $true; Desc = 'localhost -> local' }
+        @{ Url = 'http://LOCALHOST:20128/'; Expected = $true; Desc = 'uppercase LOCALHOST -> local' }
+        @{ Url = 'http://[::1]:20128'; Expected = $true; Desc = 'IPv6 loopback -> local' }
+        @{ Url = 'http://user:pass@127.0.0.1:8080'; Expected = $true; Desc = 'userinfo + 127.0.0.1 -> local' }
+        @{ Url = 'http://user@127.0.0.1:8080'; Expected = $true; Desc = 'userinfo (user only) + 127.0.0.1 -> local' }
+        @{ Url = 'http://user:pass@localhost:8080'; Expected = $true; Desc = 'userinfo + localhost -> local' }
+        @{ Url = 'http://user:pass@[::1]:8080'; Expected = $true; Desc = 'userinfo + IPv6 loopback -> local' }
+        @{ Url = 'https://gw.example.com'; Expected = $false; Desc = 'external hostname -> non-local' }
+        @{ Url = 'http://server:20128'; Expected = $false; Desc = 'bare hostname -> non-local' }
+        @{ Url = 'http://[::2]:20128'; Expected = $false; Desc = 'non-loopback IPv6 -> non-local' }
+        @{ Url = 'not-a-url'; Expected = $false; Desc = 'unparseable -> non-local' }
+        @{ Url = 'http://evil.example/x@127.0.0.1'; Expected = $false; Desc = '@ in path -> host is evil.example' }
+        @{ Url = 'http://evil.example#@127.0.0.1'; Expected = $false; Desc = '@ in fragment -> host is evil.example' }
+        @{ Url = 'http://evil.example?x=@127.0.0.1'; Expected = $false; Desc = '@ in query -> host is evil.example' }
+        @{ Url = 'http://localhost.'; Expected = $false; Desc = 'trailing-dot lookalike -> non-local' }
+        @{ Url = 'http://127.0.0.2'; Expected = $false; Desc = '127.0.0.2 -> non-local' }
+        @{ Url = 'http://0.0.0.0'; Expected = $false; Desc = '0.0.0.0 -> non-local' }
+        @{ Url = 'http://127.0.0.1/x@y'; Expected = $true; Desc = '@ in path after a loopback host -> local' }
+        @{ Url = 'http://localhost?x=1'; Expected = $true; Desc = 'query after localhost -> local' }
+        @{ Url = 'http://127.0.0.1#frag'; Expected = $true; Desc = 'fragment after 127.0.0.1 -> local' }
+    )
+    $failures = @()
+    foreach ($tc in $testCases) {
+        $result = Test-AutoOSLocalGateway -Url $tc.Url
+        if ($result -ne $tc.Expected) {
+            $failures += "$($tc.Desc): got $result, expected $($tc.Expected) for '$($tc.Url)'"
+        }
+    }
+    Assert-True ($failures.Count -eq 0) ($failures -join '; ')
+}
+
+Test-Case 'gwkey: key file rules match tools/keys_file.py (case, comments, placeholders, duplicates)' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_keyrules_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $d -Force
+    try {
+        $keys = Join-Path $d 'api-keys.yml'
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'absent.yml'
+        Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        $cases = @(
+            @{ Text = "OmniRoute_TestHost: mixed-case-key"; Want = 'mixed-case-key'; Desc = 'field match is case-insensitive' }
+            @{ Text = "omniroute_testhost: inline-key # rotated"; Want = 'inline-key'; Desc = 'an inline comment is cut' }
+            @{ Text = "omniroute_testhost: 'quoted-key'  # note"; Want = 'quoted-key'; Desc = 'quoted value with a comment after it' }
+            @{ Text = "omniroute_testhost: REPLACE_WITH_KEY`nomniroute_testhost: second-key"; Want = 'second-key'; Desc = 'a placeholder is skipped and the next value used' }
+            @{ Text = "omniroute_testhost: sk-REPLACE_ME`nomniroute_testhost: third-key"; Want = 'third-key'; Desc = 'a placeholder anywhere in the value is skipped' }
+            @{ Text = "omniroute_testhost: <REPLACE_WITH_X>"; Want = ''; Desc = 'an angle-bracket placeholder is not a key' }
+            @{ Text = "omniroute_testhost: first-key`nomniroute_testhost: second-key"; Want = 'first-key'; Desc = 'the first filled-in duplicate wins' }
+        )
+        $failures = @()
+        foreach ($c in $cases) {
+            Set-Content -LiteralPath $keys -Value $c.Text -Encoding utf8
+            $got = Get-AutoOSClientKey -KeysFile $keys
+            if ([string]$got -ne $c.Want) { $failures += "$($c.Desc): got '$got' want '$($c.Want)'" }
+        }
+        Assert-True ($failures.Count -eq 0) ($failures -join '; ')
+    } finally {
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: -Optional makes a missing key silent and still honours the env key' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY; $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        $got = Get-AutoOSClientKey -KeysFile (Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-keys.yml') -Optional
+        Assert-True ($null -eq $got) 'a missing optional key must be $null'
+        $text = if (Test-Path $log) { Get-Content $log -Raw -Encoding utf8 } else { '' }
+        Assert-True ([string]::IsNullOrEmpty($text) -or $text -notmatch 'No OmniRoute client key') 'a missing optional key must not print the error line'
+        $env:AUTOOS_OMNIROUTE_KEY = 'env-key-value'
+        Assert-Equal (Get-AutoOSClientKey -KeysFile (Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-keys.yml') -Optional) 'env-key-value'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: two resolves in one session print the deprecation line once' {
+    $rUrl = $env:AUTOOS_OMNIROUTE_URL; $rKey = $env:AUTOOS_OMNIROUTE_KEY
+    $rHost = $env:AUTOOS_HOST_NAME; $rCfg = $env:AUTOOS_HOST_CONFIG
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-gwkey-once-$PID.yml"
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('autoos-gwkey-' + [Guid]::NewGuid().ToString('N') + '.log')
+    try {
+        'omniroute: sk-test-legacy' | Out-File $tmp -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        Initialize-AutoOSLog -Path $log
+        & (Get-Module AutoOS.Install) { $script:AutoOSNoticed = @{} }
+        $null = Get-AutoOSClientKey -KeysFile $tmp
+        $null = Get-AutoOSClientKey -KeysFile $tmp
+        $warns = @(Select-String -Path $log -Pattern 'deprecated' -SimpleMatch)
+        Assert-Equal $warns.Count 1
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        if ($null -eq $rUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $rUrl }
+        if ($null -eq $rKey) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $rKey }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: the shared URL table classifies every row the same way (module and start-stack copy)' {
+    $table = Get-Content -LiteralPath (Join-Path $Root 'tests\fixtures\gateway-url-classification.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    Assert-True ($table.Count -gt 60) 'the shared table is missing rows'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-AutoOSLocalGateway' }, $true))
+    Assert-Equal $fn.Count 1 'start-stack.ps1 must carry exactly one Test-AutoOSLocalGateway'
+    $inCopy = { param($text, $u) . ([scriptblock]::Create($text)); Test-AutoOSLocalGateway -Url $u }
+    $wrong = @()
+    foreach ($r in $table) {
+        $m = [bool](Test-AutoOSLocalGateway -Url $r.url)
+        $c = [bool](& $inCopy $fn[0].Extent.Text $r.url)
+        if ($m -ne [bool]$r.local) { $wrong += "module: '$($r.url | ConvertTo-Json -Compress)' got $m want $($r.local)" }
+        if ($c -ne [bool]$r.local) { $wrong += "start-stack copy: '$($r.url | ConvertTo-Json -Compress)' got $c want $($r.local)" }
+    }
+    Assert-True ($wrong.Count -eq 0) ($wrong -join '; ')
+}
+
+Test-Case 'gwkey: start-stack.ps1 carries the gateway-key functions word for word' {
+    # start-stack.ps1 is standalone (it imports no module), so it holds copies of the gateway-key rule.
+    # A copy that drifts picks another key field than apply.ps1 on the same machine: compare the TEXT.
+    $names = 'Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','ConvertFrom-AutoOSKeyValue','Read-AutoOSKeyMap','Get-AutoOSKeyValue','Find-AutoOSKey','Write-AutoOSNoticeOnce','Get-AutoOSClientKey'
+    $pick = {
+        param($file, $name)
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($file, [ref]$null, [ref]$null)
+        $f = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name }, $true))
+        if ($f.Count -ne 1) { return $null }
+        return ($f[0].Extent.Text -replace "`r`n", "`n")
+    }
+    $differ = @()
+    foreach ($n in $names) {
+        $m = & $pick (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') $n
+        $c = & $pick (Join-Path $Root 'configuration\start-stack.ps1') $n
+        if ($null -eq $m -or $null -eq $c) { $differ += "$n (missing in one file)"; continue }
+        if ($m -cne $c) { $differ += $n }
+    }
+    Assert-True ($differ.Count -eq 0) ("start-stack.ps1 drifted from the module: " + ($differ -join ', '))
+}
+
+Test-Case 'gwkey: start-stack.ps1 takes the key class from the gateway it talks to, never from a stale AUTOOS_OMNIROUTE_URL' {
+    $script = Join-Path $Root 'configuration\start-stack.ps1'
+    $full = Get-Content -LiteralPath $script -Raw
+    $m = [regex]::Match($full, '(?s)# BEGIN key-block.*?# END key-block')
+    Assert-True $m.Success 'start-stack.ps1 lost its key-block markers'
+    $block = $m.Value.Replace('exit 1', "throw 'no key'")
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$null, [ref]$null)
+    $want = 'Write-AutoOSLine','Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','ConvertFrom-AutoOSKeyValue','Read-AutoOSKeyMap','Get-AutoOSKeyValue','Find-AutoOSKey','Write-AutoOSNoticeOnce','Get-AutoOSClientKey'
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true))
+    $funcs = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    $run = { param($funcs, $block, $keysFile) $Gateway = 'http://127.0.0.1:20128'; . ([scriptblock]::Create($funcs)); . ([scriptblock]::Create($block)); [pscustomobject]@{ Key = $Key; Url = $env:AUTOOS_OMNIROUTE_URL; Exported = $env:AUTOOS_OMNIROUTE_KEY } }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; KEY = $env:AUTOOS_OMNIROUTE_KEY; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_ssk_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $d -Force
+    try {
+        $keys = Join-Path $d 'api-keys.yml'
+        Set-Content -LiteralPath $keys -Value "omniroute_server: K-REMOTE-must-not-leak`nomniroute_testhost: K-LOCAL-right" -Encoding utf8
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'absent.yml'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        $env:AUTOOS_OMNIROUTE_URL = 'https://gw.example.test'   # a stale REMOTE url in the environment
+        $r = & $run $funcs $block $keys 6>$null
+        Assert-Equal $r.Key 'K-LOCAL-right' 'the REMOTE key was chosen for a launcher that talks to the local gateway'
+        Assert-Equal $r.Exported 'K-LOCAL-right' 'the exported key is not the local one'
+        Assert-Equal $env:AUTOOS_OMNIROUTE_URL 'https://gw.example.test' 'the url the block sets must be restored afterwards'
+    } finally {
+        if ($null -eq $saved.URL) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $saved.URL }
+        if ($null -eq $saved.KEY) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $saved.KEY }
+        if ($null -eq $saved.HOSTN) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $saved.HOSTN }
+        if ($null -eq $saved.CFG) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $saved.CFG }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'gwkey: the start-stack.ps1 copy writes its missing-key line validly (no literal -Level) and reads host_name case-sensitively' {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $want = 'Write-AutoOSLine','Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','ConvertFrom-AutoOSKeyValue','Read-AutoOSKeyMap','Get-AutoOSKeyValue','Find-AutoOSKey','Write-AutoOSNoticeOnce','Get-AutoOSClientKey'
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true))
+    Assert-Equal $defs.Count $want.Count 'start-stack.ps1 no longer carries every function (the stand-in writer included)'
+    $text = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    # ErrorActionPreference Stop turns an invalid parameter (Write-Host ... -Level error) into a terminating error
+    $run = { param($text, $keys) $ErrorActionPreference = 'Stop'; . ([scriptblock]::Create($text)); Get-AutoOSClientKey -KeysFile $keys }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; KEY = $env:AUTOOS_OMNIROUTE_KEY; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_ssl_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $d -Force
+    try {
+        $env:AUTOOS_HOST_NAME = 'testhost'
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'absent.yml'
+        $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:20128'
+        Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue
+        $out = (& $run $text (Join-Path $d 'none.yml') 6>&1 | Out-String)
+        Assert-True ($out -match 'No OmniRoute client key') "the missing-key line was not written: $out"
+        Assert-True ($out -notmatch '-Level') "a literal -Level leaked into the console line: $out"
+        # host_name is case-sensitive, like Python and bash: `Host_Name: x` is not the setting
+        [IO.File]::WriteAllText((Join-Path $d 'host.yml'), "Host_Name: wrongcase`n")
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'host.yml'
+        $field = & { . ([scriptblock]::Create($text)); Get-AutoOSClientKeyField } 6>$null
+        Assert-True ($field -ne 'omniroute_wrongcase') 'host_name matched case-insensitively'
+    } finally {
+        if ($null -eq $saved.URL) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $saved.URL }
+        if ($null -eq $saved.KEY) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_KEY = $saved.KEY }
+        if ($null -eq $saved.HOSTN) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $saved.HOSTN }
+        if ($null -eq $saved.CFG) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $saved.CFG }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'gwkey: start-stack.ps1 trims a padded URL and expands a leading ~ in AUTOOS_HOST_CONFIG like the module' {
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $want = 'Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','Write-AutoOSNoticeOnce'
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $want }, $true))
+    $text = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    $inCopy = { param($text, $cmd) . ([scriptblock]::Create($text)); & $cmd }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG; HOME_ = $env:USERPROFILE }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_ssw_$1_' + [Guid]::NewGuid().ToString('N'))  # a $ in the profile path must not be read as a replacement token
+    $null = New-Item -ItemType Directory -Path (Join-Path $d 'autoos') -Force
+    try {
+        [IO.File]::WriteAllText((Join-Path $d 'autoos\host.yml'), "host_name: tilde-host`n")
+        $env:USERPROFILE = $d
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $env:AUTOOS_HOST_CONFIG = '~/autoos/host.yml'
+        $env:AUTOOS_OMNIROUTE_URL = '  http://127.0.0.1:20128  '
+        $m = Get-AutoOSClientKeyField
+        $c = & $inCopy $text 'Get-AutoOSClientKeyField'
+        Assert-Equal $m 'omniroute_tilde_host'
+        Assert-Equal (Get-AutoOSHostConfigPath) ($d + '/autoos/host.yml') 'the ~ was not expanded literally (the rest of the path stays as written)'
+        Assert-Equal $c $m 'the start-stack copy picked another field than the module'
+    } finally {
+        if ($null -eq $saved.URL) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $saved.URL }
+        if ($null -eq $saved.HOSTN) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $saved.HOSTN }
+        if ($null -eq $saved.CFG) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $saved.CFG }
+        $env:USERPROFILE = $saved.HOME_
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'gwkey: start-stack.ps1 parity with module function' {
+    # start-stack.ps1 carries a copy of the local-gateway check (Test-AutoOSLocalGateway).
+    # This test loads both and asserts they give identical answers for the WS-OMNIREMOTE URL table.
+    $testUrls = @(
+        '', 'http://127.0.0.1:20128', 'http://localhost:20128', 'http://LOCALHOST:20128/',
+        'http://[::1]:20128', 'http://user:pass@127.0.0.1:8080', 'http://user@127.0.0.1:8080',
+        'http://user:pass@localhost:8080', 'http://user:pass@[::1]:8080',
+        'https://gw.example.com', 'http://server:20128', 'http://[::2]:20128', 'not-a-url'
+    )
+    $moduleResults = @{}
+    foreach ($u in $testUrls) { $moduleResults[$u] = (Test-AutoOSLocalGateway -Url $u) }
+
+    # Extract start-stack.ps1's own copy through the AST (the script itself is never run).
+    $startStackPath = Join-Path $Root 'configuration\start-stack.ps1'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($startStackPath, [ref]$null, [ref]$null)
+    $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-AutoOSLocalGateway' }, $true)
+    Assert-True ($null -ne $fn) 'start-stack.ps1 has no Test-AutoOSLocalGateway'
+    $copy = $fn.Body.GetScriptBlock()
+    $failures = @()
+    foreach ($u in $testUrls) {
+        $other = & $copy -Url $u
+        if ($moduleResults[$u] -ne $other) { $failures += "mismatch for '$u': module=$($moduleResults[$u]) start-stack=$other" }
+    }
+    Assert-True ($failures.Count -eq 0) ($failures -join '; ')
+}
+
+Test-Case 'gwkey: start-stack.ps1 host-name and field choice match the module' {
+    # start-stack.ps1 is standalone (it imports no module), so it carries its own copy of the
+    # whole gateway-key rule. Extract every copied function through the AST, define them only
+    # inside a child scope (the module's versions stay untouched), and compare host name,
+    # normalisation and field choice with the module over a URL x host-source matrix.
+    $names = 'Test-AutoOSLocalGateway','Get-AutoOSHostConfigPath','ConvertTo-AutoOSHostName','Get-AutoOSHostName','Get-AutoOSClientKeyField','Write-AutoOSNoticeOnce'
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Root 'configuration\start-stack.ps1'), [ref]$null, [ref]$null)
+    $defs = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in $names }, $true))
+    Assert-Equal $defs.Count $names.Count 'start-stack.ps1 no longer carries every gateway-key function'
+    $defsText = ($defs | ForEach-Object { $_.Extent.Text }) -join "`n"
+    $inCopy = { param($text, $cmd, $argList) . ([ScriptBlock]::Create($text)); & $cmd @argList }
+    $saved = @{ URL = $env:AUTOOS_OMNIROUTE_URL; HOSTN = $env:AUTOOS_HOST_NAME; CFG = $env:AUTOOS_HOST_CONFIG }
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwpar_' + [Guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Path $d -Force
+    try {
+        $yml = Join-Path $d 'host.yml'
+        [IO.File]::WriteAllText($yml, "host_name: server`n")
+        $failures = @()
+        foreach ($raw in 'Work-Station.corp.example.com', 'LAPTOP', 'a b-c') {
+            $m = ConvertTo-AutoOSHostName $raw; $c = & $inCopy $defsText 'ConvertTo-AutoOSHostName' @($raw)
+            if ($m -ne $c) { $failures += "normalise '$raw': module=$m start-stack=$c" }
+        }
+        foreach ($url in '', 'http://127.0.0.1:20128', 'https://gw.example.com') {
+            foreach ($src in 'env', 'file', 'hostname') {
+                if ($url) { $env:AUTOOS_OMNIROUTE_URL = $url } else { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue }
+                Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+                $env:AUTOOS_HOST_CONFIG = Join-Path $d 'absent.yml'
+                if ($src -eq 'env') { $env:AUTOOS_HOST_NAME = 'Work-Station' }
+                if ($src -eq 'file') { $env:AUTOOS_HOST_CONFIG = $yml }
+                foreach ($fn in 'Get-AutoOSHostName', 'Get-AutoOSClientKeyField') {
+                    $m = & $fn 6>$null; $c = & $inCopy $defsText $fn @() 6>$null
+                    if ($m -ne $c) { $failures += "$fn url='$url' host=$src : module=$m start-stack=$c" }
+                }
+            }
+        }
+        Assert-Equal $failures.Count 0 ($failures -join '; ')
+    } finally {
+        foreach ($k in @{ URL = 'AUTOOS_OMNIROUTE_URL'; HOSTN = 'AUTOOS_HOST_NAME'; CFG = 'AUTOOS_HOST_CONFIG' }.GetEnumerator()) {
+            if ($null -ne $saved[$k.Key]) { Set-Item -Path "Env:$($k.Value)" -Value $saved[$k.Key] } else { Remove-Item -Path "Env:$($k.Value)" -ErrorAction SilentlyContinue }
+        }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'gwkey: setup -HostName writes host.yml when missing' {
+    $rCfg = $env:AUTOOS_HOST_CONFIG; $rHost = $env:AUTOOS_HOST_NAME
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwhost_' + [Guid]::NewGuid().ToString('N'))
+    try {
+        $null = New-Item -ItemType Directory -Path $d -Force
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'host.yml'
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $out = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $Root 'setup.ps1') -HostName 'testhost' 2>&1 | Out-String
+        Assert-Equal ([IO.File]::ReadAllText($env:AUTOOS_HOST_CONFIG).Trim()) 'host_name: testhost'
+        $hostBytes = [IO.File]::ReadAllBytes($env:AUTOOS_HOST_CONFIG)
+        Assert-True (-not ($hostBytes.Length -ge 3 -and $hostBytes[0] -eq 0xEF -and $hostBytes[1] -eq 0xBB -and $hostBytes[2] -eq 0xBF)) 'host.yml must be written without a BOM (ReadAllText hides one)'
+        Assert-True ($out -like '*Created*') "no created line in: $out"
+    } finally {
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: setup -HostName never overwrites an existing host.yml' {
+    $rCfg = $env:AUTOOS_HOST_CONFIG; $rHost = $env:AUTOOS_HOST_NAME
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwhost_' + [Guid]::NewGuid().ToString('N'))
+    try {
+        $null = New-Item -ItemType Directory -Path $d -Force
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'host.yml'
+        [IO.File]::WriteAllText($env:AUTOOS_HOST_CONFIG, "host_name: original`n")
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $out = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $Root 'setup.ps1') -HostName 'other' 2>&1 | Out-String
+        Assert-Equal ([IO.File]::ReadAllText($env:AUTOOS_HOST_CONFIG).Trim()) 'host_name: original'
+        Assert-True ($out -like '*skipped*') "no skipped line in: $out"
+    } finally {
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'gwkey: setup -HostName defaults to the short hostname' {
+    $rCfg = $env:AUTOOS_HOST_CONFIG; $rHost = $env:AUTOOS_HOST_NAME
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_gwhost_' + [Guid]::NewGuid().ToString('N'))
+    try {
+        $null = New-Item -ItemType Directory -Path $d -Force
+        $env:AUTOOS_HOST_CONFIG = Join-Path $d 'host.yml'
+        Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue
+        $out = & (Get-Process -Id $PID).Path -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $Root 'setup.ps1') -HostName '' 2>&1 | Out-String
+        try { $rawHost = [System.Net.Dns]::GetHostName() } catch { $rawHost = 'localhost' }
+        $want = 'host_name: ' + (ConvertTo-AutoOSHostName $rawHost)
+        Assert-Equal ([IO.File]::ReadAllText($env:AUTOOS_HOST_CONFIG).Trim()) $want
+        Assert-True ($out -like '*Created*') "no created line in: $out"
+    } finally {
+        if ($null -eq $rCfg) { Remove-Item Env:AUTOOS_HOST_CONFIG -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_CONFIG = $rCfg }
+        if ($null -eq $rHost) { Remove-Item Env:AUTOOS_HOST_NAME -ErrorAction SilentlyContinue } else { $env:AUTOOS_HOST_NAME = $rHost }
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'zed routing merges one provider and keeps the rest' {
+    $realAppData = $env:APPDATA
+    $realOmni = $env:AUTOOS_OMNIROUTE_KEY
+    $realLit = $env:LITELLM_MASTER_KEY
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
+        $env:LITELLM_MASTER_KEY = 'test-lit-key'
+        $cfgDir = Join-Path $scratch 'Zed'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '{"theme":"mine","language_models":{"openai":{"api_url":"https://x"}}}' |
+            Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Set-AutoOSZedProxy
+        Set-AutoOSZedProxy
+        # -Encoding UTF8: the file is BOM-less UTF-8 and the catalog names carry
+        # em-dashes, which Windows PowerShell 5.1 would read as ANSI otherwise.
+        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Equal $s.theme 'mine'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_url 'http://127.0.0.1:20128/v1'
+        # Keys never land in settings.json (Zed docs: keychain/UI or env);
+        # the writers must not write api_key even when env carries keys.
+        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-omniroute'.PSObject.Properties['api_key']) 'api_key in omni entry'
+        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-litellm'.PSObject.Properties['api_key']) 'api_key in lit entry'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
+        # The model lists are catalog/ide-models.json projected at run time
+        # (ids, display names, windows, membership, order).
+        $cat = @((Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models)
+        foreach ($gw in @('omniroute', 'litellm')) {
+            $want = @($cat | Where-Object { $null -ne $_.surfaces.PSObject.Properties[$gw] -and @($_.surfaces.PSObject.Properties[$gw].Value) -contains 'zed' })
+            $got = @($s.language_models.openai_compatible."autoos-$gw".available_models)
+            Assert-Equal (($got | ForEach-Object { $_.name }) -join ',') (($want | ForEach-Object { $_.id }) -join ',')
+            Assert-Equal (($got | ForEach-Object { "$($_.display_name)|$($_.max_tokens)" }) -join ',') (($want | ForEach-Object { "$($_.name)|$($_.context)" }) -join ',')
+        }
+        # PROVFIX3 finding 1 re-pins the window: a route promises what its
+        # smallest SERVED leg takes. FREEKEYS-2/2c (D-141) put the free band
+        # (scaleway/nebius, 128k advertised) ahead of gemini in l1-orchestrator,
+        # so 128,000 is the honest promise now. Finding 8 still holds and now
+        # bites for real: the head is gemini, whose ladder tops out at "high",
+        # so the surface default "xhigh" is DROPPED, never forwarded.
+        $t1 = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | Where-Object { $_.name -eq 'l1-orchestrator' })
+        Assert-Equal $t1.Count 1
+        Assert-Equal $t1[0].max_tokens 128000
+        Assert-Equal ($null -eq $t1[0].PSObject.Properties['reasoning_effort']) $true 'xhigh must be dropped for gemini, not forwarded'
+        $bypass = $s.agent.profiles.bypass
+        Assert-Equal $bypass.name 'bypass'
+        $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })
+        Assert-Equal ($off -join ',') '' "bypass tools off: $($off -join ',')"
+        Assert-Equal $bypass.default_model.provider 'autoos-omniroute'
+        Assert-Equal $bypass.default_model.model 'l1-orchestrator'
+        Assert-Equal $s.agent.tool_permissions.default 'allow'
+        Assert-True ($null -ne $s.context_servers.serena) 'serena context server missing'
+        Assert-True ($null -ne $s.context_servers.graphify) 'graphify context server missing'
+        Assert-True ($null -ne $s.context_servers.omnigraph) 'omnigraph context server missing'
+        Assert-True ($null -ne $s.context_servers.playwright) 'playwright context server missing'
+        Assert-True ($null -ne $s.context_servers.context7) 'context7 context server missing'
+        # Pins come from the harness at runtime, never as literals in lib/
+        # (mcp-pins tests forbid both the bare names and the versions there).
+        $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($n in @('serena', 'graphify', 'omnigraph', 'playwright', 'context7', 'autoos-agent')) {
+            $pin = $harness.mcp_servers.$n.package
+            Assert-True ((@($s.context_servers.$n.args) -join ' ') -match [regex]::Escape($pin)) "$n context server does not carry harness pin $pin"
+        }
+        Assert-True ($s.agent.profiles.bypass.enable_all_context_servers -eq $true) 'bypass does not opt into context servers'
+        Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
+        $raw = Get-Content (Join-Path $cfgDir 'settings.json') -Raw
+        Assert-True ($raw -notmatch 'sk-' -and $raw -notmatch 'AUTOOS_OMNIROUTE_KEY|LITELLM_MASTER_KEY|REPLACE') 'secret leaked into settings'
+        # No BOM: Zed's parser rejects a leading UTF-8 BOM with "expected
+        # value at line 1 column 1" (measured 2026-09-22 — Out-File utf8 bug).
+        $bytes = [IO.File]::ReadAllBytes((Join-Path $cfgDir 'settings.json'))
+        Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191)) 'settings.json starts with a BOM'
+    } finally {
+        $env:APPDATA = $realAppData
+        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_KEY = $realOmni }
+        if ($null -eq $realLit) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
+        else { $env:LITELLM_MASTER_KEY = $realLit }
+    }
+}
+
+Test-Case 'zed routing warns when the Zed key env names are absent' {
+    # Zed derives provider env names from the provider id (upper snake +
+    # _API_KEY): AUTOOS_OMNIROUTE_API_KEY, AUTOOS_LITELLM_API_KEY. The writer
+    # warns when they are missing; settings stay key-free either way.
+    $realAppData = $env:APPDATA
+    $realOmni = $env:AUTOOS_OMNIROUTE_API_KEY
+    $realLit = $env:AUTOOS_LITELLM_API_KEY
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue
+        $cfgDir = Join-Path $scratch 'Zed'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '{}' | Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Set-AutoOSZedProxy
+        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
+        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-omniroute'.PSObject.Properties['api_key']) 'omni key written without env'
+        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-litellm'.PSObject.Properties['api_key']) 'lit key written without env'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_url 'http://127.0.0.1:20128/v1'
+        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
+    } finally {
+        $env:APPDATA = $realAppData
+        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_OMNIROUTE_API_KEY = $realOmni }
+        if ($null -eq $realLit) { Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:AUTOOS_LITELLM_API_KEY = $realLit }
+    }
+}
+
+Test-Case 'serena memory tools off from harness field (serena)' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $oc = ($raw -replace '(?m)^\s*//.*$', '') | ConvertFrom-Json
+    $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $mem = @($harness.mcp_servers.serena.memory_tools)
+    Assert-True ($mem.Count -gt 0) 'harness memory_tools missing or empty'
+    foreach ($t in $mem) {
+        Assert-True ($oc.tools.PSObject.Properties.Name -contains "serena_$t") "repo tools block missing serena_$t"
+        Assert-Equal $oc.tools."serena_$t" $false "serena_$t not false"
+    }
+    # Both writers must read the harness field at runtime, never literals.
+    $body = (Get-Command Set-AutoOSOpenCodeConfig).Definition
+    Assert-True ($body -match 'memory_tools') 'PS opencode writer does not read the harness memory_tools field'
+    foreach ($t in $mem) {
+        Assert-True ($body -notmatch [regex]::Escape("'serena_$t'")) "PS writer carries literal serena_$t"
+        Assert-True ($body -notmatch [regex]::Escape("`"serena_$t`"")) "PS writer carries literal serena_$t"
+    }
+    $sh = Get-Content (Join-Path $Root 'lib\linux\install.sh') -Raw -Encoding UTF8
+    Assert-True ($sh -match 'memory_tools') 'sh opencode writer does not read the harness memory_tools field'
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig does not back up again when nothing changed' {
+    # The real writer against a scratch home. HOME, USERPROFILE and APPDATA point
+    # into a temp dir; a stand-in `python` first on PATH keeps the agent generator
+    # (it links skills and rewrites the file in its own formatting) out of it;
+    # Ollama's address is pinned so nothing probes the network; no key comes from
+    # the caller's environment. Nothing outside the temp dir is read or written.
+    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocbackup-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $cfgDir = Join-Path $scratch '.config\opencode'
+    $cfgFile = Join-Path $cfgDir 'opencode.json'
+    # The theme is non-ASCII and the file is written with an explicit BOM: a backup
+    # that lost either would still read as the same text, so it is judged on bytes.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"@THEME@","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"mcp":{"mine":{"type":"local","command":["mine-mcp"],"enabled":true}}}'.Replace('@THEME@', $theme)
+    $runLogged = {
+        $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocbackup-$([Guid]::NewGuid().ToString('N')).log"
+        try {
+            Initialize-AutoOSLog -Path $log
+            $null = Set-AutoOSOpenCodeConfig
+            Get-Content -LiteralPath $log -Raw -Encoding utf8
+        } finally {
+            Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        }
+    }
+    try {
+        $null = New-Item -ItemType Directory -Path $bin, $cfgDir -Force
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [IO.File]::WriteAllText((Join-Path $bin 'python.cmd'), "@echo off`r`nexit /b 0`r`n")
+        } else {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexit 0`n")
+            & chmod +x $fake
+        }
+        [IO.File]::WriteAllText($cfgFile, $seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($cfgFile)
+        $seedB64 = [Convert]::ToBase64String($seedBytes)
+        if ($seedBytes.Length -lt 4 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191 -or @($seedBytes | Where-Object { $_ -gt 127 }).Count -le 3) { throw 'the seed must carry a BOM and a non-ASCII character, or the byte compare has nothing to lose' }
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch
+        $env:APPDATA = Join-Path $scratch 'AppData'
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+        # The writer reads $HOME, which the environment does not set on every
+        # host: prove the module sees the scratch home before it writes anything.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+
+        $null = & $runLogged
+        $sha1 = (Get-FileHash -LiteralPath $cfgFile -Algorithm SHA256).Hash
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'opencode.json.autoos-backup-*')
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($cfgFile)) -ceq $seedB64) { throw 'the first run left the file unchanged' }
+        if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the original file, byte for byte (a BOM or a non-ASCII byte was lost)' }
+        $written = Get-Content -LiteralPath $cfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($written.theme -cne $theme -or $null -eq $written.provider.PSObject.Properties['custom'] -or $null -eq $written.mcp.PSObject.Properties['mine']) { throw 'run 1 dropped a key of the existing file' }
+        if ($null -eq $written.provider.PSObject.Properties['omniroute']) { throw 'run 1 did not write the gateway provider' }
+
+        # Backup names carry whole seconds: without this pause a wrongly repeated
+        # backup would overwrite the first one and the count could not tell.
+        Start-Sleep -Milliseconds 1200
+        $out2 = & $runLogged
+        $sha2 = (Get-FileHash -LiteralPath $cfgFile -Algorithm SHA256).Hash
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'opencode.json.autoos-backup-*')
+        if ($backups2.Count -ne $backups1.Count) { throw "backups after run 2 = $($backups2.Count), after run 1 = $($backups1.Count) (an unchanged run must not back up again)" }
+        if ($sha2 -ne $sha1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+# Stand-in `opencode` CLI for the hermetic writer tests: prints $Line for any
+# arguments. `opencode.cmd` on Windows (PATHEXT finds it), an executable sh
+# script elsewhere. Windows PowerShell 5.1 has no $IsWindows, so the platform
+# is read from [Environment]::OSVersion, as the neighbouring tests do.
+function New-OpenCodeStandIn {
+    param([Parameter(Mandatory)][string]$Dir, [Parameter(Mandatory)][string]$Line)
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        [IO.File]::WriteAllText((Join-Path $Dir 'opencode.cmd'), "@echo off`r`necho $Line`r`n")
+    } else {
+        $fake = Join-Path $Dir 'opencode'
+        [IO.File]::WriteAllText($fake, "#!/bin/sh`necho '$Line'`n")
+        & chmod +x $fake
+    }
+}
+
+# The REAL Set-AutoOSOpenCodeConfig against a scratch home. HOME, USERPROFILE
+# and APPDATA point into a temp dir; a stand-in `python` keeps the agent
+# generator (it links skills and rewrites the file in its own formatting) out
+# of it; a stand-in `opencode` printing $OpenCodeVersion sits first on PATH, so
+# the result never depends on the CLI the host has; Ollama's address is pinned
+# so nothing probes the network; no key comes from the caller's environment.
+# Nothing outside the temp dir is read or written. $Body receives one
+# hashtable: Scratch, Bin, CfgDir, CfgFile, AppDataDir, AppDataFile and Run
+# (one logged run of the writer; returns what it logged).
+function Invoke-OpenCodeScratch {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Body,
+        [string]$OpenCodeVersion = '1.4.0',
+        [string]$Seed = ''
+    )
+    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY')
+    $savedEnv = @{}
+    foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocscratch-$([Guid]::NewGuid().ToString('N'))"
+    $bin = Join-Path $scratch 'bin'
+    $ctx = @{
+        Scratch      = $scratch
+        Bin          = $bin
+        CfgDir       = Join-Path $scratch '.config\opencode'
+        CfgFile      = Join-Path $scratch '.config\opencode\opencode.json'
+        AppDataDir   = Join-Path $scratch 'AppData\opencode'
+        AppDataFile  = Join-Path $scratch 'AppData\opencode\config.json'
+        Run          = {
+            $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-ocscratch-$([Guid]::NewGuid().ToString('N')).log"
+            try {
+                Initialize-AutoOSLog -Path $log
+                $null = Set-AutoOSOpenCodeConfig
+                Get-Content -LiteralPath $log -Raw -Encoding utf8
+            } finally {
+                Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+                Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    try {
+        $null = New-Item -ItemType Directory -Path $bin, $ctx.CfgDir -Force
+        if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            [IO.File]::WriteAllText((Join-Path $bin 'python.cmd'), "@echo off`r`nexit /b 0`r`n")
+        } else {
+            $fake = Join-Path $bin 'python'
+            [IO.File]::WriteAllText($fake, "#!/bin/sh`nexit 0`n")
+            & chmod +x $fake
+        }
+        New-OpenCodeStandIn -Dir $bin -Line $OpenCodeVersion
+        if ($Seed) { [IO.File]::WriteAllText($ctx.CfgFile, $Seed) }
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        $env:USERPROFILE = $scratch; $env:HOME = $scratch
+        $env:APPDATA = Join-Path $scratch 'AppData'
+        $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
+        $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
+        Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+        # The writer reads $HOME, which the environment does not set on every
+        # host: prove the module sees the scratch home before it writes anything.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        & $Body $ctx
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $envNames) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# What the repo declares for V2, parsed WITHOUT the function under test: the
+# file has whole-line comments only and no trailing commas.
+function Read-RepoOpenCodeJsonc {
+    $raw = Get-Content -LiteralPath (Join-Path $Root 'opencode.jsonc') -Raw -Encoding UTF8
+    ($raw -replace '(?m)^\s*//.*$', '') | ConvertFrom-Json
+}
+
+# Stand-in `opencode` that RECORDS how it was called and can answer strictly: each
+# call appends `[<arguments>]` to opencode-args.log beside it, then it prints $Line
+# (nothing when empty) and exits $ExitCode. With -OnlyVersion it answers only when
+# its arguments are exactly `--version` and fails (exit 64, stderr) for anything
+# else, so a caller that stops asking for --version gets no version at all. Keep
+# $Line to characters cmd.exe passes through echo unchanged (no % & | < > ^ ( ) !).
+function New-OpenCodeArgsStandIn {
+    param(
+        [Parameter(Mandatory)][string]$Dir,
+        [string]$Line = '',
+        [int]$ExitCode = 0,
+        [switch]$OnlyVersion
+    )
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $lines = @('@echo off', '>>"%~dp0opencode-args.log" echo [%*]')
+        if ($OnlyVersion) {
+            $lines += 'if "%~1"=="--version" if "%~2"=="" goto :answer'
+            $lines += 'echo unexpected arguments 1>&2'
+            $lines += 'exit /b 64'
+            $lines += ':answer'
+        }
+        if ($Line -ne '') { $lines += "echo $Line" }
+        if ($ExitCode -ne 0) { $lines += 'echo error: cannot start 1>&2' }
+        $lines += "exit /b $ExitCode"
+        [IO.File]::WriteAllText((Join-Path $Dir 'opencode.cmd'), (($lines -join "`r`n") + "`r`n"))
+    } else {
+        $sh = "#!/bin/sh`n" + 'printf ' + "'[%s]\n'" + ' "$*" >> "${0%/*}/opencode-args.log"' + "`n"
+        if ($OnlyVersion) { $sh += 'if [ "$#" -ne 1 ] || [ "$1" != "--version" ]; then echo "unexpected arguments" >&2; exit 64; fi' + "`n" }
+        if ($Line -ne '') { $sh += "echo '$Line'`n" }
+        if ($ExitCode -ne 0) { $sh += 'echo "error: cannot start" >&2' + "`n" }
+        $sh += "exit $ExitCode`n"
+        $fake = Join-Path $Dir 'opencode'
+        [IO.File]::WriteAllText($fake, $sh)
+        & chmod +x $fake
+    }
+}
+
+Test-Case 'opencode V2: Test-AutoOSOpenCodeV2 tells V2 from V1 by --version, like the Linux writer' {
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        $cases = [ordered]@{
+            '2.1.0'          = $true
+            'v2.0.0'         = $true
+            'opencode 2.3.1' = $true
+            '1.4.0'          = $false
+            '1.2.0'          = $false
+            '12.0.1'         = $false
+            '0.2.9'          = $false
+            'no version'     = $false
+        }
+        foreach ($v in $cases.Keys) {
+            New-OpenCodeStandIn -Dir $c.Bin -Line $v
+            $got = Test-AutoOSOpenCodeV2
+            if ($got -ne $cases[$v]) { throw "opencode --version printing [$v]: Test-AutoOSOpenCodeV2 = $got, want $($cases[$v])" }
+        }
+
+        # The stand-in above prints its version for ANY arguments, so that loop passes
+        # even if the function stops calling --version. This one records how it was
+        # called and answers only to exactly `--version`: the recorded call must be
+        # that one call, and the answers must not change.
+        $argsLog = Join-Path $c.Bin 'opencode-args.log'
+        foreach ($v in $cases.Keys) {
+            New-OpenCodeArgsStandIn -Dir $c.Bin -Line $v -OnlyVersion
+            Remove-Item -LiteralPath $argsLog -Force -ErrorAction SilentlyContinue
+            $got = Test-AutoOSOpenCodeV2
+            $calls = @(Get-Content -LiteralPath $argsLog -ErrorAction SilentlyContinue)
+            if (($calls -join '|') -cne '[--version]') { throw "Test-AutoOSOpenCodeV2 ran opencode as [$($calls -join '|')], want exactly one call, [--version]" }
+            if ($got -ne $cases[$v]) { throw "an opencode that prints [$v] only for --version: Test-AutoOSOpenCodeV2 = $got, want $($cases[$v])" }
+        }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: Set-AutoOSOpenCodeConfig adds the gateway providers when the CLI is V2' {
+    # The theme is non-ASCII and the file is written with an explicit BOM: a backup
+    # that lost either would still read as the same text, so it is judged on bytes.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    # Not called $seed: Invoke-OpenCodeScratch has a -Seed parameter, and PowerShell
+    # variable names are case-insensitive, so the body would see the helper's own.
+    $v2Seed = '{"$schema":"https://opencode.ai/config.json","theme":"@THEME@","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}},"providers":{"foreign":{"name":"Foreign V2","env":["FOREIGN_KEY"],"package":"p"},"omniroute":{"name":"stale"}}}'.Replace('@THEME@', $theme)
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Body {
+        param($c)
+        [IO.File]::WriteAllText($c.CfgFile, $v2Seed, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $seedBytes = [IO.File]::ReadAllBytes($c.CfgFile)
+        $seedB64 = [Convert]::ToBase64String($seedBytes)
+        if ($seedBytes.Length -lt 4 -or $seedBytes[0] -ne 239 -or $seedBytes[1] -ne 187 -or $seedBytes[2] -ne 191 -or @($seedBytes | Where-Object { $_ -gt 127 }).Count -le 3) { throw 'the seed must carry a BOM and a non-ASCII character, or the byte compare has nothing to lose' }
+        $repo = Read-RepoOpenCodeJsonc
+        $canon = { param($o) $o | ConvertTo-Json -Depth 100 -Compress }
+        $null = & $c.Run
+        $hash1 = (Get-FileHash -LiteralPath $c.CfgFile -Algorithm SHA256).Hash
+        $backups1 = @(Get-ChildItem -LiteralPath $c.CfgDir -Filter 'opencode.json.autoos-backup-*')
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($name in @('omniroute', 'litellm')) {
+            if ($null -eq $w.PSObject.Properties['providers'] -or $null -eq $w.providers.PSObject.Properties[$name]) { throw "providers.$name was not written for a V2 CLI" }
+            if ((& $canon $w.providers.$name) -cne (& $canon $repo.providers.$name)) { throw "providers.$name differs from the repo opencode.jsonc" }
+        }
+        if ($w.model -cne $repo.model) { throw "model = [$($w.model)], want the repo model [$($repo.model)]" }
+        if ($null -eq $w.providers.PSObject.Properties['foreign'] -or $w.providers.foreign.name -cne 'Foreign V2') { throw 'a foreign providers entry of the user was dropped' }
+        if ($null -eq $w.provider.PSObject.Properties['custom'] -or $w.provider.custom.name -cne 'Mine') { throw 'a foreign V1 provider of the user was dropped' }
+        if ($w.theme -cne $theme) { throw 'a foreign key of the user was dropped' }
+        if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw 'the V1 gateway provider block went missing' }
+        if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the original file, byte for byte (a BOM or a non-ASCII byte was lost)' }
+
+        # Backup names carry whole seconds: without this pause a wrongly
+        # repeated backup would overwrite the first one and the count could
+        # not tell.
+        Start-Sleep -Milliseconds 1200
+        $out2 = & $c.Run
+        $hash2 = (Get-FileHash -LiteralPath $c.CfgFile -Algorithm SHA256).Hash
+        $backups2 = @(Get-ChildItem -LiteralPath $c.CfgDir -Filter 'opencode.json.autoos-backup-*')
+        if ($hash2 -ne $hash1) { throw 'run 2 changed the file (SHA256 differs from run 1)' }
+        if ($backups2.Count -ne $backups1.Count) { throw "backups after run 2 = $($backups2.Count), after run 1 = $($backups1.Count)" }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: a model the user chose is kept' {
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Seed '{"model":"custom/mine"}' -Body {
+        param($c)
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -eq $w.PSObject.Properties['providers'] -or $null -eq $w.providers.PSObject.Properties['omniroute']) { throw 'the V2 providers were not written' }
+        if ($w.model -cne 'custom/mine') { throw "the user's model was replaced: [$($w.model)]" }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: a V1 CLI gets no providers block' {
+    $seed = '{"$schema":"https://opencode.ai/config.json","theme":"mine","provider":{"custom":{"npm":"@ai-sdk/openai-compatible","name":"Mine","options":{"baseURL":"http://127.0.0.1:9/v1"},"models":{"m":{"name":"M"}}}}}'
+    Invoke-OpenCodeScratch -OpenCodeVersion '1.4.0' -Seed $seed -Body {
+        param($c)
+        if (Test-AutoOSOpenCodeV2) { throw 'the stand-in opencode 1.4.0 was taken for a V2 CLI' }
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($null -ne $w.PSObject.Properties['providers']) { throw 'a V1 CLI got a providers block' }
+        if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw 'the V1 gateway provider block went missing' }
+        if ($null -eq $w.provider.PSObject.Properties['custom']) { throw 'a foreign V1 provider of the user was dropped' }
+        if ($w.model -notlike 'ollama/*') { throw "a V1 CLI's default model is not the Ollama default: [$($w.model)]" }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: an opencode that is missing or fails or prints garbage for --version is taken for V1' {
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        $pathBefore = $env:PATH
+        $sep = [IO.Path]::PathSeparator
+        $scenarios = [ordered]@{
+            'is missing'                     = $null
+            'exits 1 and prints nothing'     = @{ Line = ''; ExitCode = 1 }
+            'exits 0 and prints nothing'     = @{ Line = ''; ExitCode = 0 }
+            'prints text that is no version' = @{ Line = 'usage opencode command'; ExitCode = 0 }
+            'prints the number 12.2.0'       = @{ Line = 'build 12.2.0 nightly'; ExitCode = 0 }
+        }
+        foreach ($name in $scenarios.Keys) {
+            $env:PATH = $pathBefore
+            foreach ($f in @('opencode', 'opencode.cmd', 'opencode-args.log')) { Remove-Item -LiteralPath (Join-Path $c.Bin $f) -Force -ErrorAction SilentlyContinue }
+            Remove-Item -LiteralPath $c.CfgFile, $c.AppDataFile -Force -ErrorAction SilentlyContinue
+            $spec = $scenarios[$name]
+            if ($null -eq $spec) {
+                # Missing: the stand-in is gone, and so is every directory that holds a
+                # real opencode (a developer machine has one), so nothing answers.
+                $kept = @()
+                foreach ($dir in $pathBefore.Split($sep)) {
+                    if (-not $dir) { continue }
+                    $holdsOne = @(Get-ChildItem -LiteralPath $dir -Filter 'opencode*' -Force -ErrorAction SilentlyContinue | Where-Object { $_.BaseName -eq 'opencode' }).Count -gt 0
+                    if (-not $holdsOne) { $kept += $dir }
+                }
+                $env:PATH = $kept -join $sep
+                if (@(Get-Command opencode -CommandType Application -ErrorAction SilentlyContinue).Count -gt 0) { throw 'an opencode stayed on PATH after hiding every directory that holds one, so the missing case cannot be tested here' }
+            } else {
+                New-OpenCodeArgsStandIn -Dir $c.Bin -Line $spec.Line -ExitCode $spec.ExitCode
+            }
+            $isV2 = Test-AutoOSOpenCodeV2
+            if ($isV2 -ne $false) { throw "opencode $name when asked for --version: Test-AutoOSOpenCodeV2 = [$isV2], want False" }
+            $null = & $c.Run
+            $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $w.PSObject.Properties['providers']) { throw "opencode $name when asked for --version: the config got a V2 providers block" }
+            if ($null -eq $w.provider.PSObject.Properties['omniroute']) { throw "opencode $name when asked for --version: the V1 gateway provider block went missing" }
+        }
+        $env:PATH = $pathBefore
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig leaves an unchanged APPDATA config.json untouched' {
+    # The APPDATA copy used to be rewritten on EVERY run: no compare, no backup.
+    Invoke-OpenCodeScratch -Seed '{"theme":"mine"}' -Body {
+        param($c)
+        $null = & $c.Run
+        if (-not (Test-Path -LiteralPath $c.AppDataFile)) { throw 'run 1 did not write the APPDATA config.json' }
+        $time1 = (Get-Item -LiteralPath $c.AppDataFile).LastWriteTimeUtc
+        $hash1 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+
+        # Timestamps are coarse on some filesystems: pause so a rewrite shows.
+        Start-Sleep -Milliseconds 1200
+        $null = & $c.Run
+        $time2 = (Get-Item -LiteralPath $c.AppDataFile).LastWriteTimeUtc
+        $hash2 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+        $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+        if ($time2 -ne $time1) { throw "run 2 rewrote the unchanged APPDATA config.json (LastWriteTimeUtc $($time1.ToString('o')) -> $($time2.ToString('o')))" }
+        if ($hash2 -ne $hash1) { throw 'run 2 changed the APPDATA config.json (SHA256 differs from run 1)' }
+        if ($backups.Count -ne 0) { throw "an unchanged APPDATA config.json got $($backups.Count) backup(s)" }
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig backs up a foreign APPDATA config.json once' {
+    Invoke-OpenCodeScratch -Seed '{"theme":"mine"}' -Body {
+        param($c)
+        $foreign = [Text.Encoding]::UTF8.GetBytes('{"foreign":"a file the user owns"}' + "`n")
+        $null = New-Item -ItemType Directory -Path $c.AppDataDir -Force
+        [IO.File]::WriteAllBytes($c.AppDataFile, $foreign)
+        $seedB64 = [Convert]::ToBase64String($foreign)
+
+        $null = & $c.Run
+        $backups1 = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter 'config.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "backups after run 1 = $($backups1.Count) (want 1: the foreign file, once)" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups1[0].FullName)) -cne $seedB64) { throw 'the backup is not the foreign file, byte for byte' }
+        $now = (Get-Content -LiteralPath $c.AppDataFile -Raw -Encoding UTF8).TrimEnd()
+        $want = (Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8).TrimEnd()
+        if ($now -cne $want) { throw 'run 1 did not put the OpenCode config into the APPDATA config.json' }
+        $appDataSha1 = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+
+        # Runs 2 and 3 change nothing, so they back nothing up and leave the file
+        # alone. The pause keeps a wrongly repeated backup from hiding behind a
+        # same-second name; the hash catches a rewrite that takes no backup.
+        foreach ($run in 2, 3) {
+            Start-Sleep -Milliseconds 1200
+            $null = & $c.Run
+            $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+            if ($backups.Count -ne 1) { throw "backups after run $run = $($backups.Count) (want 1)" }
+            $appDataSha = (Get-FileHash -LiteralPath $c.AppDataFile -Algorithm SHA256).Hash
+            if ($appDataSha -cne $appDataSha1) { throw "run $run changed the APPDATA config.json (SHA256 differs from run 1)" }
+        }
+        Pass
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSOpenCodeConfig treats an APPDATA config.json that differs only by a BOM or a final newline as unchanged' {
+    # The APPDATA copy is compared as text: the encoding Out-File writes (BOM or not)
+    # is the host's, so a copy that differs only in it or in its final newline is
+    # the same config and must be neither rewritten nor backed up.
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        [IO.File]::WriteAllText($c.CfgFile, '{"theme":"mine"}')
+        $null = & $c.Run
+        if (-not (Test-Path -LiteralPath $c.AppDataFile)) { throw 'run 1 did not write the APPDATA config.json' }
+        $canonicalB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+        $written = [IO.File]::ReadAllBytes($c.AppDataFile)
+        $hasBom = ($written.Length -ge 3 -and $written[0] -eq 239 -and $written[1] -eq 187 -and $written[2] -eq 191)
+        $text = [IO.File]::ReadAllText($c.AppDataFile)      # without the BOM
+        $trimmed = $text.TrimEnd("`r", "`n")
+        $variants = [ordered]@{
+            'the BOM'                       = @{ Bom = (-not $hasBom); Text = $text }
+            'the final newline (removed)'   = @{ Bom = $hasBom; Text = $trimmed }
+            'the final newline (repeated)'  = @{ Bom = $hasBom; Text = $trimmed + "`r`n`n`r`n" }
+            'the BOM and the final newline' = @{ Bom = (-not $hasBom); Text = $trimmed }
+        }
+        foreach ($label in $variants.Keys) {
+            $v = $variants[$label]
+            [IO.File]::WriteAllText($c.AppDataFile, $v.Text, (New-Object Text.UTF8Encoding([bool]$v.Bom)))
+            $variantB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+            if ($variantB64 -ceq $canonicalB64) { throw "the variant that differs by $label equals the file the writer makes, so it proves nothing" }
+            $null = & $c.Run
+            $nowB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.AppDataFile))
+            $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+            if ($nowB64 -cne $variantB64) { throw "an APPDATA config.json that differs only by $label was rewritten" }
+            if ($backups.Count -ne 0) { throw "an APPDATA config.json that differs only by $label got $($backups.Count) backup(s)" }
+        }
+
+        # Control: a file whose CONTENT differs is still backed up once and rewritten,
+        # so the checks above are not just a writer that never touches the file.
+        [IO.File]::WriteAllText($c.AppDataFile, '{"theme":"someone else"}' + "`n")
+        $null = & $c.Run
+        $backups = @(Get-ChildItem -LiteralPath $c.AppDataDir -Filter '*.autoos-backup-*')
+        if ($backups.Count -ne 1) { throw "control: an APPDATA config.json with other content got $($backups.Count) backup(s) (want 1)" }
+        if ((Get-Content -LiteralPath $c.AppDataFile -Raw -Encoding UTF8).TrimEnd() -cne (Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8).TrimEnd()) { throw 'control: an APPDATA config.json with other content was not rewritten' }
+        Pass
+    }
+}
+
+Test-Case 'opencode V2: an invalid repo opencode.jsonc leaves the user opencode.json byte-identical and takes no backup' {
+    # The writer reads the repo file up front, like the model catalog, so an
+    # unreadable one must stop it before any backup or write.
+    $theme = "caf$([char]0x00E9)-$([char]0x2603)"
+    $userConfig = '{"$schema":"https://opencode.ai/config.json","theme":"@THEME@","model":"custom/mine"}'.Replace('@THEME@', $theme)
+    Invoke-OpenCodeScratch -OpenCodeVersion '2.1.0' -Body {
+        param($c)
+        [IO.File]::WriteAllText($c.CfgFile, $userConfig, (New-Object Text.UTF8Encoding($true)))   # with a BOM
+        $userB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($c.CfgFile))
+        # A scratch repo root: the real catalog, an (empty) skills directory so that a
+        # writer that wrongly carried on would run to the end and fail the checks below
+        # instead of dying on a missing directory, and an opencode.jsonc cut off mid-file.
+        $repo = Join-Path $c.Scratch 'repo'
+        $null = New-Item -ItemType Directory -Path $repo, (Join-Path $repo '.agents\skills') -Force
+        Copy-Item -LiteralPath (Join-Path $Root 'catalog') -Destination (Join-Path $repo 'catalog') -Recurse
+        [IO.File]::WriteAllText((Join-Path $repo 'opencode.jsonc'), "{`n  // cut off mid-file`n  `"providers`": {`n    `"omniroute`": ")
+        try {
+            Initialize-AutoOSInstaller -DryRun $false -RepoRoot $repo
+            if (-not (Test-AutoOSOpenCodeV2)) { throw 'the stand-in opencode 2.1.0 was not taken for a V2 CLI, so the invalid repo file is never read' }
+            $out = & $c.Run
+        } finally {
+            Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        }
+        if ($out -notmatch 'is not valid JSONC' -or $out -notmatch 'left unchanged') { throw "the run did not say the repo opencode.jsonc is invalid and that the config was left unchanged: [$out]" }
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($c.CfgFile)) -cne $userB64) { throw "the user's opencode.json changed although the repo opencode.jsonc is invalid" }
+        $files = @(Get-ChildItem -LiteralPath $c.CfgDir -Force | ForEach-Object { $_.Name })
+        if ($files.Count -ne 1) { throw "the config directory holds [$($files -join ', ')], want only opencode.json (no backup, nothing written)" }
+        if (Test-Path -LiteralPath $c.AppDataFile) { throw 'the APPDATA config.json was written although the run stopped early' }
+        Pass
+    }
+}
+
+Test-Case 'zed default_model converges litellm to omniroute (zed routing)' {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path $env:TEMP "autoos-zeddm-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        $cfgDir = Join-Path $scratch 'Zed'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '{"agent":{"default_model":{"provider":"autoos-litellm","model":"l3-driver-paid"}}}' |
+            Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
+        Set-AutoOSZedProxy
+        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $s.agent.default_model.provider 'autoos-omniroute'
+        Assert-Equal $s.agent.default_model.model 'l1-orchestrator'
+        # A default already on omniroute must survive untouched.
+        '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"l2-worker"}}}' |
+            Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
+        Set-AutoOSZedProxy
+        $s2 = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
+        Assert-Equal $s2.agent.default_model.provider 'autoos-omniroute'
+        Assert-Equal $s2.agent.default_model.model 'l2-worker'
+    } finally { $env:APPDATA = $realAppData }
+}
+
+Test-Case 'opencode repo config pins omniroute with litellm fallback' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $oc = $stripped | ConvertFrom-Json
+    Assert-Equal $oc.model 'omniroute/l1-orchestrator'
+    Assert-Equal $oc.providers.omniroute.settings.baseURL 'http://127.0.0.1:20128/v1'
+    # The model list is the managed block rendered from catalog/ide-models.json,
+    # so the expectation is derived from that file: which tiers opencode may see
+    # follows provider servability and needs no re-pin when a provider flips
+    # (lesson PROVPIN 2026-09-27). The default model and gateway URL above stay
+    # pinned - human-chosen client settings. The models map ALSO carries hand
+    # entries (direct-provider passthrough, kept outside the AUTOOS-MANAGED
+    # region - the file's own comment and tools/sync-ide-models.py's docstring
+    # say so), so this compares the generated region only; hand entries are
+    # deliberate repo content, not drift.
+    $ideModels = @(Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    $offered = @($ideModels | Where-Object {
+        $surf = $_.PSObject.Properties['surfaces']
+        $omni = if ($surf) { $surf.Value.PSObject.Properties['omniroute'] } else { $null }
+        [bool]($omni -and (@($omni.Value) -contains 'opencode'))
+    } | ForEach-Object { $_.id } | Sort-Object) -join ','
+    $lines = $raw -split "`r?`n"
+    $managedStart = -1; $managedEnd = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($managedStart -lt 0 -and $lines[$i] -match 'AUTOOS-MANAGED-START omniroute') { $managedStart = $i }
+        elseif ($managedStart -ge 0 -and $lines[$i] -match 'AUTOOS-MANAGED-END omniroute') { $managedEnd = $i; break }
+    }
+    Assert-True ($managedStart -ge 0 -and $managedEnd -gt $managedStart) 'the omniroute managed region is missing'
+    $managedText = '{' + (($lines[($managedStart + 1)..($managedEnd - 1)]) -join "`n") + '}'
+    $managed = $managedText -replace '(?m)^\s*//.*$', '' | ConvertFrom-Json
+    Assert-Equal (@($managed.PSObject.Properties.Name | Sort-Object) -join ',') $offered
+    Assert-True ($null -ne $oc.providers.litellm) 'litellm fallback missing'
+    Assert-Equal (@($oc.mcp.servers.PSObject.Properties.Name | Sort-Object) -join ',') 'autoos-agent,context7,graphify,omnigraph,playwright,serena'
+    # Every repo MCP command carries the harness pin: a floating spec changes
+    # under the user (same rule as 'mcp pins: lib/ carries no floating...').
+    $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    foreach ($p in $oc.mcp.servers.PSObject.Properties) {
+        $pin = $harness.mcp_servers.($p.Name).package
+        Assert-True ($null -ne $pin) "no harness pin for $($p.Name)"
+        Assert-True ((@($p.Value.command) -join ' ') -match [regex]::Escape($pin)) "$($p.Name) does not carry pin $pin"
+    }
+}
+
+Test-Case 't3-reviewer fences and tier depth: only t1 spawns, t3 spawns nothing' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $agents = ($stripped | ConvertFrom-Json).agents
+    Assert-True ($null -ne $agents.'l1-orchestrator') 'l1-orchestrator agent missing'
+    Assert-True ($null -ne $agents.'l2-worker') 'l2-worker agent missing'
+    Assert-True ($null -ne $agents.'t3-reviewer') 't3-reviewer agent missing'
+    # t1 may launch l2-worker and nothing else (deny-all first, narrow
+    # allow last — last matching rule wins).
+    $t1 = @($agents.'l1-orchestrator'.permissions)
+    Assert-Equal $t1[0].action 'subagent'; Assert-Equal $t1[0].resource '*'; Assert-Equal $t1[0].effect 'deny'
+    Assert-Equal $t1[-1].resource 'l2-worker'; Assert-Equal $t1[-1].effect 'allow'
+    # t2 may launch t3-reviewer and nothing else.
+    $t2 = @($agents.'l2-worker'.permissions)
+    Assert-Equal $t2[0].effect 'deny'
+    Assert-Equal $t2[-1].resource 't3-reviewer'; Assert-Equal $t2[-1].effect 'allow'
+    # t3 is a leaf: subagent deny-all, no allow rule. It reads and runs
+    # checks (read/grep/glob/shell allow) but never edits, writes or spawns
+    # (deny) — a tool-less reviewer refuses the task outright (2026-09-21).
+    $t3 = @($agents.'t3-reviewer'.permissions)
+    # More than the original seven: the harness fences and the MCP write
+    # tools are denies now (2026-09-24).
+    Assert-True ($t3.Count -gt 7) 't3-reviewer lost its fences'
+    # subagent deny — and the same gate's other spelling, `task` (KEYDENY3b:
+    # deny one and a leaf still spawns through the other).
+    Assert-Equal $t3[0].action 'subagent'; Assert-Equal $t3[0].resource '*'; Assert-Equal $t3[0].effect 'deny'
+    Assert-Equal $t3[1].action 'task'; Assert-Equal $t3[1].resource '*'; Assert-Equal $t3[1].effect 'deny'
+    Assert-Equal $t3[2].action 'edit'; Assert-Equal $t3[2].resource '*'; Assert-Equal $t3[2].effect 'deny'
+    Assert-Equal $t3[3].action 'write'; Assert-Equal $t3[3].resource '*'; Assert-Equal $t3[3].effect 'deny'
+    Assert-Equal $t3[4].action 'read'; Assert-Equal $t3[4].resource '*'; Assert-Equal $t3[4].effect 'allow'
+    Assert-Equal $t3[5].action 'grep'; Assert-Equal $t3[5].resource '*'; Assert-Equal $t3[5].effect 'allow'
+    Assert-Equal $t3[6].action 'glob'; Assert-Equal $t3[6].resource '*'; Assert-Equal $t3[6].effect 'allow'
+    # The spawn gate is asserted for t1/t2 as well, in both spellings.
+    foreach ($spec in @(
+        @{rules = $t1; child = 'l2-worker';   name = 'l1-orchestrator'},
+        @{rules = $t2; child = 't3-reviewer'; name = 'l2-worker'})) {
+        foreach ($gate in 'subagent', 'task') {
+            $own = @(@($spec.rules) | Where-Object { $_.action -eq $gate })
+            Assert-True ($own.Count -eq 2) "$($spec.name): $gate gate incomplete"
+            Assert-Equal $own[0].resource '*'
+            Assert-Equal $own[0].effect 'deny'
+            Assert-Equal $own[-1].resource $spec.child
+            Assert-Equal $own[-1].effect 'allow'
+        }
+    }
+    $leafGates = @($t3 | Where-Object { $_.action -in 'subagent', 'task' })
+    $openGates = @($leafGates | Where-Object { $_.effect -ne 'deny' })
+    Assert-True ($leafGates.Count -eq 2 -and $openGates.Count -eq 0) 't3-reviewer can spawn'
+    # v2 names the action `shell`; a `bash` rule matches nothing (2026-09-24).
+    Assert-Equal $t3[7].action 'shell'; Assert-Equal $t3[7].resource '*'; Assert-Equal $t3[7].effect 'allow'
+    Assert-True (@($t3 | Where-Object { $_.action -eq 'bash' }).Count -eq 0) 'bash rule is dead in opencode v2'
+    # Every harness fence is a shell deny on the leaf, and MCP writers are off.
+    $harnessDoc = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    $fences = $harnessDoc.fences
+    foreach ($pat in @($fences.bash_deny_all) + @($fences.bash_deny_leaf)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'shell' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer shell fence missing: $pat"
+    }
+    foreach ($tool in @('serena_*', 'omnigraph_mutate', 'omnigraph_load', 'omnigraph_branches_merge', 'omnigraph_branches_delete', 'playwright_browser_run_code_unsafe', 'playwright_*', 'context7_*', 'autoos-agent_*')) {
+        $hit = @($t3 | Where-Object { $_.action -eq $tool })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer MCP writer open: $tool"
+    }
+    # KEYDENY3b: a leaf has no MCP door that reads a file by URL or path, so the
+    # concrete reader tools are denied through their server pattern.
+    foreach ($reader in @('playwright_browser_navigate', 'context7_get_library_docs')) {
+        $open = @($t3 | Where-Object { $_.effect -eq 'deny' -and $reader -like $_.action })
+        Assert-True ($open.Count -gt 0) "t3-reviewer MCP file reader open: $reader"
+    }
+    foreach ($pat in @($fences.read_deny_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'read' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer read fence missing: $pat"
+    }
+    foreach ($pat in @($fences.bash_allow_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'shell' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer shell allow missing: $pat"
+    }
+    foreach ($pat in @($fences.read_allow_all)) {
+        $hit = @($t3 | Where-Object { $_.action -eq 'read' -and $_.resource -eq $pat })
+        Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer read allow missing: $pat"
+    }
+    # KEYDENY3: one deny list, three actions — opencode v2.0.16 matches a
+    # grep/glob rule against the search *pattern* and checks the searched path
+    # only through `external_directory`, so a read-only fence left both doors
+    # open for a leaf.
+    foreach ($act in @('grep', 'glob', 'external_directory')) {
+        foreach ($pat in @($fences.read_deny_all)) {
+            $hit = @($t3 | Where-Object { $_.action -eq $act -and $_.resource -eq $pat })
+            Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'deny') "t3-reviewer $act fence missing: $pat"
+        }
+    }
+    foreach ($act in @('grep', 'glob')) {
+        foreach ($pat in @($fences.read_allow_all)) {
+            $hit = @($t3 | Where-Object { $_.action -eq $act -and $_.resource -eq $pat })
+            Assert-True ($hit.Count -gt 0 -and $hit[-1].effect -eq 'allow') "t3-reviewer $act allow missing: $pat"
+        }
+    }
+    # KEYDENY: a fence is a decision over a path, not a list of names — last
+    # matching rule wins, so walk the rules and keep the final verdict. Fixture
+    # paths only; the suite never opens a real key file.
+    foreach ($path in @('configuration/api-keys.yml',
+                        '/home/x/.config/autoos/ai-stack/client.key',
+                        '/home/x/.config/autoos/ai-stack/manage.key')) {
+        $readVerdict = ''; $shellVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'read' -and $path -like $rule.resource) { $readVerdict = $rule.effect }
+            if ($rule.action -eq 'shell' -and ("cat " + $path) -like $rule.resource) { $shellVerdict = $rule.effect }
+        }
+        Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
+        Assert-Equal $shellVerdict 'deny' "t3-reviewer may cat $path"
+        # KEYDENY3: the same path decided as a search pattern and as a searched
+        # directory. Fixture strings only — no key file is opened.
+        foreach ($act in @('grep', 'glob', 'external_directory')) {
+            $verdict = ''
+            foreach ($rule in $t3) {
+                if ($rule.action -eq $act -and $path -like $rule.resource) { $verdict = $rule.effect }
+            }
+            Assert-Equal $verdict 'deny' "t3-reviewer may reach $path through $act"
+        }
+    }
+    # KEYDENY2: a shell rule matches the whole command line, so the substring
+    # allow *api-keys.example* licensed the real key file as soon as the
+    # template's name shared a line with it (and let a copy out under an
+    # *.example* path). Fixture strings only — no key file is opened.
+    foreach ($command in @('cat configuration/api-keys.yml configuration/api-keys.example.yml',
+                           'cp configuration/api-keys.yml /tmp/api-keys.example/x',
+                           'cat /tmp/api-keys.example/stolen')) {
+        $shellVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'shell' -and $command -like $rule.resource) { $shellVerdict = $rule.effect }
+        }
+        Assert-Equal $shellVerdict 'deny' "t3-reviewer may run $command"
+    }
+    $example = 'configuration/api-keys.example.yml'
+    $readVerdict = ''; $shellVerdict = ''
+    foreach ($rule in $t3) {
+        if ($rule.action -eq 'read' -and $example -like $rule.resource) { $readVerdict = $rule.effect }
+        if ($rule.action -eq 'shell' -and ("cat " + $example) -like $rule.resource) { $shellVerdict = $rule.effect }
+    }
+    Assert-Equal $readVerdict 'allow' 't3-reviewer is denied the key example'
+    Assert-Equal $shellVerdict 'deny' 't3-reviewer may cat the key example'
+    foreach ($act in @('grep', 'glob')) {
+        $verdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq $act -and $example -like $rule.resource) { $verdict = $rule.effect }
+        }
+        Assert-Equal $verdict 'allow' "t3-reviewer is denied the example through $act"
+    }
+    # A read allow is a path, not a substring: a backup named after the
+    # template stays denied.
+    foreach ($path in @('/tmp/api-keys.example.yml.bak', '/tmp/api-keys.example/stolen')) {
+        $readVerdict = ''
+        foreach ($rule in $t3) {
+            if ($rule.action -eq 'read' -and $path -like $rule.resource) { $readVerdict = $rule.effect }
+        }
+        Assert-Equal $readVerdict 'deny' "t3-reviewer may read $path"
+    }
+    $serenaAllowed = @($t3 | Where-Object { $_.action -like 'serena_*' -and $_.effect -eq 'allow' } | ForEach-Object { $_.action })
+    foreach ($action in $serenaAllowed) {
+        Assert-True ($action -notmatch 'create|replace|insert|rename|delete|edit|write|execute') "t3-reviewer allows serena writer $action"
+    }
+    # KEYDENY3: an MCP rule cannot name a path (v2.0.16 asserts every MCP call
+    # as {action:"<server>_<tool>", resources:["*"]}), so a serena tool that can
+    # return file bytes is off the allow list outright — the list comes from the
+    # harness, never a copy here. Tools that return names or diagnostics stay.
+    $rawReaders = @($harnessDoc.mcp_servers.serena.raw_content_tools | ForEach-Object { "serena_$_" })
+    Assert-True ($rawReaders.Count -gt 0) 'harness lists no serena raw-content tools'
+    foreach ($action in $serenaAllowed) {
+        Assert-True ($rawReaders -notcontains $action) "t3-reviewer may read file bytes through $action"
+    }
+    foreach ($keep in @('serena_get_symbols_overview', 'serena_list_dir', 'serena_find_file')) {
+        Assert-True ($serenaAllowed -contains $keep) "t3-reviewer lost the name-only tool $keep"
+    }
+    Assert-Equal $agents.'t3-reviewer'.mode 'subagent'
+}
+
+Test-Case 'subagent depth config' {
+    $config = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw
+    $json = $config -replace '(?m)^\s*//.*$','' | ConvertFrom-Json
+    # opencode v2 drops a top-level subagent_depth ("unsupported legacy
+    # setting") and defaults to 1; it reads experimental.subagent_depth.
+    Assert-True ($null -eq $json.PSObject.Properties['subagent_depth']) 'top-level subagent_depth is ignored by opencode v2'
+    Assert-Equal $json.experimental.subagent_depth 2
+}
+
+Test-Case 'openhands template routes tiers with no secrets' {
+    $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
+    # l1-orchestrator-clean is NOT in this list (PROVFIX3 finding 6): its combo
+    # is omitted — a route with no servable leg — so apply prunes it and the
+    # profile would point at a 404. The next assertion pins it staying gone.
+    foreach ($section in @('[llm]', '[llm.l1-orchestrator]', '[llm.l2-worker]', '[llm.l3-driver]', '[llm.l2-worker-clean]', '[llm.l3-driver-clean]', '[llm.t4-rag]', '[llm.litellm-l1-orchestrator]', '[llm.litellm-l2-worker]', '[llm.litellm-l3-driver]', '[llm.draft_editor]', '[agent.CodeActAgent]')) {
+        Assert-True ($toml -match [regex]::Escape($section)) "missing $section"
+    }
+    Assert-True ($toml -notmatch '\[llm\.l1-orchestrator-clean\]') 'a pruned combo still has an OpenHands profile'
+    Assert-True ($toml -match 'host\.docker\.internal:20128') 'not pointed at the gateway'
+    Assert-True ($toml -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
+    Assert-True ($toml -match 'api_key = ""') 'api_key not left empty'
+    Pass
+}
+
+Test-Case 'litellm fallback config is internally consistent' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $yaml = Get-Content (Join-Path $Root 'configuration\litellm\config.yaml') -Raw -Encoding utf8
+    $groups = @([regex]::Matches($yaml, '(?m)^\s*-\s*model_name:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    # Expected groups are derived from the registry render (the tiers
+    # sync-router-tiers.py manages, plus the hand-curated legless *-paid
+    # chains) — no hand-kept list to go stale when a provider flips
+    # (lesson PROVPIN 2026-09-27).
+    $derive = @'
+import io, json, os, sys
+root = sys.argv[1]
+sys.path.insert(0, os.path.join(root, 'tools'))
+import registry
+text = io.open(os.path.join(root, 'configuration', 'litellm', 'config.yaml'), encoding='utf-8').read()
+reg = json.load(open(os.path.join(root, 'catalog', 'ai-registry.json'), encoding='utf-8'))
+need = set(registry.render_litellm_blocks(reg, text))
+need |= set(rid for rid, route in reg['routes'].items()
+           if not (route.get('legs') or []) and rid.endswith('-paid'))
+print(','.join(sorted(need)))
+'@
+    $derivePath = Join-Path ([IO.Path]::GetTempPath()) "autoos-litellm-groups-$PID.py"
+    [IO.File]::WriteAllText($derivePath, $derive)
+    try { $needed = & $py.Source $derivePath $Root 2>&1 | Out-String }
+    finally { Remove-Item $derivePath -Force -ErrorAction SilentlyContinue }
+    Assert-True ($LASTEXITCODE -eq 0) "registry render failed: $needed"
+    foreach ($g in ($needed.Trim() -split ',' | Where-Object { $_ })) {
+        Assert-Contains $groups $g
+    }
+    $fb = [regex]::Match($yaml, '(?s)fallbacks:(.*?)(?:\r?\n\S|\z)').Groups[1].Value
+    foreach ($m in [regex]::Matches($fb, '[- ](\S+):\s*\[([^\]]*)\]')) {
+        Assert-Contains $groups $m.Groups[1].Value
+        foreach ($t in ($m.Groups[2].Value -split ',')) { Assert-Contains $groups $t.Trim() }
+    }
+    $models = [regex]::Matches($yaml, '(?m)^\s*model:\s*(\S+)\s*$') | ForEach-Object { $_.Groups[1].Value }
+    # llama-3.3-70b left groq's free tier in 2026-08 and must never come back.
+    # cerebras is NOT stale: combos.json re-admits it as a credit/paid-capable
+    # leg (2026-09-20), so the old "any cerebras routed" check no longer holds.
+    # Its presence in the managed blocks is asserted against combos.json by
+    # tools/sync-router-tiers.py --check.
+    Assert-True (($models -match 'llama-3\.3-70b').Count -eq 0) 'retired free legs still routed'
+    Assert-True ($yaml -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
+    Pass
+}
+
+Test-Case "sync-router-tiers's unit tests pass (registry-sourced, task A5c)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_sync_router_tiers_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "sync-router-tiers registry unit tests failed: $out"
+}
+
+Test-Case 'start scripts exist and name the client key' {
+    Assert-True (Test-Path (Join-Path $Root 'configuration\start-stack.ps1')) 'ps1 missing'
+    Assert-True (Test-Path (Join-Path $Root 'configuration\start-stack.sh')) 'sh missing'
+    $ps1 = Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw
+    $sh = Get-Content (Join-Path $Root 'configuration\start-stack.sh') -Raw
+    Assert-True ($ps1 -match 'AUTOOS_OMNIROUTE_KEY' -and $sh -match 'AUTOOS_OMNIROUTE_KEY') 'key wiring missing'
+    Assert-True ($ps1 -match 'openhands' -and $sh -match 'host\.docker\.internal') 'openhands launch missing'
+    Assert-True ($ps1 -match 'opencode-serve' -and $sh -match 'opencode-serve') 'phone-fallback launch missing'
+    Pass
+}
+
+Test-Case 'start-stack.ps1 parses without syntax errors' {
+    $errors = $null
+    $null = [System.Management.Automation.PSParser]::Tokenize(
+        (Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw), [ref]$errors)
+    Assert-Equal (@($errors)).Count 0
+}
+
+Test-Case 'start-stack.ps1: a settings backup never overwrites an earlier one taken in the same second' {
+    # The launcher is standalone (no module import, so no Copy-AutoOSBackup) and
+    # cannot run here (gateway, docker): pull its backup function out of the AST
+    # and run that in a scratch dir. Its two call sites are pinned by text. The
+    # stamp has whole-second resolution, so the same-second case is forced with
+    # -Stamp, as the module's test does.
+    $script = Join-Path $Root 'configuration\start-stack.ps1'
+    $tokens = $null; $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
+    $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'New-FileBackup' }, $true))
+    if ($fn.Count -ne 1) { throw "want exactly one function New-FileBackup in start-stack.ps1, found $($fn.Count)" }
+    . ([scriptblock]::Create($fn[0].Extent.Text))
+
+    $text = Get-Content -LiteralPath $script -Raw
+    if (([regex]::Matches($text, [regex]::Escape('New-FileBackup -Path $ohSettings'))).Count -ne 2) { throw 'both OpenHands settings backups must go through New-FileBackup' }
+    if ($text -match [regex]::Escape('Copy-Item $ohSettings $backup')) { throw 'a settings backup still copies straight to a second-resolution name' }
+
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-stackbak-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $settings = Join-Path $scratch 'settings.json'
+        $stamp = '20260101-000000'
+        # Three versions of a settings file, judged on bytes: the first has a BOM and
+        # a non-ASCII character, the second only the character, the third neither. A
+        # backup that lost the BOM or a byte would still read as the same text.
+        $withBom = New-Object Text.UTF8Encoding($true)
+        $withoutBom = New-Object Text.UTF8Encoding($false)
+        $texts = @("v0 caf$([char]0x00E9)", "v1 caf$([char]0x00E9) $([char]0x2603)", 'v2')
+        $encodings = @($withBom, $withoutBom, $withoutBom)
+        $wantB64 = @()
+        $made = @()
+        for ($i = 0; $i -lt 3; $i++) {
+            [IO.File]::WriteAllText($settings, $texts[$i], $encodings[$i])
+            $bytes = [IO.File]::ReadAllBytes($settings)
+            if ($i -eq 0 -and ($bytes[0] -ne 239 -or $bytes[1] -ne 187 -or $bytes[2] -ne 191)) { throw 'version 0 must carry a BOM, or the byte compare has nothing to lose' }
+            $wantB64 += [Convert]::ToBase64String($bytes)
+            $made += New-FileBackup -Path $settings -Stamp $stamp
+        }
+        $want = @("settings.json.autoos-backup-$stamp", "settings.json.autoos-backup-$stamp-1", "settings.json.autoos-backup-$stamp-2")
+        if ((@($made | ForEach-Object { Split-Path -Leaf $_ }) -join ',') -cne ($want -join ',')) { throw "backup names: [$(@($made | ForEach-Object { Split-Path -Leaf $_ }) -join ', ')], want [$($want -join ', ')]" }
+        for ($i = 0; $i -lt 3; $i++) {
+            $got = [Convert]::ToBase64String([IO.File]::ReadAllBytes($made[$i]))
+            if ($got -cne $wantB64[$i]) { throw "$($want[$i]) does not hold version $i byte for byte (an earlier backup was overwritten, or a BOM / non-ASCII byte was lost)" }
+        }
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'start-stack.ps1: opencode serve takes its password from api-keys.yml opencode_password' {
+    # The opencode-serve branch must read opencode_password from the same
+    # api-keys.yml the OmniRoute key comes from, export it as OPENCODE_PASSWORD
+    # so the child inherits it, and never print the value. AST-extract
+    # Get-AutoOSKeyValue and exercise it in a scratch dir.
+    $script = Join-Path $Root 'configuration\start-stack.ps1'
+    $tokens = $null; $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($script, [ref]$tokens, [ref]$parseErrors)
+    # The reader is three functions (value parser, file reader, exact-name lookup): extract all of them.
+    foreach ($fname in 'ConvertFrom-AutoOSKeyValue', 'Read-AutoOSKeyMap', 'Get-AutoOSKeyValue') {
+        $fn = @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $fname }, $true))
+        if ($fn.Count -ne 1) { throw "want exactly one function $fname in start-stack.ps1, found $($fn.Count)" }
+        . ([scriptblock]::Create($fn[0].Extent.Text))
+    }
+
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-ockey-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $null = New-Item -ItemType Directory -Path $scratch -Force
+        $keys = Join-Path $scratch 'api-keys.yml'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: hunter2" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'hunter2'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: 'x'" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'x'
+
+        Set-Content -LiteralPath $keys -Value 'opencode_password: "x"' -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'x'
+
+        Set-Content -LiteralPath $keys -Value "# opencode_password: y" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: REPLACE_WITH_A" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+
+        Set-Content -LiteralPath $keys -Value 'opencode_password: "pw-with-comment"   # rotated by L0' -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'pw-with-comment'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: 'single-q'  # note" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'single-q'
+
+        Set-Content -LiteralPath $keys -Value "opencode_password: plain-pw # c" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'plain-pw'
+
+        # Two uncommented lines: the first one wins - the one rule in tools/keys_file.py, which
+        # the bash launchers and the Python tools now share.
+        Set-Content -LiteralPath $keys -Value "opencode_password: first`nopencode_password: second" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'first'
+
+        # Case-sensitive key match: Opencode_password is not opencode_password.
+        Set-Content -LiteralPath $keys -Value "Opencode_password: x" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') ''
+
+        # Like tools/keys_file.py: a placeholder line is skipped, so the real value above it is used;
+        # indentation is trimmed, as keys_file.py trims it (the keys file is flat, so an indented line is a key).
+        Set-Content -LiteralPath $keys -Value "opencode_password: real`nopencode_password: REPLACE_WITH_X" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'real'
+        Set-Content -LiteralPath $keys -Value "  opencode_password: nested" -Encoding utf8
+        Assert-Equal (Get-AutoOSKeyValue -Path $keys -Name 'opencode_password') 'nested'
+
+        Assert-Equal (Get-AutoOSKeyValue -Path (Join-Path $scratch 'nope.yml') -Name 'opencode_password') ''
+    } finally {
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    $text = Get-Content -LiteralPath $script -Raw
+    $ocBranch = $text -split "`n" | Where-Object { $_ -match 'opencode-serve' -or $_ -match 'opencode serve' -or $_ -match 'OPENCODE_PASSWORD' -or ($_ -match 'Get-AutoOSKeyValue' -and $_ -match 'opencode_password') }
+    $ocText = $ocBranch -join "`n"
+    if ($ocText -notmatch 'Get-AutoOSKeyValue') { throw 'opencode-serve branch must read opencode_password via Get-AutoOSKeyValue' }
+    if ($ocText -notmatch 'opencode_password') { throw 'opencode-serve branch must reference opencode_password' }
+    if ($text -notmatch '\$env:OPENCODE_PASSWORD') { throw 'opencode-serve branch must set $env:OPENCODE_PASSWORD' }
+    $whLines = @($text -split "`n" | Where-Object { $_ -match 'Write-Host' -and $_ -match '\$pw' })
+    if ($whLines.Count -gt 0) { throw "a Write-Host line references `$pw (would print the password): $($whLines -join ' | ')" }
+    Pass
+}
+
+Test-Case 'openhands launch is detached, probed and stale-settings safe' {
+    # -it fails without a TTY and foreground never returns (the old script
+    # printed the URL even when nothing started); schema_version 6 settings
+    # 500 the current image. Both fixed 2026-09-21 - pin the shape here.
+    # 2026-09-23: the guard repairs in place instead of deleting (old shape
+    # moved the whole file aside and lost the user's profiles/keys). It must
+    # target agent_settings.schema_version (top-level stays 2-3 on broken
+    # files too) and strip the agent-canvas `enabled` MCP keys.
+    foreach ($f in @('configuration\start-stack.ps1', 'configuration\start-stack.sh')) {
+        $text = Get-Content (Join-Path $Root $f) -Raw
+        Assert-True ($text -match 'docker run -d ') "$f is not detached"
+        Assert-True ($text -notmatch 'docker run -it') "$f still uses -it"
+        Assert-True ($text -match 'agent_settings.schema_version|agent_settings.*schema_version') "$f checks the wrong schema_version level"
+        Assert-True ($text -match 'autoos-backup') "$f repairs settings without backup"
+        Assert-True ($text -match 'docker logs openhands-app') "$f prints the URL without a probe behind it"
+        # Tier profiles re-project from the spec on every start (never stale).
+        Assert-True ($text -match 'sync-openhands-profiles') "$f never syncs tier profiles"
+        # Repair, not delete: clamping keeps the user's profiles/keys.
+        # Only versions NEWER than the image (> 4) clamp down: older
+        # payloads keep theirs so the image's own migrations still run.
+        Assert-True ($text -match '> 4|-gt 4') "$f clamps at the wrong version"
+        # The agent-canvas `enabled` MCP key 500s the image (extra_forbidden).
+        Assert-True ($text -match 'enabled') "$f does not strip the enabled MCP key"
+        # Repair, not delete, for parseable files: the version-mismatch path
+        # must clamp in place (the only Remove-Item on settings.json is the
+        # unparseable-file fallback, where there is nothing to preserve).
+        Assert-True ($text -match 'schema_version.?\]? ?= 4') "$f does not clamp the version in place"
+        Assert-True (([regex]::Matches($text, 'Remove-Item \$ohSettings|rm -f "\$oh_settings"')).Count -le 1) "$f deletes parseable user settings"
+    }
+    Pass
+}
+
+Test-Case 'zed routing creates a fresh config when none exists' {
+    $realAppData = $env:APPDATA
+    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:APPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Set-AutoOSZedProxy
+        $cfgPath = Join-Path $scratch 'Zed\settings.json'
+        Assert-True (Test-Path $cfgPath) 'settings.json not created'
+        $s = Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        # One entry per catalog/ide-models.json model Zed lists through each gateway.
+        $cat = @((Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models)
+        foreach ($gw in @('omniroute', 'litellm')) {
+            $want = @($cat | Where-Object { $null -ne $_.surfaces.PSObject.Properties[$gw] -and @($_.surfaces.PSObject.Properties[$gw].Value) -contains 'zed' }).Count
+            Assert-True ($want -gt 0) "catalog lists no zed model for $gw"
+            Assert-Equal (@($s.language_models.openai_compatible."autoos-$gw".available_models).Count) $want
+        }
+    } finally { $env:APPDATA = $realAppData }
+}
+
+Test-Case 'a missing or malformed catalog/ide-models.json stops the IDE writers with one clear line (ide-models)' {
+    # The Zed and OpenCode writers read the model catalog at install time.
+    # Missing or malformed, Get-AutoOSIdeModel must throw ONE message naming
+    # the file (not a parser error or a silent empty list), and the Zed
+    # writer must report it and write nothing.
+    $realAppData = $env:APPDATA
+    $fakeRoot = Join-Path ([IO.Path]::GetTempPath()) "autoos-idecat-$([Guid]::NewGuid().ToString('N'))"
+    $unusedLog = Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log'
+    try {
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $fakeRoot 'catalog')
+        $catPath = Join-Path $fakeRoot 'catalog\ide-models.json'
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $fakeRoot
+        $cases = @('', '{ "models": [ ', '{"models": [{"id": "l1-orchestrator"}]}', '{"other": 1}')
+        for ($i = 0; $i -lt $cases.Count; $i++) {
+            Remove-Item -LiteralPath $catPath -Force -ErrorAction SilentlyContinue
+            if ($cases[$i]) { [IO.File]::WriteAllText($catPath, $cases[$i]) }
+            $msg = $null
+            try { $null = @(Get-AutoOSIdeModel -Gateway 'omniroute' -Surface 'zed') } catch { $msg = $_.Exception.Message }
+            Assert-True ($null -ne $msg) "case ${i}: no error"
+            Assert-True ($msg.Contains($catPath)) "case ${i}: the error does not name the file: $msg"
+            $env:APPDATA = Join-Path $fakeRoot "appdata-$i"
+            $log = Join-Path $fakeRoot "zed-$i.log"
+            Initialize-AutoOSLog -Path $log
+            Set-AutoOSZedProxy
+            Initialize-AutoOSLog -Path $unusedLog
+            $text = Get-Content -LiteralPath $log -Raw -Encoding utf8
+            Assert-True ($text.Contains($catPath)) "case ${i}: the Zed writer did not name the file: $text"
+            Assert-True (-not (Test-Path (Join-Path $env:APPDATA 'Zed'))) "case ${i}: the Zed writer touched its folder"
+        }
+    } finally {
+        $env:APPDATA = $realAppData
+        Initialize-AutoOSLog -Path $unusedLog
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Remove-Item -LiteralPath $fakeRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'backup-once: Set-AutoOSZedProxy does not back up again when nothing changed' {
+    # Only the run that changes settings.json backs it up. The backup name carries a
+    # second-resolution timestamp, so two quick runs would collide on one name and a
+    # bare count proves nothing: the surviving backup must still be the ORIGINAL file.
+    $realAppData = $env:APPDATA
+    $realOmni = $env:AUTOOS_OMNIROUTE_API_KEY
+    $realLit = $env:AUTOOS_LITELLM_API_KEY
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        $env:APPDATA = $scratch
+        $env:AUTOOS_OMNIROUTE_API_KEY = 'test-omni-key'
+        $env:AUTOOS_LITELLM_API_KEY = 'test-lit-key'
+        $cfgDir = Join-Path $scratch 'Zed'
+        $cfgPath = Join-Path $cfgDir 'settings.json'
+        $null = New-Item -ItemType Directory -Path $cfgDir -Force
+        $seed = '{"theme":"mine","vim_mode":true,"language_models":{"openai":{"api_url":"https://example.invalid"}},"agent":{"default_model":{"provider":"anthropic","model":"claude"}}}'
+        [IO.File]::WriteAllText($cfgPath, $seed)
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSZedProxy
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'settings.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        $hash1 = (Get-FileHash -LiteralPath $cfgPath -Algorithm SHA256).Hash
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSZedProxy
+        $out2 = Get-Content -LiteralPath $log -Raw -Encoding utf8
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'settings.json.autoos-backup-*')
+        if ($backups2.Count -ne 1) { throw "run 2: backups=$($backups2.Count) (want 1: nothing changed, so no new backup)" }
+        if ([IO.File]::ReadAllText($backups2[0].FullName) -ne $seed) { throw 'run 2 overwrote the run 1 backup: it is no longer the original file' }
+        $hash2 = (Get-FileHash -LiteralPath $cfgPath -Algorithm SHA256).Hash
+        if ($hash2 -ne $hash1) { throw 'run 2 changed settings.json although nothing needed changing' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        $s = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ($s.theme -ne 'mine' -or $s.vim_mode -ne $true) { throw 'user settings lost' }
+        if ($s.language_models.openai.api_url -ne 'https://example.invalid') { throw 'user provider lost' }
+        if ($s.language_models.openai_compatible.'autoos-omniroute'.api_url -ne 'http://127.0.0.1:20128/v1') { throw 'omniroute provider not written' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:APPDATA = $realAppData
+        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_API_KEY = $realOmni }
+        if ($null -eq $realLit) { Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_LITELLM_API_KEY = $realLit }
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+Test-Case 'component profiles name real profiles and verify is set' {
+    $bad = @()
+    foreach ($file in @('catalog\windows.json', 'catalog\linux.json', 'catalog\macos.json')) {
+        $c = Get-Content (Join-Path $Root $file) -Raw -Encoding utf8 | ConvertFrom-Json
+        $profiles = @($c.profiles.PSObject.Properties.Name)
+        foreach ($cat in $c.categories) {
+            foreach ($comp in $cat.components) {
+                if ($comp.id -notin @('zed', 'litellm', 'opencode-cli', 'omniroute')) { continue }
+                foreach ($p in $comp.profiles) {
+                    if ($p -notin $profiles) { $bad += "$file/$($comp.id):$p" }
+                }
+                if ([string]::IsNullOrWhiteSpace($comp.verify)) { $bad += "$file/$($comp.id):no-verify" }
+            }
+        }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'ai-coding ticks the whole routing stack' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $ticks = @($a | Where-Object { 'ai-coding' -in $_.Profiles } | ForEach-Object { $_.Id })
+    foreach ($id in @('zed', 'litellm', 'opencode-cli', 'omniroute', 'openhands-docker')) {
+        Assert-Contains $ticks $id
+    }
+    Pass
+}
+
+Test-Case 'neovim component exists with winget id and lazyvim postInstall' {
+    $nv = Get-AutoOSWinComponent 'neovim'
+    Assert-True ($null -ne $nv) 'neovim missing from the windows catalog'
+    Assert-Equal "$($nv.provider)|$($nv.package)" 'winget|Neovim.Neovim'
+    Assert-Contains $nv.requires 'git'
+    Assert-Contains $nv.profiles 'ai-coding'
+    Assert-Equal $nv.postInstall 'Install-AutoOSNeovim'
+    Assert-Equal $nv.verify 'nvim --version'
+}
+
+Test-Case 'neovim is offered on arm64 Windows too' {
+    $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem -Arch 'arm64'))
+    Assert-Contains ($a | ForEach-Object { $_.Id }) 'neovim'
+}
+
+Test-Case 'a dry run plans neovim and its git dependency' {
+    $out = (& powershell -NoProfile -ExecutionPolicy Bypass -File $setup -DryRun -Only neovim -Yes -NoColor 2>&1) -join "`n"
+    Assert-True ($LASTEXITCODE -eq 0) "exit $LASTEXITCODE : $($out | Select-Object -Last 3)"
+    Assert-True ($out -match 'Neovim') 'neovim missing from the dry-run plan'
+}
+
+Test-Case 'PATH is only ever written by Add-AutoOSPathEntry' {
+    # The single code path that may touch PATH. A second writer is how the
+    # repository once wiped a user's entire Path.
+    $src = Get-Content (Join-Path $Lib 'AutoOS.Install.psm1') -Raw
+    $writers = @([regex]::Matches($src, "SetEnvironmentVariable\(\s*'Path'"))
+    Assert-Equal $writers.Count 1
+    $fn = [regex]::Match($src, '(?s)function Install-AutoOSNeovim.*?(?=\r?\nfunction )').Value
+    Assert-True ($fn -match 'Add-AutoOSPathEntry') 'neovim bypasses the PATH code path'
+}
+
+Test-Case 'neovim postInstall hooks are exported' {
+    foreach ($fn in @('Install-AutoOSNeovim', 'Install-AutoOSLazyVim', 'Enable-AutoOSSidekickExtra')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn missing"
+    }
+    Pass
+}
+
+Test-Case 'neovim postInstall writes nothing in dry run' {
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path $env:TEMP "autoos-nvim-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        Install-AutoOSNeovim
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Assert-Equal (Test-Path (Join-Path $scratch 'nvim')) $false
+    } finally { $env:LOCALAPPDATA = $realLocal }
+}
+
+Test-Case 'neovim sidekick leaves a non-object config alone' {
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path $env:TEMP "autoos-nvim-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'nvim'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '["not","an","object"]' | Out-File (Join-Path $cfgDir 'lazyvim.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Enable-AutoOSSidekickExtra
+        $raw = Get-Content (Join-Path $cfgDir 'lazyvim.json') -Raw
+        Assert-True ($raw -match '"not"') 'a non-object config was rewritten'
+        Assert-Equal (@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count 0
+    } finally { $env:LOCALAPPDATA = $realLocal }
+}
+
+Test-Case 'neovim sidekick enabling merges one extra and keeps the rest' {
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path $env:TEMP "autoos-nvim-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'nvim'
+        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+        '{"extras":["lazyvim.plugins.extras.lang.python"]}' |
+            Out-File (Join-Path $cfgDir 'lazyvim.json') -Encoding utf8
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Enable-AutoOSSidekickExtra
+        Enable-AutoOSSidekickExtra
+        $j = Get-Content (Join-Path $cfgDir 'lazyvim.json') -Raw | ConvertFrom-Json
+        Assert-Contains $j.extras 'lazyvim.plugins.extras.ai.sidekick'
+        Assert-Contains $j.extras 'lazyvim.plugins.extras.lang.python'
+        Assert-Equal (@($j.extras | Where-Object { $_ -eq 'lazyvim.plugins.extras.ai.sidekick' }).Count) 1
+        Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
+    } finally { $env:LOCALAPPDATA = $realLocal }
+}
+
+Test-Case 'backup-once: Enable-AutoOSSidekickExtra does not back up again when nothing changed' {
+    # Only the run that changes lazyvim.json backs it up. The backup name carries a
+    # second-resolution timestamp, so two quick runs would collide on one name and a
+    # bare count proves nothing: the surviving backup must still be the ORIGINAL file.
+    $realLocal = $env:LOCALAPPDATA
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        $env:LOCALAPPDATA = $scratch
+        $cfgDir = Join-Path $scratch 'nvim'
+        $lj = Join-Path $cfgDir 'lazyvim.json'
+        $null = New-Item -ItemType Directory -Path $cfgDir -Force
+        $seed = '{"extras":["lazyvim.plugins.extras.lang.python"],"news":{"NEWS.md":"11866"},"version":8}'
+        [IO.File]::WriteAllText($lj, $seed)
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Enable-AutoOSSidekickExtra
+        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'lazyvim.json.autoos-backup-*')
+        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
+        $hash1 = (Get-FileHash -LiteralPath $lj -Algorithm SHA256).Hash
+        Initialize-AutoOSLog -Path $log
+        Enable-AutoOSSidekickExtra
+        $out2 = Get-Content -LiteralPath $log -Raw -Encoding utf8
+        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'lazyvim.json.autoos-backup-*')
+        if ($backups2.Count -ne 1) { throw "run 2: backups=$($backups2.Count) (want 1: nothing changed, so no new backup)" }
+        if ([IO.File]::ReadAllText($backups2[0].FullName) -ne $seed) { throw 'run 2 overwrote the run 1 backup: it is no longer the original file' }
+        $hash2 = (Get-FileHash -LiteralPath $lj -Algorithm SHA256).Hash
+        if ($hash2 -ne $hash1) { throw 'run 2 changed lazyvim.json although the extra was already enabled' }
+        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+        $j = Get-Content -LiteralPath $lj -Raw | ConvertFrom-Json
+        if (@($j.extras) -notcontains 'lazyvim.plugins.extras.ai.sidekick') { throw 'sidekick extra missing after run 1' }
+        if (@($j.extras) -notcontains 'lazyvim.plugins.extras.lang.python') { throw 'existing extra lost' }
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:LOCALAPPDATA = $realLocal
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Pass
+}
+
+# ── OpenHands self-checks ───────────────────────────────────────────────────
+# Both retired to permanent skips: they asked a live docker daemon and a live HTTP
+# port, so their verdict described whatever the machine was running (AGENTS.md §5).
+Test-Case 'openhands container answers on :3000' {
+    # Retired to a permanent skip: it asks a live docker daemon whether a container
+    # happens to be running and then probes a live HTTP port, so its verdict describes
+    # the machine, not the repository. CI run 36118435700 proved it - two attempts of
+    # the same commit disagreed, and the failing one spent 120 s inside
+    # Wait-AutoOSHttp before reporting. AGENTS.md §5 keeps system state out of the
+    # suite; the manual container proof stays a manual check.
+    Skip 'live container probe is out of scope for the suite'; return
+}
+
+Test-Case 'openhands llm profile points at the gateway' {
+    # Retired to a permanent skip: it asserted live ~/.openhands/settings.json,
+    # which fails on any machine whose OpenHands was configured outside AutoOS
+    # (the installer never overwrites existing keys). Gateway shape is covered
+    # by 'openhands template routes tiers with no secrets' and the embedded
+    # setup-script tests instead.
+    Skip 'live user settings are out of scope for the suite'; return
+}
+
+Test-Case 'litellm installer delegates to pipx when present' {
+    $realPath = $env:PATH
+    $stub = Join-Path $env:TEMP "autoos-pipxstub-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-pipx-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        New-Item -ItemType Directory -Path $stub -Force | Out-Null
+        '@echo off' + "`r`n" + 'echo called > "%~dp0called.txt"' |
+            Out-File (Join-Path $stub 'pipx.cmd') -Encoding ascii
+        # Narrowed PATH, not stub+real: a real litellm on this machine must
+        # not short-circuit the installer before the pipx stub is reached
+        # (the suite never asserts on live system state).
+        $env:PATH = "$stub;$env:SystemRoot\System32"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True (Test-Path (Join-Path $stub 'called.txt')) 'pipx stub was not invoked'
+        Assert-True ($text -match 'configuration/litellm') 'no next-steps hint in the log'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'litellm installer falls back to the py launcher' {
+    $realPath = $env:PATH
+    $stub = Join-Path $env:TEMP "autoos-pystub-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-py-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        New-Item -ItemType Directory -Path $stub -Force | Out-Null
+        '@echo off' + "`r`n" + 'echo called > "%~dp0called.txt"' |
+            Out-File (Join-Path $stub 'py.cmd') -Encoding ascii
+        $env:PATH = "$stub;$env:SystemRoot\System32"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        Assert-True (Test-Path (Join-Path $stub 'called.txt')) 'py launcher stub was not invoked'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'litellm installer detects an existing install' {
+    $realPath = $env:PATH
+    $stub = Join-Path $env:TEMP "autoos-litstub-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-lit-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        New-Item -ItemType Directory -Path $stub -Force | Out-Null
+        '@echo off' + "`r`n" + 'exit /b 0' | Out-File (Join-Path $stub 'litellm.cmd') -Encoding ascii
+        $env:PATH = "$stub;$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'already installed') 'no already-installed message in the log'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'litellm installer warns when no python is available' {
+    $realPath = $env:PATH
+    $empty = Join-Path $env:TEMP "autoos-noempty-$([Guid]::NewGuid().ToString('N'))"
+    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-nopy-$([Guid]::NewGuid().ToString('N')).log"
+    try {
+        New-Item -ItemType Directory -Path $empty -Force | Out-Null
+        $env:PATH = $empty
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Initialize-AutoOSLog -Path $log
+        Install-AutoOSLitellm
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'no Python on PATH') 'no missing-python warning in the log'
+    } finally {
+        # Dead log path: Initialize-AutoOSLog always rewrites it, while ''
+        # would only hide the leak until the next Initialize-AutoOSLog call.
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item $log -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'env template carries placeholders only' {
+    $bad = @()
+    $n = 0
+    foreach ($line in (Get-Content (Join-Path $Root 'configuration\litellm\.env.example') -Encoding utf8)) {
+        $n++
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        if ($t -notmatch '^[A-Z_]+=REPLACE_WITH_[A-Z_]+$') { $bad += "line $n" }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'api-keys example carries placeholders only' {
+    $bad = @()
+    $n = 0
+    foreach ($line in (Get-Content (Join-Path $Root 'configuration\api-keys.example.yml') -Encoding utf8)) {
+        $n++
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#')) { continue }
+        $val = ($t -split ':', 2)[1].Trim()
+        if ($val -notmatch '^REPLACE_WITH_[A-Z_]+$') { $bad += "line $n" }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'provider status reads keys but never exposes them' {
+    $scratch = Join-Path $env:TEMP "autoos-keys-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        @(
+            'groq: gsk_SUPERSECRETVALUE123',
+            '# comment',
+            'deepseek:',
+            'mistral: 5xLsSecretValue',
+            'not-a-provider: nope'
+        ) | Out-File (Join-Path $scratch 'configuration\api-keys.yml') -Encoding utf8
+        $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+        $json = $status | ConvertTo-Json
+        Assert-True ($status.Count -eq 18) "expected 18 secret entries, got $($status.Count)"
+        $groq = $status | Where-Object { $_.id -eq 'groq' }
+        $ds = $status | Where-Object { $_.id -eq 'deepseek' }
+        Assert-True ($groq.configured -and -not $ds.configured) 'configured flags are wrong'
+        Assert-True ($json -notmatch 'SUPERSECRET|SecretValue') 'a key value leaked into the payload'
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: set new key creates the file' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = Join-Path $scratch 'configuration\api-keys.yml'
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_NEWVALUE123' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200
+            Assert-True $result.Payload.ok 'payload not ok'
+            Assert-True $result.Payload.configured 'payload not configured'
+            Assert-True (Test-Path $env:AUTOOS_KEYS_FILE) 'keys file was not created'
+            $content = Get-Content $env:AUTOOS_KEYS_FILE -Raw -Encoding utf8
+            Assert-True ($content -match "groq: 'gsk_NEWVALUE123'") 'key not written correctly'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: replace keeps other lines + comment byte-identical and makes one backup' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $original = "groq: 'gsk_OLDVALUE' # my comment`r`nmistral: 'old_mistral'`r`n"
+        [System.IO.File]::WriteAllText($keysFile, $original, [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_NEWVALUE' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200
+            $after = [System.IO.File]::ReadAllBytes($keysFile)
+            $afterText = [System.Text.Encoding]::UTF8.GetString($after)
+            if ($afterText.Length -gt 0 -and $afterText[0] -eq [char]0xFEFF) { $afterText = $afterText.Substring(1) }
+            Assert-True ($afterText -match "groq: 'gsk_NEWVALUE' # my comment`r`n") 'groq line not rebuilt correctly'
+            Assert-True ($afterText -match "mistral: 'old_mistral'`r`n") 'other lines changed'
+            $backups = @(Get-ChildItem (Join-Path $scratch 'configuration') -Filter 'api-keys.yml.autoos-backup-*')
+            Assert-Equal $backups.Count 1 "expected 1 backup, got $($backups.Count)"
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: same value twice -> unchanged no second backup' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "groq: 'gsk_SAMEVALUE'`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_SAMEVALUE' }
+            $r1 = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $r1.Code 200
+            Assert-True $r1.Payload.unchanged 'first call should be unchanged'
+            $r2 = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $r2.Code 200
+            Assert-True $r2.Payload.unchanged 'second call should be unchanged'
+            $backups = @(Get-ChildItem (Join-Path $scratch 'configuration') -Filter 'api-keys.yml.autoos-backup-*')
+            Assert-Equal $backups.Count 0 "expected 0 backups, got $($backups.Count)"
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: 400 cases incl. quotes' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $bad = @(
+            @{ id = 'unknown_key'; value = 'x' },
+            @{ id = 'groq'; value = 123 },
+            @{ id = 'groq'; value = '' },
+            @{ id = 'groq'; value = ('x' * 4097) },
+            @{ id = 'groq'; value = "has`nnewline" },
+            @{ id = 'groq'; value = ' leading' },
+            @{ id = 'groq'; value = 'trailing ' },
+            @{ id = 'groq'; value = 'REPLACE_WITH_KEY' },
+            @{ id = 'groq'; value = 'replace_with_x' },
+            @{ id = 'groq'; value = "has'quote" },
+            @{ id = 'groq'; value = 'has"quote' }
+        )
+        foreach ($case in $bad) {
+            $body = [pscustomobject]$case
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-True ($result.Code -eq 400) "expected 400 for $($case.id)=$($case.value), got $($result.Code)"
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: non-loopback -> 403 and file untouched' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        $prevRemote = $env:AUTOOS_SERVE_REMOTE_SECRETS
+        Remove-Item Env:\AUTOOS_SERVE_REMOTE_SECRETS -ErrorAction SilentlyContinue
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_VALUE' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $false
+            Assert-Equal $result.Code 403
+            Assert-True ($result.Payload.error -match 'loopback') 'wrong error message'
+            Assert-True (-not (Test-Path $keysFile)) 'file was created despite non-loopback'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+            if ($null -ne $prevRemote) { $env:AUTOOS_SERVE_REMOTE_SECRETS = $prevRemote }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: REPLACE_WITH_ reads not configured' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        @(
+            'groq: REPLACE_WITH_GROQ_KEY',
+            'mistral: real_value'
+        ) | Out-File $keysFile -Encoding utf8
+        $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+        $groq = $status | Where-Object { $_.id -eq 'groq' }
+        $mistral = $status | Where-Object { $_.id -eq 'mistral' }
+        Assert-True (-not $groq.configured) 'REPLACE_WITH_ should read as not configured'
+        Assert-True $mistral.configured 'real value should read as configured'
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: no configured key -> every row reports false, nothing throws' {
+    # Get-AutoOSConfiguredIds returns a HashSet. Returned through the pipeline
+    # PowerShell unrolls it: an empty set arrived at the caller as $null and
+    # $have.Contains($id) threw "null-valued expression" on every row.
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "groq: REPLACE_WITH_GROQ_KEY`nmistral: REPLACE_WITH_MISTRAL_KEY`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+            Assert-True ($status.Count -gt 0) 'provider status returned no rows at all'
+            $on = @($status | Where-Object { $_.configured })
+            Assert-Equal $on.Count 0 'a row reported configured with no real key in the file'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: exactly one configured key -> exactly one configured row' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            [System.IO.File]::WriteAllText($keysFile, "meta: 'fake_meta_value'`n", [System.Text.Encoding]::UTF8)
+            $on = @(@(Get-AutoOSProviderStatus -RepoRoot $scratch) | Where-Object { $_.configured })
+            Assert-Equal $on.Count 1 "expected one configured row, got: $(@($on | ForEach-Object { $_.id }) -join ',')"
+            Assert-Equal $on[0].id 'meta' 'the wrong key reported configured'
+            # The discriminating case: a one-element HashSet unrolled to a bare
+            # string makes .Contains a SUBSTRING test, so 'omniroute' answers
+            # true for a file that only holds omniroute_management.
+            [System.IO.File]::WriteAllText($keysFile, "omniroute_management: 'fake_management_token'`n", [System.Text.Encoding]::UTF8)
+            $on2 = @(@(Get-AutoOSProviderStatus -RepoRoot $scratch) | Where-Object { $_.configured })
+            Assert-Equal $on2.Count 1 "expected one configured row, got: $(@($on2 | ForEach-Object { $_.id }) -join ',')"
+            Assert-Equal $on2[0].id 'omniroute_management' 'a substring of a configured key reported configured'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: only a column-0 key counts; a nested line is read and written as data' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $original = "some_block:`n  groq: nested_value`nmistral: real_value`n"
+        [System.IO.File]::WriteAllText($keysFile, $original, [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $status = @(Get-AutoOSProviderStatus -RepoRoot $scratch)
+            $groq = @($status | Where-Object { $_.id -eq 'groq' })
+            $mistral = @($status | Where-Object { $_.id -eq 'mistral' })
+            Assert-True ($groq.Count -eq 1 -and -not $groq[0].configured) 'an indented groq line read as a configured key'
+            Assert-True ($mistral.Count -eq 1 -and $mistral[0].configured) 'a column-0 mistral line did not read as configured'
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_COL0TEST' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200 "POST groq got $($result.Code): $(@($result.Payload) | ConvertTo-Json -Compress)"
+            $after = [System.IO.File]::ReadAllText($keysFile, [System.Text.Encoding]::UTF8)
+            Assert-Equal $after ($original + "groq: 'gsk_COL0TEST'`n") 'the nested groq line was rewritten, or the new key did not land at column 0'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: payload JSON never contains the value' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "groq: 'gsk_SUPERSECRETXYZ'`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $payload = Get-AutoOSSecretsPayload -RepoRoot $scratch -ClientIsLoopback $true
+            $json = $payload | ConvertTo-Json -Depth 10
+            Assert-True ($json -notmatch 'SUPERSECRET') 'a secret value leaked into the GET payload'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: key match is exact-case and leaves differently-cased lines alone' {
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        [System.IO.File]::WriteAllText($keysFile, "GROQ: 'x'`n", [System.Text.Encoding]::UTF8)
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $groqBefore = @(Get-AutoOSProviderStatus -RepoRoot $scratch) | Where-Object { $_.id -eq 'groq' }
+            Assert-True (-not $groqBefore.configured) 'provider status reported groq configured for an uppercase GROQ line'
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_CASETEST' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 200
+            $after = [System.IO.File]::ReadAllText($keysFile, [System.Text.Encoding]::UTF8)
+            Assert-True ($after -match "GROQ: 'x'") 'the uppercase GROQ line was altered'
+            Assert-True ($after -match "groq: 'gsk_CASETEST'") 'lowercase groq line was not appended'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'secrets: new file inside a git work tree with no .gitignore -> 409' {
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Host "  [skip] git not on PATH"
+        return
+    }
+    $scratch = Join-Path $env:TEMP "autoos-secrets-$([Guid]::NewGuid().ToString('N'))"
+    try {
+        New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+        $prevDir = Get-Location
+        try {
+            Set-Location $scratch
+            $null = & git init -q 2>$null | Out-Null
+            $null = & git config user.email "t@t" 2>$null | Out-Null
+            $null = & git config user.name "t" 2>$null | Out-Null
+        } finally { Set-Location $prevDir }
+        New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
+        $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
+        $prev = $env:AUTOOS_KEYS_FILE
+        $env:AUTOOS_KEYS_FILE = $keysFile
+        try {
+            $body = [pscustomobject]@{ id = 'groq'; value = 'gsk_GITTEST' }
+            $result = Get-AutoOSSecretPostResult -RepoRoot $scratch -Body $body -ClientIsLoopback $true
+            Assert-Equal $result.Code 409 "expected 409 for non-ignored new file, got $($result.Code)"
+            Assert-True (-not (Test-Path $keysFile)) 'keys file was written despite git refusal'
+        } finally {
+            if ($null -eq $prev) { Remove-Item Env:\AUTOOS_KEYS_FILE -ErrorAction SilentlyContinue }
+            else { $env:AUTOOS_KEYS_FILE = $prev }
+        }
+    } finally { Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+Test-Case 'svc: the Windows server reports the AI services and allowlists actions' {
+    # Same payload as serve.py's service_status(): the browser page is shared.
+    # The probe is injected, so no port on this machine is touched.
+    $codes = @{ 20128 = 200; 4000 = 0; 4096 = 401; 3000 = 200 }
+    $status = @(Get-AutoOSServiceStatus -Probe { param($port, $path) $codes[$port] })
+    $by = @{}; foreach ($s in $status) { $by[$s.id] = $s }
+    foreach ($id in 'omniroute', 'litellm', 'opencode', 'openhands') {
+        Assert-True ($by.ContainsKey($id)) "missing service $id"
+    }
+    Assert-True ($by.omniroute.up -and -not $by.litellm.up -and $by.opencode.up -and $by.openhands.up) 'up flags are wrong'
+    Assert-True ($by.litellm.bind -eq '127.0.0.1') 'litellm must be loopback'
+    Assert-True (@($by.omniroute.actions) -contains 'apply-dry-run') 'no apply dry run'
+    $bad = Get-AutoOSServiceActionResult -Body ([pscustomobject]@{ action = 'rm -rf /' }) -ForceDryRun $false
+    Assert-True ($bad.Code -eq 400) "unknown action answered $($bad.Code)"
+    $dry = Get-AutoOSServiceActionResult -Body ([pscustomobject]@{ action = 'apply-dry-run' }) -ForceDryRun $true
+    Assert-True ($dry.Code -eq 202) "dry-run action refused under -DryRun: $($dry.Code)"
+    $live = Get-AutoOSServiceActionResult -Body ([pscustomobject]@{ action = 'start-openhands' }) -ForceDryRun $true
+    Assert-True ($live.Code -eq 409) "live action allowed under -DryRun: $($live.Code)"
+}
+
+Test-Case 'opencode.jsonc is valid JSON once comments are stripped' {
+    # Every client loads this file, and one unbalanced brace makes ALL of them
+    # fall back to defaults while the suite's other assertions (which read it as
+    # text) stay green. Measured 2026-09-23: a provider block was added without
+    # its closing brace and nothing failed.
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $parsed = $null
+    $err = $null
+    try { $parsed = $stripped | ConvertFrom-Json } catch { $err = $_.Exception.Message }
+    Assert-True ($null -ne $parsed) "opencode.jsonc does not parse: $err"
+    Assert-True (-not [string]::IsNullOrWhiteSpace($parsed.model)) 'no default model'
+    Assert-True ($null -ne $parsed.providers.omniroute) 'omniroute provider missing'
+}
+
+Test-Case 'the router declarations do not drift from each other' {
+    # tools/audit-router.py --offline compares combos.json against
+    # opencode.jsonc, both Zed writers and the OpenHands tier profiles, and
+    # rejects any combo-bypassing direct ref. Live probes are the operator
+    # path; CI stays deterministic.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $out = & $py.Source (Join-Path $Root 'tools\audit-router.py') --offline 2>&1 | Out-String
+    Assert-Equal $LASTEXITCODE 0 "audit-router drift: $out"
+}
+
+Test-Case "audit-router's unit tests pass (registry-sourced, task A5c)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_audit_router_registry.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-True ($rc -eq 0) "audit-router registry unit tests failed: $out"
+}
+
+Test-Case 'the IDE model lists match catalog/ide-models.json (sync-ide-models --check)' {
+    # catalog/ide-models.json is rendered from catalog/ai-registry.json
+    # (python3 tools/registry.py render ide --out catalog/ide-models.json),
+    # not the single source. opencode.jsonc and the OpenHands tier spec +
+    # config.toml carry generated copies; --check exits 1 with a diff when
+    # one drifted (fix: edit ai-registry.json, re-render, then python3
+    # tools/sync-ide-models.py).
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # A drift report goes to stderr; keep Windows PowerShell 5.1 from turning
+    # it into a terminating error and judge by the exit code instead.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tools\sync-ide-models.py') --check 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-True ($rc -eq 0) "sync-ide-models drift: $out"
+}
+
+Test-Case "the IDE model sync tool's unit tests pass (sync-ide-models)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr (PS 5.1 + Stop would throw on it).
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_sync_ide_models.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "sync-ide-models unit tests failed: $out"
+}
+
+Test-Case "registry_loader's unit tests pass (shared by-path loader, REVFIX)" {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr (PS 5.1 + Stop would throw on it).
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_registry_loader.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "registry_loader unit tests failed: $out"
+}
+
+Test-Case 'apply sets the resilience deadline and the fast-skip breaker' {
+    # A 15s requestQueue.maxWaitMs kills every spark request mid-think and the
+    # chain then reports a different leg's error (see docs/verification.md).
+    # The breaker threshold must stay low so the free promo leg is skipped
+    # after two failures instead of being retried on every request.
+    foreach ($f in @('configuration\omniroute\apply.ps1')) {
+        $text = Get-Content (Join-Path $Root $f) -Raw
+        Assert-True ($text -match 'maxWaitMs') "$f never sets maxWaitMs"
+        Assert-True ($text -match '180000') "$f does not use the reasoning-safe value"
+        Assert-True ($text -match 'providerBreaker') "$f never sets the fast-skip breaker"
+        Assert-True ($text -match 'failureThreshold\s*=\s*2') "$f does not use the 2-failure threshold"
+    }
+}
+
+Test-Case 'combos.json carries no phantom legs (probe-falsified refs stay out)' {
+    # Regression gate for the 2026-09-22 finding: legs that simulate resolves
+    # but the gateway 400s on at chat time ("not available in the active live
+    # catalog"). Pin the three falsified refs so they cannot come back.
+    $banned = @(
+        'openrouter/gemini-3.8-flash',
+        'deepseek/deepseek-v4.1-flash',
+        'gemini/gemini-3.7-flash'
+    )
+    $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
+        ConvertFrom-Json).combos
+    $bad = @()
+    foreach ($c in $combos) {
+        foreach ($m in $c.models) { if ($m -in $banned) { $bad += "$($c.name):$m" } }
+    }
+    Assert-Equal ($bad -join ',') ''
+}
+
+Test-Case 'combos.json is valid, named and provider/model shaped' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $combos = (Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 |
+        ConvertFrom-Json).combos
+    $names = @($combos | ForEach-Object { $_.name })
+    # Which routes are servable (a combo), which fail closed (omitted) and which
+    # are legless by design is provider state: derived from the registry render
+    # (tools/registry.py), never re-pinned as a literal list here. The ORDER of
+    # the render is its own sorted convention; the human-approved pins in this
+    # file are the per-combo context labels further down. (Lesson PROVPIN
+    # 2026-09-27: the MUSEAPI meta_api flip made spark/t1-paid servable and a
+    # pinned list went stale in both suites.)
+    $derive = @'
+import json, os, sys
+root = sys.argv[1]
+sys.path.insert(0, os.path.join(root, 'tools'))
+import registry
+reg = json.load(open(os.path.join(root, 'catalog', 'ai-registry.json'), encoding='utf-8'))
+rendered = registry.render_omniroute(reg)
+routes = reg['routes']
+legless = sorted(rid for rid, r in routes.items()
+                 if isinstance(r, dict) and not (r.get('legs') or []))
+print('%s|%s|%s' % (
+    ','.join(c['name'] for c in rendered['combos']),
+    ','.join(rendered.get('omitted') or []),
+    ','.join(legless)))
+'@
+    $derivePath = Join-Path ([IO.Path]::GetTempPath()) "autoos-combos-derive-$PID.py"
+    [IO.File]::WriteAllText($derivePath, $derive)
+    try { $derived = & $py.Source $derivePath $Root 2>&1 | Out-String }
+    finally { Remove-Item $derivePath -Force -ErrorAction SilentlyContinue }
+    Assert-True ($LASTEXITCODE -eq 0) "registry render failed: $derived"
+    $parts = $derived.Trim() -split '\|'
+    Assert-Equal ($names -join ',') $parts[0] 'combos.json is not the registry render of servable tiers'
+    $expectedOmitted = @($parts[1] -split ',' | Where-Object { $_ })
+    $leglessRoutes = @($parts[2] -split ',' | Where-Object { $_ })
+    # "retired" is the one home of the ids a rename left behind: apply prunes
+    # them from the store, so a retired id must never also be a current combo.
+    $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
+    Assert-True ($null -ne $doc.PSObject.Properties['retired']) 'combos.json has no "retired" list'
+    $retired = @($doc.retired)
+    Assert-True ($retired.Count -gt 0) 'combos.json "retired" is empty'
+    foreach ($r in $retired) {
+        Assert-True (($r -is [string]) -and $r) "bad retired id: [$r]"
+        Assert-True ($names -notcontains $r) "retired combo id back: $r"
+    }
+    # OR1g: "omitted" is the managed-orphan list - only routes that declared
+    # legs but the render serves none for (orphaned). apply.sh/apply.ps1 prune it,
+    # so it must be disjoint from the current combos and from retired. The
+    # deliberately legless routes (*-paid, auto*) have no gateway combo by
+    # design and are never named here, or apply would delete a live combo a user
+    # or OmniRoute itself named "auto".
+    Assert-True ($null -ne $doc.PSObject.Properties['omitted']) 'combos.json has no "omitted" list'
+    $omitted = @($doc.omitted)
+    Assert-True ($omitted.Count -gt 0) 'combos.json "omitted" is empty'
+    foreach ($o in $omitted) {
+        Assert-True (($o -is [string]) -and $o) "bad omitted id: [$o]"
+        Assert-True ($names -notcontains $o) "omitted id is also a current combo: $o"
+        Assert-True ($retired -notcontains $o) "omitted id is also retired: $o"
+    }
+    foreach ($legless in $leglessRoutes) {
+        Assert-True ($omitted -notcontains $legless) "legless route $legless is omitted"
+    }
+    $contexts = @{
+        # TORDER 2026-10-01 (D-TORDER-1b, CTXFIX, MAINPIN): t1 1M-only (>=600k,
+        # all 1048576, renders 1M); gemini 1M (live 1048576); opus/l2-orchestrator
+        # 1M (antigravity opus 1048576, CTXFIX); t2/t3-clean 1M (deepseek 1M,
+        # CTXFIX); t2/t3 full + free-only 128k clamp (sub-1M allowed, do not raise).
+        'l1-orchestrator' = '1M'
+        'l1-orchestrator-free-only' = '1M'
+        'l1-orchestrator-paid' = '1M'
+        'spark-1.3-contributor' = '1M'
+        'l2-worker' = '128k'
+        'l2-worker-clean' = '128k'; 'l2-worker-free-only' = '128k'; 'l2-orchestrator' = '1M'; 'l3-driver' = '128k'; 'l3-driver-clean' = '128k'; 'l3-driver-free-only' = '128k'; 't4-rag' = '128k'
+        # L1-CLEAN wave 2026-10-05: the -clean routes carry the 128k credit band
+        # legs (registry surfaces declare 128000), so they clamp to 128k.
+        # 2026-10-05 operator: l2-orchestrator is 1M again (agy claude head).
+        # RENDERFIX 2026-10-01: the researcher-tier lane added this route; it is
+        # the t4 tier like t4-rag, so it clamps to its lowest leg (128k).
+        'l2-researcher' = '128k'
+        'gemini-3.8-flash' = '1M'; 'opus-4-6' = '1M'
+        # GLM55 wave 2026-10-05: new opus-5-5 single (antigravity opus, 1M).
+        'opus-5-5' = '1M'
+        # DS1M 2026-09-30: declares 1M - the vendor Models & Pricing page
+        # states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in / 384K
+        # out, so the 128k clamp was stale data (models.deepseek-flash).
+        'deepseek-v4.1-flash' = '1M'
+        # TORDER pinned singles: free :free 128k/256k, credit ovh/vertex.
+        'groq-qwen3.8-27b' = '128k'; 'hf-glm-5.2' = '128k'; 'hf-qwen3.8-27b' = '128k'
+        'or-nemotron-3-super-free' = '256k'
+        'or-north-mini-code-free' = '256k'; 'or-laguna-s-2.1-free' = '256k'
+        'ovh-qwen3.8-27b' = '128k'; 'ovh-gpt-oss-120b' = '128k'
+        'vertex-gemini-3.8-flash' = '1M'
+    }
+    foreach ($c in $combos) {
+        Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
+        foreach ($m in $c.models) {
+            Assert-True ($m -match '^[A-Za-z0-9@._/:-]+$') "$($c.name): bad ref '$m'"
+        }
+        Assert-Equal $c.context $contexts[$c.name]
+    }
+    # Every route the render fails closed is named in "omitted" and is never a
+    # combo (l1-orchestrator-clean since DSMAX 2026-09-27; deepseek-v4.1-flash
+    # left that set on DSBACK 2026-09-28 when the operator top-up made
+    # providers.deepseek available again, and whatever flips next —
+    # derived, so there is no per-route list to keep current here).
+    foreach ($gone in $expectedOmitted) {
+        Assert-True ($names -notcontains $gone) "$gone should be omitted, not a combo"
+        Assert-True ($omitted -contains $gone) "$gone missing from omitted"
+    }
+    # Every route the render serves is a combo and never in "omitted".
+    foreach ($kept in ($parts[0] -split ',' | Where-Object { $_ })) {
+        Assert-True ($omitted -notcontains $kept) "$kept missing from combos"
+    }
+    # *-clean = paid legs only: no free pool may train on private prompts.
+    # Free legs = contributor-free, groq/cerebras/sambanova hosts, gemini
+    # free tier, mistral-code + qwen free pools. -contributor (trains by
+    # contract) is banned in l2-worker-clean/l3-driver-clean
+    # (l1-orchestrator-clean is omitted, see above). Direct-key legs
+    # (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
+    # on the same key, so they stay. L1-CLEAN 2026-10-05: ovhcloud is a
+    # metered credit-tier provider (providers.ovhcloud tier credit), not a
+    # free pool, so its Qwen leg is exempted from the /qwen free-pool ban.
+    $freeRe = 'contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|(?<!ovh(cloud)?)/qwen'
+    $noTrainRe = '-contributor$'
+    foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
+        $free = @($c.models | Where-Object { $_ -match $freeRe })
+        Assert-Equal ($free -join ',') '' "$($c.name) carries free legs: $($free -join ',')"
+        $train = @($c.models | Where-Object { $_ -match $noTrainRe })
+        Assert-Equal ($train -join ',') '' "$($c.name) carries training legs: $($train -join ',')"
+    }
+    # *-free-only = zero paid/keyed legs: only free pools may appear (the
+    # zen contributor-free promo counts as free; other opencode-zen legs bill).
+    # TORDER-OR: openrouter :free ids are $0 free (model tier override) and ARE
+    # allowed in free-only; paid openrouter (no :free suffix) is banned.
+    $paidRe = 'cheaperinference|openrouter/(?!.*:free$)|^(deepseek|mistral)/|opencode-zen/(?!.*-free)'
+    foreach ($c in ($combos | Where-Object { $_.name -like '*-free-only' })) {
+        $paid = @($c.models | Where-Object { $_ -match $paidRe })
+        Assert-Equal ($paid -join ',') '' "$($c.name) carries paid legs: $($paid -join ',')"
+    }
+    # Plain muse-spark-1.3 is BLOCKED (operator 2026-09-21): no combo may carry a
+    # plain spark leg. The contributor variant is a different model id, and it is
+    # what the meta_api legs serve (MUSEAPI 2026-09-27).
+    $allLegs = @($combos | ForEach-Object { $_.models }) -join ' '
+    Assert-True ($allLegs -notmatch 'muse-spark-1\.3(?!-contributor)') 'plain muse-spark-1.3 leg present'
+}
+
+# ─── Fleet rule D-852: the stand-in directory every gate case runs inside ──────
+# A D-825 case that CLEARS a gate is not finished at the gate. The tool it names
+# goes on to exec docker/systemctl/ssh off PATH and to dial a gateway URL, and one
+# such case restarted the live omnigraph-server on the host on 2026-10-09 while
+# still printing a green tick. So every case that spawns a run does it with this
+# directory first on PATH — one script per binary that appends the call to
+# calls.log and exits 0 — and with every gateway/graph URL env var pointed at a
+# discard port. The bash twin is gate_stubs_make in tests/run-tests.sh; the guard
+# cases at the end of the D-825 groups test the shadow itself, not the convention.
+$GateUrlSink = 'http://127.0.0.1:9'          # discard port: nothing listens
+$GateStubUrlVars = @('AUTOOS_OMNIROUTE_URL', 'OMNIROUTE_BASE_URL',
+                     'AUTOOS_OMNIGRAPH_URL', 'OMNIGRAPH_URL', 'OMNI_S3')
+$GateStubAllBins = @('docker', 'curl', 'systemctl', 'ssh', 'omniroute', 'npx', 'node')
+# The host-only set, for a case that must keep a real curl against its own loopback
+# stand-in (a curl stand-in there would answer the request the case needs to fail).
+$GateStubHostBins = @('docker', 'systemctl', 'ssh', 'npx', 'node')
+
+function New-GateStubDir {
+    param([string[]]$Bins = $GateStubAllBins, [string]$Dir = '')
+    $root = if ($Dir) { $Dir } else {
+        Join-Path ([IO.Path]::GetTempPath()) ('gate_stub_' + [Guid]::NewGuid().ToString('N'))
+    }
+    $bin = Join-Path $root 'bin'
+    $null = New-Item -ItemType Directory -Path $bin
+    $log = Join-Path $bin 'calls.log'
+    [IO.File]::WriteAllText($log, '')
+    $isWin = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    foreach ($b in $Bins) {
+        if ($isWin) {
+            # cmd.exe runs the .cmd twin; %~dp0 keeps the log path out of the body.
+            $body = @('@echo off', ('>>"%~dp0calls.log" echo ' + $b + ' %*'), 'exit /b 0')
+            $text = (($body -join "`n") -replace "`r", '') -replace "`n", "`r`n"
+            [IO.File]::WriteAllText((Join-Path $bin ($b + '.cmd')), $text)
+        } else {
+            $body = @('#!/bin/sh',
+                      ('printf "%s %s\n" "' + $b + '" "$*" >>"' + $log + '"'), 'exit 0')
+            $text = ($body -join "`n") -replace "`r", ''
+            $path = Join-Path $bin $b
+            [IO.File]::WriteAllText($path, $text)
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = 'Continue'
+            & chmod '+x' $path 2>$null
+            $ErrorActionPreference = $prevEap
+        }
+    }
+    [pscustomobject]@{ Dir = $root; Bin = $bin; Log = $log; Bins = @($Bins) }
+}
+
+function Get-GateStubEnv {
+    # The environment a spawned run gets: stand-ins first on PATH, every gateway and
+    # graph URL at the discard port. -Extra wins — that is how a case points a run at
+    # its own loopback stand-in — but a host name never reaches these vars.
+    param($Stub, [hashtable]$Extra = @{})
+    $values = @{}
+    $values['PATH'] = $Stub.Bin + [IO.Path]::PathSeparator +
+                      [Environment]::GetEnvironmentVariable('PATH')
+    foreach ($k in $GateStubUrlVars) { $values[$k] = $GateUrlSink }
+    foreach ($k in @($Extra.Keys)) { $values[$k] = $Extra[$k] }
+    $values
+}
+
+function Set-GateStubEnv {
+    param([hashtable]$Values)
+    foreach ($k in @($Values.Keys)) { [Environment]::SetEnvironmentVariable($k, $Values[$k]) }
+}
+
+function Get-GateStubCalls {
+    param($Stub)
+    if (Test-Path -LiteralPath $Stub.Log) { return [IO.File]::ReadAllText($Stub.Log) }
+    ''
+}
+
+function Test-GateStubRecord {
+    # True when the record names a call to $Bin — the proof a cleared gate stopped
+    # at the stand-in. An empty record proves the opposite: nothing was execed.
+    param([string]$Calls, [string]$Bin)
+    @(($Calls -split "`r?`n") | Where-Object { $_ -like ($Bin + ' *') }).Count -gt 0
+}
+
+function Remove-GateStubDir {
+    param($Stub)
+    if ($Stub) {
+        Remove-Item -LiteralPath $Stub.Dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply --dry-run registers nothing and starts nothing' {
+    # The suite runs $ErrorActionPreference = 'Stop', but the omniroute CLI
+    # writes a harmless warning to stderr on every call, which 5.1 promotes
+    # to a terminating error. So the -DryRun call runs in a child powershell:
+    # a stray preference or a non-zero exit can never abort the suite, and
+    # only the captured text counts. combos.json must be byte-identical after.
+    if (-not (Get-Command omniroute -ErrorAction SilentlyContinue)) {
+        Skip 'omniroute CLI not installed — dry-run announcements need it'; return
+    }
+    $combosPath = Join-Path $Root 'configuration\omniroute\combos.json'
+    $before = Get-Content $combosPath -Raw -Encoding utf8
+    # Hermetic: a dead gateway port and no key file - the dry run must never
+    # read the live gateway or the machine's keys (the child inherits both).
+    # D-852: the host-only stand-ins shadow the container tools too; the real
+    # omniroute CLI stays on PATH because the case is about what it announces.
+    $stub = New-GateStubDir -Bins $GateStubHostBins
+    $oldUrl = $env:AUTOOS_OMNIROUTE_URL; $oldKeys = $env:AUTOOS_KEYS_FILE; $oldPath = $env:PATH
+    $env:AUTOOS_OMNIROUTE_URL = 'http://127.0.0.1:1'
+    $env:AUTOOS_KEYS_FILE = Join-Path ([IO.Path]::GetTempPath()) 'autoos-no-such-api-keys.yml'
+    $env:PATH = $stub.Bin + [IO.Path]::PathSeparator + $oldPath
+    try {
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File `
+            (Join-Path $Root 'configuration\omniroute\apply.ps1') -DryRun 2>&1 | Out-String
+    } finally {
+        $env:AUTOOS_OMNIROUTE_URL = $oldUrl; $env:AUTOOS_KEYS_FILE = $oldKeys; $env:PATH = $oldPath
+        $reached = Get-GateStubCalls $stub
+        Remove-GateStubDir $stub
+    }
+    Assert-True ($out -match 'dry run stops here|dry run continues|would create|would register|already registered') 'dry run announced nothing'
+    Assert-Equal $reached '' ("the dry run execed a host binary: $reached")
+    Assert-Equal (Get-Content $combosPath -Raw -Encoding utf8) $before
+}
+
+# combos.json "retired" is the one list of ids a rename or removal left in the
+# gateway store (9 orphans were deleted by hand on 2026-09-25); apply prunes
+# those and nothing else. Mirror of the bash suite's _prune_sandbox: a
+# stand-in omniroute first on PATH (omniroute.cmd on Windows, a sh script
+# elsewhere) that answers `combo list` from list.txt and logs every other call
+# to calls.log, plus a loopback stand-in gateway serving a static /api/health.
+# Nothing here reaches the live gateway or its store.
+function New-AutoOSPruneSandbox {
+    $d = Join-Path ([IO.Path]::GetTempPath()) ('aos_prune_' + [Guid]::NewGuid().ToString('N'))
+    $bin = Join-Path $d 'bin'
+    $api = Join-Path (Join-Path $d 'gw') 'api'
+    $null = New-Item -ItemType Directory -Path $bin
+    $null = New-Item -ItemType Directory -Path $api
+    [IO.File]::WriteAllText((Join-Path $api 'health'), "ok`n")
+    [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "# no keys: every provider is skipped`n")
+    [IO.File]::WriteAllText((Join-Path $d 'calls.log'), '')
+    # D-852: these runs carry a judge GO (see Invoke-AutoOSPruneApply), so a cleared
+    # gate hands them to apply.ps1's live path. The host-only stand-ins shadow
+    # docker/systemctl/ssh/npx/node — host-only, because `combo list` and the health
+    # probe above are the real thing this battery is testing. Lives under $d so the
+    # case's own cleanup removes it.
+    $null = New-GateStubDir -Bins $GateStubHostBins -Dir (Join-Path $d 'hstub')
+    # The live connection list as `omniroute providers list` prints it (hex id,
+    # name). Empty means the store holds nothing; a test writes a row to make
+    # apply take its "already registered" branch.
+    [IO.File]::WriteAllText((Join-Path $d 'providers.txt'), '')
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        $cmd = @'
+@echo off
+if "%~1 %~2"=="combo list" goto list
+if "%~1 %~2"=="providers list" goto plist
+>>"%~dp0..\calls.log" echo %*
+exit /b 0
+:list
+>>"%~dp0..\listed" echo %*
+type "%~dp0..\list.txt"
+exit /b 0
+:plist
+type "%~dp0..\providers.txt"
+exit /b 0
+'@
+        [IO.File]::WriteAllText((Join-Path $bin 'omniroute.cmd'), (($cmd -replace "`r", '') -replace "`n", "`r`n"))
+    } else {
+        $sh = @'
+#!/bin/sh
+d="$(dirname "$0")/.."
+if [ "$1 $2" = "combo list" ]; then
+    echo "$*" >>"$d/listed"
+    cat "$d/list.txt"
+    exit 0
+fi
+if [ "$1 $2" = "providers list" ]; then
+    cat "$d/providers.txt"
+    exit 0
+fi
+# `omniroute models <provider>` is what makes the gateway enumerate a freshly
+# registered provider's models into /v1/models. The stand-in catalog is
+# gw/v1/models (served by the static gateway): its baseline is catalog.base
+# plus provider_models.tsv's rows for every provider enumerated so far. Nothing
+# is served until a test writes catalog.base, so every other test here keeps the
+# old "no catalog to validate against" behaviour.
+if [ "$1" = "models" ]; then
+    echo "$*" >>"$d/calls.log"
+    [ -n "$2" ] && echo "$2" >>"$d/enumerated"
+    [ -f "$d/gw/v1/models" ] || exit 0
+    python3 - "$d" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+ids = []
+base = os.path.join(d, "catalog.base")
+if os.path.exists(base):
+    ids += [l.strip() for l in open(base, encoding="utf-8") if l.strip()]
+enum = set()
+seen = os.path.join(d, "enumerated")
+if os.path.exists(seen):
+    enum = {l.strip() for l in open(seen, encoding="utf-8") if l.strip()}
+table = os.path.join(d, "provider_models.tsv")
+if os.path.exists(table):
+    for line in open(table, encoding="utf-8"):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) == 2 and parts[0] in enum:
+            ids.append(parts[1])
+with open(os.path.join(d, "gw", "v1", "models"), "w", encoding="utf-8") as fh:
+    json.dump({"data": [{"id": i} for i in dict.fromkeys(ids)]}, fh)
+PY
+    exit 0
+fi
+echo "$*" >>"$d/calls.log"
+exit 0
+'@
+        $fake = Join-Path $bin 'omniroute'
+        [IO.File]::WriteAllText($fake, ($sh -replace "`r", ''))
+        & chmod +x $fake
+    }
+    $d
+}
+
+# The store as `omniroute combo list` prints it: ANSI-coloured icon and
+# status, the name padded to 25, the strategy column in brackets.
+function Set-AutoOSPruneList {
+    param([string]$Dir, [string[]]$Names)
+    $esc = [char]27
+    $lines = @('', ('{0}[1mCombos{0}[0m' -f $esc))
+    foreach ($n in $Names) {
+        $lines += ('  {0}[2m{1}{0}[0m {2} [{3}] {0}[32menabled{0}[0m' -f $esc, [char]0x25CB, $n.PadRight(25), 'priority'.PadRight(12))
+    }
+    [IO.File]::WriteAllText((Join-Path $Dir 'list.txt'), (($lines -join "`n") + "`n"))
+}
+
+# One managed orphan, read from combos.json's own "omitted" list. Derived rather than
+# pinned, exactly as the bash twin's _omitted_combo does it: which route is orphaned
+# right now is registry data, and a name written into a test goes stale the moment a
+# re-cut gates a leg again (AO-DENYLEGS D2 did that to the l1-orchestrator-clean pin
+# this replaces — the Windows suite still carried it and pruned nothing).
+function Get-AutoOSOmittedCombo {
+    $doc = [IO.File]::ReadAllText(
+        [IO.Path]::Combine($Root, 'configuration', 'omniroute', 'combos.json')) | ConvertFrom-Json
+    if (-not $doc.PSObject.Properties['omitted']) { throw 'combos.json holds no omitted list to prune from' }
+    $orphan = @($doc.omitted)[0]
+    if (-not $orphan) { throw 'combos.json: the omitted list holds no combo to prune' }
+    $orphan
+}
+
+# apply.ps1 in a child of the shell running the suite, with the stand-ins
+# first on PATH. A child, because the suite runs under Stop and 5.1 promotes
+# any native stderr to a terminating error; only the captured text counts.
+function Invoke-AutoOSPruneApply {
+    param([string]$Dir, [string]$Gateway, [switch]$DryRun)
+    $ErrorActionPreference = 'Continue'
+    $saved = @{}
+    foreach ($k in @('PATH', 'AUTOOS_OMNIROUTE_URL', 'OMNIROUTE_BASE_URL', 'AUTOOS_KEYS_FILE',
+                     'AUTOOS_ROUTING_DIR', 'AUTOOS_WORKERS_DIR',
+                     'AUTOOS_OMNIGRAPH_URL', 'OMNIGRAPH_URL', 'OMNI_S3')) {
+        $saved[$k] = [Environment]::GetEnvironmentVariable($k)
+    }
+    try {
+        # The case's own stand-in CLI first (it answers `combo list` and marks the
+        # store), then the D-852 host stand-ins, and nothing after them is reachable.
+        $path = (Join-Path $Dir 'bin') + [IO.Path]::PathSeparator +
+                (Join-Path (Join-Path $Dir 'hstub') 'bin') + [IO.Path]::PathSeparator + $saved['PATH']
+        [Environment]::SetEnvironmentVariable('PATH', $path)
+        [Environment]::SetEnvironmentVariable('AUTOOS_OMNIROUTE_URL', $Gateway)
+        [Environment]::SetEnvironmentVariable('OMNIROUTE_BASE_URL', $Gateway)
+        foreach ($k in @('AUTOOS_OMNIGRAPH_URL', 'OMNIGRAPH_URL', 'OMNI_S3')) {
+            [Environment]::SetEnvironmentVariable($k, $GateUrlSink)
+        }
+        [Environment]::SetEnvironmentVariable('AUTOOS_KEYS_FILE', (Join-Path $Dir 'keys.yml'))
+        $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+            [IO.Path]::Combine($Root, 'configuration', 'omniroute', 'apply.ps1'))
+        if ($DryRun) {
+            $argList += '-DryRun'
+        } else {
+            # Fleet rule D-825: a run that is not -DryRun converges the live gateway, so
+            # the stand-in cases carry a judge GO naming this checkout's HEAD, exactly as
+            # the bash twins in tests/linux/34-ai-services.sh do. The ref is proved against
+            # the checked-in artefact tree, never a host's own ~/code/routing.
+            [Environment]::SetEnvironmentVariable('AUTOOS_ROUTING_DIR',
+                (Join-Path $Root 'tests/fixtures/go-gate/routing'))
+            [Environment]::SetEnvironmentVariable('AUTOOS_WORKERS_DIR',
+                (Join-Path $Root 'tests/fixtures/go-gate/worker-tree/workers'))
+            $goSha = ( (& git -C $Root rev-parse HEAD 2>$null) | Select-Object -First 1 )
+            if ($goSha) { $goSha = "$goSha".Trim() }
+            $argList += @('-Go', 'D-825', '-GoSha', $goSha)
+        }
+        & (Get-Process -Id $PID).Path @argList 2>&1 | Out-String
+    } finally {
+        foreach ($k in @($saved.Keys)) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) }
+    }
+}
+
+function Get-AutoOSPruneCalls {
+    param([string]$Dir)
+    @(Get-Content -LiteralPath (Join-Path $Dir 'calls.log') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+# D-852: the host stand-in record for a prune run. Such a run clears the D-825 gate
+# and goes on with the live path, but it has no business execing docker, systemctl or
+# ssh — a non-empty record here names the binary it reached.
+function Get-AutoOSPruneHostCalls {
+    param([string]$Dir)
+    $log = Join-Path (Join-Path (Join-Path $Dir 'hstub') 'bin') 'calls.log'
+    if (-not (Test-Path -LiteralPath $log)) { return '' }
+    [IO.File]::ReadAllText($log)
+}
+
+# The stand-in gateway, proven to answer before apply runs: a gateway that
+# looked down would make a real run wait two minutes for a start instead.
+function Start-AutoOSPruneGateway {
+    param([string]$Dir)
+    $srv = Start-AutoOSTestHttpServer -Directory (Join-Path $Dir 'gw')
+    $ok = $false
+    try {
+        $ok = (Invoke-WebRequest -Uri "http://127.0.0.1:$($srv.Port)/api/health" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200
+    } catch { $ok = $false }
+    if (-not $ok) {
+        Stop-AutoOSTestHttpServer $srv
+        throw 'the stand-in gateway does not answer /api/health'
+    }
+    $srv
+}
+
+Test-Case 'apply prune: deletes only the retired combos the store holds, never a user-made one' {
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        $srv = Start-AutoOSPruneGateway $d
+        Set-AutoOSPruneList $d @('tier2', 'l2-worker', 'my-own-combo')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') 'combo delete tier2 --yes'
+        Assert-True (@($calls | Where-Object { $_ -like '*my-own-combo*' }).Count -eq 0) 'the user-made combo was touched'
+        Assert-True ($out -like '*  - tier2: retired, deleted*') "no deletion line in: $out"
+        Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply prune: --dry-run names the retired combo and deletes nothing' {
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        $srv = Start-AutoOSPruneGateway $d
+        Set-AutoOSPruneList $d @('tier2', 'l2-worker', 'my-own-combo')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
+        Assert-True ($out -like '*  - tier2: retired, would delete*') "no would-delete line in: $out"
+        Assert-True ($out -notlike '*retired, deleted*') 'the dry run claims a deletion'
+        Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply prune: a second run finds no retired or omitted combos and deletes nothing' {
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        $srv = Start-AutoOSPruneGateway $d
+        Set-AutoOSPruneList $d @('l2-worker', 'my-own-combo')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') ''
+        Assert-True ($out -like '*  = no retired or omitted combos in the store*') "no clean-store line in: $out"
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# OR1g: "omitted" lists only the ORPHANED routes (declared legs, none servable).
+# A live combo with such an id is a managed orphan apply prunes; a deliberately
+# legless route (*-paid, auto*) is never in that list, so a live "auto" or
+# "l2-worker-paid" is never touched or even named.
+Test-Case 'apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one' {
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        $srv = Start-AutoOSPruneGateway $d
+        # The orphan comes from combos.json itself (see Get-AutoOSOmittedCombo): the
+        # rule is what is asserted, the id is registry data of the moment.
+        $orphan = Get-AutoOSOmittedCombo
+        Set-AutoOSPruneList $d @($orphan, 'l2-worker', 'my-own-combo')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo delete*' }) -join ' | ') "combo delete $orphan --yes"
+        Assert-True (@($calls | Where-Object { $_ -like '*my-own-combo*' }).Count -eq 0) 'the user-made combo was touched'
+        Assert-True ($out -like "*  - ${orphan}: omitted, deleted*") "no omitted-deletion line in: $out"
+        Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
+        Assert-Equal (Get-AutoOSPruneHostCalls $d) '' 'the prune run execed a host binary'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply prune: --dry-run names the omitted combo and never names a live "auto" or "l2-worker-paid"' {
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        $srv = Start-AutoOSPruneGateway $d
+        # The orphan is read from combos.json (see Get-AutoOSOmittedCombo), so this
+        # names whatever is orphaned right now, not whatever was orphaned when the
+        # case was written.
+        $orphan = Get-AutoOSOmittedCombo
+        Set-AutoOSPruneList $d @($orphan, 'auto', 'l2-worker-paid', 'my-own-combo')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)" -DryRun
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-True (Test-Path -LiteralPath (Join-Path $d 'listed')) "the store was never listed: $out"
+        Assert-Equal (@($calls | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
+        Assert-True ($out -like "*  - ${orphan}: omitted, would delete*") "no omitted would-delete line in: $out"
+        Assert-True ($out -notlike '*omitted, deleted*') 'the dry run claims a deletion'
+        Assert-True ($out -notlike '*- auto:*') 'a live "auto" combo was named'
+        Assert-True ($out -notlike '*- l2-worker-paid:*') 'a live "l2-worker-paid" combo was named'
+        Assert-True ($out -notlike '*my-own-combo*') 'the user-made combo was named'
+        Assert-Equal (Get-AutoOSPruneHostCalls $d) '' 'the prune dry run execed a host binary'
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# A down gateway must not be listed: the real CLI then falls back to reading
+# the store file directly, which is how a test would reach the live store.
+Test-Case 'apply prune: a down gateway is never listed and nothing is pruned' {
+    $d = New-AutoOSPruneSandbox
+    try {
+        Set-AutoOSPruneList $d @('tier2')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway 'http://127.0.0.1:1' -DryRun
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $d 'listed'))) 'a down gateway was listed'
+        Assert-Equal (@(Get-AutoOSPruneCalls $d | Where-Object { $_ -like 'combo *' }) -join ' | ') ''
+        Assert-True ($out -like '*Prune:*gateway down - the store is not read, nothing pruned*') "out: $out"
+    } finally {
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply registers meta_api from the shared meta key and stays idempotent' {
+    # MUSEAPI step 4, the mirror of the bash suite's two svc tests. providers
+    # .meta_api carries key_name, so its credential is the meta entry the user
+    # already has — reading a meta_api entry nobody writes means the connection
+    # is never registered. And the run after the store holds it must say
+    # "already registered" instead of adding a second connection.
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        [IO.File]::WriteAllText((Join-Path $d 'keys.yml'), "meta: not-a-real-key-123`n")
+        Set-AutoOSPruneList $d @('l2-worker')
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway 'http://127.0.0.1:1' -DryRun
+        Assert-True ($out -like '*  - meta-api : would register (key from meta)*') "plan: $out"
+        Assert-True ($out -notlike '*meta-api : no key in api-keys.yml*') 'read a meta_api key instead'
+
+        $srv = Start-AutoOSPruneGateway $d
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        Assert-True ($out -like '*  + meta-api registered*') "first run: $out"
+        $adds = @(Get-AutoOSPruneCalls $d | Where-Object { $_ -like 'providers add meta-api*' })
+        Assert-True (@($adds).Count -eq 1) "add calls: $($adds -join ' | ')"
+        Assert-True ($adds[0] -like '*--credential-env AUTOOS_KEY_META*') "credential env: $($adds[0])"
+
+        # Second run: the store now holds the connection, the log starts empty.
+        Stop-AutoOSTestHttpServer $srv
+        $srv = $null
+        [IO.File]::WriteAllText((Join-Path $d 'providers.txt'), "  a1b2c3d4 meta-api`n")
+        [IO.File]::WriteAllText((Join-Path $d 'calls.log'), '')
+        $srv = Start-AutoOSPruneGateway $d
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        Assert-True ($out -like '*  = meta-api already registered*') "second run: $out"
+        Assert-Equal (@(Get-AutoOSPruneCalls $d | Where-Object { $_ -like 'providers add meta-api*' }) -join '') ''
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# L0 2026-09-27T19:07:39Z, free-ai/qwen7b on a fresh machine: the leg appeared
+# in l3-driver-free-only only on the SECOND apply run, because the first read
+# /v1/models before the gateway had enumerated the connection it had just added
+# and dropped the ref as "catalog does not know". The order that fixes it is
+# register -> refresh (omniroute models <provider>) -> read -> combos.
+# Behavioral twin of the bash suite's "apply: one run registers a provider,
+# refreshes the catalog…": the stand-in CLI's `models` branch is POSIX (a cmd
+# file cannot rebuild JSON without a python dependency), so Windows skips it and
+# the next case pins the order in the script text instead — on every platform.
+Test-Case 'apply.ps1: one run registers a provider, refreshes the catalog, and writes its leg into the combos' {
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        Skip 'the stand-in CLI models branch is POSIX; the order is asserted in the script text'
+        return
+    }
+    $d = New-AutoOSPruneSandbox
+    $srv = $null
+    try {
+        # apply.ps1 reads /v1/models only when an omniroute client key exists —
+        # without it every combo is written unvalidated and this proves nothing.
+        [IO.File]::WriteAllText((Join-Path $d 'keys.yml'),
+            "free_ai: not-a-real-key-123`nomniroute: not-a-real-client-key`n")
+        $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw |
+            ConvertFrom-Json
+        $refs = @($doc.combos.models) | Sort-Object -Unique
+        $fresh = @($refs | Where-Object { $_ -like 'free-ai/*' })
+        $base = @($refs | Where-Object { $fresh -notcontains $_ })
+        $null = New-Item -ItemType Directory -Path (Join-Path $d 'gw\v1')
+        [IO.File]::WriteAllLines((Join-Path $d 'catalog.base'), $base)
+        [IO.File]::WriteAllLines((Join-Path $d 'provider_models.tsv'),
+            @($fresh | ForEach-Object { "free-ai`t$_" }))
+        [IO.File]::WriteAllText((Join-Path $d 'gw\v1\models'),
+            (@{ data = @($base | ForEach-Object { @{ id = $_ } }) } | ConvertTo-Json -Depth 5 -Compress))
+        Set-AutoOSPruneList $d @()
+        $srv = Start-AutoOSPruneGateway $d
+        $out = Invoke-AutoOSPruneApply -Dir $d -Gateway "http://127.0.0.1:$($srv.Port)"
+        $calls = @(Get-AutoOSPruneCalls $d)
+        Assert-True ($out -like '*  + free-ai registered*') "register step: $out"
+        Assert-True ($out -like '*  + free-ai enumerated*') "refresh step: $out"
+        Assert-True ($out -notlike '*catalog does not know free-ai*') "leg dropped: $out"
+        Assert-True ($out -notlike '*could not read /v1/models*') "catalog never read: $out"
+        # The whole combo read from the file apply reads, not a hardcoded leg
+        # list: FREEKEYS-2 put scaleway's and nebius' free grants in front of
+        # free-ai's stopgap, so the old single-leg expectation pinned one tier's
+        # pre-FREEKEYS legs. Fails if ANY leg goes missing, not only if free-ai does.
+        $want = @($doc.combos | Where-Object { $_.name -eq 'l3-driver-free-only' })[0]
+        $expect = 'combo create l3-driver-free-only --strategy {0} --models {1}' -f `
+            $want.strategy, ($want.models -join ',')
+        Assert-Equal (@($calls | Where-Object { $_ -eq $expect }).Count) 1 `
+            "first-run combos: $($calls -join ' | ')"
+        Assert-Equal (@($calls | Where-Object {
+            $_ -like 'combo create l3-driver-free-only *' -and
+            $_ -like '*--models *free-ai/qwen7b*' }).Count) 1 `
+            "the new leg in the first combo write: $($calls -join ' | ')"
+        $enumAt = -1; $comboAt = -1
+        for ($i = 0; $i -lt $calls.Count; $i++) {
+            if ($enumAt -lt 0 -and $calls[$i] -eq 'models free-ai') { $enumAt = $i }
+            if ($comboAt -lt 0 -and $calls[$i] -like 'combo create *') { $comboAt = $i }
+        }
+        Assert-True ($enumAt -ge 0 -and $comboAt -gt $enumAt) "order: refresh=$enumAt first-combo=$comboAt"
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'apply scripts refresh the catalog between registering and reading /v1/models' {
+    # The platform-independent half of the L0 fix: whatever the stand-in can or
+    # cannot emulate, neither script may read the catalog before it refreshed it,
+    # nor write a combo before it read it. Each step is one straight block, so a
+    # call site's position in the text is the position in the run. Anchored on the
+    # call sites themselves, not on prose that mentions them.
+    $steps = @(
+        @{ File = 'configuration\omniroute\apply.ps1'
+           Add = "`$addArgs = @('providers', 'add'"; Enum = '& omniroute models $providerId'
+           Read = '$resp = Invoke-RestMethod -Uri "$Gateway/v1/models'
+           Write = '& omniroute combo create $combo.name' },
+        @{ File = 'configuration/omniroute/apply.sh'
+           # MUSEREG 2026-09-28: the connection binds to the provider NODE id ($add_id).
+           Add = 'omni providers add "$add_id"'; Enum = 'omni models "$provider_id"'
+           Read = '"$GATEWAY/v1/models"'; Write = 'omni combo create "$name"' }
+    )
+    foreach ($s in $steps) {
+        $text = Get-Content (Join-Path $Root $s.File) -Raw
+        $add = $text.IndexOf($s.Add, [System.StringComparison]::Ordinal)
+        $enum = $text.IndexOf($s.Enum, [System.StringComparison]::Ordinal)
+        $read = $text.IndexOf($s.Read, [System.StringComparison]::Ordinal)
+        $write = $text.IndexOf($s.Write, [System.StringComparison]::Ordinal)
+        Assert-True ($add -ge 0 -and $enum -ge 0 -and $read -ge 0 -and $write -ge 0) `
+            "a step is missing from $($s.File) (add=$add enum=$enum read=$read write=$write)"
+        Assert-True ($add -lt $enum) "$($s.File) refreshes the catalog before it registers"
+        Assert-True ($enum -lt $read) "$($s.File) reads /v1/models before it refreshes the catalog"
+        Assert-True ($read -lt $write) "$($s.File) writes combos before it reads /v1/models"
+    }
+}
+
+Test-Case 'apply scripts carry the Cloudflare User-Agent fix and stay openrouter-first' {
+    $ps1 = Get-Content (Join-Path $Root 'configuration\omniroute\apply.ps1') -Raw
+    $sh = Get-Content (Join-Path $Root 'configuration\omniroute\apply.sh') -Raw
+    foreach ($text in @($ps1, $sh)) {
+        # The UA quirk now lives once, in the registry; apply.sh only passes
+        # provider_data through. Task A5e deleted catalog/providers.json;
+        # catalog/ai-registry.json is the only provider source.
+        Assert-True ($text -match 'ai-registry\.json') 'does not read catalog/ai-registry.json'
+        Assert-True ($text -match 'provider-specific-data') 'provider-specific-data flag missing'
+        Assert-True ($text -notmatch "'meta'|`"meta:|meta:muse-code") 'muse-code mapping must stay removed (openrouter-first)'
+    }
+    # The Cloudflare UA quirk now has one home: the registry.
+    $reg = (Get-Content (Join-Path $Root 'catalog\ai-registry.json') -Raw | ConvertFrom-Json).providers
+    foreach ($id in @('groq', 'cerebras')) {
+        Assert-Equal $reg.$id.provider_data.customUserAgent 'curl/8.7.1'
+    }
+}
+
+# apply.ps1's registry parse spans three functions after the case-collision fix
+# (FREEWIRE 2026-09-30): dot-sourcing only Get-AutoOSProviderMap leaves it
+# calling an undefined ConvertFrom-AutoOSRegistryJson. Return the whole set, so
+# every test that runs the map function gets a loadable body. Optional consumers
+# (Get-AutoOSProviderDataJson) come along only when present.
+function Get-AutoOSRegistryFunctionSource {
+    param([System.Management.Automation.Language.ScriptBlockAst]$Ast)
+    $texts = foreach ($fn in @('ConvertTo-AutoOSRegistryObject', 'ConvertFrom-AutoOSRegistryJson',
+            'Get-AutoOSProviderMap', 'Get-AutoOSProviderDataJson')) {
+        $d = $Ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq $fn }, $false)
+        if ($null -ne $d) { $d.Extent.Text }
+    }
+    return ($texts -join "`n")
+}
+
+Test-Case 'provider data JSON survives both PowerShell generations' {
+    # 5.1 strips inner double quotes marshalling to a native exe, pwsh 7
+    # passes them through: one literal cannot serve both (groq/cerebras
+    # registration failed exactly this way). The registry holds the UA quirk as
+    # data and Get-AutoOSProviderMap turns it into the plain JSON string the
+    # escaping branch needs; both real functions run here.
+    $tokens = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Root 'configuration\omniroute\apply.ps1'), [ref]$tokens, [ref]$errs)
+    Assert-Equal $errs.Count 0 'apply.ps1 does not parse'
+    $mapDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $n.Name -eq 'Get-AutoOSProviderMap' }, $false)
+    $jsonDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $n.Name -eq 'Get-AutoOSProviderDataJson' }, $false)
+    Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
+    Assert-True ($null -ne $jsonDef) 'Get-AutoOSProviderDataJson missing from apply.ps1'
+    . ([scriptblock]::Create((Get-AutoOSRegistryFunctionSource $ast)))
+    # Task A5e: catalog/providers.json is deleted; the real call site now
+    # points at catalog/ai-registry.json, so this test does too - it exercises
+    # the exact call apply.ps1 itself makes.
+    $registry = Get-AutoOSProviderMap (Join-Path $Root 'catalog\ai-registry.json')
+    $ProviderData = $registry.Data
+    Assert-Equal $registry.Map['google_ai_studio'] 'gemini'
+    # The Map is keyed by the api-keys.yml NAME, so since MUSEAPI step 4 the
+    # name 'meta' is in it - as meta_api's connection. What must stay true is
+    # that no connection called `meta` is registered (the direct provider has
+    # been unregistered, openrouter-first, since 2026-09-23).
+    Assert-Equal $registry.Map['meta'] 'meta-api'
+    Assert-True (@($registry.Map.Values) -notcontains 'meta') 'meta must not be registered (2026-09-23)'
+    Assert-True (-not $registry.Map.Contains('meta_api')) 'meta_api must read the shared meta key, not a phantom one'
+    Assert-True (-not $registry.Map.Contains('omniroute')) 'omniroute is the client key, not a provider'
+    # antigravity and cc exist only in the registry (no catalog/providers.json
+    # entry - it was deleted in task A5e) - switching the source picks them up
+    # for the first time.
+    Assert-Equal $registry.Map['antigravity'] 'antigravity'
+    # cc: provider available:false since 2026-09-27 (operator: never connected
+    # to OmniRoute), so it now lands in Skipped with the dead providers below.
+    # Regression lock for today's registry (2026-09-28, OR1e): cerebras (402/401
+    # credit exhaustion, L0 2026-09-26T11:44Z), groq (L0 2026-09-27), openrouter
+    # (DSMAX 401, 2026-09-27T15:05:54Z) and the zen free pool (every
+    # deepseek-v4.1-flash leg route-gated) are all-unavailable across every route
+    # that lists them; antigravity and deepseek each carry a live leg, so they are
+    # offered — deepseek rejoined them on DSBACK 2026-09-28 (operator top-up,
+    # router balance 19.99 USD) after its 402 of 2026-09-27T16:4xZ. A dead
+    # provider must land in Skipped and never in Map.
+    foreach ($dead in @('cerebras', 'groq', 'opencode-zen', 'sambanova', 'samba', 'cc', 'openrouter')) {
+        Assert-True ($registry.Skipped -contains $dead) "$dead (all legs dead today) was not skipped"
+        Assert-True (-not $registry.Map.Contains($dead)) "$dead must not also be in Map"
+    }
+    Assert-True ($registry.Map.Contains('antigravity')) 'antigravity (has a live leg today) must be offered'
+    Assert-True ($registry.Map.Contains('deepseek')) 'deepseek has a live leg since DSBACK but is not offered'
+    Assert-True (-not ($registry.Skipped -contains 'deepseek')) 'deepseek must no longer land in Skipped'
+    # The UA escaping branch is a pure function of the registry's provider_data;
+    # both real carriers (groq, cerebras) are skipped today, so a fixture keeps
+    # both PowerShell generations under test. It is the exact call apply.ps1 makes.
+    $fixturePath = Join-Path ([IO.Path]::GetTempPath()) ('aos_or1e_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "providers": {
+    "groq": {"omniroute_id": "groq", "provider_data": {"customUserAgent": "curl/8.7.1"}}
+  },
+  "routes": {
+    "r": {"legs": ["groq/openai/gpt-oss-120b"]}
+  }
+}
+'@ | Set-Content -LiteralPath $fixturePath -Encoding utf8
+    try {
+        $fixtureRegistry = Get-AutoOSProviderMap $fixturePath
+        Assert-Equal $fixtureRegistry.Map['groq'] 'groq'
+        $ProviderData = $fixtureRegistry.Data
+        $v7 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 7
+        $v5 = Get-AutoOSProviderDataJson 'groq' -ShellMajor 5
+        Assert-Equal ($v7 | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
+        # What node parses after 5.1 legacy unescaping (measured: backslash
+        # quotes arrive as plain quotes) must equal the 7.x literal.
+        Assert-Equal (($v5 -replace '\\"','"') | ConvertFrom-Json).customUserAgent 'curl/8.7.1'
+        Assert-True ($null -eq (Get-AutoOSProviderDataJson 'nope' -ShellMajor 7)) 'unknown provider must yield null'
+    } finally {
+        Remove-Item -LiteralPath $fixturePath -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Get-AutoOSProviderMap skips a provider whose every route leg is unavailable' {
+    # A synthetic fixture (task A5a) so this pins the derivation itself and
+    # does not drift with future operator edits to catalog/ai-registry.json -
+    # the real-registry regression is 'apply scripts carry the Cloudflare
+    # User-Agent fix...' / 'provider data JSON survives...' above.
+    $tokens = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Root 'configuration\omniroute\apply.ps1'), [ref]$tokens, [ref]$errs)
+    Assert-Equal $errs.Count 0 'apply.ps1 does not parse'
+    $mapDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $n.Name -eq 'Get-AutoOSProviderMap' }, $false)
+    Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
+    . ([scriptblock]::Create((Get-AutoOSRegistryFunctionSource $ast)))
+    $fixture = Join-Path ([IO.Path]::GetTempPath()) ('aos_a5a_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "providers": {
+    "avail": {"omniroute_id": "avail-id", "provider_data": {"customUserAgent": "curl/8.7.1"}},
+    "unused": {"omniroute_id": "unused-id"},
+    "alldown": {"omniroute_id": "alldown-id"},
+    "providerdown": {"omniroute_id": "providerdown-id", "available": false},
+    "mixed": {"omniroute_id": "mixed-id"},
+    "noomni": {}
+  },
+  "routes": {
+    "r1": {
+      "legs": ["avail/model-a", "alldown/model-b", "providerdown/model-c", "mixed/model-d"],
+      "unavailable_legs": {
+        "alldown/model-b": {"available": false},
+        "mixed/model-d": {"available": false}
+      }
+    },
+    "r2": {
+      "legs": ["alldown/model-e", "mixed/model-f"],
+      "unavailable_legs": {
+        "alldown/model-e": {"available": false}
+      }
+    }
+  }
+}
+'@ | Set-Content -LiteralPath $fixture -Encoding utf8
+    try {
+        $registry = Get-AutoOSProviderMap $fixture
+        # alldown: both its legs (r1 + r2) are individually flagged.
+        Assert-True ($registry.Skipped -contains 'alldown-id') 'alldown (every leg unavailable_legs-flagged) was not skipped'
+        # providerdown: no per-leg entry at all, but the provider itself
+        # carries available: false - spec 3.1's second down-flag.
+        Assert-True ($registry.Skipped -contains 'providerdown-id') 'providerdown (provider-wide available:false) was not skipped'
+        # avail: no leg ever flagged - registered normally.
+        Assert-True ($registry.Map.Contains('avail')) 'avail (no leg down) was wrongly all-unavailable-skipped'
+        # unused: has an omniroute_id but appears in no route leg at all -
+        # "every leg unavailable" is vacuously false for an unused provider.
+        Assert-True ($registry.Map.Contains('unused')) 'unused (no route leg at all) was wrongly all-unavailable-skipped'
+        # mixed: one leg down (r1), one leg live (r2) - not EVERY leg.
+        Assert-True ($registry.Map.Contains('mixed')) 'mixed (one live leg) was wrongly all-unavailable-skipped'
+        # noomni has no omniroute_id - the pre-existing skip rule, never
+        # even considered (matches today's ai-registry.json behaviour).
+        Assert-True (-not $registry.Map.Contains('noomni')) 'noomni (no omniroute_id) must never appear in Map'
+    } finally {
+        Remove-Item -LiteralPath $fixture -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Get-AutoOSProviderMap rejects two connections on one api-keys.yml name' {
+    # MUSEAPI review F1, both sides: apply.sh exits 1 on it (tests/linux
+    # 'apply refuses a registry where two providers claim one api-keys.yml
+    # name'), apply.ps1 throws here. The ordered map keys the api-keys.yml name
+    # once, so without the guard the second connection is dropped silently and
+    # the operator gets a half-configured gateway. A fixture, so neither the
+    # real registry nor a live key file is touched - and the guard must NOT fire
+    # for the real MUSEAPI shape, where only one of the two is registered at
+    # all (the direct `meta` provider carries no omniroute_id).
+    $tokens = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Root 'configuration\omniroute\apply.ps1'), [ref]$tokens, [ref]$errs)
+    Assert-Equal $errs.Count 0 'apply.ps1 does not parse'
+    $mapDef = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+        $n.Name -eq 'Get-AutoOSProviderMap' }, $false)
+    Assert-True ($null -ne $mapDef) 'Get-AutoOSProviderMap missing from apply.ps1'
+    . ([scriptblock]::Create((Get-AutoOSRegistryFunctionSource $ast)))
+    $dir = [IO.Path]::GetTempPath()
+
+    $clash = Join-Path $dir ('aos_dupkey_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "providers": {
+    "muse":     {"omniroute_id": "muse-id",     "key_name": "meta"},
+    "meta_api": {"omniroute_id": "meta-api-id", "key_name": "meta"}
+  },
+  "routes": {}
+}
+'@ | Set-Content -LiteralPath $clash -Encoding utf8
+    $shared = Join-Path $dir ('aos_sharedkey_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "providers": {
+    "meta":     {"omniroute_id": null},
+    "meta_api": {"omniroute_id": "meta-api-id", "key_name": "meta"}
+  },
+  "routes": {}
+}
+'@ | Set-Content -LiteralPath $shared -Encoding utf8
+    try {
+        $threw = $null
+        try { $null = Get-AutoOSProviderMap $clash } catch { $threw = $_.Exception.Message }
+        Assert-True ($null -ne $threw) 'two connections claiming one api-keys.yml name were accepted'
+        Assert-True ($threw -match 'claimed by both muse-id and meta-api-id') "guard said: $threw"
+
+        # The shape the real registry actually has: the unregistered provider
+        # never reaches the guard, so the live run keeps working.
+        $registry = Get-AutoOSProviderMap $shared
+        Assert-Equal $registry.Map['meta'] 'meta-api-id'
+        Assert-True (-not $registry.Map.Contains('meta_api')) 'a phantom meta_api key must not be offered'
+    } finally {
+        Remove-Item -LiteralPath $clash, $shared -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'Get-AutoOSProviderMap tolerates registry keys differing only by case' {
+    # FREEWIRE finding (2026-09-30, pre-existing at the baseline): the registry
+    # may carry two keys differing only by casing - model ids are vendor
+    # spellings (`Qwen/Qwen3.8-27B` beside `qwen/qwen3.8-27b`). ConvertFrom-Json
+    # maps JSON objects to a case-INSENSITIVE PSObject, so the pair throws
+    # DuplicateKeysInJsonString on Windows PowerShell 5.1 ("keys with different
+    # casing" on pwsh). The throw happened inside Get-AutoOSProviderMap, so the
+    # whole run's provider registration was silently skipped while connections
+    # and combos still applied. This fixture is the guard; it touches no live
+    # registry, so an operator edit cannot make it flaky. Before the fix the
+    # test dot-sources only Get-AutoOSProviderMap, hits the raw ConvertFrom-Json
+    # path and fails with the duplicate-key error - exactly the defect.
+    $tokens = $null; $errs = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $Root 'configuration\omniroute\apply.ps1'), [ref]$tokens, [ref]$errs)
+    Assert-Equal $errs.Count 0 'apply.ps1 does not parse'
+    $defs = foreach ($fn in @('ConvertTo-AutoOSRegistryObject', 'ConvertFrom-AutoOSRegistryJson', 'Get-AutoOSProviderMap')) {
+        $d = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $n.Name -eq $fn }, $false)
+        if ($null -ne $d) { $d.Extent.Text }
+    }
+    . ([scriptblock]::Create(($defs -join "`n")))
+    $fixture = Join-Path ([IO.Path]::GetTempPath()) ('aos_dupcase_' + [Guid]::NewGuid().ToString('N') + '.json')
+    @'
+{
+  "models": {
+    "Qwen/Qwen3.8-27B": {"id": "Qwen/Qwen3.8-27B"},
+    "qwen/qwen3.8-27b": {"id": "qwen/qwen3.8-27b"}
+  },
+  "providers": {
+    "groq": {"omniroute_id": "groq"}
+  },
+  "routes": {
+    "r": {"legs": ["groq/qwen/qwen3.8-27b"]}
+  }
+}
+'@ | Set-Content -LiteralPath $fixture -Encoding utf8
+    try {
+        $registry = Get-AutoOSProviderMap $fixture
+        Assert-Equal $registry.Map['groq'] 'groq'
+        Assert-True ($registry.Skipped -notcontains 'groq') 'groq (has a live leg) was wrongly skipped'
+        # Case-sensitivity at the parse: the exact-case key keeps its spelling
+        # and the later case-only duplicate does not replace it. PSObject names
+        # are case-insensitive by construction, so first-wins is the documented
+        # policy - the colliding section (models) is not read by the launcher.
+        $doc = ConvertFrom-AutoOSRegistryJson -Text (Get-Content -LiteralPath $fixture -Raw -Encoding utf8)
+        $modelNames = @($doc.models.PSObject.Properties.Name)
+        Assert-True ($modelNames -ccontains 'Qwen/Qwen3.8-27B') "exact-case model key lost: $($modelNames -join ',')"
+        Assert-True ($modelNames -cnotcontains 'qwen/qwen3.8-27b') "case-only duplicate replaced the first key: $($modelNames -join ',')"
+    } finally {
+        Remove-Item -LiteralPath $fixture -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'provider registry is the single source for apply, mirror and tier maps' {
+    # catalog/ai-registry.json is the one map; the helper asserts every
+    # consumer's in-memory map equals it, so a hand-edited copy or a half-done
+    # registry edit fails here instead of routing a provider to a wrong name.
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $out = & $py.Source (Join-Path $Root 'tests\helpers\check-provider-registry.py') 2>&1 | Out-String
+    Assert-Equal $LASTEXITCODE 0 "provider registry drift: $out"
+    Assert-True ($out -match 'ok') 'helper did not confirm'
+}
+
+Test-Case 'opencode tiers declare matching context limits' {
+    $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
+    $stripped = $raw -replace '(?m)^\s*//.*$', ''
+    $oc = $stripped | ConvertFrom-Json
+    $models = $oc.providers.omniroute.models
+    # Models and their context limits come from catalog/ide-models.json (the
+    # file the managed block is rendered from) and the omitted set from
+    # configuration/omniroute/combos.json - derived, so a provider flip needs
+    # no re-pin here (lesson PROVPIN 2026-09-27).
+    $ideModels = @(Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models
+    $offered = @($ideModels | Where-Object {
+        $surf = $_.PSObject.Properties['surfaces']
+        $omni = if ($surf) { $surf.Value.PSObject.Properties['omniroute'] } else { $null }
+        [bool]($omni -and (@($omni.Value) -contains 'opencode'))
+    })
+    Assert-True ($offered.Count -gt 0) 'catalog/ide-models.json lists no opencode model'
+    foreach ($m in $offered) {
+        $name = $m.id
+        Assert-True ($null -ne $models.$name) "missing model $name"
+        Assert-Equal $models.$name.modelID $name
+        Assert-Equal $models.$name.limit.context $m.context
+    }
+    $combosDoc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    $offeredNames = @($offered | ForEach-Object { $_.id })
+    # A route that fails closed is omitted from the gateway, so it must not be a
+    # client model either; a servable combo must be offered to the client.
+    foreach ($gone in @($combosDoc.omitted)) {
+        Assert-True ($null -eq $models.PSObject.Properties[$gone]) "$gone should be omitted, not a client model"
+    }
+    foreach ($c in @($combosDoc.combos)) {
+        if ($offeredNames -contains $c.name) {
+            Assert-True ($null -ne $models.PSObject.Properties[$c.name]) "$($c.name) is servable but not a client model"
+        }
+    }
+    Pass
+}
+
+Test-Case 'qoder components exist with the right providers and arch' {
+    $cli = Get-AutoOSWinComponent 'qodercli'
+    $ide = Get-AutoOSWinComponent 'qoder-desktop'
+    Assert-True ($null -ne $cli -and $null -ne $ide) 'missing qoder component'
+    Assert-Equal "$($cli.provider)|$($ide.provider)" 'script|winget'
+    Assert-Equal "$($cli.package)|$($ide.package)" 'qodercli|Alibaba.Qoder'
+    # The shipped binary is qodercli, NOT qoder - the docs' `qoder --version`
+    # is stale for what the vendor install script actually places.
+    Assert-Equal $cli.verify 'qodercli --version'
+    # The vendor's own installation docs state Windows arm64 is not supported
+    # for the Qoder CLI, so the entry must pin x64 and be hidden elsewhere
+    # rather than shown and failing (AGENTS.md section 3).
+    Assert-Equal (@($cli.arch) -join ',') 'x64'
+    # The desktop app puts no confirmed CLI on PATH; a verify that fails after
+    # a successful install is worse than none, so the entry must omit it.
+    Assert-True (-not $ide.PSObject.Properties.Name.Contains('verify')) 'qoder-desktop grew an unconfirmed verify'
+    Assert-Contains $cli.profiles 'ai-coding'
+    Assert-Contains $ide.profiles 'ai-coding'
+}
+
+Test-Case 'qodercli rides ai-coding and is hidden on arm64' {
+    $x64 = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
+    $aiCoding = @($x64 | Where-Object { 'ai-coding' -in $_.Profiles } | ForEach-Object { $_.Id })
+    Assert-Contains $aiCoding 'qodercli'
+    Assert-Contains $aiCoding 'qoder-desktop'
+    # Qoder CLI is amd64-only on Windows; an arm64 box must never be offered it.
+    $arm = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem -Arch 'arm64') | ForEach-Object { $_.Id })
+    Assert-NotContains $arm 'qodercli'
+}
+
+Test-Case 'qoder postInstall is exported and names a real command' {
+    # postInstall is NOT schema-validated - a typo only warns at runtime, so
+    # the catalog name must resolve to a real exported command.
+    Assert-Equal (Get-AutoOSWinComponent 'qodercli').postInstall 'Set-AutoOSQoderMcp'
+    foreach ($fn in @('Set-AutoOSQoderMcp', 'Install-AutoOSQoderCli')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn is not an exported command"
+    }
+    # context7 key resolution mirrors Install-AutoOSMcpContext7.
+    Assert-True ((Get-Command Set-AutoOSQoderMcp).Definition -match "Get-AutoOSAnswer 'context7_api_key'") 'context7 key resolution missing'
+}
+
+function New-AutoOSQoderCliShim {
+    <#
+      .SYNOPSIS Drop a fake qodercli on PATH that logs every argv it receives.
+      .DESCRIPTION
+        `mcp get` answers "not registered" (exit 1) until the presence-flag
+        file exists, then "registered" (exit 0), so one shim drives both the
+        first-run registration and the idempotent second run. Log and flag
+        paths travel in QODER_SHIM_LOG / QODER_SHIM_PRESENT_FLAG because
+        Invoke-AutoOSProcess launches the shim in a fresh powershell.exe. The
+        shim must be a .ps1, not a .cmd: Invoke-AutoOSProcess passes literal
+        arguments to scripts via -EncodedCommand, the only quoting path that
+        keeps a JSON argv element intact. That path hands the script ONE
+        array argument (`& shim @('mcp','get',...)`), so the shim flattens
+        $args before inspecting it.
+    #>
+    param([Parameter(Mandatory)][string]$Dir)
+    $shim = @'
+$a = @()
+foreach ($x in $args) { $a += $x }
+$line = ($a | ForEach-Object { "'" + ($_ -replace "'", "''") + "'" }) -join ' '
+Add-Content -LiteralPath $env:QODER_SHIM_LOG -Value $line -Encoding utf8
+if ($a.Count -ge 2 -and $a[0] -eq 'mcp' -and $a[1] -eq 'get') {
+    if (Test-Path -LiteralPath $env:QODER_SHIM_PRESENT_FLAG) { exit 0 }
+    exit 1
+}
+exit 0
+'@
+    Set-Content -LiteralPath (Join-Path $Dir 'qodercli.ps1') -Value $shim -Encoding utf8
+}
+
+Test-Case 'qoder MCP wiring writes nothing in dry run' {
+    $scratch = Join-Path $env:TEMP "autoos-qoder-dry-$([Guid]::NewGuid().ToString('N'))"
+    $shimDir = Join-Path $scratch 'bin'
+    $null = New-Item -ItemType Directory -Path $shimDir -Force
+    New-AutoOSQoderCliShim -Dir $shimDir
+    $shimLog = Join-Path $scratch 'calls.log'
+    $uiLog = Join-Path $scratch 'ui.log'
+    $realPath = $env:PATH
+    try {
+        $env:QODER_SHIM_LOG = $shimLog
+        $env:QODER_SHIM_PRESENT_FLAG = Join-Path $scratch 'present.flag'
+        $env:PATH = "$shimDir;$realPath"
+        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
+        Initialize-AutoOSLog -Path $uiLog
+        Set-AutoOSQoderMcp
+        $text = Get-Content $uiLog -Raw -Encoding utf8
+        Assert-True ($text -match 'would register') 'no dry-run announcement in the log'
+        Assert-True (-not (Test-Path $shimLog)) 'dry run invoked qodercli'
+    } finally {
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        $env:PATH = $realPath
+        Remove-Item Env:QODER_SHIM_LOG -ErrorAction SilentlyContinue
+        Remove-Item Env:QODER_SHIM_PRESENT_FLAG -ErrorAction SilentlyContinue
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case 'qoder MCP wiring registers the four harness servers and never omnigraph' {
+    $scratch = Join-Path $env:TEMP "autoos-qoder-mcp-$([Guid]::NewGuid().ToString('N'))"
+    $shimDir = Join-Path $scratch 'bin'
+    $null = New-Item -ItemType Directory -Path $shimDir -Force
+    New-AutoOSQoderCliShim -Dir $shimDir
+    $shimLog = Join-Path $scratch 'calls.log'
+    $flag = Join-Path $scratch 'present.flag'
+    $realPath = $env:PATH
+    $realC7 = $env:CONTEXT7_API_KEY
+    try {
+        $env:QODER_SHIM_LOG = $shimLog
+        $env:QODER_SHIM_PRESENT_FLAG = $flag
+        Remove-Item Env:CONTEXT7_API_KEY -ErrorAction SilentlyContinue
+        $env:PATH = "$shimDir;$realPath"
+        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
+        Set-AutoOSQoderMcp
+
+        $calls = @(Get-Content $shimLog -Encoding utf8)
+        $adds = @($calls | Where-Object { $_ -match "^'mcp' 'add-json' " })
+        Assert-Equal $adds.Count 4
+        # The omnigraph graph is per-repository (OMNIGRAPH_GRAPH_ID); a user
+        # scope entry would pin this repo's graph for every other one. This
+        # absence is deliberate - do not "fix" it.
+        Assert-True (-not ($calls -match 'omnigraph')) 'omnigraph must not be registered at user scope'
+
+        $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        $seen = @()
+        foreach ($line in $adds) {
+            $m = [regex]::Match($line, "^'mcp' 'add-json' '([^']+)' '(.+)' '-s' 'user'$")
+            Assert-True $m.Success "unrecognised add-json argv: $line"
+            $name = $m.Groups[1].Value
+            $seen += $name
+            $spec = $m.Groups[2].Value | ConvertFrom-Json
+            Assert-True ((@($spec.args) -join ' ') -match [regex]::Escape($harness.mcp_servers.$name.package)) "$name does not carry the harness pin"
+            if ($name -eq 'serena') {
+                Assert-Equal $spec.command 'uvx'
+                Assert-Contains $spec.args 'start-mcp-server'
+            }
+            if ($name -eq 'graphify') { Assert-Equal $spec.command 'uv' }
+            if ($name -in @('playwright', 'context7')) {
+                Assert-Equal $spec.command 'npx'
+                Assert-Contains $spec.args '-y'
+            }
+            if ($name -eq 'context7') {
+                Assert-True (@($spec.args) -notcontains '--api-key') 'context7 registered with a key nobody provided'
+            }
+        }
+        Assert-Equal (($seen | Sort-Object) -join ',') 'context7,graphify,playwright,serena'
+
+        # Idempotency (AGENTS.md section 4): once every server exists, a
+        # second run adds nothing.
+        $null = New-Item -ItemType File -Path $flag -Force
+        Set-AutoOSQoderMcp
+        $calls2 = @(Get-Content $shimLog -Encoding utf8)
+        Assert-Equal @($calls2 | Where-Object { $_ -match "^'mcp' 'add-json' " }).Count 4
+    } finally {
+        $env:PATH = $realPath
+        if ($null -eq $realC7) { Remove-Item Env:CONTEXT7_API_KEY -ErrorAction SilentlyContinue }
+        else { $env:CONTEXT7_API_KEY = $realC7 }
+        Remove-Item Env:QODER_SHIM_LOG -ErrorAction SilentlyContinue
+        Remove-Item Env:QODER_SHIM_PRESENT_FLAG -ErrorAction SilentlyContinue
+        Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# â”€â”€â”€ Summary â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# Phone-remote resilience (autostart + healthcheck).
+Describe-Group 'phone-remote resilience'
+
+Test-Case 'autostart launchers exist and parse' {
+    foreach ($f in @('configuration\autostart\Start-AutoOSStack.ps1',
+                     'configuration\autostart\Register-AutoOSAutostart.ps1',
+                     'configuration\healthcheck.ps1')) {
+        Assert-True (Test-Path (Join-Path $Root $f)) "$f missing"
+        $errors = $null
+        $null = [System.Management.Automation.PSParser]::Tokenize(
+            (Get-Content (Join-Path $Root $f) -Raw), [ref]$errors)
+        Assert-Equal (@($errors)).Count 0
+    }
+}
+
+Test-Case 'autostart is opt-in and double-run safe' {
+    $reg = Get-Content (Join-Path $Root 'configuration\autostart\Register-AutoOSAutostart.ps1') -Raw
+    $start = Get-Content (Join-Path $Root 'configuration\autostart\Start-AutoOSStack.ps1') -Raw
+    Assert-True ($reg -match 'Unregister') 'no -Unregister removal path'
+    Assert-True ($reg -match '-Force') 're-register must replace in place'
+    Assert-True ($start -match 'nothing to do') 'launcher must no-op when already up'
+    Assert-True ($start -notmatch 'Remove-Item|rm -rf|uninstall') 'launcher must never be destructive'
+}
+
+Test-Case 'autostart resumes the LiteLLM fallback proxy too' {
+    # litellm cannot read its own .env, so the launcher must delegate to the
+    # starter that exports it - starting the proxy bare serves every leg as
+    # "Missing credentials" (measured 2026-09-22).
+    $start = Get-Content (Join-Path $Root 'configuration\autostart\Start-AutoOSStack.ps1') -Raw
+    $sh = Get-Content (Join-Path $Root 'configuration\autostart\Start-AutoOSStack.sh') -Raw
+    Assert-True ($start -match 'start-litellm\.ps1') 'ps1 launcher does not use the litellm starter'
+    Assert-True ($start -match '4000') 'ps1 launcher does not probe :4000'
+    Assert-True ($sh -match '4000') 'sh launcher does not probe :4000'
+    # The Linux launcher delegates to configuration/litellm/start-litellm.sh
+    # (literal .env parsing, stale-key restart), like the ps1 one does.
+    $shStarter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.sh') -Raw
+    Assert-True ($sh -match 'start-litellm\.sh') 'sh launcher does not use the litellm starter'
+    Assert-True ($shStarter -match 'PYTHONUTF8') 'sh starter must set PYTHONUTF8 (cp1252 banner crash)'
+    # Idempotent: only start when down, never bounce a healthy proxy.
+    Assert-True ($start -match 'already up on 4000') 'ps1 launcher has no litellm no-op path'
+    Assert-True ($shStarter -match 'already up with the current keys') 'sh starter has no litellm no-op path'
+    $starter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.ps1') -Raw
+    Assert-True ($starter -match '\.env') 'starter does not read the litellm .env'
+    Assert-True ($starter -notmatch 'REPLACE_WITH_YOUR') 'starter embeds a placeholder key name list, not values'
+}
+
+Test-Case 'litellm starter takes host, state dir and master-key file from the environment' {
+    # The starter is the one place the proxy's bind, log location and master
+    # key are chosen; all three must be overridable without editing the file.
+    $starter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.ps1') -Raw
+    $shStarter = Get-Content (Join-Path $Root 'configuration\litellm\start-litellm.sh') -Raw
+    foreach ($v in @('AUTOOS_LITELLM_HOST', 'AUTOOS_LITELLM_STATE_DIR', 'AUTOOS_LITELLM_MASTER_KEY_FILE')) {
+        Assert-True ($starter -match $v) "ps1 starter ignores $v"
+        Assert-True ($shStarter -match $v) "sh starter ignores $v"
+    }
+    Assert-True ($starter -match '--host' -and $shStarter -match '--host \$HOST') 'bind host not passed to litellm'
+    Assert-True ($starter -match 'litellm\.log' -and $shStarter -match 'litellm\.log') 'state-dir log name missing'
+    # Never echo the key value: the starter reports key NAMES only.
+    Assert-True ($starter -notmatch 'Write-Host \$master') 'ps1 starter prints the master key'
+    Assert-True ($shStarter -notmatch 'echo "\$MASTER_KEY"') 'sh starter prints the master key'
+    Pass
+}
+
+Test-Case 'healthcheck probes four ports and resumes only with -Fix' {
+    $hc = Get-Content (Join-Path $Root 'configuration\healthcheck.ps1') -Raw
+    foreach ($p in @('20128', '3000', '4096', '8777')) {
+        Assert-True ($hc -match $p) "port $p not probed"
+    }
+    Assert-True ($hc -match '401') 'opencode 401-alive nuance missing'
+    # The resume call must sit inside the -Fix branch: log-only by default.
+    # (Matched by count, not by cutting the text: the header comment names the
+    # launcher too, so a cut-and-search would flag its own documentation.)
+    $fixBranch = [regex]::Match($hc, '(?s)if \(\$Fix.*').Value
+    Assert-True ($fixBranch -match '\&\s*\(Join-Path \$RepoRoot') 'the -Fix branch must invoke the launcher'
+    Assert-True (@([regex]::Matches($hc, 'Start-AutoOSStack')).Count -eq 3) `
+        'the launcher must be named exactly 3x (doc comment, log line, -Fix branch)'
+    Assert-True ($hc -notmatch 'Start-Process|docker start') `
+        'healthcheck itself must never start processes'
+}
+
+Test-Case 'phone URLs are documented without secrets' {
+    $doc = Get-Content (Join-Path $Root 'docs\troubleshooting.md') -Raw -Encoding utf8
+    foreach ($frag in @('<tail-ip>:3000', '<tail-ip>:4096', 'healthcheck')) {
+        Assert-True ($doc -match [regex]::Escape($frag)) "missing $frag"
+    }
+    Assert-True ($doc -notmatch 'sk-[A-Za-z0-9]{10,}') 'credential-shaped value committed'
+    Assert-True ($doc -notmatch '100\.70\.|192\.168\.178\.59') 'machine-local IP committed'
+}
+
+Test-Case 'canvas verdict keeps the current docker path' {
+    $ver = Get-Content (Join-Path $Root 'docs\verification.md') -Raw -Encoding utf8
+    $toml = Get-Content (Join-Path $Root 'configuration\openhands\config.toml') -Raw -Encoding utf8
+    $ps1 = Get-Content (Join-Path $Root 'configuration\start-stack.ps1') -Raw
+    Assert-True ($ver -match 'Agent Canvas') 'no canvas verdict in verification.md'
+    Assert-True ($toml -match 'agent-canvas') 'config.toml must record the canvas decision'
+    Assert-True ($ps1 -match 'docker\.openhands\.dev/openhands/openhands:latest') 'docker path must stay intact'
+}
+
+Test-Case 'omniroute launchers pin the .cmd shim, fail loudly without it, and default chat admission without clobbering' {
+    # A bare Start-Process -FilePath 'omniroute' resolves to the npm .ps1 shim
+    # (ExternalScript), which Start-Process cannot launch as a Win32 app: the
+    # gateway silently never starts. Every gateway-spawn site must pin the .cmd
+    # shim - resolved via PATH with an %APPDATA%\npm fallback, never a hardcoded
+    # user path - and fail loudly when it is missing, and must apply the chat
+    # admission default only when the operator has not already set one. The
+    # logon resume helper (configuration\autostart\Start-AutoOSStack.ps1) carries
+    # the same bare-shim class; it was missed by the original handoff and is
+    # covered here too, so a third site cannot drift back to the bare name.
+    foreach ($rel in @('configuration\omniroute\apply.ps1', 'configuration\start-stack.ps1',
+                       'configuration\autostart\Start-AutoOSStack.ps1')) {
+        $src = Get-Content (Join-Path $Root $rel) -Raw -Encoding UTF8
+        # (a) resolves the .cmd shim, not the bare ExternalScript name.
+        Assert-True ($src -notmatch "Start-Process\s+-FilePath\s+'omniroute'") "$rel still starts the bare 'omniroute' name"
+        Assert-True ($src -match 'Get-Command omniroute\.cmd') "$rel does not resolve omniroute.cmd via PATH"
+        Assert-True ($src -match 'if \(-not \$omnirouteCmd\) \{ \$omnirouteCmd = Join-Path \$env:APPDATA') "$rel lacks the %APPDATA%\npm fallback"
+        Assert-True ($src -match 'Start-Process -FilePath \$omnirouteCmd') "$rel does not start the resolved .cmd shim"
+        Assert-True ($src -notmatch 'C:\\Users\\[A-Za-z]') "$rel carries a hardcoded user path"
+        # (b) a missing shim is a loud failure, not a silent wait for a gateway
+        # that never starts.
+        Assert-True ($src -match 'if \(-not \(Test-Path -LiteralPath \$omnirouteCmd\)\) \{') "$rel does not check that the shim exists"
+        Assert-True ($src -match '(?s)Test-Path -LiteralPath \$omnirouteCmd.{0,200}?exit 1') "$rel does not exit when the shim is missing"
+        # (c) the chat admission default is respect-set and appears exactly once
+        # (idempotent - a second run cannot add a duplicate assignment).
+        Assert-True ($src -match 'if \(-not \$env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT\) \{') "$rel does not respect a user-set admission limit"
+        Assert-Equal @([regex]::Matches($src, "OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT = '8'")).Count 1 "$rel must set the admission default exactly once"
+    }
+}
+
+Test-Case 'omniroute gateway launchers default the repeated-429 rotation policy, respect-set and once' {
+    # The gateway reads the rotation and provider-breaker policy from its own
+    # process env at startup (open-sse/services/rotationConfig.ts:84-110 and
+    # open-sse/config/constants.ts:251-277), so only the launcher that spawns it
+    # can supply it. Every gateway-spawn site must default each knob while never
+    # clobbering an operator value, and the assignment must appear exactly once
+    # (a re-run, or a re-apply, cannot accumulate a duplicate line).
+    $policy = [ordered]@{
+        'OMNIROUTE_ROTATION_ENABLED'                     = 'true'
+        'OMNIROUTE_ROTATE_ON_429'                        = 'true'
+        'OMNIROUTE_ROTATE_429_THRESHOLD'                 = '3'
+        'OMNIROUTE_ROTATE_429_WINDOW_SECONDS'            = '120'
+        'OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS'    = '300'
+        'OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS' = '1800000'
+    }
+    foreach ($rel in @('configuration\start-stack.ps1', 'configuration\omniroute\apply.ps1',
+                       'configuration\autostart\Start-AutoOSStack.ps1')) {
+        $src = Get-Content (Join-Path $Root $rel) -Raw -Encoding UTF8
+        foreach ($name in $policy.Keys) {
+            $val = $policy[$name]
+            Assert-True ($src -match ('if \(-not \$env:{0}\)' -f $name)) "$rel does not respect a user-set $name"
+            $assignment = "`$env:{0} = '{1}'" -f $name, $val
+            Assert-Equal @([regex]::Matches($src, [regex]::Escape($assignment))).Count 1 "$rel must set $name = $val exactly once"
+        }
+    }
+    foreach ($rel in @('configuration\start-stack.sh', 'configuration\omniroute\apply.sh')) {
+        $src = Get-Content (Join-Path $Root $rel) -Raw -Encoding UTF8
+        foreach ($name in $policy.Keys) {
+            $val = $policy[$name]
+            $exportLine = 'export {0}="${{{0}:-{1}}}"' -f $name, $val
+            Assert-Equal @([regex]::Matches($src, [regex]::Escape($exportLine))).Count 1 "$rel must export $name (default $val) exactly once"
+        }
+    }
+    Pass
+}
+
+
+# ─── ZCode (GLM) gateway link ───────────────────────────────────────────────
+Describe-Group 'zcode gateway'
+
+Test-Case 'zcode and zcode-gateway sit next to omniroute in the windows catalog' {
+    $z = Get-AutoOSWinComponent 'zcode'
+    $g = Get-AutoOSWinComponent 'zcode-gateway'
+    Assert-True ($null -ne $z -and $null -ne $g) 'missing zcode / zcode-gateway row'
+    Assert-Equal "$($z.provider)|$($z.package)" 'winget|ZhipuAI.ZCode'
+    Assert-Equal $z.homepage 'https://zcode.z.ai'
+    # No version pin on purpose: the winget manifest lags the vendor.
+    Assert-True (-not $z.PSObject.Properties.Name.Contains('version')) 'zcode grew a version pin'
+    Assert-Equal "$($g.provider)|$($g.package)" 'custom|zcode-gateway'
+    Assert-Equal $g.postInstall 'Set-AutoOSZcodeGatewayEnv'
+    Assert-Equal $g.homepage 'https://zcode.z.ai'
+    Assert-Contains $g.requires 'omniroute'
+    Assert-Contains $g.profiles 'workstation'
+    Assert-Contains $g.profiles 'ai-coding'
+}
+
+Test-Case 'the ZCode gateway postInstall is exported like its neighbours' {
+    # postInstall is NOT schema-validated, so the catalog name has to resolve
+    # from outside the module or the hook can never run.
+    foreach ($fn in @('Set-AutoOSZcodeGatewayEnv', 'Set-AutoOSOpenCodeConfig', 'Invoke-AutoOSPostInstall')) {
+        Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn is not an exported command"
+    }
+    Pass
+}
+
+Test-Case 'the ZCode gateway postInstall writes nothing into an empty home' {
+    # POSIX-only by design: the hook reports and returns, so an empty HOME plus
+    # an empty USERPROFILE must come back byte-identical - no ~/.zcode, no
+    # ~/.omniroute, no file at all.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-zcode-$([Guid]::NewGuid().ToString('N'))"
+    $empty = Join-Path $scratch 'home'
+    $log = Join-Path $scratch 'ui.log'
+    $null = New-Item -ItemType Directory -Path $empty -Force
+    $realHome = $env:HOME
+    $realUserProfile = $env:USERPROFILE
+    try {
+        $env:HOME = $empty
+        $env:USERPROFILE = $empty
+        Initialize-AutoOSLog -Path $log
+        Set-AutoOSZcodeGatewayEnv
+        $text = Get-Content $log -Raw -Encoding utf8
+        Assert-True ($text -match 'POSIX-only') 'the hook did not report that the bundle is POSIX-only'
+        Assert-Equal (@(Get-ChildItem -LiteralPath $empty -Force -Recurse -ErrorAction SilentlyContinue)).Count 0 `
+            'the hook wrote into the home it was given'
+    } finally {
+        $env:HOME = $realHome
+        $env:USERPROFILE = $realUserProfile
+        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ─── omniroute apply.ps1 D-825 GO gate ──────────────────────────────────────
+# 2026-10-09 06:27Z a real apply run began with no judge GO — it stopped only on
+# a missing key file. apply.ps1 is the Windows twin of apply.sh and mutates the
+# same live gateway, so it carries the same D-825 gate: a run that is not -DryRun
+# refuses without -Go <ref> and -GoSha <sha> equal to this checkout's HEAD. The
+# refusals exit before any gateway contact; -DryRun is unchanged.
+Describe-Group 'omniroute apply D-825 GO gate'
+$gateApply = Join-Path $Root 'configuration/omniroute/apply.ps1'
+$gateOverrides = Join-Path $Root 'configuration/omniroute/apply-capability-overrides.ps1'
+$gateHost  = if ($PSVersionTable.PSVersion.Major -ge 6) { 'pwsh' } else { 'powershell' }
+$gateKeys  = [IO.Path]::GetTempFileName()
+$gateHead  = ( (& git -C $Root rev-parse HEAD 2>$null) | Select-Object -First 1 )
+if ($gateHead) { $gateHead = "$gateHead".Trim() }
+# A GO of the right shape is no longer enough — the gate proves the ref names an
+# artefact that EXISTS, read from the routing dir and the workers tree. Point the
+# child runs at the checked-in fixture tree, never at the host's own
+# $HOME/code/routing: a suite that passes only on the machine it was written on
+# proves nothing, and a CI box with no routing dir must decide exactly like this one.
+$gateRouting = Join-Path $Root 'tests/fixtures/go-gate/routing'
+$gateWorkers = Join-Path $Root 'tests/fixtures/go-gate/worker-tree/workers'
+$gateEnvKeys = @(
+    'PATH', 'AUTOOS_OMNIROUTE_URL', 'AUTOOS_KEYS_FILE',
+    'AUTOOS_ROUTING_DIR', 'AUTOOS_WORKERS_DIR', 'AUTOOS_DECISIONS_LOG',
+    'OMNIGRAPH_IMAGE'
+) + $GateStubUrlVars
+function Push-GateEnv {
+    # [Environment] rather than $env: because a $null read under Set-StrictMode
+    # is a variable error, and these keys are legitimately unset most of the time.
+    $saved = @{}
+    foreach ($key in $gateEnvKeys) { $saved[$key] = [Environment]::GetEnvironmentVariable($key) }
+    $saved
+}
+function Pop-GateEnv {
+    param($Saved)
+    foreach ($key in $gateEnvKeys) { [Environment]::SetEnvironmentVariable($key, $Saved[$key]) }
+}
+
+function Test-GatePython {
+    # The shared gate is python, and the PowerShell front proves each candidate by
+    # running it — a Windows Store 'python3' alias answers a shrug. Do the same here,
+    # so these cases are skipped on a host that genuinely cannot read an artefact tree
+    # rather than passing on a refusal for the wrong reason.
+    $prevEap = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        foreach ($cand in @('python', 'python3')) {
+            if (-not (Get-Command $cand -CommandType Application -ErrorAction SilentlyContinue)) { continue }
+            & $cand -c 'import sys' *> $null
+            if ($LASTEXITCODE -eq 0) { return $true }
+        }
+    } finally { $ErrorActionPreference = $prevEap }
+    return $false
+}
+$gatePy = Test-GatePython
+
+function Invoke-ChildApply {
+    # Every run goes out inside the D-852 stand-in directory: the binaries it could
+    # exec are shadowed first on PATH and every gateway/graph URL is the discard
+    # port. -Gateway replaces the sink for a case that brings its own loopback
+    # stand-in; -StubBins narrows the shadow (the host-only set) for a case that
+    # needs one real binary. The record comes back as 'Calls' and the directory is
+    # removed here, so a case asserts without leaking temp state: an empty record is
+    # the proof a refusal touched nothing, a non-empty one the proof a cleared gate
+    # stopped at the stand-in.
+    param([string[]]$ScriptArgs, [string]$Path = $gateApply, [hashtable]$Extra = @{},
+          [string[]]$StubBins = $GateStubAllBins, [string]$Gateway = '')
+    $prevEap = $ErrorActionPreference
+    $saved = Push-GateEnv
+    $stub = New-GateStubDir -Bins $StubBins
+    try {
+        # 5.1 promotes a native command's stderr to a terminating error under Stop;
+        # the child writes its refusal to stderr, so run the call under Continue.
+        $ErrorActionPreference = 'Continue'
+        $values = Get-GateStubEnv -Stub $stub -Extra @{
+            'AUTOOS_OMNIROUTE_URL' = 'http://127.0.0.1:1'
+            'AUTOOS_KEYS_FILE'     = $gateKeys
+            'AUTOOS_ROUTING_DIR'   = $gateRouting
+            'AUTOOS_WORKERS_DIR'   = $gateWorkers
+        }
+        if ($Gateway) {
+            $values['AUTOOS_OMNIROUTE_URL'] = $Gateway
+            $values['OMNIROUTE_BASE_URL'] = $Gateway
+        }
+        foreach ($key in @($Extra.Keys)) { $values[$key] = $Extra[$key] }
+        Set-GateStubEnv -Values $values
+        $out = & $gateHost -NoProfile -NonInteractive -File $Path @ScriptArgs 2>&1 | Out-String
+        [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out; Calls = (Get-GateStubCalls $stub) }
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-GateEnv $saved
+        Remove-GateStubDir $stub
+    }
+}
+
+function Assert-GateUntouched {
+    # A refused gate must not have execed anything at all.
+    param($Run)
+    $calls = ($Run.Calls -replace "`r", '')
+    Assert-Equal $calls '' ("a refused run reached a host binary: $calls")
+}
+
+Test-Case 'apply.ps1 D-825: a live run with no -Go is refused before any gateway contact' {
+    $r = Invoke-ChildApply @()
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'refusing to change live gateway state without -Go') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO:') "a refused run printed a GO line: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: a malformed -Go reference is refused' {
+    $r = Invoke-ChildApply @('-Go', 'not-a-real-ref', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not a judge run id') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: a -GoSha that is not this checkout HEAD is refused' {
+    $r = Invoke-ChildApply @('-Go', 'D-825', '-GoSha', '0000000000000000000000000000000000000000')
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not this checkout') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: a -Go decision id that names no decision is refused' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    # D-9999 has the right SHAPE and the right sha; only the decisions log says no.
+    $r = Invoke-ChildApply @('-Go', 'D-9999', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'names no decision') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO: D-9999') "a ref that names nothing printed a GO: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: a decision id matches exactly — D-82 is not D-825' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    # The fixture log holds D-825 alone: a prefix match would let D-82 through.
+    $r = Invoke-ChildApply @('-Go', 'D-82', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'names no decision') "D-82 matched the D-825 line: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: an unreadable decisions log refuses the -Go' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $missing = Join-Path ([IO.Path]::GetTempPath()) 'autoos-gate-no-such-decisions-log.md'
+    Remove-Item -LiteralPath $missing -Force -ErrorAction SilentlyContinue
+    # A named AUTOOS_DECISIONS_LOG is the WHOLE source: no fallback read, no verdict, no GO.
+    $r = Invoke-ChildApply -ScriptArgs @('-Go', 'D-825', '-GoSha', $gateHead) `
+        -Extra @{ 'AUTOOS_DECISIONS_LOG' = $missing }
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'cannot read') "out: $($r.Out)"
+    Assert-True ($r.Out -match 'GO-OFFLINE|go-offline|-GoOffline') "the refusal did not name the way out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: -GoOffline does not lower the sha bar' {
+    # Offline waives the artefact lookup only — a GO naming the wrong code is still a
+    # refusal, and the sha check runs first, so this never reaches the gateway.
+    $r = Invoke-ChildApply @('-Go', 'D-825', '-GoSha', '0000000000000000000000000000000000000000', '-GoOffline')
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not this checkout') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO-OFFLINE') "the offline line was logged before the sha check: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply.ps1 D-825: -GoOffline gates nothing on a -DryRun' {
+    $r = Invoke-ChildApply @('-DryRun', '-GoOffline')
+    Assert-True ($r.Out -match 'This is a dry run') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO-OFFLINE') "the offline flag logged on a read-only run: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to change live') "the dry run hit the gate: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: -DryRun needs no -Go and is unchanged' {
+    $r = Invoke-ChildApply @('-DryRun')
+    Assert-True ($r.Out -match 'This is a dry run') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to change live') "the dry run hit the gate: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: -Go on a -DryRun is echoed and stays read-only' {
+    $r = Invoke-ChildApply @('-DryRun', '-Go', 'D-825', '-GoSha', $gateHead)
+    Assert-True ($r.Out -match 'GO: D-825') "the -Go was not echoed: $($r.Out)"
+    Assert-True ($r.Out -match 'read-only run') "not marked read-only: $($r.Out)"
+}
+
+Test-Case 'apply.ps1 D-825: a valid -Go + -GoSha clears the gate and echoes GO first' {
+    # A cleared gate hands the run to the real apply.ps1, which would spawn a real
+    # gateway and wait two minutes for a port. Everything it can reach is a stand-in:
+    # the host binaries and the omniroute CLI first on PATH (D-852), and a loopback
+    # gateway answering /api/health so the health probe passes without a start. The
+    # CLI record is the proof the run reached the stand-in and not the host, and it
+    # is bounded by a job timeout so a hang can never outlive the case.
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $stub = New-GateStubDir
+    $srv = $null
+    try {
+        $gw = Join-Path $stub.Dir 'gw'
+        $api = Join-Path $gw 'api'
+        $null = New-Item -ItemType Directory -Path $api
+        [IO.File]::WriteAllText((Join-Path $api 'health'), "ok`n")
+        $srv = Start-AutoOSTestHttpServer -Directory $gw
+        $gateway = "http://127.0.0.1:$($srv.Port)"
+        # A gateway that only looked down would make the run start the real thing.
+        $ok = $false
+        try {
+            $ok = (Invoke-WebRequest -Uri "$gateway/api/health" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200
+        } catch { $ok = $false }
+        if (-not $ok) { throw 'the stand-in gateway does not answer /api/health' }
+        $sb = {
+            param($exe, $path, $keys, $sha, $routing, $workers, $gatewayUrl, $stubBin, $sink)
+            $ErrorActionPreference = 'Continue'
+            # A job gets its own session state: the stand-in dir and the fixture tree
+            # are passed in, so the run reaches neither the host's binaries nor the
+            # host's routing dir.
+            $env:PATH = $stubBin + [IO.Path]::PathSeparator + $env:PATH
+            $env:AUTOOS_OMNIROUTE_URL = $gatewayUrl
+            $env:OMNIROUTE_BASE_URL = $gatewayUrl
+            $env:AUTOOS_KEYS_FILE = $keys
+            $env:AUTOOS_ROUTING_DIR = $routing
+            $env:AUTOOS_WORKERS_DIR = $workers
+            $env:AUTOOS_OMNIGRAPH_URL = $sink
+            $env:OMNIGRAPH_URL = $sink
+            $env:OMNI_S3 = $sink
+            $o = & $exe -NoProfile -NonInteractive -File $path -Go 'D-825' -GoSha $sha 2>&1 | Out-String
+            [pscustomobject]@{ Code = $LASTEXITCODE; Out = $o }
+        }
+        $job = Start-Job -ScriptBlock $sb -ArgumentList $gateHost, $gateApply, $gateKeys, `
+            $gateHead, $gateRouting, $gateWorkers, $gateway, $stub.Bin, $GateUrlSink
+        try {
+            if (-not (Wait-Job $job -Timeout 120)) { throw 'the gated run did not finish in 120s' }
+            $r = Receive-Job $job
+            Assert-True ($r.Out -match 'GO: D-825') "the run never cleared the gate: $($r.Out)"
+            Assert-True ($r.Out -notmatch 'refusing to change live') "a valid GO was refused: $($r.Out)"
+            $calls = Get-GateStubCalls $stub
+            Assert-True (Test-GateStubRecord $calls 'omniroute') `
+                "the cleared run reached no stand-in CLI: [$($calls -replace "`r", ' / ')]"
+        } finally {
+            Stop-Job $job -ErrorAction SilentlyContinue
+            Remove-Job $job -Force -ErrorAction SilentlyContinue
+        }
+    } finally {
+        Stop-AutoOSTestHttpServer $srv
+        Remove-GateStubDir $stub
+    }
+}
+
+Test-Case 'apply-capability-overrides.ps1 D-825: a live run with no -Go is refused' {
+    # The standalone twin of apply.sh's override step PATCHes the live gateway,
+    # so it carries the same D-825 gate. The full ref/sha logic is apply.ps1's
+    # above; here the gate's presence and wiring are what is asserted.
+    $r = Invoke-ChildApply @() -Path $gateOverrides
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'refusing to change live gateway state without -Go') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply-capability-overrides.ps1 D-825: a -Go that names no decision is refused' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    # Proof that this twin calls the shared gate rather than keeping its own regex:
+    # a well-shaped ref with the right sha still stops at the artefact lookup.
+    $r = Invoke-ChildApply @('-Go', 'D-9999', '-GoSha', $gateHead) -Path $gateOverrides
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'names no decision') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'apply-capability-overrides.ps1 D-825: -DryRun needs no -Go and is unchanged' {
+    $r = Invoke-ChildApply @('-DryRun') -Path $gateOverrides
+    Assert-True ($r.Out -notmatch 'refusing to change live') "the dry run hit the gate: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO: D') "a dry run without -Go printed a GO: $($r.Out)"
+}
+
+# ─── infra/mcp-servers/scripts/compact-graphs.ps1 D-825 GO gate ───────────────
+# Compaction stops and restarts the live omnigraph-server and rewrites each graph's
+# manifest against the running store, so it is a live converging step (fleet rule D-825)
+# like apply-cluster.sh. The gate runs before any docker call, so a refused run touches
+# nothing; D-852 puts a stand-in directory first on PATH for every run here, so even a
+# cleared gate (and -DryRun, which reaches the same step) stops at the stand-in docker
+# instead of the host's.
+Describe-Group 'compact-graphs D-825 GO gate'
+$gateCompact = Join-Path $Root 'infra/mcp-servers/scripts/compact-graphs.ps1'
+# D-1038 P4c4: compact-graphs.ps1 defaults to the pinned v0.13.0 reference and its image
+# guard fails closed on >= 0.13 — before the GO gate and before any docker call, and
+# -DryRun included. These cases test the GO gate, so they must get past that guard: they
+# name a 0.8 image, the same shared-variable fix APC_IMG08 makes in
+# tests/linux/40-omnigraph-images.sh. One variable, so no case can drift back onto the
+# failing default.
+$gateCompactImage = 'modernrelay/omnigraph-server:v0.8.1'
+
+function Invoke-ChildCompact {
+    # D-852: compaction is a docker-first tool — it inspects, stops and restarts the
+    # live omnigraph-server — so the stand-in directory is the only thing this case
+    # family can honestly run against. The record comes back as 'Calls'.
+    # An empty -Extra OMNIGRAPH_IMAGE clears the 0.8 image and so runs against the
+    # failing default — that is how the guard case below reaches the abort.
+    param([string[]]$ScriptArgs, [hashtable]$Extra = @{})
+    $prevEap = $ErrorActionPreference
+    $saved = Push-GateEnv
+    $stub = New-GateStubDir
+    try {
+        # 5.1 promotes a native command's stderr to a terminating error under Stop; the
+        # refusal is written to stderr, so run the child call under Continue.
+        $ErrorActionPreference = 'Continue'
+        $values = Get-GateStubEnv -Stub $stub -Extra @{
+            'AUTOOS_ROUTING_DIR' = $gateRouting
+            'AUTOOS_WORKERS_DIR' = $gateWorkers
+            'OMNIGRAPH_IMAGE'    = $gateCompactImage
+        }
+        foreach ($key in @($Extra.Keys)) { $values[$key] = $Extra[$key] }
+        Set-GateStubEnv -Values $values
+        $out = & $gateHost -NoProfile -NonInteractive -File $gateCompact @ScriptArgs 2>&1 | Out-String
+        [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out; Calls = (Get-GateStubCalls $stub) }
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-GateEnv $saved
+        Remove-GateStubDir $stub
+    }
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a live compaction with no -Go is refused before any docker call' {
+    $r = Invoke-ChildCompact @()
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'refusing to compact the live omnigraph store without -Go') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO:') "a refused run printed a GO line: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a malformed -Go reference is refused' {
+    $r = Invoke-ChildCompact @('-Go', 'not-a-real-ref', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not a judge run id') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a -GoSha that is not this checkout HEAD is refused' {
+    $r = Invoke-ChildCompact @('-Go', 'D-825', '-GoSha', '0000000000000000000000000000000000000000')
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not this checkout') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a -Go that names no decision is refused' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $r = Invoke-ChildCompact @('-Go', 'D-9999', '-GoSha', $gateHead)
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'names no decision') "out: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'GO: D-9999') "a ref that names nothing printed a GO: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: an unreadable decisions log refuses the -Go' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $missing = Join-Path ([IO.Path]::GetTempPath()) 'autoos-gate-compact-no-such-log.md'
+    Remove-Item -LiteralPath $missing -Force -ErrorAction SilentlyContinue
+    $r = Invoke-ChildCompact -ScriptArgs @('-Go', 'D-825', '-GoSha', $gateHead) `
+        -Extra @{ 'AUTOOS_DECISIONS_LOG' = $missing }
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'cannot read') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: -GoOffline does not lower the sha bar' {
+    $r = Invoke-ChildCompact @('-Go', 'D-825', '-GoSha', '0000000000000000000000000000000000000000', '-GoOffline')
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'is not this checkout') "out: $($r.Out)"
+    Assert-GateUntouched $r
+}
+
+Test-Case 'compact-graphs.ps1 D-825: -DryRun needs no -Go and is unchanged' {
+    $r = Invoke-ChildCompact @('-DryRun')
+    Assert-True ($r.Out -notmatch 'refusing to compact the live omnigraph store') "the dry run hit the gate: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-825: -Go on a -DryRun is echoed and stays read-only' {
+    $r = Invoke-ChildCompact @('-DryRun', '-Go', 'D-825', '-GoSha', $gateHead)
+    Assert-True ($r.Out -match 'GO: D-825') "the -Go was not echoed: $($r.Out)"
+    Assert-True ($r.Out -match 'read-only run') "not marked read-only: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-825: a valid -Go + -GoSha clears the gate and echoes GO first' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    # A cleared gate lets the run on to the store, and on a host with the stack up that
+    # is a live stop/start of omnigraph-server — shared infrastructure a test does not
+    # own. The stand-in directory Invoke-ChildCompact installs is what stops it: the
+    # stand-in docker answers an empty inspect, so the run throws one step past the
+    # gate at 'resolve the live stack', and its record is the proof the run got there
+    # through the shadow instead of the host's docker (D-852).
+    $r = Invoke-ChildCompact @('-Go', 'D-825', '-GoSha', $gateHead)
+    Assert-True ($r.Out -match 'GO: D-825') "the run never cleared the gate: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to compact the live') "a valid GO was refused: $($r.Out)"
+    Assert-True (Test-GateStubRecord $r.Calls 'docker') `
+        "the cleared run reached no stand-in docker: [$(($r.Calls) -replace "`r", ' / ')]"
+    Assert-True ($r.Out -match 'omnigraph-server not found') "the stand-in did not stop the run: $($r.Out)"
+}
+
+Test-Case 'compact-graphs.ps1 D-1038: no OMNIGRAPH_IMAGE aborts on the 0.13 default before the gate' {
+    # The guard every case above now has to satisfy, asserted at suite level: with no
+    # image named, the run fails closed on the 0.13 default — and it does so ahead of
+    # the GO gate and ahead of -DryRun, so neither reaches a docker call.
+    $r = Invoke-ChildCompact @() -Extra @{ 'OMNIGRAPH_IMAGE' = '' }
+    Assert-Equal $r.Code 2
+    Assert-True ($r.Out -match 'ABORT: image ') "no image abort: $($r.Out)"
+    Assert-True ($r.Out -match 'AO-APPLY-CLUSTER-013') "the abort lost the port item: $($r.Out)"
+    Assert-True ($r.Out -notmatch 'refusing to compact the live') "the run reached the GO gate: $($r.Out)"
+    Assert-GateUntouched $r
+    $d = Invoke-ChildCompact @('-DryRun') -Extra @{ 'OMNIGRAPH_IMAGE' = '' }
+    Assert-Equal $d.Code 2
+    Assert-True ($d.Out -match 'ABORT: image ') "a dry run skipped the guard: $($d.Out)"
+    Assert-GateUntouched $d
+}
+
+# ─── D-852: the shadow itself is a tested property ────────────────────────────
+# Every case above either clears a gate or refuses one, and a cleared gate goes on to
+# exec docker/systemctl/curl/ssh off PATH. If the stand-in dir ever stops being first
+# — a case that forgot New-GateStubDir, a PATH rebuilt from the host's own, a stub that
+# lost its execute bit — the same case would silently reach the host's live stack and
+# still print a green tick. That is how omnigraph-server got restarted on 2026-10-09,
+# so these three cases assert the shadow, the record and the URL sink directly.
+function Get-GateFlatPath {
+    # Compare a resolved path against the stand-in's own: one separator, and case
+    # folded only where the filesystem is case-insensitive.
+    param([string]$Path)
+    $flat = $Path -replace '\\', '/'
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $flat = $flat.ToLowerInvariant() }
+    $flat
+}
+
+Test-Case 'apply.ps1 D-825: guard (D-852) every stand-in binary resolves inside the shadow dir' {
+    $stub = New-GateStubDir
+    $prevEap = $ErrorActionPreference
+    $saved = Push-GateEnv
+    $bad = @()
+    try {
+        $ErrorActionPreference = 'Continue'
+        Set-GateStubEnv -Values (Get-GateStubEnv -Stub $stub)
+        # Resolved by a child of the same shell the cases spawn, so what is asserted
+        # is what a run sees — not what this process happens to remember.
+        $names = @($GateStubAllBins | ForEach-Object { "'" + $_ + "'" }) -join ','
+        $probe = 'foreach ($b in @(' + $names + ')) { $c = Get-Command $b -CommandType Application ' +
+                 '-ErrorAction SilentlyContinue | Select-Object -First 1; ' +
+                 'if ($c) { "$b $($c.Source)" } else { "$b missing" } }'
+        $out = & $gateHost -NoProfile -NonInteractive -Command $probe 2>&1 | Out-String
+        $lines = @(($out -split "`r?`n") | Where-Object { $_ })
+        $isWin = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+        foreach ($b in $GateStubAllBins) {
+            $line = @($lines | Where-Object { $_ -like "$b *" }) | Select-Object -First 1
+            if (-not $line) { $bad += "${b}:absent"; continue }
+            $got = $line.Substring($b.Length + 1).Trim()
+            $want = if ($isWin) { Join-Path $stub.Bin ($b + '.cmd') } else { Join-Path $stub.Bin $b }
+            if ((Get-GateFlatPath $got) -ne (Get-GateFlatPath $want)) { $bad += "${b}:$got" }
+        }
+        # docker and systemctl are the two that restarted the live server.
+        foreach ($b in @('docker', 'systemctl')) {
+            if (@($bad | Where-Object { $_ -like "$b*" }).Count -eq 0) { continue }
+            $bad += "$b-outside-the-stand-in-dir"
+        }
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-GateEnv $saved
+        Remove-GateStubDir $stub
+    }
+    Assert-Equal ($bad -join ' ') '' ("resolved outside the stand-in dir: $($bad -join ' ')")
+}
+
+Test-Case 'apply.ps1 D-825: guard (D-852) a stand-in records the call and never runs the host binary' {
+    # The record is the whole guard: a stub that shadows PATH but stays silent cannot
+    # prove a cleared gate stopped there, and one that fell through to the host would
+    # restart the stack while still logging.
+    $stub = New-GateStubDir
+    $prevEap = $ErrorActionPreference
+    $bad = @()
+    try {
+        $ErrorActionPreference = 'Continue'
+        foreach ($b in $GateStubAllBins) {
+            $exe = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+                Join-Path $stub.Bin ($b + '.cmd')
+            } else { Join-Path $stub.Bin $b }
+            $shown = & $exe --pretend-argument 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { $bad += "${b}:exited-$LASTEXITCODE" }
+            if ($shown.Trim()) { $bad += "${b}:printed [$($shown.Trim())]" }
+            if (-not (Test-GateStubRecord (Get-GateStubCalls $stub) $b)) { $bad += "${b}:not-recorded" }
+        }
+        $calls = Get-GateStubCalls $stub
+        if ($calls -notmatch '--pretend-argument') { $bad += 'the record lost the arguments' }
+        # The host's docker answers `inspect` with a StartedAt; the stand-in answers
+        # nothing at all. Asking for the live container is the incident, directly.
+        $exe = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+            Join-Path $stub.Bin 'docker.cmd'
+        } else { Join-Path $stub.Bin 'docker' }
+        $shown = & $exe inspect -f '{{.State.StartedAt}}' omnigraph-server 2>&1 | Out-String
+        if ($shown -match '20') { $bad += "the stand-in answered with a real container: $($shown.Trim())" }
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Remove-GateStubDir $stub
+    }
+    Assert-Equal ($bad -join ' ') '' "a stand-in did not behave like one: $($bad -join ' ')"
+}
+
+Test-Case 'apply.ps1 D-825: guard (D-852) the gateway URL env points at a closed port' {
+    $stub = New-GateStubDir
+    $bad = @()
+    try {
+        $values = Get-GateStubEnv -Stub $stub
+        foreach ($k in $GateStubUrlVars) {
+            if ($values[$k] -ne $GateUrlSink) { $bad += "$k=[$($values[$k])]" }
+        }
+        # A case that names its own stand-in overrides the sink — that is how the
+        # apply battery talks to its loopback gateway — but never a host name.
+        $overridden = Get-GateStubEnv -Stub $stub -Extra @{ 'AUTOOS_OMNIROUTE_URL' = 'http://127.0.0.1:20128' }
+        if ($overridden['AUTOOS_OMNIROUTE_URL'] -ne 'http://127.0.0.1:20128') {
+            $bad += 'the per-case override did not win'
+        }
+        if ($GateUrlSink -ne 'http://127.0.0.1:9') { $bad += "the sink is not the discard port: $GateUrlSink" }
+    } finally {
+        Remove-GateStubDir $stub
+    }
+    Assert-Equal ($bad -join ' ') '' "the URL sink is not what a run sees: $($bad -join ' ')"
+}
+
+# ─── the shared PowerShell front (invoke-go-gate.ps1) ─────────────────────────
+# apply.ps1, apply-capability-overrides.ps1 and compact-graphs.ps1 all ask one front
+# whether a -Go names something that exists; the front is the only place the answer is
+# decided. Asserted here directly because it writes nothing and talks to nothing: every
+# verdict is reachable without clearing a live gate on real infrastructure.
+Describe-Group 'go-gate ref existence front'
+$gateFront = Join-Path $Root 'infra/mcp-servers/scripts/invoke-go-gate.ps1'
+
+function Invoke-GateFront {
+    param([string]$Ref, [switch]$Offline)
+    $prevEap = $ErrorActionPreference
+    $saved = Push-GateEnv
+    try {
+        $ErrorActionPreference = 'Continue'
+        $env:AUTOOS_ROUTING_DIR = $gateRouting
+        $env:AUTOOS_WORKERS_DIR = $gateWorkers
+        # In-process, exactly as the callers invoke it: the front returns {Code,Out,Err}
+        # and writes nothing, so there is no child to capture and no stream to merge.
+        & $gateFront -Tool 'apply.ps1' -Ref $Ref -Root $Root -Offline:$Offline
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-GateEnv $saved
+    }
+}
+
+Test-Case 'go-gate front: a ref that exists clears with no output of its own' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $v = Invoke-GateFront -Ref 'D-825'
+    Assert-Equal $v.Code 0
+    Assert-Equal (@($v.Out).Count) 0
+    Assert-Equal (@($v.Err).Count) 0
+}
+
+Test-Case 'go-gate front: an absent decision refuses with the searched sources' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $v = Invoke-GateFront -Ref 'D-9999'
+    Assert-Equal $v.Code 2
+    Assert-True (($v.Err -join "`n") -match "-Go 'D-9999' names no decision") "err: $($v.Err -join ' / ')"
+    Assert-True (($v.Err -join "`n") -match 'searched:') "the refusal named no source: $($v.Err -join ' / ')"
+}
+
+Test-Case 'go-gate front: the flag names are PowerShell-side' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $err = (Invoke-GateFront -Ref 'OS-9').Err -join "`n"
+    Assert-True ($err -match '-Go ') "the refusal used a bash flag name: $err"
+    Assert-True ($err -notmatch '\-\-go ') "the refusal leaked --go into a PowerShell gate: $err"
+    Assert-True ($err -match '-GoOffline') "the way out was not named: $err"
+}
+
+Test-Case 'go-gate front: -Offline clears an unreadable tree and logs the unverified ref' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $missing = Join-Path ([IO.Path]::GetTempPath()) 'autoos-gate-front-no-such-log.md'
+    Remove-Item -LiteralPath $missing -Force -ErrorAction SilentlyContinue
+    $prevEap = $ErrorActionPreference
+    $saved = Push-GateEnv
+    try {
+        $ErrorActionPreference = 'Continue'
+        $env:AUTOOS_ROUTING_DIR = $gateRouting
+        $env:AUTOOS_WORKERS_DIR = $gateWorkers
+        $env:AUTOOS_DECISIONS_LOG = $missing
+        $blocked = & $gateFront -Tool 'apply.ps1' -Ref 'D-825' -Root $Root
+        $waived = & $gateFront -Tool 'apply.ps1' -Ref 'D-825' -Root $Root -Offline
+    } finally {
+        $ErrorActionPreference = $prevEap
+        Pop-GateEnv $saved
+    }
+    Assert-Equal $blocked.Code 2
+    Assert-Equal $waived.Code 0
+    Assert-Equal ($waived.Out -join '') 'GO-OFFLINE: D-825 unverified'
+}
+
+Test-Case 'go-gate front: a malformed ref is refused whatever the tree holds' {
+    if (-not $gatePy) { Skip 'no python interpreter for the shared ref-existence gate'; return }
+    $v = Invoke-GateFront -Ref 'not-a-real-ref' -Offline
+    Assert-Equal $v.Code 2
+    Assert-True (($v.Err -join "`n") -match 'is not a judge run id') "err: $($v.Err -join ' / ')"
+}
+
+Test-Case 'go-gate front: the gate script is imported, not restated' {
+    # One implementation: the front holds no ref grammar and no artefact lookup of its
+    # own — it only resolves python and runs `verify-ref` on _go_gate.py.
+    $text = Get-Content -LiteralPath $gateFront -Raw
+    Assert-True ($text -match 'verify-ref') 'the front does not call the shared gate'
+    # No restated grammar: the ref pattern is the only thing here that could look like
+    # one, and a quantifier written into this file means a second copy of the rule.
+    Assert-True ($text -notmatch 'd\{\d\}') 'the front restates the ref grammar'
+    Assert-True ($text -notmatch 'def verify_go_ref|verify_go_ref\(') 'the front restates the verdict logic'
+}
+
+# ─── ci-runner (D-1380) ─────────────────────────────────────────────────────
+Import-Module (Join-Path $Root 'tools\ci-runner\CiRunner.psm1') -Force -DisableNameChecking
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs never puts the registration token in argv' {
+    $a = Get-CiRunnerDockerArgs -Name 'workst-a-1-20261016120000' -Repo 'example-owner/example' -Labels 'workst,workstation,fleet-ci' -Memory '8g' -Image 'workst-runner:2.338.0-2'
+    # T1: the function has no token parameter at all...
+    Assert-True (-not (@((Get-Command Get-CiRunnerDockerArgs).Parameters.Keys) -match 'Token')) 'Get-CiRunnerDockerArgs takes a token parameter'
+    # ...so argv carries only the ENV NAME, as the exact pair '-e','RUNNER_TOKEN'.
+    $pairs = 0
+    for ($k = 0; $k -lt $a.Count - 1; $k++) { if ($a[$k] -eq '-e' -and $a[$k + 1] -eq 'RUNNER_TOKEN') { $pairs++ } }
+    Assert-Equal $pairs 1
+    $tokenLike = 'ghs_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'
+    $tokenPat = [regex]::Escape($tokenLike)
+    Assert-True (-not (@($a) -match $tokenPat)) 'a token value leaked into the docker args'
+    $m = [array]::IndexOf([string[]]$a, '--memory')
+    Assert-True ($m -ge 0) '--memory missing'
+    Assert-Equal $a[$m + 1] '8g'
+    Assert-Contains $a '--rm'
+    Assert-Contains $a 'workst-runner:2.338.0-2'
+    Assert-Contains $a 'REPO_URL=https://github.com/example-owner/example'
+    Assert-Contains $a 'RUNNER_LABELS=workst,workstation,fleet-ci'
+    $e = [array]::IndexOf([string[]]$a, '--entrypoint')
+    Assert-True ($e -ge 0) '--entrypoint missing'
+    Assert-Equal $a[$e + 1] 'bash'
+    Assert-Equal $a[$e + 2] 'workst-runner:2.338.0-2'
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs -DockerSocket mounts the host socket' {
+    $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
+    $with = Get-CiRunnerDockerArgs @base -DockerSocket
+    $g = [array]::IndexOf([string[]]$with, '--group-add')
+    Assert-True ($g -ge 0) '--group-add missing with -DockerSocket'
+    Assert-Equal $with[$g + 1] '0'
+    $v = [array]::IndexOf([string[]]$with, '-v')
+    Assert-True ($v -ge 0) '-v missing with -DockerSocket'
+    Assert-Equal $with[$v + 1] '/var/run/docker.sock:/var/run/docker.sock'
+    $without = Get-CiRunnerDockerArgs @base
+    Assert-True (-not ($without -contains '--group-add')) '--group-add without -DockerSocket'
+    Assert-True (-not ($without -contains '0')) 'group 0 without -DockerSocket'
+    Assert-True (-not ($without -contains '-v')) '-v without -DockerSocket'
+    Assert-True (-not ($without -contains '/var/run/docker.sock:/var/run/docker.sock')) 'socket mount without -DockerSocket'
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs -NetNs adds the caps it needs' {
+    $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
+    $net = Get-CiRunnerDockerArgs @base -NetNs
+    Assert-Contains $net '--cap-add'
+    Assert-Contains $net 'SYS_ADMIN'
+    Assert-Contains $net 'NET_ADMIN'
+    Assert-Contains $net '--security-opt'
+    Assert-Contains $net 'seccomp=unconfined'
+    $plain = Get-CiRunnerDockerArgs @base
+    Assert-True (-not ($plain -contains '--cap-add')) '--cap-add without -NetNs'
+    Assert-True (-not ($plain -contains 'SYS_ADMIN')) 'SYS_ADMIN without -NetNs'
+    Assert-True (-not ($plain -contains 'NET_ADMIN')) 'NET_ADMIN without -NetNs'
+    Assert-True (-not ($plain -contains 'seccomp=unconfined')) 'seccomp=unconfined without -NetNs'
+}
+
+Test-Case 'ci-runner: Get-CiSlotAction starts a slot whose loop is gone' {
+    # T4: loop dead => start, whatever the other signals say.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'start'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 99) 'start'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'start'
+}
+
+Test-Case 'ci-runner: Get-CiSlotAction leaves a live healthy slot alone' {
+    # T5: loop alive and online, or busy, or its container running => ok.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 0) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $true -UnhealthyMinutes 0) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 60) 'ok'
+}
+
+Test-Case 'ci-runner: Get-CiSlotAction waits, then restarts, never a busy runner' {
+    # T6: live + not online + not busy + no container: wait up to 5 min, then restart.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'wait'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5) 'wait'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5.5) 'restart'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'restart'
+    # T6: a running job must not be killed.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 60) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 600) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 600) 'start'
+}
+
+Test-Case 'ci-runner: Test-CiOfflineExpired waits 3 minutes for a fresh runner' {
+    # T7: a fresh ephemeral runner shows offline until its session connects.
+    Assert-True (-not (Test-CiOfflineExpired -OfflineMinutes 0)) '0 min must not expire'
+    Assert-True (-not (Test-CiOfflineExpired -OfflineMinutes 2.9)) '2.9 min must not expire'
+    Assert-True (Test-CiOfflineExpired -OfflineMinutes 3) '3 min must expire'
+    Assert-True (Test-CiOfflineExpired -OfflineMinutes 42) '42 min must expire'
+}
+
+Test-Case 'ci-runner: Get-CiSlotNames expands every prefix into its slots' {
+    # T8
+    $cfg = [pscustomobject]@{ repos = @(
+        [pscustomobject]@{ prefix = 'workst-a'; slots = 2 },
+        [pscustomobject]@{ prefix = 'workst-b'; slots = 1 }) }
+    $names = @(Get-CiSlotNames -Config $cfg)
+    Assert-Equal $names.Count 3
+    Assert-Equal $names[0] 'workst-a-1'
+    Assert-Equal $names[1] 'workst-a-2'
+    Assert-Equal $names[2] 'workst-b-1'
+}
+
+Test-Case 'ci-runner: slots.example.json matches the live config shape' {
+    # T9
+    $ex = Get-Content -LiteralPath (Join-Path $Root 'tools\ci-runner\slots.example.json') -Raw | ConvertFrom-Json
+    $repos = @($ex.repos)
+    Assert-True ($repos.Count -ge 2) 'the example needs at least two repos'
+    $labels = @("$($ex.labels)" -split ',')
+    Assert-Contains $labels 'fleet-ci'
+    Assert-Contains $labels 'workstation'
+    foreach ($r in $repos) {
+        foreach ($prop in 'repo', 'prefix', 'slots', 'memory') {
+            Assert-True (@($r.PSObject.Properties.Name) -contains $prop) "repo entry lacks '$prop'"
+        }
+        Assert-True ($r.repo -like 'example-owner/*') "repo owner must be example-owner: $($r.repo)"
+        Assert-True ([int]$r.slots -ge 1) "slots must be >= 1 on $($r.prefix)"
+    }
+}
+
+Test-Case 'ci-runner: ci.yml keeps fork PRs off the self-hosted runners' {
+    # T10
+    $lines = @(Get-Content -LiteralPath (Join-Path $Root '.github\workflows\ci.yml'))
+    $runsOn = @($lines | Where-Object { $_ -match '^\s*runs-on:' })
+    Assert-True ($runsOn.Count -gt 0) 'no runs-on: lines in ci.yml'
+    # Every job, the Windows one included: a self-hosted Windows fleet-ci runner would otherwise
+    # take fork PRs (22aa4730 moved it to [self-hosted, windows, fleet-ci] without the guard).
+    foreach ($line in $runsOn) {
+        Assert-True ($line -like '*github.event.pull_request.head.repo.full_name == github.repository*') "fork guard missing: $($line.Trim())"
+        Assert-True (($line -like "*'ubuntu-latest'*") -or ($line -like "*'windows-latest'*")) "no GitHub-hosted fallback: $($line.Trim())"
+    }
+}
+
+Test-Case 'ci-runner: no file under tools/ci-runner hardcodes a host path' {
+    # T11: the install dir is $PSScriptRoot, so nothing names a drive or the install dir.
+    $ciDir = Join-Path $Root 'tools\ci-runner'
+    $files = @()
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $files = @(git -C $Root ls-files -- 'tools/ci-runner/' 2>$null | Where-Object { $_ })
+    }
+    if (-not $files) {
+        $files = @(Get-ChildItem -LiteralPath $ciDir -Recurse -File | ForEach-Object { $_.FullName })
+    }
+    Assert-True ($files.Count -gt 0) 'no files found under tools/ci-runner'
+    $drive = '(?<![A-Za-z])[A-Za-z]:[\\/]'
+    $install = 'fleet[\\/]ci-runner'
+    foreach ($f in $files) {
+        $path = if ([System.IO.Path]::IsPathRooted($f)) { $f } else { Join-Path $Root $f }
+        $name = Split-Path $path -Leaf
+        $text = Get-Content -LiteralPath $path -Raw
+        Assert-True ($text -notmatch $drive) "drive path in tools/ci-runner/$name"
+        Assert-True ($text -notmatch $install) "install dir in tools/ci-runner/$name"
+    }
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs -CacheVolumes adds the three cache mounts and sccache envs' {
+    $cbase = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
+    $cmounts = @('ci-cargo-registry:/home/runner/.cargo/registry',
+                 'ci-cargo-git:/home/runner/.cargo/git',
+                 'ci-sccache:/home/runner/.cache/sccache')
+    $cenvs = @('RUSTC_WRAPPER=/usr/local/bin/sccache',
+               'SCCACHE_DIR=/home/runner/.cache/sccache',
+               'SCCACHE_CACHE_SIZE=30G')
+    $cwant = $cmounts + $cenvs
+    $cwith = Get-CiRunnerDockerArgs @cbase -CacheVolumes
+    $cep = [array]::IndexOf([string[]]$cwith, '--entrypoint')
+    Assert-True ($cep -ge 0) '--entrypoint missing'
+    # each mount appears as the exact pair '-v','<volume>:<path>'
+    foreach ($cm in $cmounts) {
+        $cpair = $false
+        for ($k = 0; $k -lt $cwith.Count - 1; $k++) { if ($cwith[$k] -eq '-v' -and $cwith[$k + 1] -eq $cm) { $cpair = $true; break } }
+        Assert-True $cpair "mount pair '-v','$cm' missing with -CacheVolumes"
+    }
+    # each env appears as the exact pair '-e','<K>=<V>'
+    foreach ($ce in $cenvs) {
+        $cpair = $false
+        for ($k = 0; $k -lt $cwith.Count - 1; $k++) { if ($cwith[$k] -eq '-e' -and $cwith[$k + 1] -eq $ce) { $cpair = $true; break } }
+        Assert-True $cpair "env pair '-e','$ce' missing with -CacheVolumes"
+    }
+    # docker run options must all precede --entrypoint / the image
+    foreach ($cneedle in $cwant) {
+        $ci = [array]::IndexOf([string[]]$cwith, $cneedle)
+        Assert-True ($ci -ge 0) "$cneedle missing from the docker args"
+        Assert-True ($ci -lt $cep) "$cneedle must come before --entrypoint"
+    }
+    # without the switch none of them appear
+    $cwithout = Get-CiRunnerDockerArgs @cbase
+    foreach ($cneedle in $cwant) {
+        Assert-True (-not (@($cwithout) -contains $cneedle)) "$cneedle appears without -CacheVolumes"
+    }
+}
+
+Test-Case 'ci-runner: Get-CiCacheVolumes returns the three cache volume names in order' {
+    $cvols = @(Get-CiCacheVolumes)
+    Assert-Equal $cvols.Count 3
+    Assert-Equal $cvols[0] 'ci-cargo-registry'
+    Assert-Equal $cvols[1] 'ci-cargo-git'
+    Assert-Equal $cvols[2] 'ci-sccache'
+    # single source of truth: -CacheVolumes mounts exactly these volumes, in this order
+    $cargs = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -CacheVolumes
+    $cgot = @()
+    for ($k = 0; $k -lt $cargs.Count - 1; $k++) { if ($cargs[$k] -eq '-v') { $cgot += ($cargs[$k + 1] -split ':')[0] } }
+    Assert-Equal $cgot.Count 3
+    for ($k = 0; $k -lt 3; $k++) { Assert-Equal $cgot[$k] $cvols[$k] }
+}
+
+Test-Case 'ci-runner: Get-CiPrepullImages returns the config prepull array, empty when absent' {
+    $cpreCfg = [pscustomobject]@{ prepull = @('postgres:16', 'redis:7') }
+    $cpre = @(Get-CiPrepullImages -Config $cpreCfg)
+    Assert-Equal $cpre.Count 2
+    Assert-Equal $cpre[0] 'postgres:16'
+    Assert-Equal $cpre[1] 'redis:7'
+    $cpreNone = @(Get-CiPrepullImages -Config ([pscustomobject]@{ labels = 'x' }))
+    Assert-Equal $cpreNone.Count 0
+    $cex = Get-Content -LiteralPath (Join-Path $Root 'tools/ci-runner/slots.example.json') -Raw | ConvertFrom-Json
+    $cexPre = @(Get-CiPrepullImages -Config $cex)
+    Assert-True ($cexPre -contains 'postgres:16') 'slots.example.json has no postgres:16 in prepull'
+}
+
+Test-Case 'ci-runner: Dockerfile pins and verifies Temporal CLI 1.9.1, sccache 0.18.0 and the cache dirs' {
+    $cdf = Get-Content -LiteralPath (Join-Path $Root 'tools/ci-runner/Dockerfile') -Raw
+    Assert-True ($cdf -match 'v1\.9\.1') 'Temporal CLI v1.9.1 not pinned'
+    Assert-True ($cdf -match 'temporal_cli_1\.9\.1_linux_amd64\.tar\.gz') 'temporal 1.9.1 tarball name missing'
+    Assert-True ($cdf -match '09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5') 'Temporal CLI sha256 missing'
+    Assert-True ($cdf -match '/usr/local/bin/temporal') 'temporal install path missing'
+    Assert-True ($cdf -match 'v0\.18\.0') 'sccache v0.18.0 not pinned'
+    Assert-True ($cdf -match 'sccache-v0\.18\.0-x86_64-unknown-linux-musl\.tar\.gz') 'sccache musl tarball name missing'
+    Assert-True ($cdf -match '/usr/local/bin/sccache') 'sccache install path missing'
+    $cshaChecks = ([regex]::Matches($cdf, 'sha256sum -c')).Count
+    Assert-True ($cshaChecks -ge 2) "sha256sum -c appears $cshaChecks time(s); expected at least 2"
+    Assert-True ($cdf -match '--default-toolchain stable') 'rustup stable default toolchain missing'
+    Assert-True ($cdf -match 'mkdir -p /home/runner/\.cargo/registry /home/runner/\.cargo/git /home/runner/\.cache/sccache') 'cache dir mkdir missing'
+    Assert-True ($cdf -match '/home/runner/\.cargo/registry') 'cargo registry dir missing'
+    Assert-True ($cdf -match '/home/runner/\.cargo/git') 'cargo git dir missing'
+    Assert-True ($cdf -match '/home/runner/\.cache/sccache') 'sccache cache dir missing'
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs adds --cpus and --cpu-shares before --entrypoint' {
+    $c1on = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -Cpus 8
+    $c1cpu = -1
+    $c1shares = -1
+    $c1ep = -1
+    for ($c1k = 0; $c1k -lt $c1on.Count; $c1k++) {
+        if ($c1on[$c1k] -eq '--cpus') { $c1cpu = $c1k }
+        if ($c1on[$c1k] -eq '--cpu-shares') { $c1shares = $c1k }
+        if ($c1on[$c1k] -eq '--entrypoint') { $c1ep = $c1k }
+    }
+    Assert-True ($c1cpu -ge 0) '--cpus missing with -Cpus 8'
+    Assert-True ($c1shares -ge 0) '--cpu-shares missing with -Cpus 8'
+    Assert-True ($c1ep -ge 0) '--entrypoint missing'
+    $c1cpuNext = $c1cpu + 1
+    $c1sharesNext = $c1shares + 1
+    Assert-Equal $c1on[$c1cpuNext] '8'
+    Assert-Equal $c1on[$c1sharesNext] '1024'
+    Assert-True ($c1cpu -lt $c1ep) '--cpus must come before --entrypoint'
+    Assert-True ($c1shares -lt $c1ep) '--cpu-shares must come before --entrypoint'
+    # no -Cpus (default 0) and an explicit -Cpus 0 must add neither flag
+    $c1off = Get-CiRunnerDockerArgs -Name 'i2' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1'
+    Assert-True (-not ($c1off -contains '--cpus')) '--cpus must be absent without -Cpus'
+    Assert-True (-not ($c1off -contains '--cpu-shares')) '--cpu-shares must be absent without -Cpus'
+    $c1zero = Get-CiRunnerDockerArgs -Name 'i3' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -Cpus 0
+    Assert-True (-not ($c1zero -contains '--cpus')) '--cpus must be absent with -Cpus 0'
+    Assert-True (-not ($c1zero -contains '--cpu-shares')) '--cpu-shares must be absent with -Cpus 0'
+}
+
+Test-Case 'ci-runner: Get-CiSlotCpus prefers repo cpus, then cpus_default, then 8, zero = no cap' {
+    $c2cfg = [pscustomobject]@{ cpus_default = 6 }
+    $c2cfgNone = [pscustomobject]@{ labels = 'x' }
+    $c2cfgZero = [pscustomobject]@{ cpus_default = 0 }
+    $c2repo = [pscustomobject]@{ prefix = 'ga'; slots = 2; cpus = 4 }
+    $c2repoZero = [pscustomobject]@{ prefix = 'z'; slots = 1; cpus = 0 }
+    $c2repoBare = [pscustomobject]@{ prefix = 'pl'; slots = 1 }
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repo -Config $c2cfg) 4
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfg) 6
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfgNone) 8
+    # a resolved 0 means "no cap" and must survive instead of falling back to 8
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoZero -Config $c2cfg) 0
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfgZero) 0
+}
+
+Test-Case 'ci-runner: Test-CiDiskFloor prunes below the floor and stays off when floor <= 0' {
+    Assert-True (Test-CiDiskFloor -FreeGB 4 -FloorGB 50) 'free below the floor must prune'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 60 -FloorGB 50)) 'free above the floor must not prune'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 50 -FloorGB 50)) 'free equal to the floor must not prune'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 1 -FloorGB 0)) 'a floor of 0 disables the check'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 1 -FloorGB (-1))) 'a negative floor disables the check'
+}
+
+Test-Case 'ci-runner: Get-CiPruneCommands returns only the dangling-image and build-cache prunes' {
+    $c4 = @(Get-CiPruneCommands)
+    Assert-Equal $c4.Count 2
+    $c4img = $c4[0]
+    $c4bld = $c4[1]
+    Assert-Equal $c4img.Count 3
+    Assert-Equal $c4img[0] 'image'
+    Assert-Equal $c4img[1] 'prune'
+    Assert-Equal $c4img[2] '-f'
+    Assert-Equal $c4bld.Count 5
+    Assert-Equal $c4bld[0] 'builder'
+    Assert-Equal $c4bld[1] 'prune'
+    Assert-Equal $c4bld[2] '-f'
+    Assert-Equal $c4bld[3] '--keep-storage'
+    Assert-Equal $c4bld[4] '20gb'
+    # the ci-cargo-registry / ci-cargo-git / ci-sccache caches are named volumes and the
+    # runner/job images are tagged: neither may ever appear in a prune
+    foreach ($c4outer in $c4) {
+        foreach ($c4inner in $c4outer) {
+            Assert-True ($c4inner -ne 'volume') "prune must never touch volumes: $c4inner"
+            Assert-True ($c4inner -ne '-a') "prune must never be all-inclusive: $c4inner"
+            Assert-True ($c4inner -ne '--all') "prune must never be all-inclusive: $c4inner"
+        }
+    }
+}
+
+Test-Case 'ci-runner: slots.example.json sets cpus_default 8 and disk_floor_gb 50' {
+    $c5roots = @()
+    if ($PSScriptRoot) { $c5roots += (Join-Path $PSScriptRoot '..') }
+    $c5cwd = (Get-Location).Path
+    $c5roots += $c5cwd
+    $c5roots += (Join-Path $c5cwd '..')
+    $c5file = $null
+    foreach ($c5root in $c5roots) {
+        $c5try = Join-Path $c5root 'tools/ci-runner/slots.example.json'
+        if (Test-Path -LiteralPath $c5try) { $c5file = $c5try; break }
+    }
+    if ($null -eq $c5file) {
+        Assert-True $false 'tools/ci-runner/slots.example.json not found'
+        return
+    }
+    $c5cfg = Get-Content -LiteralPath $c5file -Raw | ConvertFrom-Json
+    Assert-True ($null -ne $c5cfg.PSObject.Properties['cpus_default']) 'cpus_default missing from slots.example.json'
+    Assert-True ($null -ne $c5cfg.PSObject.Properties['disk_floor_gb']) 'disk_floor_gb missing from slots.example.json'
+    Assert-Equal ([int]($c5cfg.cpus_default)) 8
+    Assert-Equal ([int]($c5cfg.disk_floor_gb)) 50
+}
+
+Test-Case 'ci-runner: Dockerfile installs the Cyrillic-capable fonts and the Python build toolchain' {
+    $c6roots = @()
+    if ($PSScriptRoot) { $c6roots += (Join-Path $PSScriptRoot '..') }
+    $c6cwd = (Get-Location).Path
+    $c6roots += $c6cwd
+    $c6roots += (Join-Path $c6cwd '..')
+    $c6file = $null
+    foreach ($c6root in $c6roots) {
+        $c6try = Join-Path $c6root 'tools/ci-runner/Dockerfile'
+        if (Test-Path -LiteralPath $c6try) { $c6file = $c6try; break }
+    }
+    if ($null -eq $c6file) {
+        Assert-True $false 'tools/ci-runner/Dockerfile not found'
+        return
+    }
+    $c6raw = Get-Content -LiteralPath $c6file -Raw
+    Assert-True ($c6raw -match 'fonts-dejavu-core') 'fonts-dejavu-core missing from the Dockerfile'
+    Assert-True ($c6raw -match 'fonts-liberation') 'fonts-liberation missing from the Dockerfile'
+    Assert-True ($c6raw -match 'python3-venv') 'python3-venv missing from the Dockerfile'
+    Assert-True ($c6raw -match 'python3-dev') 'python3-dev missing from the Dockerfile'
+    Assert-True ($c6raw -match 'build-essential') 'build-essential missing from the Dockerfile'
+}
+
+# ─── Summary ────────────────────────────────────────────────────────────────
+Write-Host ''
+Write-Host (C ('-' * 56) '2;38;5;245')
+Write-Host ("  " + (C "passed $script:Pass" '38;5;71') +
+            "   " + (C "failed $script:Fail" $(if ($script:Fail) { '1;38;5;167' } else { '2;38;5;245' })) +
+            "   " + (C "skipped $script:Skip" '2;38;5;245'))
+if ($script:Fail) {
+    Write-Host ''
+    Write-Host '  failures:'
+    foreach ($f in $script:Failures) { Write-Host "    - $f" }
+    exit 1
+}
+exit 0

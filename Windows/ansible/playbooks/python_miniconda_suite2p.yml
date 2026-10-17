@@ -1,0 +1,67 @@
+---
+- name: Install Miniconda and the suite2p analysis environment
+  hosts: windows
+  gather_facts: true
+
+  vars:
+    conda_root: C:\tools\miniconda3
+    suite2p_env: suite2p
+    suite2p_python: "3.11"      # 3.8 reached end of life in October 2024
+
+  tasks:
+    - name: Ensure Miniconda3 is installed
+      chocolatey.chocolatey.win_chocolatey:
+        name: miniconda3
+        state: present
+
+    # CRITICAL: win_environment with a `value:` REPLACES the variable. The old
+    # task set Path to just the four conda directories, wiping everything the
+    # user had. Read the current value, append what is missing, write it back.
+    - name: Read the current user Path
+      ansible.windows.win_environment:
+        name: Path
+        level: user
+        state: present
+      check_mode: true
+      register: current_path
+      changed_when: false
+
+    - name: Append Miniconda to the user Path
+      ansible.windows.win_environment:
+        name: Path
+        value: "{{ (existing + missing) | join(';') }}"
+        level: user
+        state: present
+      vars:
+        existing: "{{ (current_path.value | default('')) | split(';') | reject('equalto', '') | list }}"
+        wanted:
+          - "{{ conda_root }}"
+          - '{{ conda_root }}\Scripts'
+          - '{{ conda_root }}\Library\bin'
+          - '{{ conda_root }}\condabin'
+        missing: "{{ wanted | difference(existing) }}"
+      when: missing | length > 0
+
+    - name: Create the conda environment
+      ansible.windows.win_command: >-
+        {{ conda_root }}\Scripts\conda.exe create -n {{ suite2p_env }}
+        python={{ suite2p_python }} -y
+      args:
+        creates: '{{ conda_root }}\envs\{{ suite2p_env }}'
+
+    # `creates` on the env directory is not enough here - the directory exists
+    # as soon as the env does. Check for the installed package instead so a
+    # re-run is a no-op rather than a full dependency re-resolve.
+    - name: Check whether suite2p is already present
+      ansible.windows.win_command: >-
+        {{ conda_root }}\Scripts\conda.exe run -n {{ suite2p_env }}
+        python -c "import suite2p"
+      register: suite2p_probe
+      failed_when: false
+      changed_when: false
+
+    - name: Install suite2p
+      ansible.windows.win_command: >-
+        {{ conda_root }}\Scripts\conda.exe run -n {{ suite2p_env }}
+        pip install suite2p
+      when: suite2p_probe.rc != 0

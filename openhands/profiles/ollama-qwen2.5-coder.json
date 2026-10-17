@@ -1,0 +1,23 @@
+{
+  "auth_type": "api_key",
+  "api_mode": "auto",
+  "stream": false,
+  "drop_params": true,
+  "modify_params": true,
+  "disable_stop_word": false,
+  "caching_prompt": true,
+  "log_completions": false,
+  "native_tool_calling": true,
+  "is_subscription": false,
+  "capability_overrides": {},
+  "litellm_extra_body": {},
+  "model": "ollama/qwen2.5-coder:7b",
+  "base_url": "http://127.0.0.1:11434/v1",
+  "max_input_tokens": 32768,
+  "max_output_tokens": 8192,
+  "input_cost_per_token": 0,
+  "output_cost_per_token": 0,
+  "reasoning_effort": "none",
+  "enable_encrypted_reasoning": false,
+  "extended_thinking_budget": null
+}

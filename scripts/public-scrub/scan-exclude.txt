@@ -1,0 +1,28 @@
+# Paths the publication gate does not read. scan.py loads this file by default
+# (the --exclude-file argument overrides it), so both CI and a local `scan.py .`
+# share one answer.
+#
+# Deliberately NOT the same list as migrate-exclude.txt: that one says what was never
+# migrated into AutoOS, this one says what carries the shapes themselves. Every entry
+# shrinks the gate, so each needs a reason on the line above it.
+
+# The scrubber's own home: patterns.txt and patterns.private.txt hold the rules and the
+# site literals, and test_scan.py plants fixture specimens of every shape on purpose.
+# None of them is published content. (patterns.txt is additionally auto-skipped as the
+# --patterns argument; the private file and the fixtures are not.)
+scripts/public-scrub/
+
+# The published `.agents/` tree is in the gate (ci.yml scans it). These three entries are
+# exact files, never a directory: excluding `.agents/` or `.../tests/` would un-gate every
+# skill body, which is precisely what router skills must not ship. Each names a fixture
+# that sets a throwaway git identity in a scratch repo it creates and discards — a fake
+# committer for a test commit, not something published about a real machine.
+
+# Portability.Tests.ps1: `git config user.email/user.name` on a fake repo it inits.
+.agents/skills/unattended-orchestration/tests/Portability.Tests.ps1
+
+# Archive.Tests.ps1: the same throwaway identity for its scratch test-repo.
+.agents/skills/unattended-orchestration/tests/Archive.Tests.ps1
+
+# test_deepseek_call.py: `git config user.email` on a tmp_path repo, to let it commit.
+.agents/skills/unattended-orchestration/tests/test_deepseek_call.py

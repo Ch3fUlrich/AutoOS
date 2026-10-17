@@ -1,0 +1,17 @@
+# Server-side dedup: collapse case-variant / drifted duplicate slugs that branch
+# merges can introduce (Omnigraph only auto-merges SAME-slug nodes). Idempotent
+# and a cheap no-op when the graph is clean; rebuilds only when duplicates exist.
+# Runs on the memory SERVER host (coding.example.internal), not on clients.
+# Install: replace @AUTOOS_ROOT@ with your AutoOS checkout root, copy to
+# ~/.config/systemd/user/ and enable the timer (see omnigraph-setup/README.md —
+# it seds the token in). Nothing renders it automatically; there is no installer
+# for the server-side dedup unit.
+[Unit]
+Description=Deduplicate the Omnigraph memory graph
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @AUTOOS_ROOT@/infra/mcp-servers/scripts/dedup-graph.py --network mcp-servers_default --minio-path %h/apps/omnigraph/minio
+Nice=15

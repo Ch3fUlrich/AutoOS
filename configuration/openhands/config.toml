@@ -1,0 +1,116 @@
+# OpenHands LLM routing — OmniRoute first (docs/models.md).
+#
+# V1 (current Web app) configures the LLM in the Settings UI; the docker path
+# gets it from env vars, which configuration/start-stack.* sets for you:
+#
+#   LLM_MODEL=openai/l1-orchestrator
+#   LLM_API_KEY=<OmniRoute client key>
+#   LLM_BASE_URL=http://host.docker.internal:20128/v1   # container -> host
+#
+# The `openai/` prefix is not decoration: LiteLLM uses it to pick the
+# OpenAI-compatible transport, and everything after the prefix is the model
+# name OmniRoute receives (`l1-orchestrator` is the combo name). Without it,
+# LiteLLM reports "LLM Provider NOT provided" — the classic model-mismatch
+# error.
+#
+# This file is the V0/dev-path template (main.py / cli.py). Named [llm.*]
+# sections + [agent.*] mapping work there; the docker path ignores it.
+# Keys: never here. Real spend shows in the OmniRoute dashboard, not the
+# OpenHands cost column (it cannot know combo pricing).
+#
+# Agent Canvas (ghcr.io/openhands/agent-canvas, npm @openhands/agent-canvas)
+# is upstream's beta successor on port 8000 — NOT a drop-in for this path.
+# Verdict 2026-09-20 (docs/verification.md): stay on
+# docker.openhands.dev/openhands/openhands:latest until Canvas leaves beta
+# or this image is retired. Do not switch this file or start-stack.* to
+# Canvas without a fresh end-to-end LLM-profile proof.
+#
+# IDS RENAMED 2026-09-23: tier1 -> l1-orchestrator, tier2 -> l2-worker,
+# tier3 -> l3-driver, rag -> t4-rag. Credit chains dropped (operator call).
+
+# ── Default: orchestrator tier ──────────────────────────────────────
+[llm]
+model = "openai/l1-orchestrator"
+base_url = "http://127.0.0.1:20128/v1"
+api_key = ""
+temperature = 0.0
+num_retries = 3
+# Token windows in every [llm*] table come from catalog/ide-models.json
+# (python3 tools/sync-ide-models.py rewrites them; edit the catalog).
+max_input_tokens = 1000000
+max_output_tokens = 32768
+
+# ── Named tiers (dev path: pick per agent below) ────────────────────
+[llm.l1-orchestrator]
+model = "openai/l1-orchestrator"
+base_url = "http://127.0.0.1:20128/v1"
+temperature = 0.0
+max_input_tokens = 1000000
+max_output_tokens = 32768
+
+[llm.l2-worker]
+model = "openai/l2-worker"
+base_url = "http://127.0.0.1:20128/v1"
+temperature = 0.1
+max_input_tokens = 131072
+max_output_tokens = 32768
+
+[llm.l3-driver]
+model = "openai/l3-driver"
+base_url = "http://127.0.0.1:20128/v1"
+temperature = 0.2
+max_input_tokens = 128000
+max_output_tokens = 16384
+
+# Sensitive data: swap tier ids for the -clean combos (no prompt training).
+# l1-orchestrator-clean is NOT here (PROVFIX3 finding 6): the combo has been
+# omitted since DSMAX 2026-09-27 (its only legs were OpenRouter and the
+# client-bound Zen deployment), apply.sh prunes an omitted combo from the
+# gateway store, and the OpenHands tier spec dropped the profile — so this table
+# would 404 on activation. The two clean tiers that do serve are below.
+[llm.l2-worker-clean]
+model = "openai/l2-worker-clean"
+base_url = "http://127.0.0.1:20128/v1"
+temperature = 0.1
+
+[llm.l3-driver-clean]
+model = "openai/l3-driver-clean"
+base_url = "http://127.0.0.1:20128/v1"
+temperature = 0.2
+
+# LiteLLM fallback proxy (:4000; the openai/ prefix is the transport
+# selector OpenHands requires - its litellm stack strips it before the call,
+# so the proxy receives the bare tier model_names below).
+[llm.litellm-l1-orchestrator]
+model = "openai/l1-orchestrator"
+base_url = "http://127.0.0.1:4000/v1"
+temperature = 0.0
+
+[llm.litellm-l2-worker]
+model = "openai/l2-worker"
+base_url = "http://127.0.0.1:4000/v1"
+temperature = 0.1
+
+[llm.litellm-l3-driver]
+model = "openai/l3-driver"
+base_url = "http://127.0.0.1:4000/v1"
+temperature = 0.2
+
+# Reserved: preliminary code-edit drafts go to the cheap tier.
+[llm.draft_editor]
+model = "openai/l3-driver"
+base_url = "http://127.0.0.1:20128/v1"
+temperature = 0.2
+top_p = 0.95
+
+# Standby: cohere RAG combo (trial keys, 128k, not in any tier).
+[llm.t4-rag]
+model = "openai/t4-rag"
+base_url = "http://127.0.0.1:20128/v1"
+temperature = 0.1
+max_input_tokens = 131072
+max_output_tokens = 4096
+
+# ── Agent mapping (dev path) ────────────────────────────────────────
+[agent.CodeActAgent]
+llm_config = "l1-orchestrator"

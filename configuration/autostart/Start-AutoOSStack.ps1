@@ -1,0 +1,158 @@
+﻿<#
+.SYNOPSIS
+    Resume the AutoOS AI stack after logon: gateway + OpenHands + opencode serve.
+
+.DESCRIPTION
+    Opt-in resume helper run by the "AutoOS Stack" scheduled task created with
+    Register-AutoOSAutostart.ps1 (or by hand after a reboot). Safe to run twice:
+    every probe below no-ops when already up, and nothing here installs
+    software, removes anything, or overwrites user files.
+
+    What resumes:
+      1. OmniRoute gateway on http://127.0.0.1:20128 (started hidden when down).
+      2. LiteLLM fallback proxy on :4000 via configuration/litellm/start-litellm.ps1,
+         which loads configuration/litellm/.env into the proxy process (the
+         proxy cannot read that file itself).
+      3. OpenHands container `openhands-app` (docker start when exited;
+         first boot still needs .\configuration\start-stack.ps1 -App openhands).
+      4. opencode serve on :4096 (started hidden when down; 401 = alive).
+
+    What does NOT resume: AutoOS --serve. Its token is random per run, so an
+    autostarted browser UI would print its URL where nobody reads it. Start it
+    by hand when you need it: .\setup.ps1 -Serve.
+
+.EXAMPLE
+    powershell -NoProfile -ExecutionPolicy Bypass -File Start-AutoOSStack.ps1
+#>
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$Gateway = 'http://127.0.0.1:20128'
+
+function Test-AutoOSGateway {
+    try { (Invoke-WebRequest -Uri "$Gateway/api/health" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 }
+    catch { $false }
+}
+
+# 1. Gateway first: everything else routes through it.
+if (Test-AutoOSGateway) {
+    Write-Host 'Gateway already up on 20128 - nothing to do.'
+} else {
+    # Sane skip-on-repeated-429 policy (operator 2026-10-01): the gateway reads
+    # these from its own process env at startup (open-sse/services/rotationConfig.ts:84-110;
+    # provider-breaker family at open-sse/config/constants.ts:251-277), so the
+    # launcher that spawns it is the only surface. Rotate a leg only after three
+    # 429s inside a 120s window (the shipped default of 1 hops on the first
+    # 429), then cool the leg for 300s. Respect-set: never clobber a user value.
+    if (-not $env:OMNIROUTE_ROTATION_ENABLED) {
+        $env:OMNIROUTE_ROTATION_ENABLED = 'true'
+    }
+    if (-not $env:OMNIROUTE_ROTATE_ON_429) {
+        $env:OMNIROUTE_ROTATE_ON_429 = 'true'
+    }
+    if (-not $env:OMNIROUTE_ROTATE_429_THRESHOLD) {
+        $env:OMNIROUTE_ROTATE_429_THRESHOLD = '3'
+    }
+    if (-not $env:OMNIROUTE_ROTATE_429_WINDOW_SECONDS) {
+        $env:OMNIROUTE_ROTATE_429_WINDOW_SECONDS = '120'
+    }
+    if (-not $env:OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS) {
+        $env:OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS = '300'
+    }
+    if (-not $env:OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS) {
+        $env:OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS = '1800000'
+    }
+    # Raise the chat admission heavy-in-flight limit from the default of 1.
+    # Default 1 + 1 healthy-headroom = 2 max concurrent heavy requests; a 3rd
+    # concurrent heavy stream gets 503 chat_admission_busy. 8 gives headroom
+    # for parallel agents (swarm, multi-lane) without over-allocating heap.
+    # Respect a user-set value - do not clobber.
+    if (-not $env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT) {
+        $env:OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT = '8'
+    }
+    # A bare 'omniroute' resolves to the npm .ps1 shim (ExternalScript), which
+    # Start-Process cannot launch as a Win32 app - pin the .cmd shim instead.
+    # Resolved via PATH with a %APPDATA%\npm fallback (never a hardcoded user
+    # path): a missing shim is a loud failure, not a silent wait for a
+    # gateway that never starts.
+    $omnirouteCmd = $null
+    $omnirouteCmdInfo = Get-Command omniroute.cmd -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($omnirouteCmdInfo) { $omnirouteCmd = $omnirouteCmdInfo.Source }
+    if (-not $omnirouteCmd) { $omnirouteCmd = Join-Path $env:APPDATA 'npm\omniroute.cmd' }
+    if (-not (Test-Path -LiteralPath $omnirouteCmd)) {
+        Write-Host "Could not find omniroute.cmd (the npm shim). Run: .\setup.ps1 -Only omniroute -Yes"
+        exit 1
+    }
+    Write-Host 'Starting OmniRoute in the background...'
+    Start-Process -FilePath $omnirouteCmd -ArgumentList '--no-open', '--port', '20128' -WindowStyle Hidden
+    $tries = 0
+    while ((-not (Test-AutoOSGateway)) -and ($tries -lt 24)) { Start-Sleep 5; $tries++ }
+    if (Test-AutoOSGateway) { Write-Host 'Gateway OK on 20128.' }
+    else { Write-Host 'Gateway did not answer - run `omniroute doctor`.' }
+}
+
+# 2. LiteLLM fallback proxy on :4000. Only start it when down: start-litellm.ps1
+#    exports configuration/litellm/.env into the process (the proxy cannot read
+#    that file itself) and restarts a stale proxy, so calling it while healthy
+#    would bounce a working service on every logon.
+function Test-AutoOSLitellm {
+    try { (Invoke-WebRequest -Uri 'http://127.0.0.1:4000/' -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 }
+    catch { $false }
+}
+$LitellmStarter = Join-Path $PSScriptRoot '..\litellm\start-litellm.ps1'
+if (Test-AutoOSLitellm) {
+    Write-Host 'LiteLLM proxy already up on 4000 - nothing to do.'
+} elseif (-not (Test-Path $LitellmStarter)) {
+    Write-Host "LiteLLM starter missing: $LitellmStarter"
+} elseif (-not (Test-Path (Join-Path $PSScriptRoot '..\litellm\.env'))) {
+    Write-Host 'No litellm .env - run: python3 tools/mirror-litellm-env.py (then re-run this).'
+} else {
+    Write-Host 'Starting the LiteLLM fallback proxy on 4000...'
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $LitellmStarter
+}
+
+# 3. OpenHands container: restart only when it exists and is not running.
+#    `docker start` on a missing name exits non-zero; that is reported, not fatal.
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Write-Host 'docker is not on PATH - skipping the OpenHands container.'
+} else {
+    $running = (& docker ps --format '{{.Names}}' 2>$null) -join "`n"
+    if ($running -match '(?m)^openhands-app$') {
+        Write-Host 'OpenHands container already running - nothing to do.'
+    } else {
+        $existing = (& docker ps -a --format '{{.Names}}' 2>$null) -join "`n"
+        if ($existing -match '(?m)^openhands-app$') {
+            Write-Host 'Restarting the stopped openhands-app container...'
+            & docker start openhands-app | Out-Null
+            Write-Host 'OpenHands UI should answer on http://localhost:3000 shortly.'
+        } else {
+            Write-Host 'No openhands-app container yet - first boot: .\configuration\start-stack.ps1 -App openhands'
+        }
+    }
+}
+
+# 4. opencode serve on :4096: start hidden only when down (401 = alive,
+#    needs pairing — the server is up, the browser just needs credentials).
+function Test-OpencodeServe {
+    try { (Invoke-WebRequest -Uri "http://127.0.0.1:4096/" -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }
+    catch {
+        $resp = $_.Exception.Response
+        if ($null -ne $resp) { return ([int]$resp.StatusCode) -in 200, 401 }
+        return $false
+    }
+}
+if (Test-OpencodeServe) {
+    Write-Host 'opencode serve already up on :4096 - nothing to do.'
+} elseif (-not (Get-Command opencode -ErrorAction SilentlyContinue)) {
+    Write-Host 'opencode is not installed - run setup.ps1 -Only opencode-cli -Yes once, then re-run this.'
+} else {
+    Write-Host 'Starting opencode serve in the background...'
+    Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', '0.0.0.0', '--port', '4096' -WindowStyle Hidden
+    $tries = 0
+    while ((-not (Test-OpencodeServe)) -and ($tries -lt 24)) { Start-Sleep 5; $tries++ }
+    if (Test-OpencodeServe) { Write-Host 'opencode serve OK on :4096.' }
+    else { Write-Host 'opencode serve did not answer - re-run configuration\healthcheck.ps1 for detail.' }
+}

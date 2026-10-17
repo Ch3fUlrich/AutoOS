@@ -1,0 +1,540 @@
+#!/usr/bin/env bash
+# AutoOS catalog loading, filtering and dependency resolution for Linux.
+#
+# JSON is parsed with python3 rather than jq: python3 ships with Debian, Ubuntu
+# and Raspberry Pi OS, whereas jq must be installed first — and this code has to
+# run before anything has been installed. The python here is a pure transform;
+# all decisions stay in shell.
+#
+# shellcheck shell=bash
+# shellcheck disable=SC2034
+#   The SYS_*/CAT_*/MENU_*/*_STATE globals below are this module's public
+#   interface - they are read by setup.sh, serve.py's probe and the tests,
+#   none of which shellcheck can see from here.
+
+
+CATALOG_PATH=""
+declare -a CAT_ID CAT_NAME CAT_DESC CAT_PROVIDER CAT_PACKAGE CAT_REQUIRES
+declare -a CAT_PROFILES CAT_POST CAT_PROMPT CAT_NOTES CAT_GROUP CAT_VERIFY CAT_CASK
+declare -a CAT_TOMBSTONE CAT_RETIRE_NOTE CAT_REPLACED_BY
+
+catalog_require_python() {
+    if ! has_cmd python3; then
+        ui_err "python3 is required to read the component catalog but was not found."
+        ui_muted "    Install it first:  ${AUTOOS_SUDO} apt-get install -y python3"
+        return 1
+    fi
+}
+
+# catalog_validate <path> — prints one problem per line, exit 1 if any.
+catalog_validate() {
+    catalog_require_python || return 1
+    python3 - "$1" <<'PY'
+import json, sys, re
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh:
+        cat = json.load(fh)
+except Exception as exc:
+    print(f"catalog: not valid JSON ({exc})"); sys.exit(1)
+
+VALID = {"winget","choco","npm","apt","snap","brew","script","custom","manual","psmodule"}
+problems, seen = [], set()
+cats = cat.get("categories")
+if not cats:
+    print("catalog: missing 'categories'"); sys.exit(1)
+
+all_ids = {c.get("id") for grp in cats for c in grp.get("components", [])}
+# A tombstone installs nothing, so it can never satisfy a dependency and no
+# entry may name one in `requires`.
+retired_ids = {c.get("id") for grp in cats for c in grp.get("components", [])
+               if c.get("tombstone") is True}
+for grp in cats:
+    if not grp.get("id"):   problems.append("category: missing 'id'")
+    if not grp.get("name"): problems.append(f"category '{grp.get('id')}': missing 'name'")
+    for c in grp.get("components", []):
+        cid = c.get("id")
+        where = f"component '{cid}'"
+        if not cid:
+            problems.append(f"{grp.get('id')}: a component has no 'id'"); continue
+        if cid in seen: problems.append(f"{where}: duplicate id")
+        seen.add(cid)
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", cid):
+            problems.append(f"{where}: id must be lower-case kebab-case")
+        if not c.get("name"):        problems.append(f"{where}: missing 'name'")
+        desc = c.get("description")
+        if not desc:                 problems.append(f"{where}: missing 'description'")
+        elif len(desc) > 70:         problems.append(f"{where}: description longer than 70 chars")
+        prov = c.get("provider")
+        if not prov:                 problems.append(f"{where}: missing 'provider'")
+        elif prov not in VALID:      problems.append(f"{where}: unknown provider '{prov}'")
+        if not c.get("package"):     problems.append(f"{where}: missing 'package'")
+        for profile in c.get("profiles", []):
+            if profile not in cat.get("profiles", {}): problems.append(f"{where}: unknown profile '{profile}'")
+        if prov=='manual' and (not c.get('homepage') or not c.get('notes')):
+            problems.append(f"{where}: manual provider requires homepage and notes")
+        for r in c.get("requires", []):
+            if r not in all_ids:     problems.append(f"{where}: requires unknown component '{r}'")
+            if r == cid:             problems.append(f"{where}: requires itself")
+            if r in retired_ids:     problems.append(f"{where}: requires '{r}', a tombstone that installs nothing")
+        hp = c.get("homepage")
+        if hp and not str(hp).startswith(("http://", "https://")):
+            problems.append(f"{where}: 'homepage' must be an http(s) URL")
+        # "tombstone": true keeps the id known and installs nothing. Only the
+        # boolean true means that: a string would read as retired to a shell
+        # test (`[[ -n ]]`) and as live to a python `is True`, so the entry would
+        # be retired everywhere and nowhere at once. A tombstone may omit
+        # postInstall / prompt / requires / verify — the loader ignores all four.
+        t = c.get("tombstone")
+        if "tombstone" in c and t is not True:
+            problems.append(f"{where}: 'tombstone' must be the boolean true")
+        if "note" in c:
+            if not str(c.get("note") or "").strip():
+                problems.append(f"{where}: 'note' is present but empty")
+            if t is not True:
+                problems.append(f"{where}: 'note' is only meaningful on a tombstone entry")
+        # "replaced_by" is what keeps a retirement's work on a replay: the ids the
+        # catalog says took it over. They have to exist and have to install
+        # something, because the expansion of an old state file plans exactly
+        # these ids — a name that resolves to a tombstone would replay into
+        # another row that can only report skipped, which is the defect this
+        # field exists to close.
+        if "replaced_by" in c:
+            rb = c.get("replaced_by")
+            if t is not True:
+                problems.append(f"{where}: 'replaced_by' is only meaningful on a tombstone entry")
+            if not isinstance(rb, list) or not rb:
+                problems.append(f"{where}: 'replaced_by' must be a non-empty list of component ids")
+            else:
+                for r in rb:
+                    if not isinstance(r, str) or not r.strip():
+                        problems.append(f"{where}: 'replaced_by' must name component ids")
+                    elif r not in all_ids:
+                        problems.append(f"{where}: 'replaced_by' names unknown component '{r}'")
+                    elif r in retired_ids:
+                        problems.append(f"{where}: 'replaced_by' names '{r}', a tombstone that installs nothing")
+        v = c.get("verify")
+        if "verify" in c and not (v or "").strip():
+            problems.append(f"{where}: 'verify' is present but empty")
+        p = c.get("prompt")
+        if p:
+            for k in [x.strip() for x in str(p).replace(",", " ").split() if x.strip()]:
+                if k not in (cat.get("prompts") or {}):
+                    problems.append(f"{where}: references undefined prompt '{k}'")
+
+for p in problems: print(p)
+sys.exit(1 if problems else 0)
+PY
+}
+
+# engine_validate <engines.json path> <catalog dir> — prints one problem per
+# line, exit 1 if any. Validates catalog/engines.json's own shape: it is a
+# different catalog *type* from the component catalogs above (top-level
+# 'engines', not 'categories'), so it needs its own rules rather than being
+# forced through catalog_validate. <catalog dir> is scanned for every
+# categories-shaped catalog (linux/macos/windows) so an engine's 'requires'
+# can be checked against the real, cross-platform set of component ids — an
+# engine like ventoy is windows-only-required even though it can also run on
+# linux, so checking against a single platform's catalog would misreport it.
+engine_validate() {
+    catalog_require_python || return 1
+    python3 - "$1" "$2" <<'PY'
+import glob, json, os, sys
+path, catalog_dir = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        cat = json.load(fh)
+except Exception as exc:
+    print(f"engines: not valid JSON ({exc})"); sys.exit(1)
+
+engines = cat.get("engines")
+if not engines:
+    print("engines: missing 'engines'"); sys.exit(1)
+
+component_ids = set()
+for p in glob.glob(os.path.join(catalog_dir, "*.json")):
+    try:
+        with open(p, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception:
+        continue
+    for grp in data.get("categories", []):
+        for c in grp.get("components", []):
+            if c.get("id"):
+                component_ids.add(c["id"])
+
+REQUIRED = ("id", "name", "platforms", "kinds", "interactive")
+problems, seen = [], set()
+for e in engines:
+    eid = e.get("id")
+    where = f"engine '{eid}'" if eid else "engine with no id"
+    missing = [k for k in REQUIRED if k not in e]
+    if missing:
+        problems.append(f"{where}: missing {missing}")
+        continue
+    if eid in seen:
+        problems.append(f"{where}: duplicate id")
+    seen.add(eid)
+    if not isinstance(e["interactive"], bool):
+        problems.append(f"{where}: 'interactive' must be a bool")
+    if not e["platforms"]:
+        problems.append(f"{where}: 'platforms' must not be empty")
+    if not e["kinds"]:
+        problems.append(f"{where}: 'kinds' must not be empty")
+    for r in e.get("requires", []):
+        if r not in component_ids:
+            problems.append(f"{where}: requires unknown component '{r}'")
+
+for p in problems: print(p)
+sys.exit(1 if problems else 0)
+PY
+}
+
+# catalog_load <path> <arch> <is_headless>
+# Fills the CAT_* arrays with components that can run on this machine.
+catalog_load() {
+    local path="$1" arch="$2" headless="$3"
+    CATALOG_PATH="$path"
+    catalog_require_python || return 1
+
+    CAT_ID=(); CAT_NAME=(); CAT_DESC=(); CAT_PROVIDER=(); CAT_PACKAGE=()
+    CAT_REQUIRES=(); CAT_PROFILES=(); CAT_POST=(); CAT_PROMPT=(); CAT_NOTES=(); CAT_GROUP=()
+    CAT_VERIFY=(); CAT_CASK=(); CAT_HOMEPAGE=(); CAT_INSTALLED=()
+    CAT_TOMBSTONE=(); CAT_RETIRE_NOTE=(); CAT_REPLACED_BY=()
+
+    # Delimiter is US (0x1f), NOT tab: tab is an IFS *whitespace* character, so
+    # bash collapses runs of them and every empty field shifts the columns left.
+    while IFS=$'\x1f' read -r id name desc provider package requires profiles post prompt notes group verify cask homepage tombstone note replaced_by; do
+        [[ -z "$id" ]] && continue
+        CAT_ID+=("$id");           CAT_NAME+=("$name");     CAT_DESC+=("$desc")
+        CAT_PROVIDER+=("$provider");CAT_PACKAGE+=("$package");CAT_REQUIRES+=("$requires")
+        CAT_PROFILES+=("$profiles");CAT_POST+=("$post");     CAT_PROMPT+=("$prompt")
+        CAT_NOTES+=("$notes");      CAT_GROUP+=("$group");   CAT_VERIFY+=("$verify")
+        CAT_CASK+=("$cask"); CAT_HOMEPAGE+=("$homepage"); CAT_INSTALLED+=(0)
+        CAT_TOMBSTONE+=("$tombstone"); CAT_RETIRE_NOTE+=("$note")
+        CAT_REPLACED_BY+=("$replaced_by")
+    done < <(python3 - "$path" "$arch" "$headless" <<'PY'
+import json, sys
+path, arch, headless = sys.argv[1], sys.argv[2], sys.argv[3] == "1"
+cat = json.load(open(path, encoding="utf-8"))
+for grp in cat.get("categories", []):
+    if grp.get("requiresDisplay") and headless:
+        continue                      # hide, never show-and-fail
+    for c in grp.get("components", []):
+        arches = c.get("arch")
+        if arches and arch not in arches:
+            continue
+        print("\x1f".join([
+            c.get("id",""), c.get("name",""), c.get("description",""),
+            c.get("provider",""), c.get("package",""),
+            ",".join(c.get("requires", [])), ",".join(c.get("profiles", [])),
+            c.get("postInstall",""), c.get("prompt",""),
+            (c.get("notes","") or "").replace("\x1f"," "), grp.get("name",""),
+            c.get("verify","") or "",
+            "1" if c.get("cask") else "0", c.get("homepage", ""),
+            "1" if c.get("tombstone") is True else "0",
+            (c.get("note","") or "").replace("\x1f"," "),
+            ",".join(c.get("replaced_by") or []),
+        ]))
+PY
+    )
+}
+
+# catalog_is_tombstone <index> — is the loaded component at <index> a retired
+# id? One home for the question: the profile list, the dependency walk, the
+# installed probe and every printed row all ask it, and a row that answers
+# "installed" for something that installs nothing is a wrong answer.
+catalog_is_tombstone() {
+    [[ "${CAT_TOMBSTONE[${1:-0}]:-0}" == 1 ]]
+}
+
+catalog_index_of() {
+    local want="$1" i
+    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        [[ "${CAT_ID[i]}" == "$want" ]] && { echo "$i"; return 0; }
+    done
+    return 1
+}
+
+# EXPANDED_IDS / EXPANDED_LINES — what the last catalog_expand_replacements
+# returned: the selection with the successors added, and one muted line per
+# retired id that has any. Globals because the caller needs both the list and the
+# lines, and a command substitution would lose them.
+EXPANDED_IDS=""
+declare -a EXPANDED_LINES=()
+
+# catalog_expand_replacements <id...> — echo <id...> with every retired id
+# followed by the ids that took its work over.
+#
+# A state file saved before a component was retired names the retired id and
+# none of its successors, so replaying it booked the retirement and installed
+# nothing: the work the user had simply stopped happening. The entry point asks
+# this of *every* selection — --from-state, --only, a browser run, which --serve
+# passes in as --only, the interactive menu, and a profile — so no path can hand
+# a retired id to the plan on its own. A profile and a menu row already keep a
+# tombstone out of the selection; that is the second guard, not the only one.
+#
+# The retired row stays in the list: it is what still reports "skipped: retired",
+# and the added ids are what do the work. A successor this machine does not offer
+# is left out — the line names only the successors that are really in the plan, so
+# the announcement and the plan can never disagree — and one the selection already
+# lists is not added twice. A successor that is itself retired is expanded in
+# turn, which is how a second retirement of the same work still lands.
+catalog_expand_replacements() {
+    local id i r named
+    local -a queue=() repl
+    local seen=" " out=""
+    EXPANDED_IDS=""; EXPANDED_LINES=()
+
+    for id in "$@"; do
+        [[ -n "$id" ]] || continue
+        [[ "$seen" == *" $id "* ]] && continue
+        seen+="$id "
+        queue+=("$id")
+    done
+
+    while ((${#queue[@]})); do
+        id="${queue[0]}"; queue=("${queue[@]:1}")
+        out+="$id "
+        i="$(catalog_index_of "$id")" || continue
+        catalog_is_tombstone "$i" || continue
+        [[ -n "${CAT_REPLACED_BY[i]}" ]] || continue
+        named=""
+        IFS=',' read -ra repl <<<"${CAT_REPLACED_BY[i]}"
+        for r in "${repl[@]}"; do
+            [[ -n "$r" ]] || continue
+            [[ "$seen" == *" $r "* ]] && { [[ -n "$named" ]] && named+=", "; named+="$r"; continue; }
+            catalog_index_of "$r" >/dev/null 2>&1 || continue
+            seen+="$r "
+            queue+=("$r")
+            [[ -n "$named" ]] && named+=", "
+            named+="$r"
+        done
+        [[ -n "$named" ]] || continue
+        EXPANDED_LINES+=("$id is retired: replaced by $named")
+    done
+
+    EXPANDED_IDS="${out% }"
+    echo "$EXPANDED_IDS"
+}
+
+# catalog_profile_defaults <profile> — echoes ids pre-selected for that profile.
+catalog_profile_defaults() {
+    local profile="$1" i out=""
+    [[ "$profile" == "custom" ]] && { echo ""; return; }
+    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        [[ "${CAT_PROVIDER[i]}" == manual ]] && continue
+        # A profile pre-ticks what it wants *installed*. A retired id keeps its
+        # profiles so old state files still resolve, so the expansion has to ask
+        # the flag rather than trust the list.
+        catalog_is_tombstone "$i" && continue
+        [[ ",${CAT_PROFILES[i]}," == *",${profile},"* ]] && out+="${CAT_ID[i]} "
+    done
+    echo "${out% }"
+}
+
+# catalog_tombstone_row_label <index> — what a retired row says about the work it
+# left behind: "(retired: replaced by <ids>)", or a bare "(retired)" when the
+# retirement moved nothing this machine offers.
+#
+# Only the successors that are actually offered are named, the way the replay
+# announcement does, so a row can never promise an id the plan then leaves out.
+catalog_tombstone_row_label() {
+    local idx="${1:-0}" r out=""
+    local -a repl=()
+    IFS=',' read -ra repl <<<"${CAT_REPLACED_BY[idx]:-}"
+    for r in "${repl[@]}"; do
+        [[ -n "$r" ]] || continue
+        catalog_index_of "$r" >/dev/null 2>&1 || continue
+        [[ -n "$out" ]] && out+=", "
+        out+="$r"
+    done
+    if [[ -n "$out" ]]; then
+        printf '(retired: replaced by %s)' "$out"
+    else
+        printf '(retired)'
+    fi
+}
+
+# catalog_menu_rows [<id>...] — fill the parallel MENU_* arrays ui_menu draws,
+# pre-ticking the ids handed in. The Windows twin is New-AutoOSMenuItem.
+#
+# Two kinds of row are shown but cannot be chosen. A manual-provider row is
+# locked because AutoOS cannot install it. A retired row is locked because it
+# installs nothing at all — and it names its replacements on the same line,
+# because someone who remembers the product deserves to learn from the row why
+# ticking it does nothing, rather than ticking it and watching. Locking is not
+# enough on its own: the entry point expands whatever the selection turns out to
+# hold, so a retired id that reaches it by any route arrives with its successors.
+catalog_menu_rows() {
+    local defaults=" $* " i
+    MENU_ID=(); MENU_NAME=(); MENU_DESC=(); MENU_GROUP=()
+    MENU_SEL=(); MENU_INSTALLED=(); MENU_DISABLED=()
+    for ((i = 0; i < ${#CAT_ID[@]}; i++)); do
+        MENU_ID+=("${CAT_ID[i]}");   MENU_NAME+=("${CAT_NAME[i]}")
+        MENU_DESC+=("${CAT_DESC[i]}"); MENU_GROUP+=("${CAT_GROUP[i]}")
+        MENU_INSTALLED+=("${CAT_INSTALLED[i]:-0}")
+        MENU_DISABLED+=(0); MENU_SEL+=(0)
+        if [[ "${CAT_PROVIDER[i]}" == manual ]]; then
+            MENU_DISABLED[i]=1; MENU_DESC[i]+=" (vendor setup required)"
+        fi
+        if catalog_is_tombstone "$i"; then
+            MENU_DISABLED[i]=1; MENU_DESC[i]+=" $(catalog_tombstone_row_label "$i")"
+        elif [[ "$defaults" == *" ${CAT_ID[i]} "* ]]; then
+            MENU_SEL[i]=1
+        fi
+    done
+}
+
+# catalog_resolve <id...> — echoes a dependency-complete, topologically sorted
+# id list. Dependencies always precede the components that need them.
+PLAN_IDS=""
+PLAN_AUTO=""
+# What the last resolve refused, as component id -> reason. The validator rejects
+# a `requires` that names a tombstone, but a normal run never validates, so
+# resolve records it here and the entry point announces and fails it — rather
+# than dropping the unsatisfiable dependency and installing the dependent green.
+declare -A PLAN_BLOCKED=()
+
+# catalog_resolve_blocked <id> — why the last resolve refused <id>, or nothing.
+# One home for the question: the plan warning, the execute loop and the tests all
+# ask it instead of each re-reading the map.
+catalog_resolve_blocked() {
+    printf '%s' "${PLAN_BLOCKED[${1:-}]:-}"
+}
+
+catalog_resolve() {
+    local requested=("$@")
+    local -a wanted=() queue=("$@")
+    local id dep i di deps
+    PLAN_BLOCKED=()
+
+    while ((${#queue[@]})); do
+        id="${queue[0]}"; queue=("${queue[@]:1}")
+        [[ " ${wanted[*]} " == *" $id "* ]] && continue
+        i="$(catalog_index_of "$id")" || continue
+        # Retired is asked before the provider is. A retired entry keeps the
+        # provider it had, and the provider guard answers "AutoOS cannot install
+        # this, use the vendor link" — a hard failure about a row that installs
+        # nothing either way, and a vendor instruction for work that moved on.
+        # The row belongs in the plan so it can report "skipped: retired".
+        if catalog_is_tombstone "$i"; then
+            wanted+=("$id")
+            continue
+        fi
+        if [[ "${CAT_PROVIDER[i]}" == manual ]]; then ui_err "AutoOS cannot install $id; use its vendor link for manual setup."; return 1; fi
+        wanted+=("$id")
+        # A retired entry keeps whatever `requires` it had; pulling those in for
+        # a component that installs nothing would only add work the user never
+        # asked for.
+        if [[ -n "${CAT_REQUIRES[i]}" ]]; then
+            IFS=',' read -ra deps <<<"${CAT_REQUIRES[i]}"
+            for dep in "${deps[@]}"; do
+                [[ -n "$dep" ]] || continue
+                di="$(catalog_index_of "$dep")" || di=""
+                # The dependent is refused, but the retired row stays in the plan:
+                # it is what the plan and the report both get to point at, and it
+                # installs nothing either way.
+                if [[ -n "$di" ]] && catalog_is_tombstone "$di"; then
+                    PLAN_BLOCKED["$id"]="requires retired $dep"
+                fi
+                queue+=("$dep")
+            done
+        fi
+    done
+
+    # A component that needed one of those refused components cannot be installed
+    # either, and quietly dropping only the first would repeat the same defect
+    # one level up — so the refusal spreads until the set stops growing.
+    local grew=1
+    while (( grew )); do
+        grew=0
+        for id in "${wanted[@]}"; do
+            [[ -n "${PLAN_BLOCKED[$id]:-}" ]] && continue
+            i="$(catalog_index_of "$id")" || continue
+            catalog_is_tombstone "$i" && continue
+            IFS=',' read -ra deps <<<"${CAT_REQUIRES[i]:-}"
+            for dep in "${deps[@]}"; do
+                [[ -n "$dep" ]] || continue
+                if [[ -n "${PLAN_BLOCKED[$dep]:-}" ]]; then
+                    PLAN_BLOCKED["$id"]="requires $dep, which cannot be installed"
+                    grew=1
+                    break
+                fi
+            done
+        done
+    done
+
+    local -a done_list=() visiting=()
+    local ordered=""
+
+    _visit() {
+        local node="$1" idx d
+        [[ " ${done_list[*]} " == *" $node "* ]] && return 0
+        if [[ " ${visiting[*]} " == *" $node "* ]]; then
+            ui_err "Dependency cycle in catalog at '$node'"; return 1
+        fi
+        visiting+=("$node")
+        idx="$(catalog_index_of "$node")" || return 0
+        if [[ -n "${CAT_REQUIRES[idx]}" ]]; then
+            IFS=',' read -ra ds <<<"${CAT_REQUIRES[idx]}"
+            for d in "${ds[@]}"; do
+                [[ -z "$d" ]] && continue
+                [[ " ${wanted[*]} " == *" $d "* ]] && { _visit "$d" || return 1; }
+            done
+        fi
+        visiting=("${visiting[@]/$node}")
+        done_list+=("$node")
+        ordered+="$node "
+        return 0
+    }
+
+    for id in "${wanted[@]}"; do _visit "$id" || return 1; done
+
+    PLAN_IDS="${ordered% }"
+    PLAN_AUTO=""
+    for id in $PLAN_IDS; do
+        [[ " ${requested[*]} " == *" $id "* ]] || PLAN_AUTO+="$id "
+    done
+    PLAN_AUTO="${PLAN_AUTO% }"
+    echo "$PLAN_IDS"
+}
+
+# catalog_prompt_field <path> <prompt-key> <field>
+catalog_prompt_field() {
+    python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+cat = json.load(open(sys.argv[1], encoding="utf-8"))
+print((cat.get("prompts", {}).get(sys.argv[2], {}) or {}).get(sys.argv[3], "") or "")
+PY
+}
+
+# catalog_profile_list <path> — echoes "name<TAB>description" per profile.
+catalog_profile_list() {
+    python3 - "$1" <<'PY'
+import json, sys
+cat = json.load(open(sys.argv[1], encoding="utf-8"))
+for name, desc in (cat.get("profiles") or {}).items():
+    print(f"{name}\t{desc}")
+PY
+}
+
+catalog_detect_installed() {
+    # One npm snapshot for the whole scan (detect_installed_status), dropped at
+    # the end so the next scan - or a real run's is_installed - asks npm again.
+    local i _AUTOOS_NPM_CACHE=1
+    unset _AUTOOS_NPM_LS_STATE _AUTOOS_NPM_LS
+    for ((i=0; i<${#CAT_ID[@]}; i++)); do
+        if catalog_is_tombstone "$i"; then CAT_INSTALLED[i]=0; continue; fi
+        detect_installed_status "${CAT_PROVIDER[i]}" "${CAT_PACKAGE[i]}" "${CAT_CASK[i]:-0}"
+        if [[ "$INSTALLED_STATUS" == installed ]]; then CAT_INSTALLED[i]=1; else CAT_INSTALLED[i]=0; fi
+    done
+    unset _AUTOOS_NPM_LS_STATE _AUTOOS_NPM_LS
+}
+
+catalog_has_profile() {
+    python3 - "$CATALOG_PATH" "$1" <<'PY'
+import json,sys
+sys.exit(0 if sys.argv[2] in json.load(open(sys.argv[1],encoding='utf8'))['profiles'] else 1)
+PY
+}

@@ -1,0 +1,1301 @@
+"""Tests for lib/agent_harness.py: the single agent-harness generator.
+
+Run from the repo root:
+
+    python3 tests/test_agent_harness.py
+"""
+import fnmatch
+import importlib.util
+import json
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from collections import OrderedDict
+from datetime import datetime
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+MODULE = ROOT / "lib" / "agent_harness.py"
+HARNESS = ROOT / "catalog" / "agent-harness.json"
+FIXTURES = ROOT / "tests" / "fixtures" / "agent-harness"
+REPO_ROOT = "/fake/autoos"
+SKILLS_SOURCE = "/fake/skills"
+
+
+def load_module():
+    spec = importlib.util.spec_from_file_location("agent_harness", MODULE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_cli(*args):
+    return subprocess.run(
+        [sys.executable, str(MODULE), *args], capture_output=True, text=True
+    )
+
+
+def read_ordered(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle, object_pairs_hook=OrderedDict)
+
+
+def harness_data():
+    with open(HARNESS, encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def module_gates():
+    """The config keys that gate a spawn, as the generator spells them (KEYDENY3b)."""
+    return list(load_module().SPAWN_GATES)
+
+
+def module_leaf_allowed_mcp():
+    """The MCP servers a leaf role may list, pinned in code (KEYDENY3b)."""
+    return set(load_module().LEAF_ALLOWED_MCP)
+
+
+# The files a spawned leaf must never see. Fixture paths only — no real key
+# file is opened by this suite, the fence is decided on the name alone.
+KEY_PATHS = [
+    "configuration/api-keys.yml",
+    "/home/x/.config/autoos/ai-stack/client.key",
+    "/home/x/.config/autoos/ai-stack/manage.key",
+]
+KEY_EXAMPLE = "configuration/api-keys.example.yml"
+# KEYDENY2: a shell rule is matched against the whole command line, so an allow
+# whose pattern is a *substring* of the line licenses every other path that
+# shares it. These are the three command lines that walked the
+# `*api-keys.example*` shell allow past the `*api-keys*` deny. Fixture strings
+# only — no real key file is opened or copied by this suite.
+SHELL_ABUSE = [
+    "cat configuration/api-keys.yml configuration/api-keys.example.yml",
+    "cp configuration/api-keys.yml /tmp/api-keys.example/x",
+    "cat /tmp/api-keys.example/stolen",
+]
+# A read rule sees one path, so the example's allow has to be its exact
+# suffix, not a substring: this is a backup of a key file that merely contains
+# the example's name.
+READ_NEAR_MISS = ["/tmp/api-keys.example.yml.bak", "/tmp/api-keys.example/stolen"]
+
+
+def fence_verdict(pattern_map, value):
+    """The verdict a rendered fence map gives `value`: last glob match wins.
+
+    This is opencode's own rule shape (opencode.jsonc: "last matching rule
+    wins"), which is why an allow_all pattern is emitted after deny_all by
+    _rebuild_patterns/_role_bash. `*` spans path separators — the harness's
+    pattern idiom, since `*api_keys*` has to fence
+    `cat /home/x/secrets/api_keys.conf` as well as a bare relative path.
+    """
+    verdict = pattern_map.get("*", "allow")
+    for pattern, effect in pattern_map.items():
+        if pattern != "*" and fnmatch.fnmatch(value, pattern):
+            verdict = effect
+    return verdict
+
+
+def leaf_bash_maps(doc, harness):
+    for name, role in harness["roles"].items():
+        if role["leaf"]:
+            yield name, doc["agent"][name]["permission"]["bash"]
+
+
+class CheckTests(unittest.TestCase):
+    def test_check_passes_on_the_real_harness(self):
+        result = run_cli("check", "--harness", str(HARNESS))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("agent-harness: ok", result.stdout)
+
+    def test_check_fails_when_a_leaf_role_can_spawn(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = harness_data()
+            data["roles"]["leaf-reviewer"]["spawn"] = True
+            path = Path(tmp) / "harness.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            result = run_cli("check", "--harness", str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("leaf-reviewer", result.stdout)
+            self.assertNotIn("agent-harness: ok", result.stdout)
+
+    def test_check_fails_when_a_non_spawning_role_gets_the_spawner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = harness_data()
+            data["roles"]["leaf-reviewer"]["mcp"].append("autoos-agent")
+            path = Path(tmp) / "harness.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            result = run_cli("check", "--harness", str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("leaf-reviewer", result.stdout)
+            self.assertIn("autoos-agent", result.stdout)
+
+    def test_check_fails_when_a_leaf_role_gets_a_file_reader_server(self):
+        # KEYDENY3b item 3: the pin is enforced by `check`, not only by the
+        # test below, so an edit to the catalog cannot quietly hand a leaf a
+        # server whose tools read by URL or path. playwright is the case in
+        # point — browser_navigate takes file:// and no path fence reaches it.
+        with tempfile.TemporaryDirectory() as tmp:
+            data = harness_data()
+            data["roles"]["leaf-reviewer"]["mcp"] = ["serena", "graphify", "playwright"]
+            path = Path(tmp) / "harness.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            result = run_cli("check", "--harness", str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("leaf-reviewer", result.stdout)
+            self.assertIn("playwright", result.stdout)
+
+    def test_check_requires_the_bash_allow_all_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = harness_data()
+            del data["fences"]["bash_allow_all"]
+            path = Path(tmp) / "harness.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            result = run_cli("check", "--harness", str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("fences.bash_allow_all", result.stdout)
+
+
+class PinTests(unittest.TestCase):
+    def test_pin_serena_prints_the_pinned_package(self):
+        result = run_cli("pin", "serena", "--harness", str(HARNESS))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "serena-agent==1.7.0")
+
+    def test_pin_unknown_server_fails(self):
+        result = run_cli("pin", "not-a-server", "--harness", str(HARNESS))
+        self.assertEqual(result.returncode, 1)
+
+    def test_serena_excluded_lists_the_tools(self):
+        result = run_cli("serena-excluded", "--harness", str(HARNESS))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        lines = result.stdout.strip().splitlines()
+        self.assertIn("read_file", lines)
+        self.assertEqual(len(lines), len(harness_data()["mcp_servers"]["serena"]["excluded_tools"]))
+
+
+class BackupTests(unittest.TestCase):
+    """_backup_and_write never overwrites an earlier backup (AGENTS.md hard rule 5).
+
+    The stamp has one-second resolution and shutil.copyfile overwrites, so two
+    writes that both change a file within one second used to destroy the
+    original. The Windows installer calls this harness too: the FIRST backup
+    keeps the name <file>.autoos-backup-<YYYYmmdd-HHMMSS>.
+    """
+
+    STAMP = "20260101-000000"
+
+    def test_backup_path_appends_a_counter_while_the_name_is_taken(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "opencode.json")
+            base = "%s.autoos-backup-%s" % (target, self.STAMP)
+            self.assertEqual(module._backup_path(target, self.STAMP), base)
+            Path(base).write_text("A", encoding="utf-8")
+            self.assertEqual(module._backup_path(target, self.STAMP), base + "-1")
+            Path(base + "-1").write_text("B", encoding="utf-8")
+            self.assertEqual(module._backup_path(target, self.STAMP), base + "-2")
+
+    def test_backup_path_skips_a_name_that_is_a_dangling_symlink(self):
+        # os.path.exists follows the link, so a dangling one reads as "free":
+        # the copy would then write THROUGH it (or fail) instead of taking the
+        # next name. lexists sees the link itself, like the bash helper's -L.
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "opencode.json")
+            base = "%s.autoos-backup-%s" % (target, self.STAMP)
+            nowhere = [os.path.join(tmp, "nowhere-0"), os.path.join(tmp, "nowhere-1")]
+            try:
+                os.symlink(nowhere[0], base)
+                os.symlink(nowhere[1], base + "-1")
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest("cannot create symlinks here: %s" % exc)
+            self.assertFalse(os.path.exists(base), "the fixture link must dangle")
+            self.assertEqual(module._backup_path(target, self.STAMP), base + "-2")
+            # End to end: the backup lands under the free name, the links stay
+            # as they were and nothing is created where they point.
+            Path(target).write_text("ORIGINAL", encoding="utf-8")
+            module._backup_and_write(target, "changed", stamp=self.STAMP)
+            self.assertEqual(Path(base + "-2").read_text(encoding="utf-8"), "ORIGINAL")
+            # Windows readlink prefixes the target with \\?\ (extended-length path).
+            def link_target(link):
+                found = os.readlink(link)
+                return found[4:] if found.startswith("\\\\?\\") else found
+            self.assertEqual(link_target(base), nowhere[0])
+            self.assertEqual(link_target(base + "-1"), nowhere[1])
+            self.assertFalse(any(os.path.lexists(n) for n in nowhere))
+
+    def test_two_changing_writes_in_one_second_keep_the_original(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            # A frozen clock: both writes land in the same second. The real
+            # strftime still formats it, so the stamp format is checked too.
+            with mock.patch.object(module, "datetime") as fake:
+                fake.now.return_value = datetime(2026, 1, 1, 0, 0, 0)
+                module._backup_and_write(str(target), "first change")
+                module._backup_and_write(str(target), "second change")
+            oldest = Path("%s.autoos-backup-%s" % (target, self.STAMP))
+            self.assertEqual(oldest.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertEqual(
+                Path(str(oldest) + "-1").read_text(encoding="utf-8"), "first change"
+            )
+            self.assertEqual(target.read_text(encoding="utf-8"), "second change")
+            self.assertEqual(len(list(Path(tmp).glob("opencode.json.autoos-backup-*"))), 2)
+
+    def test_a_missing_file_is_written_without_a_backup(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "nested" / "opencode.json"
+            module._backup_and_write(str(target), "new", stamp=self.STAMP)
+            self.assertEqual(target.read_text(encoding="utf-8"), "new")
+            self.assertEqual(list(target.parent.glob("*.autoos-backup-*")), [])
+
+    def test_a_symlink_is_refused_not_written_through(self):
+        # Writing through a link edits whatever it points at, which the user did
+        # not ask AutoOS to touch. antigravity_desktop_entry refuses a symlinked
+        # .desktop for the same reason; this helper must refuse too, and say so.
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            link = Path(tmp) / "linked.json"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest("cannot create symlinks here: %s" % exc)
+            wrote = module._backup_and_write(str(link), "changed", stamp=self.STAMP)
+            self.assertFalse(wrote, "a symlink must be refused, not written through")
+            self.assertEqual(target.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertTrue(link.is_symlink())
+            self.assertFalse(
+                os.path.lexists("%s.autoos-backup-%s" % (link, self.STAMP)),
+                "a refused write must not leave a backup either",
+            )
+
+    def test_a_symlink_that_appears_after_the_check_leaves_no_backup(self):
+        # The islink() check above is best-effort; O_NOFOLLOW is what actually
+        # refuses the write. When the link appears in between, copy2 has already
+        # run, so the refusal path used to leave a backup of the target's bytes
+        # behind — a file AutoOS created for a config it never touched, which
+        # contradicts the docstring's "not a backup ... is changed".
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            link = Path(tmp) / "linked.json"
+            try:
+                link.symlink_to(target)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest("cannot create symlinks here: %s" % exc)
+            real_islink = os.path.islink
+            # Race simulated by making the pre-check blind, not by reordering the
+            # helper: the open below really does hit ELOOP on a real symlink.
+            with mock.patch("os.path.islink", return_value=False):
+                self.assertTrue(real_islink(link), "fixture must be a symlink")
+                self.assertFalse(
+                    module._backup_and_write(str(link), "changed", stamp=self.STAMP),
+                    "the open must still refuse it",
+                )
+            self.assertEqual(target.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertEqual(
+                list(Path(tmp).glob("*.autoos-backup-*")),
+                [],
+                "a refused write must leave no backup residue",
+            )
+
+    @unittest.skipIf(os.name == "nt", "POSIX mode bits do not exist on Windows")
+    def test_the_backup_keeps_the_mode_of_the_file_it_copies(self):
+        # A 0600 config may hold a key: shutil.copyfile makes the backup with
+        # the umask's mode (0644 here), so the copy was more readable than the
+        # original. The bash helper (cp -p) keeps 0600; so must this one. The
+        # umask is pinned so the old behaviour cannot pass by accident.
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "opencode.json"
+            target.write_text("ORIGINAL", encoding="utf-8")
+            os.chmod(target, 0o600)
+            old_umask = os.umask(0o022)
+            try:
+                module._backup_and_write(str(target), "changed", stamp=self.STAMP)
+            finally:
+                os.umask(old_umask)
+            # The first backup keeps the plain name the Windows installer expects.
+            backup = Path("%s.autoos-backup-%s" % (target, self.STAMP))
+            self.assertEqual(backup.read_text(encoding="utf-8"), "ORIGINAL")
+            self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o600)
+            self.assertEqual(target.read_text(encoding="utf-8"), "changed")
+
+
+class OpencodeMergeTests(unittest.TestCase):
+    def merge_fixture(self, tmp):
+        config = Path(tmp) / "opencode.json"
+        shutil.copyfile(FIXTURES / "opencode.user.json", config)
+        result = run_cli(
+            "opencode",
+            "--harness", str(HARNESS),
+            "--config", str(config),
+            "--repo-root", REPO_ROOT,
+            "--skills-source", SKILLS_SOURCE,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return config, result
+
+    def test_fixture_merges_to_the_expected_document_in_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            actual = read_ordered(config)
+            expected = read_ordered(FIXTURES / "opencode.expected.json")
+            self.assertEqual(actual, expected)
+
+    def test_an_empty_skills_source_writes_no_bogus_skill_path(self):
+        # install.sh passes "" when neither this checkout's .agents/skills nor
+        # a legacy clone exists. _join("", skill, "SKILL.md") would otherwise
+        # write a relative path that names nothing into the user's config, so
+        # the file reads as wired-up while no skill can ever be found.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "opencode.json"
+            shutil.copyfile(FIXTURES / "opencode.user.json", config)
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(config),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", "",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            instructions = read_ordered(config).get("instructions", [])
+            for skill in harness["rules"]["skills"]:
+                self.assertNotIn(skill + "/SKILL.md", instructions)
+            self.assertIn("skills: source missing", result.stdout)
+
+    def test_every_global_fence_pattern_gets_its_verdict(self):
+        # Top level carries deny_all only: the leaf fences live on the leaf
+        # agent blocks (see test_a_leaf_cannot_commit_or_push_and_cannot_spawn).
+        # The top-level session is the interactive user and V2 tier agents
+        # inherit top-level bash, so leaf denies there would break everyday
+        # git inside any agent run. A user's own leaf-pattern value survives
+        # untouched (the fence no longer owns it).
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            bash = read_ordered(config)["permission"]["bash"]
+            for pattern in harness["fences"]["bash_deny_all"]:
+                self.assertEqual(bash[pattern], "deny", pattern)
+            for pattern in harness["fences"]["bash_deny_leaf"]:
+                # Leaf fences live on the leaf agent blocks. At top level a
+                # leaf pattern is either absent or carries the user's own
+                # non-deny verdict (e.g. the fixture's push allow) — never a
+                # fence "deny" (stale footprints are dropped on merge).
+                self.assertNotEqual(bash.get(pattern), "deny", pattern)
+            for pattern in harness["fences"]["bash_allow_all"]:
+                self.assertEqual(bash[pattern], "allow", pattern)
+
+    def test_a_leaf_is_denied_read_and_cat_of_every_real_key_file(self):
+        # KEYDENY: the fence spelled the key file `*api_keys*` (underscore)
+        # while the real one is configuration/api-keys.yml, and the gateway's
+        # client.key/manage.key were not fenced at all — so a leaf could Read
+        # and `cat` the keys. Decided on the rendered map, not on file
+        # contents: no key file is opened here.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            read_map = doc["permission"]["read"]
+            self.assertTrue(list(leaf_bash_maps(doc, harness)), "no leaf role renders")
+            for name, bash_map in leaf_bash_maps(doc, harness):
+                top_bash = doc["permission"]["bash"]
+                for path in KEY_PATHS:
+                    self.assertEqual(fence_verdict(read_map, path), "deny",
+                                     "%s may Read %s" % (name, path))
+                    self.assertEqual(fence_verdict(bash_map, "cat " + path), "deny",
+                                     "%s may cat %s" % (name, path))
+                    self.assertEqual(fence_verdict(top_bash, "cat " + path), "deny",
+                                     "top level may cat %s" % path)
+
+    def test_a_leaf_reads_the_key_example_but_never_cats_it(self):
+        # The template has to stay readable — read rules see one path, so the
+        # allow is the example's exact suffix. `cat` of it is denied: a shell
+        # rule sees the whole command line, and an allow that is only a
+        # substring of that line cannot be bounded to one file (KEYDENY2).
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            read_map = doc["permission"]["read"]
+            for name, bash_map in leaf_bash_maps(doc, harness):
+                self.assertEqual(fence_verdict(read_map, KEY_EXAMPLE), "allow",
+                                 "%s is denied the example" % name)
+                self.assertEqual(fence_verdict(bash_map, "cat " + KEY_EXAMPLE), "deny",
+                                 "%s may cat the example" % name)
+                self.assertEqual(fence_verdict(doc["permission"]["bash"],
+                                               "cat " + KEY_EXAMPLE), "deny",
+                                 "top level may cat the example")
+
+    def test_a_leaf_reads_the_example_only_at_its_exact_path(self):
+        # KEYDENY2: `*api-keys.example*` as a read allow also licensed
+        # /tmp/api-keys.example.yml.bak — a copy of the real key file named
+        # after the template. Only the exact example suffix is allowed.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            read_map = doc["permission"]["read"]
+            for path in READ_NEAR_MISS:
+                self.assertEqual(fence_verdict(read_map, path), "deny", path)
+
+    def test_a_substring_allow_cannot_license_a_command_line(self):
+        # KEYDENY2: the shell allow `*api-keys.example*` won over the
+        # `*api-keys*` deny whenever the example's name appeared anywhere in
+        # the line, so a leaf could read the real key file by pairing it with
+        # the template, or by exfiltrating a copy under an *.example* path.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            top_bash = doc["permission"]["bash"]
+            for command in SHELL_ABUSE:
+                self.assertEqual(fence_verdict(top_bash, command), "deny", command)
+            for name, bash_map in leaf_bash_maps(doc, harness):
+                for command in SHELL_ABUSE:
+                    self.assertEqual(fence_verdict(bash_map, command), "deny",
+                                     "%s may run %s" % (name, command))
+
+    def test_the_shell_fence_grants_no_substring_pattern(self):
+        # The structural reason the abuse worked: bash_allow_all is matched
+        # against a command line, so no entry of it may match a command that
+        # names a real key file. Guard the list itself, not just the verdict.
+        fences = harness_data()["fences"]
+        for pattern in fences["bash_allow_all"]:
+            for command in SHELL_ABUSE:
+                self.assertFalse(fnmatch.fnmatch(command, pattern),
+                                 "bash_allow_all %s matches %s" % (pattern, command))
+            for path in KEY_PATHS:
+                self.assertFalse(fnmatch.fnmatch("cat " + path, pattern),
+                                 "bash_allow_all %s matches cat of %s" % (pattern, path))
+
+    def test_grep_glob_and_external_directory_carry_the_read_fence(self):
+        # KEYDENY3: read_deny_all fenced the `read` tool and nothing else, while
+        # opencode v2.0.16 asserts a *different* resource per action — the grep
+        # and glob tools call Permission.assert({action:"grep"|"glob",
+        # resources:[<the search pattern>]}) and check the searched path only
+        # through the `external_directory` action (FileAccess.authorizeExternal).
+        # So the fence list has to land on three more maps: as the pattern for
+        # grep/glob (a leaf grepping for "api-keys" is stopped), and as the path
+        # for external_directory (a leaf grepping /home/x/.config/autoos/... is
+        # stopped at the path). Decided on the rendered map; no key file opened.
+        fences = harness_data()["fences"]
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for pattern in fences["read_deny_all"]:
+                for action in ("grep", "glob", "external_directory"):
+                    self.assertEqual(doc["permission"][action][pattern], "deny",
+                                     "%s %s" % (action, pattern))
+            for pattern in fences["read_allow_all"]:
+                for action in ("grep", "glob"):
+                    self.assertEqual(doc["permission"][action][pattern], "allow",
+                                     "%s %s" % (action, pattern))
+            for path in KEY_PATHS:
+                for action in ("grep", "glob", "external_directory"):
+                    self.assertEqual(fence_verdict(doc["permission"][action], path),
+                                     "deny", "%s may reach %s" % (action, path))
+            for path in READ_NEAR_MISS:
+                self.assertEqual(fence_verdict(doc["permission"]["grep"], path),
+                                 "deny", path)
+            for action in ("grep", "glob"):
+                self.assertEqual(fence_verdict(doc["permission"][action], KEY_EXAMPLE),
+                                 "allow", "%s is denied the example" % action)
+
+    def test_a_leaf_is_denied_every_serena_tool_that_returns_file_bytes(self):
+        # KEYDENY3: an MCP tool's permission rule can only name the tool — the
+        # MCP dispatcher asserts {action:"<server>_<tool>", resources:["*"]}
+        # (v2.0.16), so there is no path to fence and the whole tool must go.
+        # The catalog lists which serena tools carry raw file bytes: read_file
+        # and search_for_pattern by design, find_symbol/find_declaration/
+        # find_implementations/find_referencing_symbols through their
+        # include_body parameter (serena 1.7.0, tools/symbol_tools.py). A leaf
+        # keeps the path-fenced Read tool and the name-only tools (overview,
+        # list_dir, find_file, diagnostics). Spawning roles keep them: they are
+        # the trusted sessions, and denying here would cost the orchestrator
+        # every file read, not just the fenced ones.
+        harness = harness_data()
+        readers = harness["mcp_servers"]["serena"]["raw_content_tools"]
+        self.assertTrue(readers)
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for name, role in harness["roles"].items():
+                tools = doc["agent"][name].get("tools", {})
+                for tool in readers:
+                    key = "serena_" + tool
+                    if role["leaf"] and "serena" in role["mcp"]:
+                        self.assertEqual(tools.get(key), False,
+                                         "%s may use %s" % (name, key))
+                    else:
+                        self.assertNotIn(key, tools,
+                                         "%s is denied %s without cause" % (name, key))
+
+    def test_check_requires_the_serena_raw_content_tool_set(self):
+        # Same reasoning as the memory_tools pin: the render derives its leaf
+        # deny list from this field, so a typo silently un-fences a reader.
+        with tempfile.TemporaryDirectory() as tmp:
+            data = harness_data()
+            data["mcp_servers"]["serena"]["raw_content_tools"] = ["read_file"]
+            path = Path(tmp) / "harness.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            result = run_cli("check", "--harness", str(path))
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("raw_content_tools", result.stdout)
+
+    def test_a_leaf_cannot_commit_or_push_and_cannot_spawn(self):
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            leaves = [name for name, role in harness["roles"].items() if role["leaf"]]
+            self.assertTrue(leaves)
+            for name in leaves:
+                block = doc["agent"][name]
+                self.assertEqual(block["permission"]["task"], "deny", name)
+                self.assertEqual(block["permission"]["bash"]["git commit*"], "deny", name)
+                self.assertEqual(block["permission"]["bash"]["git push*"], "deny", name)
+                self.assertEqual(block["permission"]["bash"]["git merge*"], "deny", name)
+
+    def test_only_spawning_roles_get_task_allow(self):
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for name, role in harness["roles"].items():
+                expected = "allow" if role["spawn"] else "deny"
+                self.assertEqual(doc["agent"][name]["permission"]["task"], expected, name)
+
+    def test_a_leaf_is_denied_the_spawn_gate_in_both_spellings(self):
+        # KEYDENY3b item 1: the render emits every spelling of the spawn gate,
+        # with one verdict. v2.0.16's rename map is {bash: "shell", task:
+        # "subagent"}, so `subagent` is the canonical action and `task` the
+        # legacy tool name — which is also what the `permission` OBJECT declares
+        # ("Deprecated alias for subagent"), while the rule lists the tier agents
+        # write assert the action. Which spelling a given build honours is not a
+        # thing to bet a fence on (opencode.jsonc:115: a `bash` rule matches
+        # nothing), so the render does not choose: it denies both. A leaf that
+        # can spawn hands the task to a child that carries none of its read
+        # fence — that child can open configuration/api-keys.yml and put the key
+        # in its answer.
+        harness = harness_data()
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for name, role in harness["roles"].items():
+                permission = doc["agent"][name]["permission"]
+                expected = "allow" if role["spawn"] else "deny"
+                for gate in module_gates():
+                    self.assertEqual(permission.get(gate), expected,
+                                     "%s.%s" % (name, gate))
+
+    def test_no_leaf_role_enables_a_server_that_reads_files_by_url_or_path(self):
+        # KEYDENY3b item 3: a fence is only as good as the tools it covers, and
+        # an MCP server is a whole bag of tools the path fences cannot reach (a
+        # leaf's MCP rule can only name the tool, never the resource — KEYDENY3).
+        # playwright opens file:// and any URL; context7 fetches remote docs by
+        # id/topic; a filesystem server reads any path. So the leaf set is pinned
+        # in code: serena (whose every raw-content tool is denied by name below)
+        # and graphify (graph answers only). Anything else a leaf could list is
+        # a defect, whoever added it.
+        harness = harness_data()
+        allowed = module_leaf_allowed_mcp()
+        leaves = [name for name, role in harness["roles"].items() if role["leaf"]]
+        self.assertTrue(leaves)
+        for name in leaves:
+            listed = set(harness["roles"][name]["mcp"])
+            self.assertTrue(listed <= allowed,
+                            "%s enables %s" % (name, sorted(listed - allowed)))
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for name in leaves:
+                tools = doc["agent"][name]["tools"]
+                for server in ("playwright", "context7", "omnigraph", "autoos-agent"):
+                    self.assertEqual(tools.get("%s*" % server), False,
+                                     "%s may reach %s" % (name, server))
+
+    def test_stale_top_level_leaf_denies_are_removed_but_user_verdicts_survive(self):
+        # A config written by the old generator carries leaf denies at top
+        # level; the fixed generator must drop its own stale "deny" footprint
+        # while keeping a user's explicit non-deny verdict on the same pattern.
+        module = load_module()
+        harness = harness_data()
+        user = {
+            "permission": {
+                "bash": {
+                    "*": "allow",
+                    "git commit*": "deny",
+                    "git stash*": "ask",
+                }
+            }
+        }
+        doc = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
+        bash = doc["permission"]["bash"]
+        self.assertNotIn("git commit*", bash)
+        self.assertEqual(bash["git stash*"], "ask")
+        self.assertNotIn("git push*", bash)
+        self.assertNotIn("*git *push*", bash)
+
+    def test_user_keys_survive_the_fence_beats_merge_but_push_is_per_role(self):
+        # Push moved from the global fence to the leaf fence (operator
+        # 2026-09-22); merge followed (operator 2026-10-15): the fixture
+        # user's explicit push/merge allows survive at top level, while a
+        # global-fence pattern still beats the user.
+        user = read_ordered(FIXTURES / "opencode.user.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            doc = read_ordered(config)
+            for key in ("provider", "model", "mcp"):
+                self.assertEqual(
+                    json.dumps(doc[key], sort_keys=True),
+                    json.dumps(user[key], sort_keys=True),
+                    key,
+                )
+            self.assertEqual(
+                json.dumps(doc["agent"]["build"], sort_keys=True),
+                json.dumps(user["agent"]["build"], sort_keys=True),
+            )
+            self.assertIn("my-rules.md", doc["instructions"])
+            self.assertEqual(doc["permission"]["bash"]["npm *"], "ask")
+            self.assertEqual(doc["permission"]["bash"]["git push*"], "allow")
+            self.assertEqual(doc["permission"]["bash"]["git merge*"], "allow")
+
+    def test_second_run_skips_and_makes_no_second_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config, _ = self.merge_fixture(tmp)
+            before = config.read_bytes()
+            backups = sorted(Path(tmp).glob("opencode.json.autoos-backup-*"))
+            self.assertEqual(len(backups), 1)
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(config),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", SKILLS_SOURCE,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("skipped", result.stdout)
+            self.assertEqual(config.read_bytes(), before)
+            self.assertEqual(
+                sorted(Path(tmp).glob("opencode.json.autoos-backup-*")), backups
+            )
+
+    def test_dry_run_on_a_missing_file_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "nested" / "opencode.json"
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(target),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", SKILLS_SOURCE,
+                "--dry-run",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("would install", result.stdout)
+            self.assertFalse(target.exists())
+            self.assertFalse(target.parent.exists())
+
+    def test_dry_run_leaves_an_existing_file_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "opencode.json"
+            shutil.copyfile(FIXTURES / "opencode.user.json", config)
+            before = config.read_bytes()
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(config),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", SKILLS_SOURCE,
+                "--dry-run",
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("would update", result.stdout)
+            self.assertEqual(config.read_bytes(), before)
+            self.assertEqual(list(Path(tmp).glob("*.autoos-backup-*")), [])
+
+    def test_a_file_with_comments_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "opencode.json"
+            original = '{\n  // a user comment\n  "model": "x/y"\n}\n'
+            config.write_text(original, encoding="utf-8")
+            before = config.read_bytes()
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(config),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", SKILLS_SOURCE,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("left alone", result.stdout)
+            self.assertEqual(config.read_bytes(), before)
+            self.assertEqual(list(Path(tmp).glob("*.autoos-backup-*")), [])
+
+    def test_a_string_permission_bash_counts_as_star(self):
+        module = load_module()
+        harness = harness_data()
+        user = {"permission": {"bash": "allow"}}
+        doc = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
+        self.assertEqual(doc["permission"]["bash"]["*"], "allow")
+
+    @unittest.skipUnless(os.name == "posix", "creating symlinks needs POSIX")
+    def test_a_symlinked_config_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real = Path(tmp) / "real.json"
+            real.write_text("{}", encoding="utf-8")
+            link = Path(tmp) / "opencode.json"
+            link.symlink_to(real)
+            before = real.read_bytes()
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(link),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", SKILLS_SOURCE,
+            )
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("left alone", result.stdout)
+            self.assertEqual(real.read_bytes(), before)
+            self.assertEqual(list(Path(tmp).glob("*.autoos-backup-*")), [])
+
+    def test_a_managed_skill_left_in_agent_skills_is_replaced_not_duplicated(self):
+        # 2026-09-25: after .agents/skills became the home, the merge appended the
+        # new coding-principles entry and kept the agent-skills one, so OpenCode
+        # loaded two diverged copies of the same skill.
+        module = load_module()
+        harness = harness_data()
+        skill = harness["rules"]["skills"][0]
+        old = "C:\\Users\\x\\Documents\\Code\\agent-skills\\skills/%s/SKILL.md" % skill
+        user = {"instructions": [
+            old,
+            "my-rules.md",
+            "/home/x/agent-skills/notes/%s.md" % skill,   # not a SKILL.md: the user's
+            "/home/x/agent-skills/skills/unlisted-skill/SKILL.md",  # not managed: the user's
+        ]}
+        doc = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
+        self.assertNotIn(old, doc["instructions"])
+        self.assertIn("%s/%s/SKILL.md" % (SKILLS_SOURCE, skill), doc["instructions"])
+        for kept in user["instructions"][1:]:
+            self.assertIn(kept, doc["instructions"])
+
+    def test_stale_entry_matching_ignores_case_and_accepts_relative_paths(self):
+        # Windows paths are case-insensitive, and hand-written configs vary the
+        # drive letter, the clone's spelling and SKILL.md's case (review, WS-HARNESS).
+        module = load_module()
+        stale = module._stale_skill_entry
+        skills = ["coding-principles"]
+        source = "C:/Users/x/Code/agent-skills-work/.agents/skills"
+        self.assertTrue(stale("C:\\Users\\x\\Code\\Agent-Skills\\skills\\coding-principles\\skill.md", skills, source))
+        self.assertTrue(stale("agent-skills/skills/coding-principles/SKILL.md", skills, source))
+        # The current entry, spelled with another drive-letter case, is never stale,
+        # even when the source itself sits under a directory named agent-skills.
+        nested = "C:/Users/x/Code/agent-skills/.agents/skills"
+        self.assertFalse(stale("c:/Users/x/Code/agent-skills/.agents/skills/coding-principles/SKILL.md", skills, nested))
+        self.assertFalse(stale("my-agent-skills/skills/coding-principles/SKILL.md", skills, source))
+
+    def test_only_the_retired_clone_layout_is_stale(self):
+        # Muse review of 2b71861 (HIGH x2): the retired layout is exactly
+        # <clone>/agent-skills/skills/<skill>/SKILL.md (install.sh skills_source =
+        # $code_root/agent-skills/skills). Anything else under a directory named
+        # agent-skills is the user's.
+        module = load_module()
+        stale = module._stale_skill_entry
+        skills = ["coding-principles"]
+        source = "/repo/.agents/skills"
+        self.assertFalse(stale("/home/x/agent-skills/my-notes/coding-principles/SKILL.md", skills, source))
+        self.assertFalse(stale("/backup/agent-skills/.agents/skills/coding-principles/SKILL.md", skills, source))
+        self.assertTrue(stale("/home/x/agent-skills/skills/coding-principles/SKILL.md", skills, source))
+        # A trailing space or separator is the same entry (Muse MEDIUM 4).
+        self.assertTrue(stale("/home/x/agent-skills/skills/coding-principles/SKILL.md ", skills, source))
+        self.assertTrue(stale("/home/x/agent-skills/skills/coding-principles/SKILL.md/", skills, source))
+
+    def test_the_current_entry_in_another_spelling_is_not_appended_twice(self):
+        # Muse MEDIUM 3: the stale check folds case and separators, so the
+        # canonical-exists check must too, or a second spelling is appended.
+        module = load_module()
+        harness = harness_data()
+        skill = harness["rules"]["skills"][0]
+        spelled = "c:\\r\\.agents\\skills\\%s\\skill.md " % skill
+        doc = module.desired_opencode({"instructions": [spelled]}, harness, REPO_ROOT, "C:/R/.agents/skills")
+        matching = [e for e in doc["instructions"] if e.strip().replace("\\", "/").casefold()
+                    == ("c:/r/.agents/skills/%s/skill.md" % skill)]
+        self.assertEqual(matching, [spelled])
+
+    def test_a_second_merge_changes_nothing(self):
+        # Muse MEDIUM 5: desired(desired(x)) == desired(x).
+        module = load_module()
+        harness = harness_data()
+        skill = harness["rules"]["skills"][0]
+        user = {"instructions": [
+            "/home/x/agent-skills/skills/%s/SKILL.md" % skill,
+            "/home/x/agent-skills/my-notes/%s/SKILL.md" % skill,
+            "my-rules.md",
+        ]}
+        once = module.desired_opencode(user, harness, REPO_ROOT, SKILLS_SOURCE)
+        twice = module.desired_opencode(once, harness, REPO_ROOT, SKILLS_SOURCE)
+        self.assertEqual(twice, once)
+
+    def test_without_a_skills_source_an_agent_skills_entry_is_kept(self):
+        # No source means no replacement: dropping the old entry would leave
+        # OpenCode with no copy of the skill at all.
+        module = load_module()
+        harness = harness_data()
+        old = "/home/x/agent-skills/skills/%s/SKILL.md" % harness["rules"]["skills"][0]
+        doc = module.desired_opencode({"instructions": [old]}, harness, REPO_ROOT, "")
+        self.assertIn(old, doc["instructions"])
+
+    def test_an_unexpected_instructions_type_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "opencode.json"
+            original = '{"instructions": "not-a-list"}\n'
+            config.write_text(original, encoding="utf-8")
+            before = config.read_bytes()
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(config),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", SKILLS_SOURCE,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("left alone", result.stdout)
+            self.assertEqual(config.read_bytes(), before)
+
+
+class OpencodeOrderAndEncodingTests(unittest.TestCase):
+    def run_on(self, config):
+        return run_cli(
+            "opencode", "--harness", str(HARNESS), "--config", str(config),
+            "--repo-root", REPO_ROOT, "--skills-source", SKILLS_SOURCE,
+        )
+
+    def test_a_reordered_rule_list_is_a_change_not_a_skip(self):
+        # OpenCode applies the last matching rule, so order is meaning.
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "opencode.json"
+            shutil.copyfile(FIXTURES / "opencode.expected.json", config)
+            doc = read_ordered(config)
+            bash = doc["permission"]["bash"]
+            star = bash.pop("*")
+            bash["*"] = star  # "*": allow now comes last and overrides every deny
+            config.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            result = self.run_on(config)
+            self.assertIn("updated", result.stdout)
+            self.assertEqual(list(read_ordered(config)["permission"]["bash"])[0], "*")
+
+    def test_a_config_with_a_utf8_bom_is_merged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "opencode.json"
+            config.write_bytes(b"\xef\xbb\xbf" + (FIXTURES / "opencode.user.json").read_bytes())
+            result = self.run_on(config)
+            self.assertIn("updated", result.stdout, result.stdout)
+
+
+class SkillsLinkTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "creating symlinks needs POSIX")
+    def test_link_is_created_then_a_second_run_skips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "skills-source"
+            source.mkdir()
+            config = Path(tmp) / "opencode.json"
+            shutil.copyfile(FIXTURES / "opencode.user.json", config)
+            first = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(config),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", str(source),
+            )
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            link = Path(tmp) / "skills"
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), source.resolve())
+            second = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(config),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", str(source),
+            )
+            self.assertIn("skipped", second.stdout)
+
+    @unittest.skipUnless(os.name == "posix", "creating symlinks needs POSIX")
+    def test_link_to_another_target_is_repointed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "skills-source"
+            source.mkdir()
+            wrong = Path(tmp) / "wrong"
+            wrong.mkdir()
+            link = Path(tmp) / "skills"
+            link.symlink_to(wrong)
+            config = Path(tmp) / "opencode.json"
+            shutil.copyfile(FIXTURES / "opencode.user.json", config)
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(config),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", str(source),
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(link.resolve(), source.resolve())
+
+    def test_a_real_skills_directory_is_never_touched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "skills-source"
+            source.mkdir()
+            link = Path(tmp) / "skills"
+            link.mkdir()
+            marker = link / "keep.txt"
+            marker.write_text("mine", encoding="utf-8")
+            config = Path(tmp) / "opencode.json"
+            shutil.copyfile(FIXTURES / "opencode.user.json", config)
+            result = run_cli(
+                "opencode",
+                "--harness", str(HARNESS),
+                "--config", str(config),
+                "--repo-root", REPO_ROOT,
+                "--skills-source", str(source),
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("skills: left alone (not a link)", result.stdout)
+            self.assertTrue(link.is_dir() and not link.is_symlink())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "mine")
+
+
+class RenderProfileTests(unittest.TestCase):
+    def render(self, name, base, contract_ref="docs/agents/leaf-contract.md"):
+        module = load_module()
+        role = harness_data()["roles"][name]
+        return module.render_profile(name, role, base, contract_ref)
+
+    def test_managed_keys_are_set_from_the_role_and_user_keys_kept(self):
+        role = harness_data()["roles"]["orchestrator"]
+        profile = self.render("orchestrator", {"custom": 1})
+        self.assertEqual(profile["name"], role["openhands"]["profile"])
+        self.assertEqual(profile["llm_profile_ref"], role["openhands"]["llm_profile_ref"])
+        self.assertEqual(profile["enable_sub_agents"], role["spawn"])
+        self.assertEqual(profile["mcp_server_refs"], role["mcp"])
+        self.assertEqual(profile["custom"], 1)
+
+    def test_base_key_order_is_kept(self):
+        base = OrderedDict([("first", 1), ("name", "old"), ("last", 2)])
+        profile = self.render("leaf-implementer", base)
+        self.assertEqual(list(profile)[:3], ["first", "name", "last"])
+
+    def test_a_leaf_suffix_names_the_contract_and_forbids_spawning(self):
+        profile = self.render("leaf-reviewer", {})
+        suffix = profile["system_message_suffix"]
+        self.assertTrue(
+            suffix.startswith(
+                "Follow the AGENTS.md of the repository you work in and the coding-principles skill."
+            )
+        )
+        self.assertIn(
+            " You are a leaf: follow the leaf contract at docs/agents/leaf-contract.md.",
+            suffix,
+        )
+        self.assertNotIn("sub-agents", suffix)
+
+    def test_a_spawning_suffix_names_the_contract_and_allows_sub_agents(self):
+        profile = self.render("orchestrator", {}, "/repo/docs/agents/leaf-contract.md")
+        suffix = profile["system_message_suffix"]
+        self.assertIn(
+            " You may start sub-agents: brief each one as a leaf under the leaf contract at "
+            "/repo/docs/agents/leaf-contract.md, then judge and commit its edits yourself.",
+            suffix,
+        )
+        self.assertNotIn("You are a leaf", suffix)
+
+
+class VendoredProfileTests(unittest.TestCase):
+    PROFILES = ("orchestrator", "suborchestrator", "implementer", "worker")
+    LEAVES = ("implementer", "worker")
+
+    def load(self, name):
+        path = ROOT / "openhands" / "agent-profiles" / (name + ".json")
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def test_spawning_profiles_enable_sub_agents_and_leaves_do_not(self):
+        for name in ("orchestrator", "suborchestrator"):
+            self.assertTrue(self.load(name)["enable_sub_agents"], name)
+        for name in self.LEAVES:
+            self.assertFalse(self.load(name)["enable_sub_agents"], name)
+
+    def test_the_reviewer_profile_uses_the_deepseek_model(self):
+        self.assertEqual(self.load("worker")["llm_profile_ref"], "deepseek-flash")
+
+    def test_every_profile_names_agents_md_and_the_leaf_contract(self):
+        for name in self.PROFILES:
+            suffix = self.load(name)["system_message_suffix"]
+            self.assertIn("AGENTS.md", suffix, name)
+            self.assertIn("leaf-contract.md", suffix, name)
+
+    def test_leaf_profiles_do_not_get_omnigraph(self):
+        for name in self.LEAVES:
+            self.assertNotIn("omnigraph", self.load(name)["mcp_server_refs"], name)
+
+
+class VendorTests(unittest.TestCase):
+    def test_vendor_check_passes_on_the_repository(self):
+        result = run_cli(
+            "vendor", "--harness", str(HARNESS), "--repo-root", str(ROOT), "--check"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("agent-harness vendor: ok", result.stdout)
+
+    def test_vendor_check_names_a_drifted_role_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            profiles = Path(tmp) / "openhands" / "agent-profiles"
+            shutil.copytree(ROOT / "openhands" / "agent-profiles", profiles)
+            drifted = profiles / "worker.json"
+            doc = json.loads(drifted.read_text(encoding="utf-8"))
+            doc["enable_sub_agents"] = True
+            drifted.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+            result = run_cli(
+                "vendor", "--harness", str(HARNESS), "--repo-root", tmp, "--check"
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("worker", result.stdout)
+
+
+class OpenhandsTests(unittest.TestCase):
+    def run_openhands(self, openhands_dir, *extra):
+        return run_cli(
+            "openhands",
+            "--harness", str(HARNESS),
+            "--openhands-dir", str(openhands_dir),
+            "--repo-root", str(ROOT),
+            *extra,
+        )
+
+    def test_settings_merge_keeps_every_other_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            settings = {
+                "schema_version": 2,
+                "agent_settings": {
+                    "enable_sub_agents": False,
+                    "llm": {"model": "m"},
+                    "mcp_config": {"serena": {"command": "uvx"}},
+                },
+                "user_key": [1, 2],
+            }
+            (openhands_dir / "settings.json").write_text(
+                json.dumps(settings), encoding="utf-8"
+            )
+            result = self.run_openhands(openhands_dir)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            doc = json.loads(
+                (openhands_dir / "settings.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(doc["agent_settings"]["enable_sub_agents"])
+            self.assertEqual(doc["schema_version"], 2)
+            self.assertEqual(doc["agent_settings"]["llm"], {"model": "m"})
+            self.assertEqual(
+                doc["agent_settings"]["mcp_config"], {"serena": {"command": "uvx"}}
+            )
+            self.assertEqual(doc["user_key"], [1, 2])
+
+    def test_an_installed_profile_keeps_a_user_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            profiles = openhands_dir / "agent-profiles"
+            profiles.mkdir()
+            (profiles / "worker.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "id": "installed",
+                        "condenser": {"max_size": 99},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            result = self.run_openhands(openhands_dir)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            doc = json.loads((profiles / "worker.json").read_text(encoding="utf-8"))
+            self.assertEqual(doc["condenser"], {"max_size": 99})
+
+    def test_second_run_only_skips_and_changes_no_byte(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            first = self.run_openhands(openhands_dir)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            before = {
+                path.relative_to(openhands_dir).as_posix(): path.read_bytes()
+                for path in openhands_dir.rglob("*")
+                if path.is_file()
+            }
+            second = self.run_openhands(openhands_dir)
+            self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+            lines = [line for line in second.stdout.splitlines() if line.strip()]
+            self.assertTrue(lines)
+            for line in lines:
+                self.assertIn("skipped", line, line)
+            after = {
+                path.relative_to(openhands_dir).as_posix(): path.read_bytes()
+                for path in openhands_dir.rglob("*")
+                if path.is_file()
+            }
+            self.assertEqual(before, after)
+
+    def test_a_reformatted_but_equal_install_is_skipped(self):
+        # The installer's embedded script rewrites settings.json with its own
+        # formatting (indent=2, no final newline) right before the harness runs;
+        # equal content must still read as skipped, with no write and no backup.
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            self.assertEqual(self.run_openhands(openhands_dir).returncode, 0)
+            for path in openhands_dir.rglob("*.json"):
+                path.write_text(json.dumps(json.loads(path.read_text(encoding="utf-8"))),
+                                encoding="utf-8")
+            before = {p.name: p.read_bytes() for p in openhands_dir.rglob("*") if p.is_file()}
+            second = self.run_openhands(openhands_dir)
+            for line in [l for l in second.stdout.splitlines() if l.strip()]:
+                self.assertIn("skipped", line, line)
+            after = {p.name: p.read_bytes() for p in openhands_dir.rglob("*") if p.is_file()}
+            self.assertEqual(before, after)
+
+    def symlink_fixture(self, openhands_dir, rel, target_rel):
+        """A symlink at `rel` pointing at `target_rel`; skipTest if links are unavailable."""
+        target = openhands_dir / target_rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('{"keep": "ORIGINAL"}', encoding="utf-8")
+        link = openhands_dir / rel
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            link.symlink_to(target)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest("cannot create symlinks here: %s" % exc)
+        return target
+
+    def test_a_symlinked_settings_json_exits_nonzero(self):
+        # `cmd_opencode` returns 1 for exactly this refusal so its caller can
+        # record the failure; `cmd_openhands` printed "left alone (symlink)" and
+        # still exited 0, so the install reported a component as installed whose
+        # config was never touched.
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            target = self.symlink_fixture(
+                openhands_dir, "settings.json", "private-settings.json"
+            )
+            result = self.run_openhands(openhands_dir)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("left alone (symlink)", result.stdout)
+            self.assertEqual(
+                target.read_text(encoding="utf-8"), '{"keep": "ORIGINAL"}'
+            )
+
+    def test_a_symlinked_agent_profile_exits_nonzero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp)
+            self.assertEqual(
+                self.run_openhands(openhands_dir).returncode, 0, "fixture must install first"
+            )
+            victim = next(
+                p for p in sorted((openhands_dir / "agent-profiles").glob("*.json"))
+            )
+            victim.unlink()
+            target = self.symlink_fixture(
+                openhands_dir,
+                str(Path("agent-profiles") / victim.name),
+                "private-profile.json",
+            )
+            self.assertEqual(
+                json.loads(target.read_text(encoding="utf-8")), {"keep": "ORIGINAL"}
+            )
+            result = self.run_openhands(openhands_dir)
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("left alone (symlink)", result.stdout)
+            self.assertEqual(
+                target.read_text(encoding="utf-8"), '{"keep": "ORIGINAL"}'
+            )
+
+    def test_dry_run_on_an_empty_dir_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openhands_dir = Path(tmp) / "openhands"
+            result = self.run_openhands(openhands_dir, "--dry-run")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("would install", result.stdout)
+            self.assertFalse(openhands_dir.exists())
+
+
+class FixtureSpawnGateObjectTests(unittest.TestCase):
+    """KEYDENY3g item 5: the checked-in expected document is the permission
+    object the render produces — {task, subagent, bash} and one verdict each."""
+
+    def test_the_fixture_names_every_spawn_gate_spelling(self):
+        doc = read_ordered(FIXTURES / "opencode.expected.json")
+        for name, role in harness_data()["roles"].items():
+            permission = doc["agent"][name]["permission"]
+            self.assertTrue(set(module_gates()) <= set(permission), name)
+            self.assertIn("bash", permission, name)
+            expected = "allow" if role["spawn"] else "deny"
+            for gate in module_gates():
+                self.assertEqual(permission[gate], expected, "%s.%s" % (name, gate))
+
+    def test_the_render_and_the_fixture_agree_on_the_leaf_gate(self):
+        # The fixture is not a fossil: what the generator renders for a leaf is
+        # what the file says, or the drift is caught here rather than in a run.
+        doc = read_ordered(FIXTURES / "opencode.expected.json")
+        harness = harness_data()
+        leaves = [n for n, r in harness["roles"].items() if r["leaf"]]
+        self.assertTrue(leaves)
+        for name in leaves:
+            self.assertEqual(doc["agent"][name]["permission"]["subagent"], "deny")
+            self.assertEqual(doc["agent"][name]["permission"]["task"], "deny")
+
+
+class IgnoredKeyFilesTests(unittest.TestCase):
+    """KEYDENY3g item 6: the premise every isolation rule rests on, checked with
+    git's own two answers — the key file is ignored, and nothing like it is
+    tracked. Fakes only; no real key file is opened by this suite."""
+
+    def _git(self, *args):
+        return subprocess.run(["git", "-C", str(ROOT)] + list(args),
+                              capture_output=True, text=True)
+
+    def test_the_key_file_and_env_patterns_are_git_ignored(self):
+        for path in ("configuration/api-keys.yml", ".env", ".env.local",
+                     ".env.production"):
+            checked = self._git("check-ignore", "-q", "--no-index", path)
+            self.assertEqual(checked.returncode, 0,
+                             "%s is not ignored: %s" % (path, checked.stderr))
+
+    def test_no_key_file_is_tracked(self):
+        listed = self._git("ls-files", "-z")
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        tracked = [p for p in listed.stdout.split("\0") if p]
+        offenders = [p for p in tracked
+                     if fnmatch.fnmatch(p, "configuration/api-keys.yml")
+                     or fnmatch.fnmatch(p, "*/.env") or fnmatch.fnmatch(p, "*/.env.*")
+                     or fnmatch.fnmatch(p, ".env") or fnmatch.fnmatch(p, ".env.*")]
+        # .env.example and the api-keys template are the sanctioned opposites.
+        offenders = [p for p in offenders if not p.endswith(".example")]
+        self.assertEqual(offenders, [], offenders)
+
+    def test_the_template_opposites_are_tracked(self):
+        # The ignore rule is a secret rule, not a rule that hides the templates
+        # an operator is meant to copy.
+        for path in ("configuration/api-keys.example.yml",
+                     "configuration/herdr-sessions/.env.example"):
+            self.assertEqual(self._git("ls-files", path).stdout.strip(), path)
+
+
+if __name__ == "__main__":
+    unittest.main()

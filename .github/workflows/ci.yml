@@ -1,0 +1,258 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # WS-CIPAR (2026-09-28): the Linux suite was one serial 11-16 min job. It now
+  # runs as parallel shards (tests/ci-shards.txt, one line per shard) next to a
+  # separate lint job. The plan job refuses a shard map that leaves a
+  # tests/linux part out or runs one twice (tests/ci-shards.py), and the `linux`
+  # job keeps the "Linux suite" check name as the one aggregate that passes only
+  # when the plan, every shard and the lint job passed.
+  linux-plan:
+    name: Linux suite plan
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every part in exactly one shard
+        id: plan
+        run: |
+          python3 tests/test_ci_shards.py
+          matrix="$(python3 tests/ci-shards.py)"  # its own line, so its exit code fails the step
+          test -n "$matrix"
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+  linux-shard:
+    name: Linux suite shard ${{ matrix.shard }}
+    needs: linux-plan
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.linux-plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck/yamllint are also used inside the suite (static-analysis parts).
+      - name: Install linters
+        run: sudo apt-get update -y && sudo apt-get install -y shellcheck yamllint
+
+      # The suite must never reach the internet (AGENTS.md SS5: tests assert
+      # on plans, never install). That rule used to be enforced only by each
+      # test stubbing the right commands, and it leaked: the rescue-bootstrap
+      # sandbox once let a real `pip install --user oterm` run on this
+      # runner. Now it is structural: the suite runs in a fresh network
+      # namespace with ONLY loopback up (the loopback HTTP fixture servers
+      # still work), dropped back to the runner user. A test that tries the
+      # real network fails fast instead of silently depending on it. The
+      # canary proves the isolation is actually in effect, so a runner-image
+      # change cannot quietly turn this back into an ordinary run.
+      # AUTOOS_TEST_PARTS picks this shard's parts; AUTOOS_FULL_SUITE=1 keeps
+      # its meaning (the opt-in to an unfiltered run of the selected parts).
+      # The parts reach the script through env, never spliced into its text.
+      - name: Test suite shard ${{ matrix.shard }} (loopback-only network)
+        env:
+          SHARD_PARTS: ${{ matrix.parts }}
+        run: |
+          sudo unshare --net -- bash -c '
+            set -e
+            ip link set lo up
+            if curl -sS --max-time 5 -o /dev/null https://example.com 2>/dev/null; then
+              echo "::error::the internet is reachable inside the test namespace - isolation is not in effect"
+              exit 1
+            fi
+            echo "network isolated: loopback only"
+            exec setpriv --reuid="$1" --regid="$2" --init-groups \
+              env AUTOOS_FULL_SUITE=1 AUTOOS_TEST_PARTS="$6" HOME="$3" USER="$4" PATH="$5" bash tests/run-tests.sh
+          ' _ "$(id -u)" "$(id -g)" "$HOME" "$USER" "$PATH" "$SHARD_PARTS"
+
+  linux-lint:
+    name: Linux suite lint
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install linters
+        run: sudo apt-get update -y && sudo apt-get install -y shellcheck yamllint
+
+      - name: Progress regression tests
+        run: |
+          python3 tests/test-process.py
+          node tests/test-web-progress.js
+
+      - name: shellcheck
+        run: |
+          shellcheck -S warning setup.sh lib/linux/*.sh tests/run-tests.sh
+          for f in tests/linux/*.sh; do shellcheck -S warning "$f" || exit 1; done
+
+      - name: yamllint
+        run: |
+          yamllint -d '{extends: relaxed, rules: {line-length: {max: 140}}}' \
+            catalog/ Windows/ansible/ Linux/ubuntu_autoinstall/ .github/
+
+      - name: Combo contract gate (TORDER)
+        run: |
+          python3 tools/combo-contract.py
+          python3 tools/registry.py render omniroute --check
+          python3 tools/registry.py render ide --check
+          python3 tools/sync-ide-models.py --check
+
+      - name: Documentation links
+        run: python3 tests/check-links.py .
+
+  # The required check keeps its name: "Linux suite" is green only when the
+  # plan, every shard and the lint job succeeded (a skipped or cancelled
+  # dependency is a failure here, never a pass).
+  linux:
+    name: Linux suite
+    if: always()
+    needs: [linux-plan, linux-shard, linux-lint]
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
+    steps:
+      - name: All shards and lint passed
+        run: |
+          echo "plan=${{ needs.linux-plan.result }} shards=${{ needs.linux-shard.result }} lint=${{ needs.linux-lint.result }}"
+          test "${{ needs.linux-plan.result }}" = success
+          test "${{ needs.linux-shard.result }}" = success
+          test "${{ needs.linux-lint.result }}" = success
+
+  windows:
+    name: Windows suite
+    # operator 2026-09-27: Windows CI paused until the Linux work is done.
+    if: false
+    # D-1349: no GitHub-hosted runners. Needs a windows fleet-ci runner before this job is un-gated; with if: false it is never queued.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","windows","fleet-ci"]') || 'windows-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PSScriptAnalyzer
+        shell: powershell
+        run: Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
+
+      # Windows has no network namespaces, so this is the practical guard:
+      # every download path in the suite goes through curl.exe, which honours
+      # these variables, so a test that tries the real network hits a closed
+      # port and fails fast. Loopback (the fixture HTTP servers) is exempt.
+      - name: Test suite (network via a dead proxy)
+        shell: powershell
+        env:
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          NO_PROXY: 127.0.0.1,localhost
+        run: .\tests\run-tests.ps1
+
+      - name: Installer and shell regressions (Windows PowerShell)
+        shell: powershell
+        run: .\tests\test-improvements.ps1
+
+      - name: Installer and shell regressions (PowerShell 7)
+        shell: pwsh
+        run: .\tests\test-improvements.ps1
+
+      - name: Web progress regressions
+        run: node tests/test-web-progress.js
+
+  ansible:
+    name: Ansible lint
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install ansible-lint
+        run: pip install "ansible-lint>=24" ansible-core
+
+      - name: Install collections
+        run: ansible-galaxy collection install -r Windows/ansible/requirements.yml
+
+      # The tree targets Windows hosts, so a real run cannot happen in CI.
+      # Syntax and lint still catch the class of bug that broke it before.
+      - name: ansible-lint
+        run: ansible-lint Windows/ansible/
+
+      - name: Playbook syntax check
+        working-directory: Windows/ansible
+        run: |
+          cp inventory.example.yml inventory.yml
+          ansible-playbook -i inventory.yml main_playbook.yml --syntax-check
+
+  secrets:
+    name: Secret scan
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # This repository has leaked credentials once. A cheap grep for the shapes
+      # that leaked is worth more than trusting everyone to remember.
+      - name: Reject credential-shaped values in tracked files
+        run: |
+          set -e
+          pattern='(ansible_password|windows_password|vault_[a-z_]*password)\s*[:=]\s*["'"'"']?[^"'"'"'{ ]'
+          if git grep -nEI "$pattern" -- . ':!*.example.*' ':!.github/workflows/ci.yml'; then
+            echo "::error::A credential-shaped value is present in a tracked file."
+            exit 1
+          fi
+          echo "no inline credentials found"
+
+      - name: Reject committed installers
+        run: |
+          set -e
+          if git ls-files | grep -iE '\.(exe|msi|deb|rpm|dmg|appx|msix)$'; then
+            echo "::error::Vendor binaries must not be committed - download them at run time."
+            exit 1
+          fi
+          echo "no committed installers found"
+
+  public-scrub:
+    name: Public scrub scan
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan the published trees for site-shaped values
+        run: |
+          # Generic shapes only (private literals live in gitignored
+          # patterns.private.txt, unavailable to CI, and scan-exclude.txt keeps
+          # the scrubber's own rules and fixtures out of its own report). Scope
+          # is everything this repository publishes about a real machine:
+          # infra/ (the imported area) and scripts/, plus docs/, catalog/,
+          # README.md and AGENTS.md (SPEC-OMNI A2). A whole-tree run is not
+          # used: the heuristic unix-home, rfc1918 and private-host shapes
+          # legitimately match test fixtures, example.conf and autoinstall
+          # placeholders under tests/, lib/ and configuration/, and this gate
+          # must stay green to be worth keeping. `tools/` is included as of
+          # 2026-10-01: a leaked absolute path in tools/combo-contract.py reached
+          # main unseen while its docs/ copy was caught; the one pre-existing
+          # tools/ match (a /home/... example in tools/hostexec/policy.py) is now
+          # a placeholder.
+          # `.agents/` and `deploy/` join the scope as of 2026-10-10: router skills
+          # and the host-unit / hook templates will be published in those two trees, so
+          # they are exactly the content this repository says about a real machine and
+          # must be scrubbed like the rest. Neither tree is exempted by
+          # scan-exclude.txt — only three fixtures that set a throwaway git identity
+          # are, each excluded by its exact file.
+          python3 scripts/public-scrub/scan.py \
+            --patterns scripts/public-scrub/patterns.txt \
+            infra/ scripts/ docs/ catalog/ tools/ .agents/ deploy/ README.md AGENTS.md
+
+      # The gate is only as good as patterns.txt: these fixtures fail when a shape
+      # stops matching, or when a documentation value starts matching one.
+      # Run directly rather than through pytest — this job installs nothing.
+      - name: Scanner rule tests
+        run: python3 scripts/public-scrub/test_scan.py

@@ -1,0 +1,264 @@
+# The L1 main orchestrator — standing orders
+
+Read this whole file when you are the **top** of a three-level agent hierarchy: you hold a plan
+and its goals, you spawn L2 orchestrators, and you judge what comes back. The operator should not
+have to repeat any of it in a brief.
+
+## 1. The three levels, and what you do at yours
+
+| Level | Who | Owns | Never |
+|---|---|---|---|
+| **L1 — you** | One interactive Opus/Fable session | The plan, the goals and their priority. Splitting it into chunks. Choosing and briefing each L2. Checking every outcome **and the reasoning behind it**. Deciding the plan's open questions, or asking the operator | Doing a chunk's work yourself |
+| **L2** | Interactive **Opus** sessions, one per chunk | One chunk from brief to DONE note. Splitting it into closed tasks for L3. Reviewing L3 output across model families | Merging into the base branch; editing another chunk's files |
+| **L3** | Mechanical executors: Haiku, Sonnet, Gemini Flash (`agy`), DeepSeek, Muse Spark 1.3-contributor | One closed task with an explicit return contract | Spawning further agents (the *leaf rule*) |
+
+You may also spawn an L3 yourself, for example a cheap reviewer or a test run, when that is
+cheaper than asking an L2.
+
+## 1a. The heartbeat (every level, from the first minute)
+
+**Superseded for the fleet: no recurring cron (D-1364/D-1377); see SKILL.md 'Fleet rules in force'.**
+
+One recurring `CronCreate` job (cron `7-59/10 * * * *`) from launch until you stop, recreated after
+every relaunch or context clear. Its prompt names the round trip — read your inbox, the status and
+DONE files you wait for and your CI runs; act; continue your plan. It is your primary wake-up — a
+background loop dies under memory pressure (that is R-coord-07's why). What a beat then does is
+R-coord-07 and R-coord-08 in [`../SKILL.md`](../SKILL.md) — not restated here;
+`autoos-agent.py heartbeat` is the read-only report of the same state.
+
+## 2. Start of session
+
+1. **Navigate with tools, not by reading.**
+   - Activate **Serena** on the repo (absolute path) and use its symbol tools
+     (`get_symbols_overview`, `find_symbol`, `find_referencing_symbols`) instead of whole-file
+     reads.
+   - Use **Graphify** (`graphify-out/graph.json`) for "what depends on X" and blast radius.
+   - Use **Omnigraph** (`structured-memory`) to recall what was already decided.
+
+   Then read the repository's `AGENTS.md` and its index (`INDEX.md`, or the `repository-index`
+   skill). Open only the files they route you to.
+2. Read the plan. Read the DONE notes of earlier sessions (`layers.md`, "successor brief").
+   Read `<stateDir>/state.json` if a run exists.
+   Read the plan-graph item (keeper `show <key> brief=true`) before the plan; claim it before work.
+3. Check the machine (§5) before launching anything.
+4. Create the heartbeat cron (§1a) before your first spawn — a session that cannot be watched
+   cannot be recovered.
+   - Superseded by D-1364/D-1377: no recurring cron (§1a); see SKILL.md 'Fleet rules in force'.
+
+## 3. Spawning and briefing L2
+
+- **How.** One runner session per chunk, with `"model": "opus"`, in its own worktree, launched
+  by this skill's runner (`run_handoff_sessions.ps1`; `-Validate`, then `-DryRun`, then run).
+  - Each session stays joinable: `claude attach <rcName>`, `claude logs <rcName>`.
+  - Your only channel into a running session is its `{{inbox}}` file (layers.md).
+  - Chunks that write the same files are **one lane**. Declare `resources` so two lanes never
+    hold the same files.
+- **Where.** All worktrees of a repo go in **one folder beside it**, `<parent>/<repo>-worktrees/`,
+  named `<repo>-<session>`.
+  - Never inside the repo: MCP servers index the repo root.
+  - Never loose in the parent folder.
+  - Scratch files go to `<repo>-worktrees/.sessions/<key>/`.
+  - Until the runner defaults to this, set `"worktreeParent"` to that folder in the run config.
+  - On WSL the worktrees need ext4: use `$HOME/<repo>-worktrees/`.
+- **The L2 brief carries**, in this order:
+  - the chunk and its "Done means";
+  - the files it owns, and the files it must not touch;
+  - the L3 routing and cross-family review rule (§4), and the time-window rule (§4a), which
+    applies to L2 exactly as to you;
+  - the token rules and the machine rules (§5, §6);
+  - "your DONE note states commits, what remains, refusals verbatim, and the evidence for
+    every claim".
+
+  Short briefs; link the plan section, never paste it.
+
+## 4. L3 executors, and cross-family review
+
+Cross-family review is rule R-orch-13 in [`../SKILL.md`](../SKILL.md); Haiku's place is
+R-orch-14. Put both ids in every L2 brief.
+
+| Executor | Family | How to reach it (measured status, 2026-09-18) |
+|---|---|---|
+| Claude Haiku / Sonnet | anthropic | Stable. Runner launcher `claude` with `"model": "haiku"`/`"sonnet"`, or the Agent tool inside an L2 |
+| Gemini 3.8 Flash | google | Stable. Runner launcher `agy` |
+| DeepSeek | deepseek | Reviews are **measured**: `deepseek_review.sh`, or `deepseek_chunked_review.sh` for diffs over ~900 lines (SKILL.md §9.7 of the pre-removal revision). Implementation: per-session `"launcher": "codewhale"`, which is **experimental** (named explicitly = allowed); or OpenCode with `deepseek/deepseek-chat` |
+| Muse Spark 1.3-contributor | meta | **Not yet measured as a batch executor.** The route to test first is OpenCode (AutoOS configures provider `meta`, model `muse-spark-1.3-contributor`): `opencode run -m meta/muse-spark-1.3-contributor`. In OpenHands it's the `orchestrator`/`suborchestrator` profile (a human-watched canvas, not headless) |
+| OpenRouter (free and cheap paid) | per model (nvidia, google, poolside, cohere, moonshot, z-ai, …) | OpenCode (`openrouter/<id>`) or the OpenHands `openrouter-*` profiles. Free `:free` ids are capped at 20 requests/min and 50/day, or 1,000/day after $10 of lifetime credits. Models, prices and limits: [`l3-routing.md`](l3-routing.md) |
+| Local Ollama | oss | OpenCode (`ollama/<tag>`) or the OpenHands `ollama-*` profiles. RTX 3060 12 GB + 128 GB RAM: a 7B coder runs at 41.9 tok/s; the 30B class at ~5 tok/s with offload. Ollama's default context is 4,096 tokens, so set `num_ctx` per request. One GPU model at a time |
+
+- Before relying on an unmeasured route, run it once on a tiny task, record the exact command
+  and result in the DONE note, then scale.
+
+**Seat-model evidence (D-260 / D-261).** A review seat run keyless on the opencode path
+(`autoos-agent.py run --free --free-model opencode/<model>`) cannot be taken at its word. A gate
+review proved opencode stores **no provider-response model** in its session db: the per-turn
+`data.model` it writes is the model the CLI was *started* with — **request-side** evidence only. So
+a keyless seat is checked three ways (D-261) and all three must equal `--expect`: (a) the run
+record's requested free model, (b) the opencode CLI `--model` from the sandbox's `opencode.log`,
+(c) the per-turn db model on *every* assistant row of the seat's session. Measured 2026-10-01: a
+seat whose record requested `opencode/mimo-v2.6-flash-free` carried `opencode/nemotron-3-ultra-free`
+on its CLI and all 7 turns — not the provider substituting a model, but **autoos-agent's own
+cross-family fence** re-launching opencode with `--model nemotron`; the three-way surfaces exactly
+that divergence. Before accepting a free-seat verdict, run
+`python3 tools/seat-model-evidence.py <sandbox-dir> --expect opencode/<model> --run-id <id>` — it
+writes a sha256-stamped JSON file (`<sandbox>.seat-evidence.json`) of kind `request-side` that lists
+each source. For a paid/gateway seat, `--gateway` reads OmniRoute call logs (kind `response-side`) —
+genuine provider-response evidence. Exit 0 = every source present and matching (turns ≥ 1); exit 2 =
+any source diverges, or an assistant row is missing its model/providerID/id (a gap — never skipped);
+exit 3 = the db is unreadable or the session has no assistant rows, unverifiable. The check is
+deterministic, opens the db read-only with the WAL included, and reads `credential`/`account`/`kv`
+never; cite the evidence file's sha256 in the DONE note.
+
+**The operator's routing rules (2026-09-18).** These hold at L1 and L2, and every L2 brief
+carries them:
+
+1-3. **Superseded 2026-09-25** (operator decision + routing v2 spec D1/D2): leg order is code, not
+   prose — read it with `python3 tools/autoos-agent.py route --explain`, per R-coord-03; review by
+   R-orch-13. Claude closes only high-risk changes (spec §5.7).
+4. **Opus stays at L1/L2 and does judgement:** decomposing, accepting or rejecting evidence
+   (R-coord-02). Who wrote, reviewed and closed each change is the lane record's job — R-orch-14.
+5. **Free first, private never** (operator, 2026-09-18: "allowed training on user data now so the
+   free and contributor models are available … ensure that no private data is used on those
+   models").
+   - **Public-only models** train on prompts: every OpenRouter `:free` id, `openrouter/free`,
+     `*muse-spark*-contributor*`, and `opencode/*-free`. An unknown model counts as public-only.
+     They are the **first choice** for public work, because they cost no Claude usage and no
+     money.
+   - **Private-safe models:** DeepSeek's paid API (`deepseek/*`) and local Ollama (`ollama/*`).
+     They are the only choice when a leaf could see private data.
+   - A leaf reads its whole working directory, its environment and the host. So the rule is
+     enforced by the **leaf gate**, not by the prompt ([`l3-routing.md`](l3-routing.md) §4).
+     L2s launch leaves only through it.
+   - This rule overrides the routing order wherever the two disagree.
+
+## 4b. Build piecewise; test on a data ladder
+
+Plan first, then build in small verified pieces. A defect found on the full data costs a full
+rerun, and one found on ten rows costs seconds.
+
+1. **Plan with the superpowers skills.** Brainstorm, then `writing-plans`, then execute with
+   `subagent-driven-development` or `executing-plans`. A plan's tasks are small enough that each
+   has its own test and its own commit.
+2. **Test-driven and fast.** Failing test first ([`AGENTS.md`](../../../../AGENTS.md) §5). A test that needs minutes is split until the inner loop takes seconds.
+3. **The data ladder** (synthetic data with a known output → a small, varied real batch → the
+   full data once, at the end) is owned by
+   [`coding-principles` Principle 10](../../coding-principles/SKILL.md). Follow it there. What
+   orchestration adds:
+   - an investigator or L2/L3 brief never asks for a full-data pass to answer a question;
+   - it names the small batch and says that a full run needs L1's approval.
+4. The same ladder applies to **tooling**: a new L3 route, a new script or a new migration is
+   run on a tiny task before it is scaled (see the rule above the pairings).
+5. L2 briefs name each rung's command and expected result. The DONE note quotes each rung's
+   summary line.
+
+## 4a. Timing: spawn where it is off-peak
+
+Providers in different countries have their busy and expensive hours at different times of day.
+DeepSeek (China) is half price outside its peak; Claude and Muse (US) throttle during US daytime.
+So when you choose *which* family runs a task, also choose by the clock. This applies to L1 and
+L2 alike.
+
+- **Ask, don't compute.** `python <skill>/provider_windows.py [pools…]` prints each pool's state
+  (`offpeak`/`peak` for price, `quiet`/`busy` for load) and when it changes, in local time.
+  - The windows live in `provider-windows.json`, in UTC, so summer/winter time can't go wrong.
+  - Each window carries its source. DeepSeek's is published; the Claude/Muse load window is the
+    operator's observation.
+- **Rules:**
+  1. Among pools that can do a task **and** satisfy the cross-family rule (§4), prefer one that
+     is `offpeak`/`quiet` now (`preferred()` returns that order).
+  2. Deferrable batch work (bulk reviews, sweeps, re-runs) goes to a pool's cheap or quiet window.
+     DeepSeek-heavy batches go outside 01:00–04:00 and 06:00–10:00 UTC on weekdays, or on
+     weekends. Claude/Muse-heavy lanes avoid their busy window, where throttling stalls lanes.
+  3. **Blocking work is never delayed for price.** If the only suitable pool is at peak and the
+     task is on the critical path, run it and note the cost.
+  4. Record the choice in the DONE note: the pool, its state at launch, and why.
+- A price window is a claim that can change. Before a large batch is planned around one,
+  re-check the source and update `verified` in the JSON.
+
+## 5. Machine: shared and limited
+
+- **Check before every heavy step** (a suite, a model load, a build, a parallel fan-out):
+  - Windows: `Get-CimInstance Win32_OperatingSystem | Select FreePhysicalMemory, TotalVisibleMemorySize`,
+    `(Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue`,
+    `Get-PSDrive C`.
+  - Linux: `free -g`, `nproc`, `uptime`, `df -h`.
+  - GPU: `nvidia-smi --query-gpu=memory.used,memory.total --format=csv`.
+  - A running batch run publishes `<stateDir>/load.json`, and briefs carry `{{machineBudget}}`
+    (its numbers live in the run config, not here).
+- **Fewer lanes beat a thrashing host.** Only add a parallel heavy lane when CPU, RAM and disk
+  all have headroom. Run one local GPU model at a time, and unload it (`keep_alive: 0`) when
+  done.
+- Never run the full suite in the main checkout while lanes merge (R-worker-03). Never reboot the
+  host.
+- Check free disk before anything that downloads or builds. Clean up worktrees you merged
+  (`-Cleanup`).
+
+## 6. Tokens: yours and every subagent's
+
+- **Never read a big log.** Filter it with code first, and read only the result:
+  - `Select-String -Path run.log -Pattern 'FAIL|Error|Traceback' -Context 0,3 | Select -First 40`
+  - `rg -n 'FAIL|ERROR' run.log | head -40`
+  - for JSON/NDJSON: `python -c` or `jq` to count and summarise, never a raw dump.
+- Redirect long runs to a file and read the summary line. Never stream a suite through
+  `grep`/`tail` pipes, which buffer and lose tracebacks.
+- Symbol lookups over file reads; one targeted read over three broad ones. Don't re-read what
+  you already summarised.
+- Subagents return a short structured result: verdict, evidence paths, numbers. Tell them that
+  in the brief, and tell them the same token rules.
+- The resolver picks the writer (`route --explain`, R-coord-03); save Opus for judgement.
+
+## 6a. Context cap: automatic recycle at 250k (P1.1)
+
+- A `PostToolUse` hook, `tools/hooks/context_guard.py`, reads the last assistant turn's usage (input + cache read + cache
+  creation) from the tail of the transcript and tells the session itself:
+  - at `AUTOOS_CTX_HANDOFF` (230000): `HANDOFF-NOW` -- finish the step, write the handoff, commit + push, then
+    `python3 tools/hooks/context_guard.py ready <handoff-path>` (and `SendMessage RECYCLE-READY <path>` to your parent if
+    your brief says so);
+  - at `AUTOOS_CTX_HARD` (250000): `HARD-CAP` -- no new work, handoff now.
+  - It re-emits at most once per +10k of growth; any error is silent (exit 0). `context_guard.py status` lists the state
+    files (`~/.local/state/autoos/ctx-guard/`, or under `$XDG_STATE_HOME`).
+- Install, once per host, in `~/.claude/settings.json`:
+  `"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "python3 <repo>/tools/hooks/context_guard.py"}]}]}`
+  On Windows write `py -3` (or `python`) in place of `python3` in that command; the `HANDOFF-NOW` line names `python3`, so
+  run the `ready` call with the interpreter your host has.
+- Safety net: the launcher exports `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000` (the router's `bin/fleet-launch` does). Never put
+  it in a shared `settings.json`.
+- The watchdog on the router side stops and relaunches a session that is over the cap and wrote its `ready` marker.
+  A session without a launch spec, or with live children, only gets an alert.
+- Bridges on the workstation or prox run the same hook. On `HANDOFF-NOW` the bridge writes its handoff, then runs the host's
+  own self-restart task (the ebn-style scheduled restart) -- the hook never restarts anything itself.
+
+## 7. Research grade: evidence over assertion
+
+- **A DONE note is a claim, not evidence** — verifying it yourself is R-coord-02.
+  - Check each outcome yourself: the guard log's summary line, and a re-run of the one test that
+    proves it.
+  - Ask the lower level for its reasoning, not just its result.
+- **Question results that look too good, and results that contradict each other.** When two
+  reviewers disagree, settle it with a test, not a vote.
+- **Don't assume numbers; recompute them.**
+  - Counts, sizes, pass/fail totals, prices, speeds all come from a command you ran, which you
+    cite with the number.
+  - A number copied from a brief, a plan or another agent is unverified until re-measured.
+- **Label every statement:** measured (command and date), sourced (link), or inferred. Never
+  present an inference as a measurement.
+- **Refusals:** record them verbatim and route them to the operator; never work around them
+  (R-orch-08).
+
+## 8. End of session
+
+- Merge only what the guards passed, and read the merge commit's diff summary.
+- Write your own DONE note: chunks landed (commits), what remains, the decisions you took and why,
+  and the ones left for the operator.
+- Persist durable decisions to Omnigraph (`structured-memory`). Clean up merged worktrees.
+
+## 9. Circuit breaker on every agent starter (P1.2)
+
+- A unit that starts agents must not restart forever (D-1173). Wrap its ExecStart in
+  `tools/unit_breaker.py --unit <name>.service -- <cmd>` and give it the drop-in
+  `lib/linux/systemd/user/breaker.conf.in` (`StartLimitBurst=5` in 600 s, `RestartSec=20`).
+- After 5 identical failures (exit code plus last stderr line) the unit is disabled and one
+  `BREAKER` line lands in `AUTOOS_ALERT_INBOX`. `unit_breaker.py status` lists units;
+  `unit_breaker.py reset <unit>` clears a trip after the cause is fixed.
+- Spend by lane: an empty gateway session tag shows as `key:<api key name>` in
+  `autoos_usage.py --by lane`; every client sends `x-omniroute-session-id`.
+  `tools/gateway_alerts.py` flags provider suspension signals (MiMo 401/403, "suspend").

@@ -1,0 +1,378 @@
+#!/usr/bin/env bash
+# Opt-in autostart for the AutoOS AI stack (Linux: systemd --user units).
+#
+# Linux counterpart of Register-AutoOSAutostart.ps1. Renders the unit
+# templates next to this script with THIS checkout's path and the PATH this
+# machine needs (nvm node, ~/.local/bin), writes them to
+# ~/.config/systemd/user/, enables them and starts them. Nothing happens until
+# you run it; every file it writes is named first.
+#
+#   ./configuration/autostart/register-autostart.sh              # register + start
+#   ./configuration/autostart/register-autostart.sh --dry-run    # show the plan only
+#   ./configuration/autostart/register-autostart.sh --only autoos-omniroute
+#   ./configuration/autostart/register-autostart.sh --takeover   # stop hand-started copies first
+#   ./configuration/autostart/register-autostart.sh --unregister # disable + remove our units
+#   ./configuration/autostart/register-autostart.sh --render autoos-omniroute  # print one unit
+#
+# Safe to run twice: an unchanged unit is reported as skipped, a changed one
+# is backed up (<unit>.autoos-backup-<timestamp>) before it is replaced, and
+# enable/start on an active unit are no-ops. A service that somebody started by
+# hand keeps running (the unit is enabled, not started) unless --takeover.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(cd "$HERE/../.." && pwd)"
+UNIT_DIR="${AUTOOS_SYSTEMD_USER_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user}"
+# Tests replace both with stubs; nothing here may touch the live user manager
+# from the suite (AGENTS.md §5).
+SYSTEMCTL="${AUTOOS_SYSTEMCTL:-systemctl}"
+LOGINCTL="${AUTOOS_LOGINCTL:-loginctl}"
+MARKER="# Managed by AutoOS configuration/autostart/register-autostart.sh"
+
+# autoos_backup <path>: copies <path> to a name that did not exist yet
+# (<path>.autoos-backup-<stamp>, then -1, -2, ... - the stamp has one-second
+# resolution and a plain overwrite used to destroy an earlier same-second
+# backup; see lib/linux/install.sh backup_path/backup_file for the source of
+# this rule). This script is standalone (does not source that lib), so it
+# gets its own copy. Prints the backup path and returns 0, or prints nothing
+# and returns non-zero with nothing left behind if the copy failed.
+autoos_backup() {
+    local path="$1" stamp base candidate n=0
+    stamp="$(date +%Y%m%d-%H%M%S)"
+    base="$path.autoos-backup-$stamp"
+    candidate="$base"
+    while [[ -e "$candidate" || -L "$candidate" ]]; do
+        n=$((n + 1))
+        candidate="$base-$n"
+    done
+    if ! cp -p -- "$path" "$candidate"; then
+        rm -f -- "$candidate"
+        return 1
+    fi
+    printf '%s\n' "$candidate"
+}
+
+# Order matters: the gateway first, the oneshot resume unit last.
+ALL_UNITS=(autoos-omniroute autoos-litellm autoos-opencode autoos-stack)
+
+DRY=0
+UNREGISTER=0
+TAKEOVER=0
+RENDER=""
+ONLY=""
+while (( $# )); do
+    case "$1" in
+        --dry-run)    DRY=1 ;;
+        --unregister) UNREGISTER=1 ;;
+        --takeover)   TAKEOVER=1 ;;
+        --render)     shift; RENDER="${1:-}" ;;
+        --render=*)   RENDER="${1#--render=}" ;;
+        --only)       shift; ONLY="${1:-}" ;;
+        --only=*)     ONLY="${1#--only=}" ;;
+        -h|--help)    sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        *) echo "Unknown option: $1"; exit 2 ;;
+    esac
+    shift
+done
+
+# ─── Per-unit facts ─────────────────────────────────────────────────────────
+unit_port() {
+    case "$1" in
+        autoos-omniroute) echo 20128 ;;
+        autoos-litellm)   echo 4000 ;;
+        autoos-opencode)  echo 4096 ;;
+        *) echo "" ;;
+    esac
+}
+unit_binary() {
+    case "$1" in
+        autoos-omniroute) echo omniroute ;;
+        autoos-litellm)   echo litellm ;;
+        autoos-opencode)  echo opencode ;;
+        *) echo "" ;;
+    esac
+}
+
+# The PATH the units run with: the directories of the tools they start (nvm
+# versions node, so it is resolved here, not hard-coded), then the usual ones.
+unit_path() {
+    local dirs=() d seen=":" tool
+    for tool in node omniroute opencode litellm docker; do
+        if command -v "$tool" >/dev/null 2>&1; then
+            dirs+=("$(dirname "$(command -v "$tool")")")
+        fi
+    done
+    dirs+=("$HOME/.local/bin" /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin)
+    local out=""
+    for d in "${dirs[@]}"; do
+        [[ "$seen" == *":$d:"* ]] && continue
+        seen+="$d:"
+        out+="${out:+:}$d"
+    done
+    printf '%s' "$out"
+}
+
+# render <unit>: the unit text for this machine, on stdout.
+render() {
+    local name="$1" tpl="$HERE/$1.service" bin=""
+    [[ -f "$tpl" ]] || { echo "No template for $name ($tpl)" >&2; return 1; }
+    local tool
+    tool="$(unit_binary "$name")"
+    if [[ -n "$tool" ]]; then
+        bin="$(command -v "$tool" 2>/dev/null || true)"
+        [[ -n "$bin" ]] || { echo "$tool is not installed" >&2; return 3; }
+    fi
+    # Characters that systemd or sed would reinterpret in a path.
+    if [[ "$REPO$bin" =~ [[:space:]%|\\] ]]; then
+        echo "Path contains a space, %, | or backslash - not supported in a unit: $REPO $bin" >&2
+        return 1
+    fi
+    local path
+    path="$(unit_path)"
+    printf '%s\n' "$MARKER"
+    # Template comments stay: they say why each line is there. Every value is
+    # escaped for sed's replacement text: an & there means "the whole match",
+    # so a path holding & rendered the placeholder back (review 2026-09-25).
+    sed -e "s|@REPO@|$(sed_repl "$REPO")|g" -e "s|@PATH@|$(sed_repl "$path")|g" \
+        -e "s|@OMNIROUTE@|$(sed_repl "$bin")|g" -e "s|@OPENCODE@|$(sed_repl "$bin")|g" "$tpl"
+}
+
+sed_repl() {
+    # Escape \, & and the | delimiter for a sed replacement.
+    printf '%s' "$1" | sed -e 's/[\\&|]/\\&/g'
+}
+
+if [[ -n "$RENDER" ]]; then
+    render "$RENDER"
+    exit $?
+fi
+
+selected_units() {
+    local u
+    for u in "${ALL_UNITS[@]}"; do
+        if [[ -z "$ONLY" || ",$ONLY," == *",$u,"* ]]; then echo "$u"; fi
+    done
+}
+
+listener_pid() {
+    ss -ltnpH "sport = :$1" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2
+}
+
+user_manager_ok() {
+    "$SYSTEMCTL" --user show-environment >/dev/null 2>&1
+}
+
+[[ $DRY -eq 1 ]] && echo "This is a dry run - no unit is written, enabled, started or stopped."
+
+if ! command -v "$SYSTEMCTL" >/dev/null 2>&1; then
+    echo "systemctl not found - this machine has no systemd; start the stack with configuration/autostart/Start-AutoOSStack.sh."
+    exit 1
+fi
+if [[ $DRY -eq 0 ]] && ! user_manager_ok; then
+    echo "No systemd user manager is reachable (systemctl --user). Log in once with a session, or run:"
+    echo "  sudo loginctl enable-linger ${USER:-$(id -un)}"
+    exit 1
+fi
+
+# ─── Unregister ─────────────────────────────────────────────────────────────
+if [[ $UNREGISTER -eq 1 ]]; then
+    while IFS= read -r u; do
+        f="$UNIT_DIR/$u.service"
+        if [[ ! -f "$f" ]]; then echo "  = $u: not registered - nothing to remove"; continue; fi
+        if ! grep -qF "$MARKER" "$f"; then
+            echo "  ! $u: $f was not written by AutoOS - left alone"
+            continue
+        fi
+        if [[ $DRY -eq 1 ]]; then echo "  - $u: would disable, stop and remove $f"; continue; fi
+        "$SYSTEMCTL" --user disable --now "$u.service" >/dev/null 2>&1 || true
+        rm -f "$f"
+        echo "  - $u: disabled, stopped, removed $f"
+    done < <(selected_units)
+    [[ $DRY -eq 1 ]] || "$SYSTEMCTL" --user daemon-reload
+    exit 0
+fi
+
+# ─── Register ───────────────────────────────────────────────────────────────
+echo "Units go to $UNIT_DIR (repo: $REPO)"
+# Once the docker AI stack owns the gateway and opencode serve (ai-stack.sh
+# migrate), a native unit would fight its container for :20128 / :4096.
+AI_STACK_ACTIVE=0
+if bash "$REPO/configuration/docker/ai-stack/ai-stack.sh" is-active >/dev/null 2>&1; then
+    AI_STACK_ACTIVE=1
+fi
+CHANGED=0
+TO_START=()
+while IFS= read -r u; do
+    f="$UNIT_DIR/$u.service"
+    if [[ $AI_STACK_ACTIVE -eq 1 && ( "$u" == autoos-omniroute || "$u" == autoos-opencode ) ]]; then
+        echo "  = $u: runs in the docker AI stack (ai-stack.sh status) - no native unit (skipped)"
+        continue
+    fi
+    if [[ "$u" == autoos-omniroute && -f "$UNIT_DIR/omniroute.service" ]]; then
+        # Two gateways would fight over :20128.
+        echo "  ! $u: 'omniroute autostart' already installed omniroute.service - skipped."
+        echo "    Use one: omniroute autostart disable   (then re-run this)"
+        continue
+    fi
+    rc=0
+    text="$(render "$u" 2>&1)" || rc=$?
+    if [[ $rc -eq 3 ]]; then echo "  - $u: skipped ($text)"; continue; fi
+    if [[ $rc -ne 0 ]]; then echo "  ! $u: $text"; continue; fi
+    if [[ -f "$f" ]] && [[ "$(cat "$f")" == "$text" ]]; then
+        echo "  = $u: unit unchanged (skipped)"
+    elif [[ $DRY -eq 1 ]]; then
+        if [[ -f "$f" ]]; then echo "  - $u: would back up and replace $f"
+        else echo "  - $u: would write $f"; fi
+    else
+        mkdir -p "$UNIT_DIR"
+        if [[ -f "$f" ]]; then
+            if ! backup="$(autoos_backup "$f")"; then
+                echo "  ! $u: could not back up $f - leaving it untouched"
+                continue
+            fi
+            echo "  + $u: replaced $f (backup: $backup)"
+        else
+            echo "  + $u: wrote $f"
+        fi
+        printf '%s\n' "$text" >"$f"
+        CHANGED=1
+    fi
+    TO_START+=("$u")
+done < <(selected_units)
+
+if [[ $DRY -eq 1 ]]; then
+    for u in "${TO_START[@]}"; do
+        port="$(unit_port "$u")"
+        pid=""
+        [[ -n "$port" ]] && pid="$(listener_pid "$port")"
+        if "$SYSTEMCTL" --user is-active --quiet "$u.service" 2>/dev/null; then
+            echo "  - $u: would enable (already running)"
+        elif [[ -n "$pid" && $TAKEOVER -eq 0 ]]; then
+            echo "  - $u: would enable; a hand-started process (pid $pid) holds :$port - would not start it (--takeover does)"
+        elif [[ -n "$pid" ]]; then
+            echo "  - $u: would stop the hand-started process on :$port (pid $pid), then enable and start"
+        else
+            echo "  - $u: would enable and start"
+        fi
+    done
+else
+    [[ $CHANGED -eq 1 ]] && "$SYSTEMCTL" --user daemon-reload
+    for u in "${TO_START[@]}"; do
+        "$SYSTEMCTL" --user enable "$u.service" >/dev/null 2>&1 \
+            || { echo "  ! $u: enable failed - see: systemctl --user status $u"; continue; }
+        if "$SYSTEMCTL" --user is-active --quiet "$u.service" 2>/dev/null; then
+            if [[ $CHANGED -eq 1 ]]; then
+                "$SYSTEMCTL" --user try-restart "$u.service" >/dev/null 2>&1 || true
+                echo "  + $u: enabled, restarted with the new unit"
+            else
+                echo "  = $u: enabled and running (skipped)"
+            fi
+            continue
+        fi
+        port="$(unit_port "$u")"
+        pid=""
+        [[ -n "$port" ]] && pid="$(listener_pid "$port")"
+        if [[ -n "$port" && -z "$pid" ]] && [[ -n "$(ss -ltnH "sport = :$port" 2>/dev/null)" ]]; then
+            echo "  ! $u: enabled; :$port is held by another user's process - not started"
+            continue
+        fi
+        if [[ -n "$pid" ]]; then
+            if [[ $TAKEOVER -eq 0 ]]; then
+                echo "  ! $u: enabled; a hand-started process (pid $pid) holds :$port - not started."
+                echo "    It takes over at the next boot, or now with: $0 --takeover --only $u"
+                continue
+            fi
+            echo "  - $u: stopping the hand-started process on :$port (pid $pid) so the unit can own it"
+            if [[ "$u" == autoos-omniroute ]]; then
+                (cd "$HOME" && omniroute stop) >/dev/null 2>&1 || kill "$pid" 2>/dev/null || true
+            else
+                kill "$pid" 2>/dev/null || true
+            fi
+            for _ in $(seq 1 15); do [[ -z "$(listener_pid "$port")" ]] && break; sleep 1; done
+        fi
+        if "$SYSTEMCTL" --user start "$u.service"; then
+            echo "  + $u: enabled and started"
+        else
+            echo "  ! $u: start failed - see: journalctl --user -u $u"
+        fi
+    done
+fi
+
+# ─── Gateway env defaults in ~/.omniroute/.env ──────────────────────────────
+# Two jobs share this file, so they share ONE append (and ONE backup) per run:
+#   1. REQUIRE_API_KEY - OmniRoute reads ~/.omniroute/.env itself
+#      (bin/omniroute.mjs loadEnvFile()); it is deliberately NOT a unit
+#      Environment= line, which would shadow the operator's own edit of it.
+#   2. The repeated-429 rotation policy. The autoos-omniroute unit runs
+#      `omniroute serve` with WorkingDirectory=~/.omniroute and the loader
+#      fills a key only when the process env does not already hold it, so this
+#      file is the unit's env surface too (no Environment= line). A native
+#      nohup launch loads the same file.
+# Read-modify-write, respect-set: only a key absent from the file is appended,
+# any value the operator already set is left alone, and a second run appends
+# nothing.
+if [[ -z "$ONLY" || ",$ONLY," == *",autoos-omniroute,"* ]]; then
+    omni_env="${AUTOOS_OMNIROUTE_ENV:-$HOME/.omniroute/.env}"
+    rotation_defaults=(
+        OMNIROUTE_ROTATION_ENABLED=true
+        OMNIROUTE_ROTATE_ON_429=true
+        OMNIROUTE_ROTATE_429_THRESHOLD=3
+        OMNIROUTE_ROTATE_429_WINDOW_SECONDS=120
+        OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS=300
+        OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS=1800000
+    )
+    env_line_present() { grep -qE "^[[:space:]]*$1[[:space:]]*=" "$omni_env" 2>/dev/null; }
+    to_append=()
+    require_missing=0
+    if env_line_present REQUIRE_API_KEY; then
+        if grep -qE '^[[:space:]]*REQUIRE_API_KEY[[:space:]]*=[[:space:]]*"?true"?[[:space:]]*$' "$omni_env"; then
+            echo "REQUIRE_API_KEY=true is set in $omni_env (skipped)."
+        else
+            echo "  ! $omni_env sets REQUIRE_API_KEY to something other than true - left alone; /v1 may accept keyless requests."
+        fi
+    else
+        require_missing=1
+        if ! grep -qF '# AutoOS: /v1 is reachable from the LAN' "$omni_env" 2>/dev/null; then
+            to_append+=("# AutoOS: /v1 is reachable from the LAN - every request must carry a client key.")
+        fi
+        to_append+=("REQUIRE_API_KEY=true")
+    fi
+    rotation_missing=0
+    for pair in "${rotation_defaults[@]}"; do
+        name="${pair%%=*}"
+        if env_line_present "$name"; then continue; fi
+        to_append+=("$pair")
+        rotation_missing=$((rotation_missing + 1))
+    done
+    if (( ${#to_append[@]} == 0 )); then
+        echo "  = 429 rotation policy already set in $omni_env (skipped)."
+    elif [[ $DRY -eq 1 ]]; then
+        if (( require_missing )); then echo "  - would append REQUIRE_API_KEY=true to $omni_env (backup first if it exists)"; fi
+        if (( rotation_missing )); then echo "  - would append $rotation_missing rotation default(s) to $omni_env (backup first if it exists)"; fi
+    else
+        mkdir -p "$(dirname "$omni_env")"
+        if [[ -f "$omni_env" ]] && ! autoos_backup "$omni_env" >/dev/null; then
+            echo "  ! could not back up $omni_env - leaving it untouched; /v1 may accept keyless requests."
+        else
+            for line in "${to_append[@]}"; do printf '%s\n' "$line"; done >>"$omni_env"
+            chmod 600 "$omni_env"
+            if (( require_missing )); then echo "  + appended REQUIRE_API_KEY=true to $omni_env (restart the gateway to apply)"; fi
+            if (( rotation_missing )); then echo "  + appended $rotation_missing rotation default(s) to $omni_env (restart the gateway to apply)"; fi
+        fi
+    fi
+fi
+
+# ─── Lingering: units start at boot, not at first login ─────────────────────
+user_name="${USER:-$(id -un)}"
+linger="$("$LOGINCTL" show-user "$user_name" -p Linger --value 2>/dev/null || true)"
+if [[ "$linger" == "yes" ]]; then
+    echo "Lingering is on for $user_name: the units start at boot."
+elif [[ $DRY -eq 1 ]]; then
+    echo "Lingering is off: would try 'loginctl enable-linger $user_name' (without sudo)."
+elif "$LOGINCTL" enable-linger "$user_name" >/dev/null 2>&1; then
+    echo "Lingering enabled for $user_name: the units start at boot."
+else
+    echo "Lingering is off and could not be enabled without sudo. Run once:"
+    echo "  sudo loginctl enable-linger $user_name"
+fi
+echo "Remove any time with: $0 --unregister"

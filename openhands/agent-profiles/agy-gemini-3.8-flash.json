@@ -1,0 +1,15 @@
+{
+  "schema_version": 2,
+  "id": "2eadb729-80e5-4f6d-920f-38a084ab82e4",
+  "name": "agy-gemini-3.8-flash",
+  "revision": 0,
+  "mcp_server_refs": null,
+  "agent_kind": "acp",
+  "acp_server": "gemini-cli",
+  "acp_model": "gemini-3-flash-preview",
+  "acp_session_mode": null,
+  "acp_prompt_timeout": 1800.0,
+  "acp_startup_timeout": 90.0,
+  "acp_command": null,
+  "acp_args": null
+}

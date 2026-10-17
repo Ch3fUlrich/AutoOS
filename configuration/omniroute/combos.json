@@ -1,0 +1,364 @@
+{
+  "$comment": "generated from catalog/ai-registry.json - do not edit",
+  "retired": [
+    "tier1",
+    "tier1-clean",
+    "tier2",
+    "tier2-clean",
+    "tier3",
+    "tier3-clean",
+    "rag",
+    "tier1-paid",
+    "tier2-paid",
+    "tier3-paid",
+    "tier2-credit",
+    "tier3-credit",
+    "opus-4-6",
+    "or-qwen3.8-27b-free",
+    "t1-orchestrator",
+    "t1-orchestrator-clean",
+    "t1-orchestrator-free-only",
+    "t1-orchestrator-paid",
+    "t2-orchestrator",
+    "t2-worker",
+    "t2-worker-clean",
+    "t2-worker-free-only",
+    "t2-worker-paid",
+    "t3-driver",
+    "t3-driver-clean",
+    "t3-driver-free-only",
+    "t3-driver-paid",
+    "t4-researcher",
+    "ovh-qwen3-coder-30b"
+  ],
+  "omitted": [
+    "cheaperinference/glm-5.2",
+    "cheaperinference/kimi-k3",
+    "deepseek-v4.1-flash",
+    "faik-gpt-6-sol",
+    "groq-qwen3.8-27b",
+    "hf-glm-5.2",
+    "hf-qwen3.8-27b",
+    "opus-5-5",
+    "ovh-gpt-oss-120b",
+    "samba/MiniMax-M3",
+    "samba/gpt-oss-120b",
+    "spark-1.3-contributor"
+  ],
+  "d657_combos": [
+    "l1-orchestrator",
+    "l1-orchestrator-clean",
+    "l1-orchestrator-free-only",
+    "l2-orchestrator",
+    "l2-orchestrator-clean",
+    "l2-worker",
+    "l2-worker-clean",
+    "l2-worker-free-only",
+    "l2-researcher",
+    "l3-driver",
+    "l3-driver-clean",
+    "l3-driver-free-only",
+    "l3-implementer",
+    "l3-implementer-clean",
+    "l3-researcher",
+    "l3-researcher-clean",
+    "l3-review-diff",
+    "l3-review-tests",
+    "l3-review-codebase",
+    "t4-rag",
+    "gemini-3.8-flash"
+  ],
+  "combos": [
+    {
+      "name": "gemini-3.8-flash",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l1-orchestrator",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l1-orchestrator-clean",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l1-orchestrator-free-only",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free"
+      ]
+    },
+    {
+      "name": "l2-orchestrator",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l2-orchestrator-clean",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l2-researcher",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+      ]
+    },
+    {
+      "name": "l2-worker",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l2-worker-1m",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "vertex/gemini-3.8-flash",
+        "mimo/mimo-v2.6-flash"
+      ]
+    },
+    {
+      "name": "l2-worker-clean",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l2-worker-free-only",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+      ]
+    },
+    {
+      "name": "l3-driver",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "cohere/command-a-03-2025",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "cohere/command-a-plus-05-2026",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/cohere/north-mini-code:free",
+        "ovh/Qwen3.5-397B-A17B",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-driver-1m",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "vertex/gemini-3.8-flash",
+        "mimo/mimo-v2.6-flash"
+      ]
+    },
+    {
+      "name": "l3-driver-256k",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "vertex/gemini-3.8-flash",
+        "mimo/mimo-v2.6-flash"
+      ]
+    },
+    {
+      "name": "l3-driver-clean",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-driver-free-only",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "cohere/command-a-03-2025",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "cohere/command-a-plus-05-2026",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/cohere/north-mini-code:free"
+      ]
+    },
+    {
+      "name": "l3-implementer",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "cohere/command-a-03-2025",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "cohere/command-a-plus-05-2026",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/cohere/north-mini-code:free",
+        "ovh/Qwen3.8-27B",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-implementer-clean",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-researcher",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-researcher-clean",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-review-codebase",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "l3-review-diff",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/poolside/laguna-s-2.1:free"
+      ]
+    },
+    {
+      "name": "l3-review-tests",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "bzl/deepseek/deepseek-v4-flash-0731free:free",
+        "vertex/gemini-3.8-flash"
+      ]
+    },
+    {
+      "name": "mimo-v2.6-flash",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "mimo/mimo-v2.6-flash"
+      ]
+    },
+    {
+      "name": "mimo-v2.6-pro",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "mimo/mimo-v2.6-pro"
+      ]
+    },
+    {
+      "name": "or-laguna-s-2.1-free",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "openrouter/poolside/laguna-s-2.1:free"
+      ]
+    },
+    {
+      "name": "or-nemotron-3-super-free",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
+      ]
+    },
+    {
+      "name": "or-north-mini-code-free",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "openrouter/cohere/north-mini-code:free"
+      ]
+    },
+    {
+      "name": "ovh-qwen3.8-27b",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "ovh/Qwen3.8-27B"
+      ]
+    },
+    {
+      "name": "t4-rag",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "cohere/command-r-plus-08-2024",
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "cohere/command-a-03-2025"
+      ]
+    },
+    {
+      "name": "vertex-gemini-3.8-flash",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,49 @@
+# infra/.gitignore
+# Files that are local to each deployment and must never be committed
+
+# Environment files with real secrets (only .env.*.example templates are tracked)
+.env
+.env.shared
+.env.server
+.env.client
+.env.local
+# Re-include the placeholder templates: the root .gitignore's broad `.env.*`
+# (a basename match, so it reaches infra/mcp-servers/ too) would otherwise
+# swallow them. This file has higher precedence than the root one, and the
+# parent dir is not excluded, so the negations win. Verified with check-ignore.
+!.env.shared.example
+!.env.server.example
+!.env.client.example
+
+# Cluster declaration with real graph names (gitignored — graph names are repo names)
+mcp-servers/cluster/cluster.yaml
+mcp-servers/cluster/seed/*
+# Allow the two tracked seed files (this repo's own seeds only)
+!mcp-servers/cluster/seed/memory.jsonl
+!mcp-servers/cluster/seed/agent-skills.jsonl
+
+# Runtime data (auto-created, persists across compose down)
+data/
+
+# Omnigraph setup backups (local snapshots)
+omnigraph-setup/backups/
+
+# Graph backups from apply-cluster.sh
+.graph-backup/
+
+# CAO local state
+.cao/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Site / policy files with real host/user names
+site.env
+users.policy.yaml
+
+# OS
+.DS_Store
+Thumbs.db

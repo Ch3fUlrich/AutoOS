@@ -1,0 +1,410 @@
+# Unattended orchestration — 3-tier protocol (AutoOS skill)
+
+How to run long-horizon agent work cost-efficiently through OmniRoute,
+and how orchestration hands off without losing the goal.
+
+Status: living doc. Proven 2026-09-20: all 6 combos live-probed `ack`
+(`l1-orchestrator`→openrouter spark-contributor, `l1-orchestrator-clean`→openrouter spark,
+`l2-worker`→gpt-oss-120b, `l3-driver`→mistral-code-latest). Gateway :20128.
+
+## Tier enforcement (mandatory depth, runtime-checked)
+
+Only `t1` may sub-orchestrate, only `t2` may review-spawn, `t3`
+spawns nothing. This is **hard-enforced by `opencode.jsonc`**, not a
+prompt convention — the `subagent` permission action (V2 docs:
+`agents` + `permissions` guides) denies everything first, then allows
+exactly one child per level:
+
+- `l1-orchestrator` (`mode: all`, model `omniroute/l1-orchestrator`): deny
+  `subagent *`, allow `subagent l2-worker`.
+- `l2-worker` (`mode: subagent`, model `omniroute/l2-orchestrator`): deny
+  `subagent *`, allow `subagent t3-reviewer`.
+- `t3-reviewer` (`mode: subagent`, model `omniroute/l3-driver`): deny
+  `subagent *` (no allow rule — leaf).
+
+Effect: a t2 that tries to spawn another t2 (or a t3 that
+tries to spawn anything) is **denied by the runtime before it runs**.
+The suite asserts all three agents exist with exactly this shape
+(`tests/run-tests.*`: tier-enforcement case). What the runtime needs,
+measured live against opencode 2.0.16 (2026-09-24):
+
+1. **Depth is `experimental.subagent_depth`.** A top-level
+   `subagent_depth` is dropped as an "unsupported legacy setting" and the
+   depth defaults to 1 - l2-worker then answers "Subagent depth limit reached
+   (1)". Both suites gate the key.
+2. **The reviewer is fenced by `shell` rules and MCP denies**, not by
+   `edit`/`write` alone. v2 calls the shell action `shell` (a `bash` rule
+   matches nothing), and serena's `create_text_file`/`replace_content`
+   write files past an `edit` deny. t3-reviewer therefore denies
+   `serena_*` except a read-only allow list, the omnigraph write tools and
+   `playwright_browser_run_code_unsafe`, and carries every
+   `catalog/agent-harness.json` fence (`bash_deny_all` + `bash_deny_leaf`:
+   no commit, push, checkout, reset, env dumps) as a `shell` deny.
+3. **Children keep their model; the entry agent does not.** A subagent
+   spawned through the subagent tool runs on its own agent's model, so depth
+   and model stay paired: l1-orchestrator on `omniroute/l1-orchestrator`,
+   l2-worker on `omniroute/l2-orchestrator`, t3-reviewer on `omniroute/l3-driver`.
+   Ask for a `-clean` twin when the task is sensitive (same depth, no-training
+   legs). But `opencode run --agent l2-worker` runs on the top-level default
+   (`omniroute/l1-orchestrator`) unless `--model` is passed too - use
+   `tools/autoos-agent.py` (below), which always pairs them.
+4. **The subagent tool accepts a `model` override**, so a model can still
+   pick another model at spawn time; the agent prompt, not the runtime,
+   keeps it on its tier.
+5. **The `agents` block binds inside the opencode runtime (CLI/TUI/
+   `serve`).** Harness or API callers that address `omniroute/t*-*`
+   models directly bypass the agents and must follow the same depth by
+   convention only - the skill prompt states the spawn budget explicitly.
+
+## Spawning - one command, any client
+
+```bash
+python3 tools/autoos-agent.py list                            # tiers, card fields, client matrix, depth
+python3 tools/autoos-agent.py run --isolate "Add a test for X"   # empty card -> l2-worker
+python3 tools/autoos-agent.py run --card role=review --isolate --lean "Review lib/linux/ui.sh"
+python3 tools/autoos-agent.py run --card privacy=sensitive --isolate "..."   # -> l2-worker-clean
+python3 tools/autoos-agent.py run --client qwen --card complexity=trivial --isolate "..."
+python3 tools/autoos-agent.py run --client claude --joinable --isolate --title d1 "..."
+python3 tools/autoos-agent.py run --tier 2 --isolate "Add a test for X"   # tier by hand
+python3 tools/autoos-agent.py run --tier 3 --isolate --clean "..."      # -clean twin
+python3 tools/autoos-agent.py run --tier 2 --isolate --model omniroute/l2-orchestrator "..."
+python3 tools/autoos-agent.py run --tier 1 --free "..."       # no key, no gateway, no spend
+python3 tools/autoos-agent.py run --card role=review --isolate --dry-run "..."   # print the plan only
+python3 tools/autoos-agent.py run --card kind=review --isolate --review-of 20260928-092516-fix-the-router-abc123 "..."
+```
+
+A review names its author: `--review-of <writer-run-id>` fences that writer's
+model family out of the whole plan, so the review cannot land on the family that
+wrote the diff it is judging (FAMILYFENCE; the rule and its exit code 12 are in
+the CLI's own docstring, which is the source of truth). Pass it — a review with no
+known writer family only warns on stderr and runs unfenced.
+
+The `CROSS-FAMILY: yes|NO|NO (assumed)|unknown` a review prints is now a
+*provenance* claim, not a plan guess (FAMILYFENCE-b): `yes` is printed only when the
+reviewer's model was witnessed — the gateway call log for a gateway run, the client's
+own transcript for an own-account run that reports (qoder, claude); `--model` on any
+client is `pinned`. A model that came only from the plan's assumed default never earns
+`yes` — an assumption may have run anything. A collision is the other direction and the
+exit code acts on it unwitnessed too, so an unattested reviewer that landed inside the
+fence prints `NO (assumed)` rather than `unknown` beside its own refusal
+(FAMILYFENCE-3 N5). `ps`/`status`/`result` surface the
+resolved writer with its `source` for every client; `--model` now pins an own-account
+client too, and its family feeds the fence like a gateway leg's.
+
+`--isolate` is not optional for a spawned tier: tiers 2 and 3 are refused in
+place (exit 2), and the MCP `spawn` tool forces the clone for them. The sandbox
+is a fresh repo holding one base commit of the allowed committed files (see the
+ISOLATION STATEMENT in `isolate_clone`, `tools/autoos-agent.py`) —
+the one control that keeps a worker's whole-tree grep out of the git-ignored
+`configuration/api-keys.yml` and `.env*` sitting in your working tree. Only a
+read-only tier-1 run (`role=orchestrate`, your own session) stays in place: a
+WRITE-role card at tier 1 takes the clone by default too, because
+`role=implement, complexity=hard` routes up to tier 1, and asking for
+`isolate=False` there is refused while `cwd` is the caller's own worktree unless
+the call also says `allow_shared_checkout=True` (SB-C).
+
+For opencode it passes the agent's own model, runs `--standalone` (the
+background opencode service keeps the environment it started with, so a key
+exported later is ignored), closes the child's stdin (with an open pipe
+`opencode run` waits for more prompt text and never starts), reads the client
+key from `AUTOOS_OMNIROUTE_KEY` or `configuration/api-keys.yml` without
+printing it, and logs one line per run to `logs/orch-<date>.log`: client,
+card, combo, reason, routing version, depth.
+
+### The task card (routing v1, [ADR 0006](decisions/0006-launch-time-routing-resolver.md))
+
+Without `--tier`, `autoos_routing.select_combo` picks the combo. The CLI and
+the MCP server both call it, so there is only one routing decision. Unknown
+fields or values are an error. The steps are filters first (privacy, ctx,
+spend), then a preference by role and complexity.
+
+| Field | Values | Default |
+|---|---|---|
+| `role` | orchestrate, implement, review | implement |
+| `complexity` | trivial, standard, hard | standard |
+| `ctx` | 128k, 1m | 128k |
+| `privacy` | public, sensitive | public |
+| `spend` | free-ok | free-ok |
+
+| privacy | ctx | role / complexity | spend | combo |
+|---|---|---|---|---|
+| public | 1m | any | free-ok | `l1-orchestrator` |
+| public | 128k | orchestrate, or hard | free-ok | `l1-orchestrator` |
+| public | 128k | implement / standard | free-ok | `l2-worker` |
+| public | 128k | review, or trivial | free-ok | `l3-driver` |
+| sensitive | 128k | review, or trivial | free-ok | `l3-driver-clean` |
+| sensitive | 128k | anything else | free-ok | `l2-worker-clean` |
+| sensitive | 1m | any | free-ok | refused - split to 128k, or `--allow-training` (logged) |
+
+`spend=credit` is refused as a card value (DEADROWS 2026-10-08): the `-credit`
+chains were dropped on 2026-09-23, no `-credit` combo is left in
+`ALL_COMBOS` and the spawner's `TIERS` has no credit tier, so the value named
+nothing a card could be routed to. `l2-worker` / `l3-driver` already overflow
+to their paid legs, which is how paid work is reached today.
+
+The combo's tier picks the opencode agent (`l3-driver-clean` runs `t3-reviewer`).
+
+### Clients
+
+| Client | Headless | Gateway | Native sub-agents | Auth | Command |
+|---|---|---|---|---|---|
+| opencode | yes | yes | yes | `AUTOOS_OMNIROUTE_KEY` | `opencode run --standalone --agent … --model omniroute/<combo>` |
+| claude | yes | no | yes | `claude` login (subscription) | `claude -p`; `--joinable`: `claude --bg --remote-control <title>` |
+| qwen | yes | yes | yes | `AUTOOS_OMNIROUTE_KEY` | `omniroute run qwen --model <combo> -- -p …` |
+| gemini | yes | yes | no | `AUTOOS_OMNIROUTE_KEY` | `omniroute run gemini --model <combo> -- -p …` |
+| codex | yes | yes | no | `AUTOOS_OMNIROUTE_KEY` | `omniroute run codex --model <combo> -- exec …` |
+| agy | yes | **no** | no | `agy` login (own Google account) | `agy -p …` |
+| qoder | yes | **no** | yes | `qodercli login` (own account) | `qodercli -p …` - promo, `privacy=public` only |
+
+agy and qoder cannot use the gateway: they bill their own accounts, and each
+needs one interactive login on the machine first. `list` shows which clients
+are installed and when qoder last worked (stale after 7 days). Permissions
+map onto each CLI's own modes. `role=review` runs read-only (plan mode or a
+read-only sandbox). Otherwise file edits are approved and anything else asks.
+`--no-auto` keeps the CLI's own prompting.
+
+### Depth, lean, isolation
+
+- **Depth budget.** Every child gets `AUTOOS_AGENT_DEPTH` (parent + 1) and
+  `AUTOOS_AGENT_MAX_DEPTH` (default 2, the same as opencode's
+  `experimental.subagent_depth`). A spawn past the max exits with code 4.
+  `--max-depth` can only lower the inherited max. This budget is the only
+  depth control qwen, gemini, codex, agy and qoder have. Inside one opencode
+  process, nesting is still `experimental.subagent_depth`.
+- **`--lean`** starts no serena, playwright or context7, which is right for
+  research and review agents. Implemented for the clients that can honour it
+  (`LEAN_CLIENTS`): opencode overlays each full server entry with
+  `disabled: true`; claude and qoder get `--strict-mcp-config` (`qodercli`
+  documents it, verified 2026-09-27). Another client cannot drop its servers,
+  so there `--lean` is read-only-vs-writer: a read-only (review) run prints a
+  note and goes ahead — those servers cost memory, not safety — while a writer
+  run still refuses (exit 2), because there removing the write-capable tool
+  surface is the whole point. `enabled: false` is not an
+  opencode 2.x field: it is dropped without a warning and the server starts
+  anyway. Measured peak process-tree RSS of one run: 1406 MB → 678 MB.
+- **`--isolate`** runs the agent in a private sandbox on its own branch: a fresh
+  repo holding one base commit of the allowed committed files (ISOLATION
+  STATEMENT in `isolate_clone`, `tools/autoos-agent.py`). For opencode it also
+  gets its own data dir and a deny on every path
+  outside the clone. **Not a git worktree:** opencode resolves a worktree to
+  the main checkout, and a worker's writes from inside one landed in the main
+  repo. Take results with `git fetch <clone> <branch>`; nothing is merged or
+  deleted for you. The clone starts from `HEAD`, so commit first.
+  **A leaf (tier 3 — a review/trivial card, `--tier 3`) is refused without it**,
+  because grep/glob is fenced on the search *pattern*: `grep "sk-" .` in a
+  working checkout reads `configuration/api-keys.yml` right through the fence,
+  while an ignored file cannot exist in a `--local` clone (KEYDENY3b).
+  A push out of the clone is stopped by an **accident guard** — every remote's
+  push URL is disabled and a `pre-push` hook exits 1. It is not a boundary:
+  `git push --no-verify`, `core.hooksPath` and `git remote set-url` walk past
+  both, and `PushFenceHonestyTests` asserts that. What contains the worker is
+  that the clone is disposable and its environment carries no credential, no ssh
+  transport and no git config channel (`worker_env`, D-106) — the guards force
+  `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_NOSYSTEM`, so the operator's own
+  `~/.gitconfig` (`url.insteadOf`, `core.sshCommand`, `core.hooksPath`) is not
+  what a worker's git reads — which is also why
+  the parent's ssh state cannot ride along with a spawned run.
+- **`--free`** maps every tier to opencode's own free model (default
+  `opencode/muse-spark-1.3-contributor-free`) through `OPENCODE_CONFIG_CONTENT`. Use it to
+  exercise the chain and the fences before any provider key exists. Free
+  promo models may train on prompts, so `--free --clean` is refused.
+
+### Over MCP (OpenHands, Claude Code, opencode, Zed)
+
+`tools/autoos_agent_mcp.py` is a stdio MCP server
+(`uv --quiet run --no-project --with 'mcp<2' python tools/autoos_agent_mcp.py`).
+Its tools, their arguments and the run states are listed once, in the module
+docstring of `tools/autoos_agent_mcp.py` (read it there). The ones an orchestrator
+uses: `spawn` returns a run id at once (refusals come back synchronously from the
+CLI's own dry run; `lean` defaults on for `role=review`); `status` reports the A2A
+states in `TASK_STATES` (`submitted`, `working`, `input_required`, `completed`,
+`failed`, `canceled`, `rejected`; the old value stays in `detail`); a worker blocked
+on a question (`tools/autoos-ask.py`) shows `input_required` until
+`respond(run_id, text)` answers it; `result`, `cancel`, `route`.
+
+Each run keeps `job.json`, `output.log` and `exit.json` under
+`<repo>/logs/agents/<id>/` (git-ignored; `AUTOOS_STATE_DIR` overrides `<repo>/logs`, isolated clones go to `logs/sandboxes/`). The installers register the server,
+using the pin in `catalog/agent-harness.json`, in these places:
+
+- `.mcp.json` (the project server, approved in `.claude/settings.local.json`)
+- the `mcp` servers of `opencode.jsonc`
+- OpenHands `mcp_config`
+- Zed `context_servers`
+
+Only spawning roles list the server (orchestrator, suborchestrator).
+`agent_harness.py check` refuses a leaf role that does, and leaf agents get
+`autoos-agent*` switched off.
+
+## Stuck-agent watchdog (t1 probes, never waits forever)
+
+T1 owns liveness (the session-side rules for the same job: R-coord-08 watches children and
+relaunches one quiet past 25 min — it binds L2 too; R-orch-06 says relaunch, never resume).
+Every background t2 gets a heartbeat line in
+`logs/orch-<date>.log`; t1 re-checks on a fixed interval and treats
+silence as stuck — with one exception for rate limits (below):
+
+1. **Probe every 5 minutes**: t1 checks each live t2 for a fresh
+   heartbeat or report line. No new output in 15 minutes = stuck.
+2. **Rate-limit ≠ stuck**: a `429 / quota / budget` message with a
+   retry timestamp resets the clock — the agent is waiting, not dead.
+   Only silence with no rate-limit trace counts as stuck.
+3. **Kill + re-spawn once per track**: t1 terminates the stuck
+   t2 and respawns it with the same track + DONE criteria (max 3
+   respawns per track, then the track is marked blocked in
+   `docs/tasks.md`).
+4. **Never wait forever**: t1 always sets a wall-clock deadline per
+   track; on expiry it reconciles whatever reported and records the
+   rest as open in `docs/handoff.md`.
+5. **Log it**: every probe, kill, and respawn appends one line to
+   `logs/orch-<date>.log` so the next t1 can audit what happened.
+
+## The tiers (ids are a contract — never rename, only relabel)
+
+Which legs each tier runs, in which order, and what is live today is **registry data**
+(`catalog/ai-registry.json`), not a fact this file may restate — a prose copy of the chain heads
+was stale within a day (credit states, gated legs). Read it with
+`python3 tools/autoos-agent.py route --explain --card complexity=hard` and pick writers by
+complexity per R-coord-03. The tier rows below are the structural contract only.
+
+| Tier | Role | Context |
+|---|---|---|
+| `t1` | orchestrator: plans, slices, verifies, never codes directly | 1M only |
+| `l1-orchestrator-clean` | same, no prompt-training legs (sensitive data) | 1M, paid legs only |
+| `t2` | smart worker: reasoning, reviews, mid-size codegen | per-combo: `l2-worker` band ≤128k, `l2-orchestrator` 1M |
+| `l2-worker-clean` | same, paid legs only (sensitive data) | ≤128k |
+| `l2-researcher` | read-only research | ≤128k |
+| `t3` | cheap driver: small edits, probes, parallel reviews | per-combo: `l3-driver`/`l3-implementer` bands ≤128k; `l3-researcher`, `l3-review-tests`, `l3-review-codebase` 1M; `l3-review-diff` ≤128k |
+| `l3-driver-clean` | same, paid legs only (sensitive data) | ≤128k |
+
+Rule: orchestrator seats (L0/L1/L2) run 1M combos only; ≤128k combos
+are L3 leaves. Windows are per-route data (`catalog/ide-models.json`,
+rendered from the registry) - never infer a window from the tier name
+(D657-CHAINS added 1M layer twins inside t2/t3). Small-context models
+CAN sub-orchestrate — slice their tasks small instead of promoting them.
+
+## The 3-tier run pattern
+
+```
+t1 (1 orchestrator)
+  plans the goal, slices into tracks, defines DONE per track
+  ├─ t2-A (sub-orchestrator, background): owns tracks 1..n
+  │    ├─ t3-a1 (reviewer, lens X, e.g. mistral/qwen leg)
+  │    └─ t3-a2 (reviewer, lens Y, e.g. deepseek leg)
+  └─ t2-B (sub-orchestrator, background): owns tracks n+1..m
+       ├─ t3-b1 (reviewer, lens X)
+       └─ t3-b2 (reviewer, lens Y)
+```
+
+Rules:
+
+1. **Max fan-out 2+2+2** (1 t1 → ≤2 t2 → ≤2 t3 each). Prevents
+   quota collapse and keeps reviews reconcilable.
+2. **Different lenses per t3 pair**: the combo picks them (registry order,
+   `route --explain`); the *why* is rule R-orch-13 and Haiku's place is R-orch-14
+   (both in `SKILL.md` — not restated here).
+3. **Rate-limit hygiene**: probes are `Reply with exactly: ack` +
+   ONE focused review question each, small output budget. Reasoning
+   models (spark) need a real budget (≥2048 tokens) or they return
+   empty — that is a budget fault, not a routing fault.
+4. **Reviews run in parallel**, reconciled by the owning t2 before
+   reporting up. T1 never gets two conflicting reviews directly.
+5. **Verify, don't trust** (R-coord-02): every t2 runs its own tests
+   (`tests/run-tests.ps1`, `tests/run-tests.sh`) and one live `ack`
+   probe per touched tier before reporting.
+6. **Non-overlapping files**: t1 assigns tracks with disjoint file
+   sets (e.g. A = configuration/remote/watchdog, B = catalog/combos/UI)
+   so parallel workers never merge-conflict.
+
+## Long-horizon continuation (the main-agent handoff)
+
+A t1 orchestrator that finishes its big part does NOT go idle:
+
+1. Write the goal + plan + DONE-state to `docs/handoff.md`
+   (what is proven, what is open, key commands, known issues).
+2. Spawn (or ask the user to spawn) a NEW t1 with the handoff as
+   its first input. The new main agent re-plans only the OPEN items.
+3. The old session ends with: files changed, test output, phone URLs,
+   remaining gaps — same shape as this doc's reports.
+
+This is what makes multi-stage goals resumable across sessions,
+reboots (see autostart), and even machines.
+
+## Remote + fallback matrix (phone-reachable today)
+
+Machine: Tailscale + LAN IPs are machine-local — find yours with
+`tailscale ip -4` / `ipconfig` (Windows) or `hostname -I` (Linux).
+Never commit them here (repo is public); `<tail-ip>` below means
+your Tailscale IPv4.
+
+| Path | URL (phone via Tailscale) | Role |
+|---|---|---|
+| OpenHands | `http://<tail-ip>:3000` | PRIMARY agent UI (t1 inside) |
+| opencode serve | `http://<tail-ip>:4096` | FALLBACK if OpenHands breaks (`opencode serve --hostname 0.0.0.0 --port 4096`) |
+| OmniRoute | `http://<tail-ip>:20128` | router for Zed/Desktop/nvim (client key via env, never URL) |
+| AutoOS `--serve` | loopback only unless elevated | installer UI; LAN bind needs `netsh http add urlacl url=http://+:8777/ user=<you>` from an elevated shell, then `setup.ps1 -Serve -Bind 0.0.0.0` |
+
+Fallback order when something breaks: OpenHands → opencode serve →
+Zed (autoos-omniroute provider) → opencode desktop → nvim+sidekick
+(`<leader>aa`). Every leg routes through :20128, so a single client
+key restores all of them. Watchdog: `configuration/healthcheck.*`
+(probe :20128/:3000/:4096/:8777, `--fix` restarts via start-stack).
+
+## Where subagents run: opencode vs OpenHands
+
+Unattended orchestration spans **two runtimes**, not one:
+
+- **opencode runtime** (this repo's harness): t1/t2/t3 agents
+  above, spawned via the `subagent` tool with `omniroute/t*-*` models.
+  Fast, cheap, file-scoped — this is where the 3-tier pattern executes.
+- **OpenHands** (`:3000`, `openhands-app` container): the durable
+  multi-project agent UI. One container per checkout today
+  (`start-stack.ps1 -App openhands`); run a second container per extra
+  project (separate port + `~/.openhands` mount). OpenHands is the
+  PRIMARY phone UI and the place long autonomous runs live; opencode
+  `serve` (`:4096`) is its fallback, not its replacement.
+- **Agent Canvas** (port 8000, beta): upstream's multi-backend control
+  center (`PROJECTS_PATH` + `~/.openhands` mounts). Verdict 2026-09-20
+  (docs/verification.md): stay on `:3000` until Canvas leaves beta —
+  then it becomes the multi-project answer and this section gets
+  rewritten with its LLM-profile proof.
+
+## Cost discipline
+
+- Default model is `omniroute/l1-orchestrator` (free legs first, paid overflow
+  only from sanctioned providers). Paid Zen legs 402 without balance —
+  the chain hops, by design.
+- `auto/*` combos are the zero-setup bootstrap; strict `t*-*`
+  combos are the deterministic path for unattended runs.
+- Sensitive data → `-clean` twins, always. When in doubt, `-clean`.
+
+## Pipeline improvements (2026-09-20)
+
+Proven this session by a 1→2→4 run (t1 → t2-A/B → dual t3
+reviewers each): disjoint file sets per track (A = watchdog/resilience,
+B = catalog/UI/pipeline), parallel dual-lens reviews reconciled by the
+owning t2, one live `ack` probe per touched tier.
+
+- **Disjoint file sets**: t1 assigns non-overlapping tracks so parallel
+  workers never merge-conflict.
+- **Parallel dual-lens reviews**: one cheap-codegen leg
+  (`l3-driver`/`l3-driver-clean`, mistral/qwen) + one smart leg
+  (`l2-worker`/`l2-worker-clean`, gpt-oss/deepseek). Reconciled by the owning
+  t2; t1 never sees two conflicting reviews directly.
+- **Ack-probe budget**: reasoning models (spark) need ≥2048 output
+  tokens or they return empty — a budget fault, not a routing fault.
+  Keep probes at `Reply with exactly: ack` + one focused question.
+- **Handoff rotation**: a t1 that finishes its big part writes goal +
+  plan + DONE-state to `docs/handoff.md` and a NEW t1 re-plans only
+  the OPEN items. Resumable across sessions, reboots, machines.
+- **Watchdog auto-resume + human fallback ladder**: `healthcheck.*`
+  probes :20128/:3000/:4096/:8777 log-only; `--fix`/`-Fix` resumes via
+  `Start-AutoOSStack`. Ladder: OpenHands → opencode serve → Zed →
+  Desktop → nvim+sidekick, all through :20128 with one client key.
+- **Next gaps**: `--fix` should also resume `opencode serve :4096`
+  when down (currently only gateway + container); the web Router-tiers
+  card is display-only until backend apply/switch endpoints exist;
+  `docs/README.md` still lacks the unattended-orchestration row.
+
+## OpenCode fleet lessons (2026-10-04)
+
+Running OpenCode sessions (L0 router, L1 orchestrator, L3 writers and seats) without Claude: what hangs, what costs, what overclaims and which rules must be mechanical. Read [references/opencode-fleet-lessons.md](references/opencode-fleet-lessons.md) before you start, restart or supervise a session. Handoff cards for a session without memory: `docs/handoff/OPENCODE-L1-AUTOOS.md`, `docs/handoff/OPENCODE-L1-WORKST.md`.

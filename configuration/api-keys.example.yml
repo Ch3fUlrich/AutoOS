@@ -1,0 +1,78 @@
+# AutoOS API keys — copy to configuration/api-keys.yml and fill in what you have.
+#
+#   cp configuration/api-keys.example.yml configuration/api-keys.yml
+#
+# The real file is git-ignored; this template is tracked and carries only
+# obvious placeholders. Every tool in AutoOS reads keys from the real file:
+#
+#   configuration/omniroute/apply.sh|ps1   registers them with OmniRoute
+#   configuration/start-stack.sh|ps1        starts apps with the client key
+#   the browser UI (--serve)                shows which providers are configured
+#
+# Get each key: docs/api-keys.md. Missing keys are fine — routing skips them.
+# Free tiers that train on prompts are excluded from the *-clean combos;
+# see docs/models.md ("Sensitive data work").
+
+# ── Free, no card ───────────────────────────────────────────────────────────
+groq: REPLACE_WITH_GROQ_KEY
+google_ai_studio: REPLACE_WITH_GOOGLE_AI_STUDIO_KEY
+mistral: REPLACE_WITH_MISTRAL_KEY
+cloudflare_workers_ai: REPLACE_WITH_CLOUDFLARE_KEY
+cohere: REPLACE_WITH_COHERE_KEY
+hugging_face: REPLACE_WITH_HUGGINGFACE_KEY
+# Free.ai self-hosted pool (Qwen3-30B-A3B): 10 rpm, 30k tokens/day, may train
+# on prompts — excluded from every *-clean route.
+free_ai: REPLACE_WITH_FREE_AI_KEY
+
+# ── Paid partner gateway (own key, own billing — sits between free/paid) ──
+cheapinference: REPLACE_WITH_CHEAPINFERENCE_KEY
+
+# ── Free tier with optional credits (paid fallback allowed) ─────────────────
+cerebras: REPLACE_WITH_CEREBRAS_KEY
+SambaNova: REPLACE_WITH_SAMBANOVA_KEY
+deepseek: REPLACE_WITH_DEEPSEEK_KEY
+meta: REPLACE_WITH_META_MODEL_API_KEY
+openrouter: REPLACE_WITH_OPENROUTER_KEY
+# Devin API key. Note: the gateway lists no models for the `devin` API-key
+# provider (broken upstream); the working path is the Devin CLI binary +
+# `devin auth login` → `devin-cli` OAuth connection (see docs/api-keys.md).
+devin: REPLACE_WITH_DEVIN_KEY
+
+# ── OpenCode Zen: free promo models + paid at-cost models ───────────────────
+zen: REPLACE_WITH_ZEN_KEY
+
+# ── OmniRoute itself ────────────────────────────────────────────────────────
+# Client key the apps send to http://127.0.0.1:20128/v1
+# (dashboard -> api-manager -> Create API Key).
+# NEW: gateway-named fields (WS-OMNIREMOTE):
+#   omniroute_server: sk-...      # the key for a NON-LOCAL gateway (AUTOOS_OMNIROUTE_URL set and non-loopback)
+#   omniroute_<host>: sk-...      # the key for THIS host's LOCAL gateway (AUTOOS_OMNIROUTE_URL unset/empty or loopback)
+#     e.g. omniroute_workstation: sk-...  (this host's local gateway, when host_name is "workstation")
+#     on the server machine itself host_name is "server", so its local lookup is omniroute_server
+# LEGACY (one release, read-only fallback, then removed):
+#   omniroute: sk-...             # (local case) deprecated - rename to omniroute_<host>
+#   omniroute_client_<host>: sk-..# (server case) deprecated - rename to omniroute_server
+# Fill in ONE of these (the first for a local gateway on this host, the second for a remote one):
+# omniroute_<host>: REPLACE_WITH_OMNIROUTE_CLIENT_KEY      # e.g. omniroute_workstation
+# omniroute_server: REPLACE_WITH_OMNIROUTE_CLIENT_KEY
+# opencode_password: REPLACE_WITH_A_LONG_RANDOM_STRING   # opencode serve Basic auth (user opencode); ai-stack.sh init copies it
+# Optional: oma_live_… management token, only needed for remote management
+# calls. Local CLI management works without it.
+# omniroute_management: REPLACE_WITH_OMNIROUTE_ACCESS_TOKEN
+
+# Bearer token the Omnigraph client bridges send to the graph server — issued by that server, not by AutoOS (docs/omnigraph.md).
+# omnigraph_token: REPLACE_WITH_OMNIGRAPH_TOKEN
+
+# ── Edge secret refresh (Semaphore template) ────────────────────────────────
+# The edge's copy of the opencode credential is refreshed by a Semaphore
+# template that PULLS the password from the coding VM's opencode.env.
+# ai-stack.sh opencode-rotate POSTs this webhook (AutoOS holds no Semaphore
+# token and never sends the opencode password).
+# Three keys are used:
+#   semaphore_edge_webhook_url    - the webhook URL (http(s)://...) — an http:// URL is allowed (LAN) but rotate warns: the token crosses the network in cleartext
+#   semaphore_edge_webhook_header - the header NAME only (e.g. X-AutoOS-Token)
+#   semaphore_edge_webhook_token  - the header VALUE (secret)
+# The header line sent is "<name>: <token>".
+# semaphore_edge_webhook_url: REPLACE_WITH_EDGE_WEBHOOK_URL
+# semaphore_edge_webhook_header: REPLACE_WITH_EDGE_WEBHOOK_HEADER_NAME
+# semaphore_edge_webhook_token: REPLACE_WITH_EDGE_WEBHOOK_TOKEN

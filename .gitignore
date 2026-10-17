@@ -1,0 +1,115 @@
+# ─── Secrets — never commit. Only *.example.* templates are tracked. ─────────
+inventory.yml
+*.vault.yml
+vault.yml
+.vault_pass
+.env
+.env.*
+!.env.example
+!*.example.yml
+!*.example.json
+configuration/api-keys.yml
+# Private scrubber patterns (contains real usernames, emails, domains, IPs, paths)
+scripts/public-scrub/patterns.private.txt
+# infra/ env templates (.env.shared/.server/.client.example) are re-included by
+# infra/.gitignore — the broad `.env.*` above is a basename match and would
+# otherwise reach into infra/mcp-servers/.
+# backups of the key file (installers, web UI, ai-stack.sh: .autoos-backup-*, .bak-*) hold the same secrets
+configuration/api-keys.yml.*
+# GCP Vertex service-account JSONs (real credentials). The file the operator
+# drops in to authenticate `vertex` is a secret even though its name does not
+# read like one: on 2026-10-01 it sat in the tree untracked-but-UNIGNORED,
+# one `git add -A` away from a public commit.
+configuration/vertex-credentials-*.json
+configuration/*-credentials*.json
+
+# ─── Downloaded installers and vendor binaries ──────────────────────────────
+installs/
+installers/
+downloads/
+*.exe
+*.msi
+*.deb
+*.rpm
+*.dmg
+*.appx
+*.msix
+*.iso
+*.iso.*
+cache/
+
+# ─── Ansible ────────────────────────────────────────────────────────────────
+*.retry
+.ansible/
+collections/
+
+# ─── AutoOS runtime output ──────────────────────────────────────────────────
+logs/
+*.autoos-backup-*
+.autoos-state.json
+autoos.config.json
+# A config save writes through an unpredictable temp name (mkstemp on Linux, a
+# GUID on Windows) so nobody can pre-plant a symlink at a fixed one; these are
+# the shapes a failed save could leave behind, never to be committed.
+.autoos.config.*.tmp
+autoos.config.json.*.tmp
+
+# ─── Agent tooling ──────────────────────────────────────────────────────────
+.serena/
+graphify-out/
+.playwright-mcp/
+# ORCH-A1 launch profiles: the tracked `<role>.settings.example.json`
+# templates render to git-ignored runtime `<role>.settings.json` files at
+# install / first launch (spec Q3). `*.settings.example.json` does not match
+# `*.settings.json`, so one line ignores the runtime without touching the
+# templates (which `!*.example.json` above already re-includes).
+configuration/launch-profiles/*.settings.json
+# CAO run state: verdicts, quota records, captured agent output, phase leases.
+# Untracked is not enough — the next `git add -A` after a run sweeps it in.
+output/cao/
+.cao-leases/
+# Memory-graph sync ledger (tools/sync_memory_graph.py --mark): machine state,
+# must never be committed or a re-run would skip records the graph never got.
+.state/graph-loaded.txt
+.state/graph-load-pending
+.state/graph-load-pending.tmp
+.claude/settings.local.json
+.claude/lane-mcp.local.json
+# Installer-created junctions into .agents/skills (one per skill, guarded by
+# existence check) — only autoos-install is tracked.
+.claude/skills/*
+!.claude/skills/autoos-install/
+
+# ─── Python bytecode ────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+
+# ─── OS / editor noise ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+*.swp
+.idea/
+.vscode/
+# ─── Agent worktrees (scratch; never tracked) ────────────────────────────────
+.claude/worktrees/
+
+# ─── Local-only helpers (not wired into setup.ps1/catalog) ───────────────────
+# additional_Features/ holds personal admin scripts (e.g. a Windows cleanup
+# script with uninstall logic) that are not part of the detect→plan→execute
+# pipeline and not reviewed as installers. Keep local until one is promoted
+# into the catalog with tests.
+additional_Features/
+
+# Node/npm scratch (omniroute patch verification — not part of AutoOS)
+node_modules/
+/package.json
+/package-lock.json
+/tools/test-reason-fix.mjs
+/tools/start-isolated-gateway.ps1
+
+# CI runner workstation slots (D-1380): live config, logs, stop files, pids
+/tools/ci-runner/slots.json
+/tools/ci-runner/*.log
+/tools/ci-runner/stop-*
+/tools/ci-runner/pids.txt

@@ -1,0 +1,889 @@
+{
+  "$schema": "./schema.json",
+  "platform": "macos",
+  "profiles": {
+    "workstation": "Full desktop workstation - the same coding and AI stack as the other platforms.",
+    "ai-coding": "Coding and AI tooling plus the shell, no GUI extras.",
+    "light": "Minimal remote-access box - Claude Code, Tailscale and Herdr only.",
+    "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
+    "local-ai": "Local AI inference with Ollama — no API key and no network, but models are 1.4-4.7 GB.",
+    "custom": "Start with nothing ticked and choose by hand.",
+    "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing."
+  },
+  "categories": [
+    {
+      "id": "core",
+      "name": "Core CLI",
+      "components": [
+        {
+          "id": "git",
+          "name": "Git",
+          "description": "Version control",
+          "provider": "brew",
+          "package": "git",
+          "verify": "git --version",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://git-scm.com/"
+        },
+        {
+          "id": "download-tools",
+          "name": "curl & wget",
+          "description": "Download tools",
+          "provider": "brew",
+          "package": "curl wget",
+          "verify": "curl --version",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://curl.se/"
+        },
+        {
+          "id": "monitoring",
+          "name": "Monitoring tools",
+          "description": "htop and fastfetch",
+          "provider": "brew",
+          "package": "htop fastfetch",
+          "verify": "htop --version",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/fastfetch-cli/fastfetch"
+        },
+        {
+          "id": "tmux",
+          "name": "tmux",
+          "description": "Terminal multiplexer",
+          "provider": "brew",
+          "package": "tmux",
+          "verify": "tmux -V",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://github.com/tmux/tmux/wiki"
+        }
+      ]
+    },
+    {
+      "id": "shell",
+      "name": "Shell & Terminal",
+      "components": [
+        {
+          "id": "oh-my-zsh",
+          "name": "Oh My Zsh",
+          "description": "Zsh framework and plugin manager",
+          "provider": "script",
+          "package": "oh-my-zsh",
+          "requires": [
+            "git",
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://ohmyz.sh/"
+        },
+        {
+          "id": "zsh-plugins",
+          "name": "Zsh plugins",
+          "description": "autosuggestions and syntax highlighting",
+          "provider": "script",
+          "package": "zsh-plugins",
+          "requires": [
+            "oh-my-zsh"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/zsh-users/zsh-autosuggestions"
+        },
+        {
+          "id": "powerlevel10k",
+          "name": "Powerlevel10k",
+          "description": "Prompt theme",
+          "provider": "script",
+          "package": "powerlevel10k",
+          "requires": [
+            "oh-my-zsh"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/romkatv/powerlevel10k"
+        },
+        {
+          "id": "nerd-font",
+          "name": "MesloLGS Nerd Font",
+          "description": "Font with the prompt glyphs",
+          "provider": "brew",
+          "package": "font-meslo-lg-nerd-font",
+          "cask": true,
+          "profiles": [
+            "workstation"
+          ],
+          "homepage": "https://www.nerdfonts.com/"
+        }
+      ]
+    },
+    {
+      "id": "ai-coding",
+      "name": "Coding & AI",
+      "components": [
+        {
+          "id": "nodejs",
+          "name": "Node.js LTS",
+          "description": "Runtime required by Claude Code",
+          "provider": "brew",
+          "package": "node",
+          "verify": "node --version",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://nodejs.org/"
+        },
+        {
+          "id": "claude-code",
+          "name": "Claude Code CLI",
+          "description": "Anthropic's terminal coding agent",
+          "provider": "npm",
+          "package": "@anthropic-ai/claude-code",
+          "verify": "claude --version",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "rescue"
+          ],
+          "homepage": "https://docs.anthropic.com/en/docs/claude-code",
+          "prompt": "claude_gateway_routing",
+          "postInstall": "route_claude_to_gateway"
+        },
+        {
+          "id": "agy",
+          "name": "Antigravity CLI",
+          "description": "Google's terminal coding agent",
+          "provider": "script",
+          "package": "agy",
+          "verify": "agy --version",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "rescue"
+          ],
+          "homepage": "https://antigravity.google/product/antigravity-cli",
+          "notes": "Replaces Gemini CLI. Headless use (agy -p) needs a prior interactive login on this machine — not possible on an offline box that has never run agy before."
+        },
+        {
+          "id": "qwen-code",
+          "name": "Qwen Code CLI",
+          "description": "Qwen's terminal coding agent (routable through OmniRoute)",
+          "provider": "npm",
+          "package": "@qwen-code/qwen-code",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "qwen --version",
+          "homepage": "https://github.com/QwenLM/qwen-code",
+          "notes": "Headless: qwen -p. tools/autoos-agent.py --client qwen routes it through OmniRoute."
+        },
+        {
+          "id": "gemini-cli",
+          "name": "Gemini CLI",
+          "description": "Google's open-source terminal agent (OmniRoute-routable)",
+          "provider": "npm",
+          "package": "@google/gemini-cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "gemini --version",
+          "homepage": "https://github.com/google-gemini/gemini-cli",
+          "notes": "Headless: gemini -p. agy succeeds it, but only this one can route through OmniRoute."
+        },
+        {
+          "id": "codex",
+          "name": "OpenAI Codex CLI",
+          "description": "OpenAI's terminal coding agent (OmniRoute-routable)",
+          "provider": "npm",
+          "package": "@openai/codex",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "ai-coding"
+          ],
+          "verify": "codex --version",
+          "homepage": "https://github.com/openai/codex",
+          "notes": "Headless: codex exec. Spawned through omniroute run, so no OpenAI login is needed."
+        },
+        {
+          "id": "qodercli",
+          "name": "Qoder CLI",
+          "description": "Alibaba terminal coding agent (Qwen-powered)",
+          "provider": "script",
+          "package": "qodercli",
+          "verify": "qodercli --version",
+          "requires": [
+            "download-tools"
+          ],
+          "postInstall": "setup_qoder_mcp",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://qoder.com/cli",
+          "notes": "Headless use needs QODER_PERSONAL_ACCESS_TOKEN exported (see docs/api-keys.md); interactive /login still works."
+        },
+        {
+          "id": "devin-cli",
+          "name": "Devin CLI",
+          "description": "Cognition terminal coding agent",
+          "provider": "script",
+          "package": "devin-cli",
+          "verify": "devin --version",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://cli.devin.ai",
+          "notes": "Needs an interactive `devin auth login` once; the gateway side connects via `omniroute providers add devin-cli --oauth` or the dashboard."
+        },
+        {
+          "id": "ollama",
+          "name": "Ollama",
+          "description": "Local AI model runtime",
+          "provider": "brew",
+          "package": "ollama",
+          "verify": "ollama --version",
+          "homepage": "https://ollama.com/",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-4b",
+          "name": "Qwen3 4B",
+          "description": "General-purpose local model, 2.5 GB download, 256K context",
+          "provider": "custom",
+          "package": "qwen3:4b",
+          "postInstall": "pull_ollama_model_qwen3_4b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen3:4b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "notes": "Pre-ticked default: small enough to load fast off USB, and its 256K context fits a full dmesg/SMART dump.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "ollama-model-qwen3-1-7b",
+          "name": "Qwen3 1.7B",
+          "description": "Smaller/faster general-purpose local model, 1.4 GB download",
+          "provider": "custom",
+          "package": "qwen3:1.7b",
+          "postInstall": "pull_ollama_model_qwen3_1_7b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen3:1.7b",
+          "homepage": "https://ollama.com/library/qwen3",
+          "profiles": []
+        },
+        {
+          "id": "ollama-model-qwen2-5-coder-7b",
+          "name": "Qwen2.5 Coder 7B",
+          "description": "Coding-focused local model, 4.7 GB download",
+          "provider": "custom",
+          "package": "qwen2.5-coder:7b",
+          "postInstall": "pull_ollama_model_qwen25_coder_7b",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "ollama show qwen2.5-coder:7b",
+          "homepage": "https://ollama.com/library/qwen2.5-coder",
+          "profiles": []
+        },
+        {
+          "id": "oterm",
+          "name": "oterm",
+          "description": "Terminal UI chat client for Ollama models",
+          "provider": "brew",
+          "package": "oterm",
+          "requires": [
+            "ollama"
+          ],
+          "verify": "oterm --help",
+          "homepage": "https://github.com/ggozad/oterm",
+          "notes": "In homebrew/core since oterm 0.13.1 — verified via formulae.brew.sh.",
+          "profiles": [
+            "local-ai"
+          ]
+        },
+        {
+          "id": "claude-desktop",
+          "name": "Claude Desktop",
+          "description": "Claude desktop application",
+          "provider": "brew",
+          "package": "claude",
+          "cask": true,
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://claude.ai/download"
+        },
+        {
+          "id": "handy",
+          "name": "Handy",
+          "description": "Offline speech-to-text — dictate instead of typing",
+          "provider": "brew",
+          "package": "handy",
+          "cask": true,
+          "homepage": "https://handy.computer/",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Needs a microphone; runs fully offline, nothing is sent to a server."
+        },
+        {
+          "id": "herdr",
+          "name": "Herdr",
+          "description": "Persistent, resumable AI sessions",
+          "provider": "script",
+          "package": "herdr",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "prompt": "herdr_source",
+          "homepage": "https://www.npmjs.com/package/herdr"
+        },
+        {
+          "id": "docker",
+          "name": "Docker Desktop",
+          "description": "Containers - backs the local MCP memory stack",
+          "provider": "brew",
+          "package": "docker",
+          "cask": true,
+          "verify": "docker --version",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://docs.docker.com/engine/"
+        },
+        {
+          "id": "vscode",
+          "name": "Visual Studio Code",
+          "description": "Editor",
+          "provider": "brew",
+          "package": "visual-studio-code",
+          "cask": true,
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://code.visualstudio.com/"
+        },
+        {
+          "id": "agent-skills",
+          "name": "agent-skills (retired)",
+          "description": "Retired: its work moved to other components",
+          "provider": "custom",
+          "package": "agent-skills",
+          "tombstone": true,
+          "note": "its work moved to agent-skill-links, omnigraph-client and the mcp-* components",
+          "replaced_by": [
+            "agent-skill-links",
+            "omnigraph-client",
+            "mcp-graphify",
+            "mcp-serena",
+            "mcp-playwright",
+            "mcp-context7"
+          ],
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS"
+        },
+        {
+          "id": "agent-skill-links",
+          "name": "Agent skill links",
+          "description": "Link this checkout's skills into every client's skills dir",
+          "provider": "custom",
+          "package": "agent-skill-links",
+          "postInstall": "install_agent_skill_links",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS",
+          "notes": "One symlink per skill of this checkout's .agents/skills into Antigravity, Claude Code (user and project scope), ~/.agents/skills and — when codex is present — ~/.codex/skills. Your own skills and links are never touched; a checkout that moved is repointed."
+        },
+        {
+          "id": "omnigraph-client",
+          "name": "Omnigraph MCP client",
+          "description": "Pinned Omnigraph bridge, env file and MCP wrapper",
+          "provider": "custom",
+          "package": "omnigraph-client",
+          "requires": [
+            "nodejs"
+          ],
+          "postInstall": "install_omnigraph_client",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "prompt": "omnigraph_url",
+          "homepage": "https://www.npmjs.com/package/@modernrelay/omnigraph-mcp",
+          "notes": "Needs the omnigraph_url answer and the omnigraph_token key (or OMNIGRAPH_TOKEN) and skips with a hint when either is missing. Writes ~/.autoos-omnigraph.env (mode 600), pre-installs the pinned bridge into a private npm prefix instead of npx, and installs the omnigraph-mcp-autoos wrapper that reads the env file itself."
+        },
+        {
+          "id": "uv",
+          "name": "uv",
+          "description": "Extremely fast Python package and project manager",
+          "provider": "brew",
+          "package": "uv",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "uv --version",
+          "homepage": "https://docs.astral.sh/uv/"
+        },
+        {
+          "id": "zed",
+          "name": "Zed",
+          "description": "Fast Rust editor with an AI agent panel",
+          "provider": "brew",
+          "package": "zed",
+          "cask": true,
+          "requires": [
+            "litellm"
+          ],
+          "postInstall": "route_zed_to_proxy",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "zed --help",
+          "homepage": "https://zed.dev/",
+          "notes": "Agent panel is pointed at the local OmniRoute gateway."
+        },
+        {
+          "id": "qoder-desktop",
+          "name": "Qoder",
+          "description": "Qoder's agent-first desktop IDE",
+          "provider": "manual",
+          "package": "qoder-desktop",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "homepage": "https://qoder.com/download",
+          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer. The vendor ships a .dmg only and no Homebrew cask exists."
+        },
+        {
+          "id": "litellm",
+          "name": "LiteLLM tier router",
+          "description": "Local LLM router: free-first tiers for all agents",
+          "provider": "custom",
+          "package": "litellm",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "install_litellm_proxy",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "litellm --version",
+          "homepage": "https://docs.litellm.ai/",
+          "notes": "Manual fallback router; primary is OmniRoute. Needs configuration/litellm/.env; see docs/api-keys.md."
+        },
+        {
+          "id": "omniroute",
+          "name": "OmniRoute gateway",
+          "description": "Local AI gateway: free tiers with auto fallback",
+          "provider": "npm",
+          "package": "omniroute",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "omniroute --version",
+          "homepage": "https://github.com/diegosouzapw/OmniRoute",
+          "notes": "Serves :20128. Register keys in the dashboard, then all agents route free-first.",
+          "prompt": "claude_gateway_routing",
+          "postInstall": "route_detected_clis_to_gateway"
+        },
+        {
+          "id": "zcode-gateway",
+          "name": "ZCode gateway link",
+          "description": "Check OmniRoute can use the ZCode server bundle",
+          "provider": "custom",
+          "package": "zcode-gateway",
+          "requires": [
+            "omniroute"
+          ],
+          "postInstall": "setup_zcode_gateway_env",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "test -f \"$HOME/.zcode/server/zcode-server.cjs\"",
+          "homepage": "https://zcode.z.ai",
+          "notes": "Needs the ZCode server bundle: in the ZCode desktop app add this host as an SSH remote and connect once (installs ~/.zcode/server, syncs the login). Detect-only: nothing is installed or changed by this step except two env lines when the bundle sits in a non-default place. The dashboard connection test for zcode always fails (zcode:// is not http): only a real chat call proves it."
+        },
+        {
+          "id": "opencode-cli",
+          "name": "OpenCode CLI",
+          "description": "Terminal AI coding agent (TUI) on the tier router",
+          "provider": "npm",
+          "package": "@opencode/cli",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "verify": "opencode --version",
+          "postInstall": "setup_opencode_config",
+          "homepage": "https://opencode.ai/",
+          "notes": "V2 CLI. The legacy npm package opencode-ai (V1) cannot read the V2 providers config."
+        },
+        {
+          "id": "openhands-docker",
+          "name": "OpenHands Docker",
+          "description": "Autonomous coding agent — Docker app, OmniRoute-routed",
+          "provider": "custom",
+          "package": "openhands",
+          "requires": [
+            "docker"
+          ],
+          "postInstall": "install_openhands",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "verify": "docker image inspect docker.openhands.dev/openhands/openhands:latest",
+          "homepage": "https://www.all-hands.dev/",
+          "notes": "Start with ./configuration/start-stack.sh openhands; LLM profiles: configuration/openhands/config.toml."
+        },
+        {
+          "id": "mcp-serena",
+          "name": "Serena MCP Server",
+          "description": "Semantic code navigation and symbol search MCP server",
+          "provider": "custom",
+          "package": "mcp-serena",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "install_mcp_serena",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Semantic code navigation and LSP symbols for Claude Code and Antigravity.",
+          "homepage": "https://github.com/serena-agent/serena"
+        },
+        {
+          "id": "mcp-graphify",
+          "name": "Graphify MCP Server",
+          "description": "Codebase knowledge graph MCP server for coding agents",
+          "provider": "custom",
+          "package": "mcp-graphify",
+          "requires": [
+            "uv"
+          ],
+          "postInstall": "install_mcp_graphify",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Codebase dependency knowledge graph queries for coding agents.",
+          "homepage": "https://github.com/Graphify-Labs/graphify"
+        },
+        {
+          "id": "mcp-playwright",
+          "name": "Playwright MCP Server",
+          "description": "Headless browser automation MCP server for coding agents",
+          "provider": "custom",
+          "package": "mcp-playwright",
+          "requires": [
+            "nodejs"
+          ],
+          "postInstall": "install_mcp_playwright",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Browser automation and web testing for Claude Code and Antigravity.",
+          "homepage": "https://github.com/modelcontextprotocol/servers"
+        },
+        {
+          "id": "mcp-context7",
+          "name": "Context7 MCP Server",
+          "description": "Real-time library documentation and code context MCP server",
+          "provider": "custom",
+          "package": "mcp-context7",
+          "requires": [
+            "nodejs"
+          ],
+          "prompt": "context7_api_key",
+          "postInstall": "install_mcp_context7",
+          "profiles": [
+            "workstation",
+            "ai-coding"
+          ],
+          "notes": "Up-to-date documentation lookups for frameworks and libraries.",
+          "homepage": "https://github.com/upstash/context7-mcp"
+        }
+      ]
+    },
+    {
+      "id": "network",
+      "name": "Remote Access & Networking",
+      "components": [
+        {
+          "id": "tailscale",
+          "name": "Tailscale",
+          "description": "Mesh VPN - reach this box from anywhere",
+          "provider": "brew",
+          "package": "tailscale",
+          "verify": "tailscale version",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light"
+          ],
+          "homepage": "https://tailscale.com/"
+        },
+        {
+          "id": "wireguard",
+          "name": "WireGuard",
+          "description": "VPN",
+          "provider": "brew",
+          "package": "wireguard-tools",
+          "profiles": [
+            "workstation"
+          ],
+          "homepage": "https://www.wireguard.com/"
+        }
+      ]
+    },
+    {
+      "id": "everyday",
+      "name": "Everyday & Entertainment",
+      "description": "Personal desktop, media, games and maker tools.",
+      "requiresDisplay": true,
+      "components": [
+        {
+          "id": "firefox",
+          "name": "Firefox",
+          "description": "Web browser with privacy controls",
+          "provider": "brew",
+          "package": "firefox",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.mozilla.org/firefox/",
+          "cask": true
+        },
+        {
+          "id": "chrome",
+          "name": "Google Chrome",
+          "description": "Web browser with account sync",
+          "provider": "brew",
+          "package": "google-chrome",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.google.com/chrome/",
+          "cask": true
+        },
+        {
+          "id": "spotify",
+          "name": "Spotify",
+          "description": "Music and podcasts",
+          "provider": "brew",
+          "package": "spotify",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.spotify.com/download/",
+          "cask": true
+        },
+        {
+          "id": "vlc",
+          "name": "VLC media player",
+          "description": "Play local videos, music and network streams",
+          "provider": "brew",
+          "package": "vlc",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.videolan.org/vlc/",
+          "cask": true
+        },
+        {
+          "id": "7zip",
+          "name": "7-Zip",
+          "description": "Create and extract compressed archives",
+          "provider": "brew",
+          "package": "sevenzip",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.7-zip.org/",
+          "cask": false
+        },
+        {
+          "id": "steam",
+          "name": "Steam",
+          "description": "Game library and store",
+          "provider": "brew",
+          "package": "steam",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://store.steampowered.com/about/",
+          "cask": true
+        },
+        {
+          "id": "discord",
+          "name": "Discord",
+          "description": "Voice, video and community chat",
+          "provider": "brew",
+          "package": "discord",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://discord.com/download",
+          "cask": true
+        },
+        {
+          "id": "parsec",
+          "name": "Parsec",
+          "description": "Remote desktop and low-latency streaming",
+          "provider": "brew",
+          "package": "parsec",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://parsec.app/downloads",
+          "cask": true
+        },
+        {
+          "id": "moonlight",
+          "name": "Moonlight",
+          "description": "Stream games from a compatible host",
+          "provider": "brew",
+          "package": "moonlight",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://moonlight-stream.org/",
+          "cask": true
+        },
+        {
+          "id": "jellyfin-client",
+          "name": "Jellyfin Media Player",
+          "description": "Desktop client for your Jellyfin media server",
+          "provider": "brew",
+          "package": "jellyfin-media-player",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://jellyfin.org/downloads/clients/all/",
+          "cask": true
+        },
+        {
+          "id": "chitubox",
+          "name": "CHITUBOX Basic",
+          "description": "Prepare models for resin 3D printing",
+          "provider": "brew",
+          "package": "chitubox",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.chitubox.com/en/download/chitubox-free",
+          "cask": true
+        },
+        {
+          "id": "unified-remote",
+          "name": "Unified Remote Server",
+          "description": "Control this computer from your phone",
+          "provider": "brew",
+          "package": "unified-remote",
+          "profiles": [
+            "everyday"
+          ],
+          "homepage": "https://www.unifiedremote.com/download",
+          "cask": true,
+          "notes": "Install the Unified Remote app on your phone and pair with this server. Review remote access settings before use."
+        }
+      ]
+    }
+  ],
+  "prompts": {
+    "omnigraph_url": {
+      "question": "Omnigraph remote server URL (blank = local Docker stack on :8080)",
+      "default": "",
+      "help": "If you run a shared Omnigraph server, give its base URL here and the MCP config will point at it instead of localhost."
+    },
+    "herdr_source": {
+      "question": "Herdr install source",
+      "default": "npm:herdr",
+      "help": "Accepts npm:<package>, git:<url> or a direct download URL. Herdr is not in Homebrew, so AutoOS needs to be told where it lives."
+    },
+    "context7_api_key": {
+      "question": "Upstash Context7 API key (blank to use default rate limit)",
+      "default": "",
+      "help": "Optional API key for Upstash Context7 live documentation lookups."
+    },
+    "claude_gateway_routing": {
+      "question": "Claude Code routing: 'login' (claude.ai sign-in) or 'gateway' (local OmniRoute)",
+      "default": "login",
+      "help": "gateway writes ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN into ~/.claude/settings.json so Claude Code talks to OmniRoute - this disables the claude.ai connectors, and needs the OmniRoute client key. login (the default) keeps the claude.ai sign-in and removes those two keys again if an earlier run set them."
+    }
+  }
+}

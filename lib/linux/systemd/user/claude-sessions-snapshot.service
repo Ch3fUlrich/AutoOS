@@ -1,0 +1,18 @@
+# Record which Claude Code sessions are live right now. Driven by the timer next
+# to this file; it has no [Install] section of its own on purpose.
+#
+# StandardOutput/StandardError: without these the script's output does not reach
+# the journal, and `journalctl --user -u claude-sessions-snapshot` — the command
+# the troubleshooting docs tell you to run — shows nothing at all.
+[Unit]
+Description=Snapshot live Claude Code sessions
+Documentation=file://@APPROOT@/docs/decisions/0001-discover-claude-sessions-from-transcripts.md
+
+[Service]
+Type=oneshot
+Environment=AUTOOS_ROOT=@APPROOT@
+Environment=AUTOOS_NONINTERACTIVE=1
+Environment=NO_COLOR=1
+ExecStart=@APPDIR@/claude-sessions.sh snapshot
+StandardOutput=journal
+StandardError=journal

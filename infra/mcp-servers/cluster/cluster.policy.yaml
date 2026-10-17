@@ -1,0 +1,11 @@
+version: 1
+
+# Server-scoped bundle (applies_to: [cluster]). Only server-scoped actions here.
+groups:
+  operators: [default]
+
+rules:
+  - id: operators-list-graphs
+    allow:
+      actors: { group: operators }
+      actions: [graph_list]

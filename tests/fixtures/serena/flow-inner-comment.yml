@@ -1,0 +1,2 @@
+excluded_tools: [read_file, # keep
+  my_tool]

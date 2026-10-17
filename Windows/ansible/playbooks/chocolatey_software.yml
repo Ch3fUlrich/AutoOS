@@ -1,0 +1,35 @@
+---
+- name: Install baseline software with Chocolatey
+  hosts: windows
+  gather_facts: true
+
+  tasks:
+    # The old version downloaded install.ps1 to the root of C:\ and ran it with
+    # -ExecutionPolicy Bypass, gated on `when: choco_install.changed` - which is
+    # false on every re-run, so a half-finished install never repaired itself.
+    - name: Ensure Chocolatey is installed
+      chocolatey.chocolatey.win_chocolatey:
+        name: chocolatey
+        state: present
+
+    - name: Install software via Chocolatey
+      chocolatey.chocolatey.win_chocolatey:
+        name: "{{ choco_packages }}"
+        state: present
+      vars:
+        choco_packages:
+          - 7zip
+          - powertoys
+          # Swapped with the local catalog: WizTree scans a volume by reading the
+          # MFT directly, where TreeSize Free walks the tree.
+          - wiztree
+          - nerd-fonts-meslo
+          - oh-my-posh
+          - firefox
+          - googlechrome
+          - vlc
+          - notepadplusplus
+          - vscode
+          - git
+          - wireguard
+          - obsidian

@@ -1,0 +1,18 @@
+# Snapshot every 5 minutes. The window of loss is therefore at most 5 minutes of
+# session *membership* changes (a newly started session), never conversation
+# content — that lives in the transcripts.
+#
+# NOTE: wall-clock OnCalendar, not monotonic OnUnitActiveSec. A monotonic-only
+# timer stops scheduling once boot+interval passes without the service running in
+# the current boot, which silently ends the snapshots.
+[Unit]
+Description=Periodic snapshot of live Claude Code sessions
+
+[Timer]
+OnBootSec=3min
+OnCalendar=*:0/5
+Persistent=true
+RandomizedDelaySec=30
+
+[Install]
+WantedBy=timers.target

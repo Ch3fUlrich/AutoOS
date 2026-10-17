@@ -1,0 +1,163 @@
+# Profiles & detection
+
+## What gets detected
+
+Detection is pure inspection — it never installs, downloads or writes. That is
+what makes `--dry-run` meaningful and lets the tests run against synthetic
+machines instead of the one they happen to be on.
+
+| Detected | Used for |
+|---|---|
+| OS, version, build | Warning on unsupported builds |
+| Architecture (`x64` / `arm64` / `armhf`) | Hiding components that have no build for it |
+| Model / board | Recognising a Raspberry Pi |
+| CPU cores, RAM | Choosing the suggested profile |
+| Free disk | Warning before large installs |
+| Microphone | Reported so speech-to-text tools can say whether they are usable here |
+| Elevation / sudo | Warning that machine-wide packages will be skipped |
+| Display present | Hiding the desktop category on headless boxes |
+| WSL (version + distro) | Reported as e.g. `WSL2 on Windows (Ubuntu)`; warns that systemd and desktop packages differ |
+| container | Suggests the `server` profile and warns for the same reason |
+| Package managers, git, node, docker | Skipping what is already there |
+| Virtualisation firmware flag | Warning that Docker and WSL2 will not start without it |
+
+## Profiles
+
+A profile is only a **starting set of ticks**. Everything stays editable in the
+menu afterwards.
+
+| Profile | Windows | Linux | macOS | Intended for |
+|---|:---:|:---:|:---:|---|
+| `workstation` | ✅ | ✅ | ✅ | A machine you sit in front of |
+| `ai-coding` | ✅ | ✅ | ✅ | Development box: editors, agents, containers, shell |
+| `light` | ✅ | ✅ | ✅ | Raspberry Pi 5 and similar — Claude Code, Tailscale, Herdr |
+| `server` | — | ✅ | — | Headless: shell, networking, containers, no GUI |
+| `everyday` | ✅ | ✅ | ✅ | Personal desktop; available apps and vendor setup steps vary by platform |
+| `rescue` | ✅ | ✅ | ✅ | Disaster-recovery USB stick: disk/filesystem repair, hardware diagnostics and Windows recovery tools for whoever gets handed the drive |
+| `local-ai` | ✅ | ✅ | ✅ | Offline AI inference via Ollama — no API key, no network, but 1.4-4.7 GB per model (B21) |
+| `custom` | ✅ | ✅ | ✅ | Nothing pre-ticked |
+
+`server` does not exist on Windows or macOS, so a headless machine there is
+offered `ai-coding` instead of a profile its catalog does not define.
+
+### `rescue`: one deliberate divergence from the catalog
+
+The rescue USB has two entry points, and for **Node.js only** they install it
+differently. This is intentional, and it is written down here because an
+undocumented second package list is exactly the drift that caused finding A12.
+
+| | Node.js comes from |
+|---|---|
+| `./setup.sh --profile rescue` | NodeSource, via the catalog's `nodejs` entry (`provider: "script"`) |
+| `templates/rescue-bootstrap.sh` on a booted stick | Ubuntu's own `nodejs` / `npm` apt packages |
+
+`claude-code` `require: ["nodejs"]` and carries the `rescue` profile, so either
+route gets you a working `claude`. `agy` (Antigravity CLI — replaces Gemini
+CLI at the human partner's direction; Gemini CLI is not deprecated, this is a
+deliberate product choice) is a standalone downloaded binary and needs no
+runtime at all, so it is unaffected by which Node.js a route picked.
+
+The bootstrap deviates because a stick handed to a stranger cannot pipe an
+unverified remote script into a shell (`curl … | bash`, finding A14), and
+because the NodeSource apt source file was re-added on every run, which broke
+idempotency (A13). apt is idempotent on its own and needs no trust decision at
+2am on a broken machine. `agy`'s own installer has the same `curl | bash`
+shape and is fixed the same way in both `lib/linux/install.sh` and
+`templates/rescue-bootstrap.sh`: download to a file, verify it is non-empty
+and looks like a script, then execute the file — never the pipe. On Windows,
+`agy` installs from a signed winget package (`Google.AntigravityCLI`)
+instead, so there is no unverified-script step there at all.
+
+**Everything else** in `rescue-bootstrap.sh` is cross-checked against
+`catalog/linux.json` in both directions by `tests/run-tests.sh`, so no other
+package can drift. Node is the one exception.
+
+### `agy` headless mode needs a prior interactive login
+
+`agy -p "prompt"` (headless mode, used for scripted/non-interactive calls)
+authenticates from credentials cached by an earlier *interactive* `agy`
+session — there is no API-key environment variable like Gemini CLI's. On a
+rescue stick this matters: a machine that is offline, or that has never run
+`agy` interactively before, cannot use `agy -p` at all. `claude -p` has no
+such requirement. `rescue-bootstrap.sh` prints this limitation in its summary
+whenever `agy` is present, and it is written down here for the same reason.
+
+### `local-ai`: kept strictly separate from `rescue` (B21)
+
+`local-ai` ships `ollama` plus three models, each its own catalog component
+(`ollama-model-<name>`, `requires: ["ollama"]`), so a model already pulled
+reports `skipped` just like any other component:
+
+| Model | Download | Notes |
+|---|---|---|
+| `qwen3:4b` (pre-ticked default) | 2.5 GB | 256K context — long enough to paste a full `dmesg`/SMART dump into |
+| `qwen3:1.7b` | 1.4 GB | Offered, not pre-ticked — smaller/faster |
+| `qwen2.5-coder:7b` | 4.7 GB | Offered, not pre-ticked — coding-focused |
+
+Every model entry states its download size in its `description`, and a test
+enforces that. This is deliberately **its own profile, never folded into
+`rescue`**: the entire rescue toolkit is ~400 MB of packages, one model here
+is 1.4-4.7 GB — two orders of magnitude apart. A user who asked for a rescue
+stick has not asked for that, and a test (`local-ai is NOT pulled in by the
+rescue profile`) holds the line.
+
+The size matters specifically because a rescue stick runs on a *broken*
+machine — often 4-8 GB RAM, no GPU, loading from USB at roughly 15-25 MB/s, so
+a 20 GB model costs on the order of 15 minutes just to load off the stick
+before it can answer anything. The three models above were chosen small on
+purpose; `qwen3:4b`'s 256K context is the specific reason it is the default,
+not just the smallest option.
+
+## How the suggestion is picked
+
+Deliberately conservative — a small board is never handed a desktop install it
+cannot use.
+
+```
+Raspberry Pi                      -> light
+container                         -> server        (Linux only)
+arm64 (Windows)                   -> light
+RAM <= 5 GB (Linux) / < 6 GB (Win) -> light
+headless                          -> server (Linux) / ai-coding (Windows, macOS)
+RAM >= 16 GB and >= 8 cores       -> workstation
+otherwise                         -> ai-coding
+```
+
+The RAM cut sits **below** 6 GB on purpose: an 8 GB machine reports about
+7.4 GB usable, and `light` is meant for Pi-class hardware, not a modest laptop.
+
+## Hidden vs. offered
+
+A component that cannot work on the detected machine is **hidden**, not shown
+and later failed. Offering a choice that cannot succeed is worse than not
+offering it.
+
+- `arch` on a component hides it on other architectures — for example
+  Antigravity is x64-only, so it never appears on a Pi.
+- `requiresDisplay` on a category hides the whole group on a headless box.
+
+## Detecting WSL
+
+Whether you are inside Windows Subsystem for Linux changes what actually works,
+so it is detected from three independent signals rather than one:
+
+- `WSL_DISTRO_NAME` — absent in a service or a bare `wsl -u root` shell;
+- `/proc/version` — rewritten by some kernels;
+- `/proc/sys/kernel/osrelease` — differs between WSL1 and WSL2.
+
+WSL2 ships a real Linux kernel tagged `microsoft-standard-WSL2` and has `/run/WSL`;
+WSL1 is a syscall translation layer on an NT-era version string. The version is
+reported rather than assumed, along with the distro name, and it appears in the
+terminal summary, in the browser UI header, and in the `environment` field of the
+browser payload.
+
+Windows reports itself as the WSL **host**, never the guest: `wsl.isWsl` is always
+false there, with `wsl.available` saying whether the feature is installed.
+
+Check what your machine is actually offered:
+
+```bash
+./setup.sh --list
+```
+
+Profile names are validated against the platform catalog, so adding a profile requires no entry-point code changes. For the everyday app list and proposed additional profiles, see [desktop setup](desktop-setup.md).

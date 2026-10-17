@@ -1,0 +1,12 @@
+# Runs the sync a minute after boot and every 5 minutes thereafter. When the
+# device is offline the script exits immediately, so this is cheap to run often.
+[Unit]
+Description=Periodic Omnigraph memory sync
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

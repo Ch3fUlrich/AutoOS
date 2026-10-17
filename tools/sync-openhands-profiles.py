@@ -1,0 +1,595 @@
+#!/usr/bin/env python3
+"""Regenerate OpenHands gateway tier profiles from the spec, with local keys.
+
+configuration/openhands/tier-profiles.json used to be the single hand-edited
+source of truth for the tier profile SHAPE (profile ids, model ids, token
+windows, reasoning flags). This tool's default, unflagged run now sources
+that shape from `tools/registry.py render openhands`'s output (routing v2
+spec 3.2 phase 1, task A4d) - the reverse of the mapping catalog/ai-
+registry.json was built from - instead of reading tier-profiles.json
+directly. `render openhands --check` proves that render reproduces today's
+committed tier-profiles.json semantically, so this is the same data, sourced
+one hop earlier. --spec PATH stays an explicit, lower-level override that
+reads a tier-profiles.json-shaped file directly (the same convention task
+A4c gave tools/sync-ide-models.py's --catalog flag).
+
+Either way, this tool projects the resulting shape into real profiles
+(omniroute-tier*.json + litellm-tier*.json) by injecting the client keys,
+which never live in the repo:
+
+    python3 tools/sync-openhands-profiles.py --openhands-dir ~/.openhands [--keys-file configuration/api-keys.yml]
+
+Key resolution: env AUTOOS_OMNIROUTE_KEY first, then the gateway-named field
+of the keys file (`omniroute_server` for a non-local gateway,
+`omniroute_<host>` for the local one, then the legacy `omniroute` /
+`omniroute_client_<host>` with a deprecation line - tools/autoos_gateway_key.py
+is the one rule) (omniroute tiers); env LITELLM_MASTER_KEY, then
+AUTOOS_LITELLM_API_KEY, then the LITELLM_MASTER_KEY entry of
+configuration/litellm/.env (litellm tiers); env OPENROUTER_API_KEY, then the
+`openrouter:` entry of the keys file (a direct-provider tier, e.g. the
+OpenRouter spark profile used for the full effort ladder). A gateway with no
+key has its tiers skipped (the installer covers the keyless path separately);
+with no key at all the tool reports the skip and exits 0.
+
+Run by configuration/start-stack.* on every `openhands` start, so a reapplied
+spec, a rotated key, or a hand-edited profile converges back automatically.
+Idempotent: byte-identical output on repeat runs (reports skipped instead).
+Byte-identical with the installer-embedded writer for the same keys.
+
+With --push-url the profiles are also saved into a running OpenHands app
+(its own settings store, /api/v1/settings/profiles): the docker app of
+2026-09 (SDK 1.36) does not read profiles/*.json at all, so without the push
+its UI offers no tier profile. The push is idempotent too (an unchanged
+profile is skipped), sends only the fields the app's StrictLLM schema allows,
+seeds the app's settings with the first tier when it has none, and fills the
+app's per-user profile cap (10 on the 2026-09 app) in spec order: before it
+pushes it deletes AutoOS-owned app profiles the spec no longer lists, and
+when the cap refuses a tier it removes the lowest-ranked AutoOS profile below
+it to make room. AutoOS-owned means RECORDED - a name this sync pushed
+(profiles/.autoos-pushed.json) or one of the spec's retired_ids - never a
+name that merely starts with omniroute-. A profile AutoOS does not own, and
+the active profile, are never deleted; nothing is when the app does not say
+which profile is active.
+
+Never prints a key. Exit 0 = written/skipped cleanly, 2 = unusable input.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from pathlib import Path
+
+# The shared by-path loader for tools/registry.py; tools/ is added to sys.path
+# only when it is missing, so importing this module from another tool (or the
+# test suite loading THIS file by path) still resolves it.
+_TOOLS_DIR = Path(__file__).resolve().parent
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+from registry_loader import load_registry_tool  # noqa: E402 - tools/ added above
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_spec(spec_path: Path | None, registry_path: Path) -> dict:
+    """The tier-profiles.json-shaped dict this tool projects into real
+    profiles.
+
+    spec_path given -> read that file directly (the explicit, lower-level
+    override task A4d's brief calls for, "keeping any explicit old-file flag
+    as an override" - the same convention A4c gave tools/sync-ide-models.py's
+    --catalog flag). spec_path None (this tool's default, unflagged run) ->
+    render it from catalog/ai-registry.json via tools/registry.py's
+    render_openhands() (routing v2 spec 3.2 phase 1, task A4d) - `render
+    openhands --check` proves that render reproduces today's committed
+    tier-profiles.json semantically, so this is the same data, sourced one
+    hop earlier.
+    """
+    if spec_path is not None:
+        return json.loads(spec_path.read_text(encoding="utf-8"))
+    registry_tool = load_registry_tool()
+    registry_doc = json.loads(registry_path.read_text(encoding="utf-8"))
+    return registry_tool.render_openhands(registry_doc)
+
+
+def read_flat_value(path: Path, name: str) -> str | None:
+    """First non-placeholder `name: value` from a flat key file, else None."""
+    try:
+        # utf-8-sig: PowerShell Out-File -Encoding utf8 writes a BOM,
+        # which would otherwise poison the first key name.
+        for line in path.read_text(encoding="utf-8-sig").splitlines():
+            text = line.strip()
+            if not text or text.startswith("#") or ":" not in text and "=" not in text:
+                continue
+            if "=" in text and ":" not in text.split("=", 1)[0]:
+                key, _, value = text.partition("=")
+            else:
+                key, _, value = text.partition(":")
+            if key.strip() == name:
+                value = value.strip().strip("\"'")
+                if value and "REPLACE" not in value:
+                    return value
+    except OSError:
+        pass
+    return None
+
+
+def read_omni_key(keys_file: Path | None) -> str | None:
+    """The OmniRoute client key: env wins, else the gateway-named api-keys.yml
+    field via tools/autoos_gateway_key.py (the one rule - new field, then the
+    legacy field with a deprecation line). None when no source has one (the
+    caller skips those tiers); never raises for a missing key."""
+    if os.environ.get("AUTOOS_OMNIROUTE_KEY"):
+        return os.environ["AUTOOS_OMNIROUTE_KEY"]
+    if not keys_file:
+        return None
+    from autoos_gateway_key import resolve_client_key
+    try:
+        return resolve_client_key(os.environ, Path(keys_file))
+    except KeyError:
+        return None
+
+
+def read_litellm_key(env_path: Path | None) -> str | None:
+    if os.environ.get("LITELLM_MASTER_KEY"):
+        return os.environ["LITELLM_MASTER_KEY"]
+    if os.environ.get("AUTOOS_LITELLM_API_KEY"):
+        return os.environ["AUTOOS_LITELLM_API_KEY"]
+    if env_path and env_path.is_file():
+        return read_flat_value(env_path, "LITELLM_MASTER_KEY")
+    return None
+
+
+def read_openrouter_key(keys_file: Path | None) -> str | None:
+    """A DIRECT-provider tier (effort-ladder surface) has its own key."""
+    if os.environ.get("OPENROUTER_API_KEY"):
+        return os.environ["OPENROUTER_API_KEY"]
+    if keys_file and keys_file.is_file():
+        return read_flat_value(keys_file, "openrouter")
+    return None
+
+
+def build_profile(tier: dict, base_url: str, key: str) -> dict:
+    profile = {
+        "auth_type": "api_key",
+        "api_mode": "auto",
+        "stream": False,
+        "drop_params": True,
+        "modify_params": True,
+        "disable_stop_word": False,
+        "caching_prompt": True,
+        "log_completions": False,
+        "native_tool_calling": True,
+        "is_subscription": False,
+        "capability_overrides": {},
+        "litellm_extra_body": {},
+        "model": tier["model"],
+        "base_url": base_url,
+        "max_input_tokens": tier["max_input_tokens"],
+        "max_output_tokens": tier["max_output_tokens"],
+        "input_cost_per_token": 0,
+        "output_cost_per_token": 0,
+        "api_key": key,
+    }
+    if tier.get("reasoning"):
+        profile["reasoning_effort"] = "high"
+    else:
+        profile["reasoning_effort"] = "none"
+        profile["enable_encrypted_reasoning"] = False
+        profile["extended_thinking_budget"] = None
+    return profile
+
+
+def clamp_to_live_windows(tiers: list, live_models: list) -> list:
+    """Adjust tier max_input_tokens and max_output_tokens to match live gateway windows."""
+    if not live_models:
+        return [dict(t) for t in tiers]
+    live_map = {}
+    for m in live_models:
+        if isinstance(m, dict) and "id" in m:
+            ctx = m.get("context_length") or m.get("max_input_tokens")
+            if ctx:
+                live_map[m["id"]] = ctx
+                if "/" in m["id"]:
+                    live_map[m["id"].split("/", 1)[-1]] = ctx
+
+    out = []
+    for tier in tiers:
+        t = dict(tier)
+        model = t.get("model", "")
+        bare_model = model.split("/", 1)[-1] if "/" in model else model
+        ctx = live_map.get(model) or live_map.get(bare_model)
+        if ctx is not None:
+            t["max_input_tokens"] = ctx
+            out_tokens = t.get("max_output_tokens", 32768)
+            if out_tokens > ctx // 2:
+                t["max_output_tokens"] = max(1024, ctx // 2)
+        out.append(t)
+    return out
+
+
+def fetch_live_models(gateway_base_url: str, key: str | None = None) -> list:
+    """Fetch live models list from the gateway, or return [] if unreachable."""
+    if not gateway_base_url or not key:
+        return []
+    url = gateway_base_url.rstrip("/") + "/models"
+    import urllib.request
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("data"), list):
+                return data["data"]
+    except Exception:
+        pass
+    return []
+
+
+def tier_base_url(tier: dict, spec: dict) -> str:
+    gateway = tier.get("gateway")
+    if gateway == "litellm":
+        return spec.get("litellm_base_url", spec["gateway_base_url"])
+    if gateway == "openrouter":
+        # A direct-provider tier names its own endpoint in the spec.
+        return tier.get("base_url", spec["gateway_base_url"])
+    return spec["gateway_base_url"]
+
+
+CONTAINER_HOST = "host.docker.internal"
+
+
+def container_host_resolves() -> bool:
+    """True when host.docker.internal resolves on THIS host (Docker Desktop).
+
+    AUTOOS_FAKE_HDI_RESOLVES=0/1 stands in for the lookup in tests.
+
+    Only loopback/private answers count. Without Docker Desktop the name can
+    fall through to public DNS (seen 2026-10-14); keeping it then would send the
+    gateway key to an address that is not this machine.
+    """
+    fake = os.environ.get("AUTOOS_FAKE_HDI_RESOLVES")
+    if fake is not None:
+        return fake == "1"
+    import ipaddress
+    import socket
+    try:
+        infos = socket.getaddrinfo(CONTAINER_HOST, None)
+    except OSError:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        except ValueError:
+            return False
+        if not (ip.is_loopback or ip.is_private):
+            return False
+    return bool(infos)
+
+
+def for_consumer(url: str, consumer: str) -> str:
+    """The spec's container-side URL, adjusted for who reads the profile.
+
+    container: unchanged - the docker app resolves host.docker.internal
+    (Docker Desktop natively, native Linux via --add-host host-gateway).
+    native: a host process (agent-canvas). It keeps the name where it
+    resolves (Docker Desktop) and gets 127.0.0.1 where it does not (native
+    Linux) - the same rule as resolve_ollama_base_url.
+    """
+    if consumer == "native" and CONTAINER_HOST in url and not container_host_resolves():
+        return url.replace(CONTAINER_HOST, "127.0.0.1")
+    return url
+
+
+def _http(method: str, url: str, body=None, timeout: float = 20.0):
+    """(status, parsed JSON or None). Never raises for HTTP or socket errors."""
+    import urllib.error
+    import urllib.request
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(url, data=data, method=method,
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", "replace")
+        status = exc.code
+    except (OSError, ValueError):
+        return 0, None
+    try:
+        return status, json.loads(raw) if raw else None
+    except ValueError:
+        return status, None
+
+
+def _key_mark(profile: dict) -> str:
+    """Short, non-reversible fingerprint of a profile's key - never the key."""
+    return hashlib.sha256(str(profile.get("api_key") or "").encode("utf-8")).hexdigest()[:16]
+
+
+def _load_marks(path: Path | None) -> dict:
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_marks(path: Path | None, marks: dict) -> None:
+    if path is None:
+        return
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(marks, fh, indent=2, sort_keys=True)
+        os.chmod(str(path), 0o600)
+    except OSError as exc:
+        # The push already happened; a lost record only means one extra
+        # re-push next time, never a skipped rotation.
+        print(f"sync-openhands-profiles: could not record pushed keys ({exc})")
+
+
+def _app_profiles(base: str):
+    """(names the app holds, active profile, whether the reply named one).
+
+    (None, None, False) when the list cannot be read. The third value is
+    False when the reply has no active_profile field at all (renamed or
+    dropped by an app update): then nothing may be deleted, because a
+    delete could hit the profile the user is working with.
+    """
+    status, listing = _http("GET", base + "/api/v1/settings/profiles")
+    if status != 200 or not isinstance(listing, dict) or not isinstance(listing.get("profiles"), list):
+        return None, None, False
+    names = [p.get("name") for p in listing["profiles"] if isinstance(p, dict) and p.get("name")]
+    return names, listing.get("active_profile"), "active_profile" in listing
+
+
+def push_profiles(push_url: str, profiles: list, marks_path: Path | None = None,
+                  spec_order: list | None = None, legacy_owned=()) -> int:
+    """Save (name, profile) pairs into a running OpenHands app. Returns 0.
+
+    The app never returns a profile's key (only api_key_set), so a rotated key
+    cannot be seen by comparing fields. marks_path records a short hash of the
+    key last pushed per profile; a different hash forces the POST.
+
+    The app keeps at most ~10 profiles and forgets none, so the push also
+    keeps the AutoOS-owned ones converged on the spec. OWNED means recorded,
+    never "named like ours": a name this sync pushed (the marks record) or
+    one of legacy_owned (the spec's retired_ids, pushed before the record
+    existed). A user's `omniroute-personal` is not ours.
+      * retired: an owned profile not in spec_order is deleted before
+        anything is pushed;
+      * cap: when a tier is refused for the cap, the lowest-ranked owned
+        profile the app holds BELOW it in spec_order is removed and the tier
+        retried - so an app filled under an older order converges on the
+        spec's top tiers. Ranks come from the full spec, so a tier this run
+        could not build (no key) still ranks.
+    Never deleted: a profile AutoOS does not own, the active profile
+    (re-read right before every delete), and anything at all when the app
+    does not say which profile is active.
+    """
+    marks = _load_marks(marks_path)
+    base = push_url.rstrip("/")
+    status, spec = _http("GET", base + "/openapi.json")
+    if status != 200 or not isinstance(spec, dict):
+        print(f"sync-openhands-profiles: push skipped ({base} is not answering)")
+        return 0
+    schemas = spec.get("components", {}).get("schemas", {})
+    allowed = set((schemas.get("StrictLLM") or {}).get("properties", {}))
+    if not allowed:
+        print("sync-openhands-profiles: push skipped (the app has no StrictLLM schema)")
+        return 0
+
+    def strict(profile: dict) -> dict:
+        return {k: v for k, v in profile.items() if k in allowed}
+
+    status, _ = _http("GET", base + "/api/v1/settings")
+    if status == 404 and profiles:
+        first = strict(profiles[0][1])
+        status, _ = _http("POST", base + "/api/v1/settings", {"agent_settings_diff": {"llm": first}})
+        print("sync-openhands-profiles: app settings seeded with %s%s"
+              % (profiles[0][0], "" if status == 200 else " FAILED (HTTP %s)" % status))
+
+    legacy = frozenset(legacy_owned)
+
+    def owned(name) -> bool:
+        return isinstance(name, str) and (name in marks or name in legacy)
+
+    held, active, knows_active = _app_profiles(base)
+    if held is None:
+        print("sync-openhands-profiles: cannot list the app's profiles - nothing deleted")
+        held = []
+    elif not knows_active:
+        print("sync-openhands-profiles: the app does not say which profile is active - "
+              "deleting nothing this run")
+    held = set(held)
+
+    def delete(name: str, why: str) -> bool:
+        if not knows_active or not owned(name):
+            return False
+        # Re-read the active profile right before the delete: the user may
+        # have switched to this one in the UI since the first look.
+        _, now_active, still_knows = _app_profiles(base)
+        if not still_knows:
+            print(f"sync-openhands-profiles: cannot confirm the active profile - {name} left in place")
+            return False
+        if name == now_active:
+            print(f"sync-openhands-profiles: app profile {name} became the active profile - left in place")
+            return False
+        status, _ = _http("DELETE", f"{base}/api/v1/settings/profiles/{name}")
+        if status != 200:
+            print(f"sync-openhands-profiles: app profile {name} delete FAILED (HTTP {status})")
+            return False
+        held.discard(name)
+        marks.pop(name, None)
+        print(f"sync-openhands-profiles: app profile {name} {why}")
+        return True
+
+    spec_ids = list(spec_order) if spec_order is not None else [name for name, _ in profiles]
+    if spec_order is not None and knows_active:
+        for name in sorted(held):
+            if not owned(name) or name in spec_ids:
+                continue
+            if name == active:
+                print(f"sync-openhands-profiles: app profile {name} is retired but active - "
+                      "left in place (activate another profile, then re-run)")
+                continue
+            delete(name, "deleted (retired: not in the tier spec)")
+
+    rank = {tid: n for n, tid in enumerate(spec_ids)}
+
+    def make_room(name: str) -> bool:
+        if not knows_active:
+            return False
+        below = [h for h in held if owned(h) and h != active and rank.get(h, -1) > rank.get(name, -1)]
+        # Lowest-ranked first; the next one if a delete is refused.
+        for victim in sorted(below, key=rank.get, reverse=True):
+            if delete(victim, f"removed to make room for {name} (the app's profile cap; spec order decides)"):
+                return True
+        return False
+
+    capped = []
+    for name, profile in profiles:
+        want = strict(profile)
+        status, have = _http("GET", f"{base}/api/v1/settings/profiles/{name}")
+        if capped and status != 200:
+            # Past the app's cap every further NEW profile is refused too:
+            # make_room found nothing ranked lower for an earlier tier, so it
+            # finds nothing for a later one. Held ones are still updated.
+            capped.append(name)
+            continue
+        if status == 200 and isinstance(have, dict) and have.get("api_key_set"):
+            current = dict(have.get("config") or {})
+            current.pop("api_key", None)
+            compare = {k: v for k, v in want.items() if k != "api_key"}
+            same_key = marks.get(name) == _key_mark(want)
+            if all(current.get(k) == v for k, v in compare.items()) and same_key:
+                print(f"sync-openhands-profiles: app profile {name} skipped (up to date)")
+                continue
+        status, reply = _http("POST", f"{base}/api/v1/settings/profiles/{name}", {"llm": want})
+        if status == 409 and make_room(name):
+            status, reply = _http("POST", f"{base}/api/v1/settings/profiles/{name}", {"llm": want})
+        if status in (200, 201):
+            held.add(name)
+            marks[name] = _key_mark(want)
+            print(f"sync-openhands-profiles: app profile {name} saved")
+        elif status == 409:
+            capped.append(name)
+        else:
+            detail = json.dumps(reply)[:160] if reply is not None else ""
+            print(f"sync-openhands-profiles: app profile {name} FAILED (HTTP {status}) {detail}")
+    if capped:
+        print("sync-openhands-profiles: the app's profile cap is reached - not in the app: %s"
+              % ", ".join(capped))
+    _save_marks(marks_path, marks)
+    return 0
+
+
+def parse_args(argv):
+    parser = argparse.ArgumentParser(
+        description="Regenerate OpenHands gateway tier profiles from the spec.",
+    )
+    parser.add_argument(
+        "--openhands-dir",
+        required=True,
+        help="target OpenHands directory (profiles/ is created inside it)",
+    )
+    parser.add_argument(
+        "--keys-file",
+        default=None,
+        help="api-keys.yml fallback for the OmniRoute client key (default: configuration/api-keys.yml)",
+    )
+    parser.add_argument(
+        "--litellm-env",
+        default=None,
+        help="litellm .env fallback for the master key (default: configuration/litellm/.env)",
+    )
+    parser.add_argument(
+        "--consumer",
+        choices=("container", "native"),
+        default="container",
+        help="who reads the profiles: the docker app (default) or a host process such as agent-canvas",
+    )
+    parser.add_argument(
+        "--push-url",
+        default=None,
+        help="also save the profiles into this running OpenHands app (e.g. http://127.0.0.1:3000)",
+    )
+    parser.add_argument(
+        "--registry",
+        default=None,
+        help="catalog/ai-registry.json to render the spec from (default: catalog/ai-registry.json; "
+             "ignored when --spec is given)",
+    )
+    parser.add_argument(
+        "--spec",
+        default=None,
+        help="an explicit tier-profiles.json-shaped file to read directly instead of rendering "
+             "--registry (default: not used)",
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    root = ROOT
+    spec_path = Path(args.spec) if args.spec else None
+    registry_path = Path(args.registry) if args.registry else root / "catalog" / "ai-registry.json"
+    keys_path = Path(args.keys_file) if args.keys_file else root / "configuration" / "api-keys.yml"
+    litellm_env = Path(args.litellm_env) if args.litellm_env else root / "configuration" / "litellm" / ".env"
+    try:
+        spec = load_spec(spec_path, registry_path)
+        tiers = spec["tiers"]
+        spec["gateway_base_url"]
+    except (OSError, ValueError, KeyError) as exc:
+        print(f"ERROR: cannot read spec {spec_path or registry_path}: {exc}", file=sys.stderr)
+        return 2
+    omni_key = read_omni_key(keys_path)
+    litellm_key = read_litellm_key(litellm_env)
+    openrouter_key = read_openrouter_key(keys_path)
+    if not omni_key and not litellm_key and not openrouter_key:
+        print("sync-openhands-profiles: no client key (env/key file/.env) - tier profiles skipped")
+        return 0
+    live_models = []
+    if omni_key:
+        gw_probe_url = for_consumer(spec.get("gateway_base_url", ""), "native")
+        live_models = fetch_live_models(gw_probe_url, omni_key)
+    if live_models:
+        tiers = clamp_to_live_windows(tiers, live_models)
+    profiles_dir = Path(args.openhands_dir) / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    keys = {"litellm": litellm_key, "openrouter": openrouter_key}
+    built = []
+    for tier in tiers:
+        key = keys.get(tier.get("gateway"), omni_key)
+        name = "%s.json" % tier["id"]
+        if not key:
+            print(f"sync-openhands-profiles: {name} skipped (no key for its gateway)")
+            continue
+        # No trailing newline: byte-identical with the installer-embedded
+        # writer, so install-time and start-time outputs never flap.
+        base_url = for_consumer(tier_base_url(tier, spec), args.consumer)
+        profile = build_profile(tier, base_url, key)
+        built.append((tier["id"], profile))
+        text = json.dumps(profile, indent=2)
+        target = profiles_dir / name
+        if target.is_file() and target.read_text(encoding="utf-8") == text:
+            print(f"sync-openhands-profiles: {name} skipped (up to date)")
+        else:
+            target.write_text(text, encoding="utf-8")
+            print(f"sync-openhands-profiles: {name} written")
+    if args.push_url:
+        # Every spec id counts as current and keeps its rank, pushed this
+        # run or not (a tier skipped for a missing key is not retired).
+        return push_profiles(args.push_url, built, profiles_dir / ".autoos-pushed.json",
+                             spec_order=[t["id"] for t in tiers],
+                             legacy_owned=spec.get("retired_ids") or ())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,17 @@
+# Optional override for the AutoOS AI stack. ai-stack.sh passes this file as a
+# second -f ONLY when the host directory holds server/zcode-server.cjs (the
+# ZCode desktop app's remote-server bundle); without that file this is never
+# loaded, so a host without ZCode runs on compose.yml alone.
+#
+# It touches services.omniroute and nothing else: the directory also holds the
+# ZCode login, so the mount is READ-ONLY by default. Set
+# AUTOOS_ZCODE_MOUNT_MODE=rw in the environment or in stack.env only if the
+# server has to write there. The mount lands at /home/qoder/.zcode - the path
+# OmniRoute resolves for $HOME/.zcode/server/{node,zcode-server.cjs} itself.
+#
+# Never copied into the repository: it stays on the host (AI stack docs:
+# docs/web-services.md, "OmniRoute with ZCode (GLM)").
+services:
+  omniroute:
+    volumes:
+      - ${AUTOOS_ZCODE_DIR}:/home/qoder/.zcode:${AUTOOS_ZCODE_MOUNT_MODE:-ro}

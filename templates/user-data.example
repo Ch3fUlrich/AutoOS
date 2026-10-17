@@ -1,0 +1,63 @@
+#cloud-config
+# AutoOS installer/rescue USB — sanitised Ubuntu autoinstall (subiquity) template.
+#
+# This file ships with NO real secret in it (AGENTS.md hard rule 1). Every value
+# that looks like it should be private is the literal placeholder
+# CHANGE-ME-AT-CREATION-TIME. The USB-creation tool substitutes it, at the moment
+# the stick is written, with a freshly generated passphrase that is shown to the
+# operator exactly once (B7) and then hashed with `openssl passwd -6` — falling
+# back to `mkpasswd -m sha512crypt` if that is unavailable. If NEITHER tool is
+# present, the creator refuses to write an answer file at all rather than embed
+# a broken or missing hash (B12). Do not hand-roll SHA-512-crypt: Python's
+# `crypt` module is POSIX-only and was removed outright in Python 3.13, and
+# rolling it by hand is exactly how the previous incident happened — a committed
+# plaintext credential (A1) sitting next to a hash truncated to 82 of the required
+# 86 characters (A2), which locks you out of the very machine you just installed.
+#
+# Validate this file for real before trusting it:
+#   cloud-init schema --config-file templates/user-data.example
+autoinstall:
+  version: 1
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  identity:
+    hostname: autoos-rescue
+    username: rescue
+    # Must be a full SHA-512 crypt hash (86 characters after the final "$"),
+    # never a plaintext credential — see the header comment above for how this
+    # placeholder is replaced.
+    password: "CHANGE-ME-AT-CREATION-TIME"
+  ssh:
+    install-server: true
+    allow-pw: true
+  # ---------------------------------------------------------------------------
+  # Storage: INTERACTIVE BY DEFAULT.
+  #
+  # AGENTS.md hard rule 3 — "every destructive action is opt-in and announced" —
+  # and this is the direct fix for A3, where the original scripts wiped the
+  # whole target disk automatically with no prompt at all. Listing "storage"
+  # here makes subiquity stop the automated run and ask a human to confirm
+  # partitioning by hand, exactly like a manual install would.
+  interactive-sections:
+    - storage
+  #
+  # Only when the operator explicitly passed --wipe-target-disk at USB-creation
+  # time (which the creation tool records by setting AUTOOS_WIPE_TARGET_DISK)
+  # does the generator remove "storage" from interactive-sections above and
+  # splice in a block shaped like the one below instead. The confirmation the
+  # operator saw before the stick was written named the disk's model and size
+  # in full, e.g. "Samsung 980 PRO 1TB (/dev/nvme0n1) will be ERASED" — never a
+  # bare "largest disk" guess.
+  #
+  # storage:
+  #   layout:
+  #     name: direct
+  #     match:
+  #       serial: "CHANGE-ME-AT-CREATION-TIME"
+  # ---------------------------------------------------------------------------
+  packages:
+    - openssh-server
+  late-commands:
+    - curtin in-target --target=/target -- systemctl enable ssh
+  shutdown: reboot

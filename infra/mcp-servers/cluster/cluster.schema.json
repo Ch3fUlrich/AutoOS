@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Ch3fUlrich/AutoOS/infra/mcp-servers/cluster/cluster.schema.json",
+  "title": "Omnigraph cluster declaration",
+  "description": "Shape of the Omnigraph cluster.yaml graph list. The live cluster.yaml is gitignored because a graph is named after the repository it serves (declaring one would publish that the repo exists); only this schema and cluster.yaml.example are tracked. See the structured-memory skill's references/schema.md for the memory model.",
+  "type": "object",
+  "required": ["version", "metadata", "storage", "state", "graphs"],
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "storage": {
+      "type": "string",
+      "pattern": "^s3://",
+      "description": "Cluster root (state ledger, lock, catalog, graph roots)."
+    },
+    "state": {
+      "type": "object",
+      "properties": {
+        "backend": {
+          "type": "string"
+        },
+        "lock": {
+          "type": "boolean"
+        }
+      }
+    },
+    "providers": {
+      "type": "object",
+      "description": "Query-time providers (e.g. the openai-compatible embedding endpoint).",
+      "additionalProperties": true
+    },
+    "graphs": {
+      "type": "object",
+      "minProperties": 1,
+      "description": "One entry per graph. Graph ids are repo names, which is why the live file is never tracked.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["schema", "embedding_provider"],
+        "properties": {
+          "schema": {
+            "type": "string"
+          },
+          "embedding_provider": {
+            "type": "string"
+          },
+          "queries": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "policies": {
+      "type": "object",
+      "description": "Policy bundles applied to graphs.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["file"],
+        "properties": {
+          "file": {
+            "type": "string"
+          },
+          "applies_to": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    }
+  }
+}

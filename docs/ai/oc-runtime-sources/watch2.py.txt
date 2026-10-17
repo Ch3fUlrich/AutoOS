@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+"""OpenCode session watcher (host-local, coding.vm, not in the repo). One instance per lane; configured by environment:
+  LANE (oc-pilot | oc-l0), CLONE (the lane's clone), ROLE_TEXT (nudge sentence), BLOCK_GATE (1 = export the pilot block gate file).
+Run under `tools/autoos_gateway_key.py exec -- python3 watch2.py` so AUTOOS_OMNIROUTE_KEY is in the environment.
+Every 30 s:
+  * spawned runs of this lane (worker records in CLONE/logs/workers, not ended): input tokens of the run's tag > 850k -> stop the run.
+  * idle: no assistant message for 240 s -> post a 'continue' prompt (max 1 per 5 min; not on failed sessions).
+  * dead (server gone or session failed/interrupted) for > 120 s -> restart from the card (canary retried up to 3x, max 1 per 10 min).
+  * rotation: > ROTATE_MSGS assistant messages in the session AND no spawned run still running -> stop by recorded pid, short progress
+    note into the lane inbox, restart (a rotation kills the process group, so never while a spawned run runs).
+Never kills by name; only recorded pids / units. Never prints secrets. Cost backstop is the central Google gate (block $10).
+"""
+import glob, json, os, re, signal, subprocess, sys, time
+
+HOME = os.path.expanduser("~")
+REPO = HOME + "/code/AutoOS"
+LANE = os.environ["LANE"]
+CLONE = os.environ["CLONE"]
+STATE = HOME + "/fleet/%s/state/oc-l1-%s.state.json" % (LANE, LANE)
+LOG = HOME + "/fleet/%s/watch.log" % LANE
+INBOX = CLONE + "/.oc-pilot/inbox"
+OUTBOX = CLONE + "/.oc-pilot/outbox"
+ROLE = os.environ.get("ROLE_TEXT", "Read your inbox, then do the next concrete step of your current lane.")
+BLOCK = os.environ.get("BLOCK_GATE") == "1"
+RUN_STOP = 850_000
+ROTATE_MSGS = int(os.environ.get("ROTATE_MSGS", "45"))   # message-count backstop (D-614)
+ROTATE_INPUT = int(os.environ.get("ROTATE_INPUT", "30000"))  # lane c/task 3: rotate on real per-turn input (input + cache reads) above this
+NUDGE_AFTER, RESTART_EVERY = 240, 600
+NUDGE_EVERY = int(os.environ.get("NUDGE_EVERY", "600"))   # D-614: L0 1200 s, L1 600 s
+L1_OUTBOX = os.environ.get("L1_OUTBOX", "")             # set for the L0: nudge only when the L1 wrote something new
+sys.path.insert(0, REPO + "/tools")
+sys.path.insert(0, REPO)
+import oc_l1_http as h  # noqa: E402
+import run_budget as rb  # noqa: E402
+
+STATUS_FILE = os.environ.get("STATUS_FILE", "")   # the L1 watcher writes the L1 status into the L0 clone (the L0 never needs the password)
+STUCK_TOOL_S = 600
+PW = open(HOME + "/.config/autoos/oc-l1.pw").read().strip()
+last = {"nudge": 0.0, "restart": 0.0, "rotate": 0.0, "dead_since": 0.0}
+
+# Ensure standard user tool paths are in PATH (for uv, node, npx in MCP servers)
+ext_paths = [
+    HOME + "/.local/bin",
+    HOME + "/.cargo/bin",
+    HOME + "/.nvm/versions/node/v24.19.0/bin",
+]
+cur_path = os.environ.get("PATH", "")
+path_parts = cur_path.split(":") if cur_path else []
+for p in reversed(ext_paths):
+    if p not in path_parts:
+        path_parts.insert(0, p)
+os.environ["PATH"] = ":".join(path_parts)
+
+
+def log(msg):
+    with open(LOG, "a") as fh:
+        fh.write("%s %s\n" % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), msg))
+
+
+def read_state():
+    try:
+        return json.load(open(STATE))
+    except (OSError, ValueError):
+        return None
+
+
+def stop_server(st):
+    pid = st.get("pid") if st else None
+    if pid:
+        for sig_target in (lambda: os.killpg(pid, signal.SIGTERM), lambda: os.kill(pid, signal.SIGTERM)):
+            try:
+                sig_target()
+                break
+            except OSError:
+                continue
+        time.sleep(2)
+    try:
+        os.remove(STATE)
+    except OSError:
+        pass
+
+
+def worker_records():
+    out = []
+    for f in glob.glob(CLONE + "/logs/workers/*.json"):
+        try:
+            rec = json.load(open(f))
+        except (OSError, ValueError):
+            continue
+        if rec.get("id"):
+            if not rec.get("ended"):  # a record whose pid is gone (or a zombie) is not running
+                try:
+                    st = open("/proc/%d/stat" % int(rec["pid"])).read().rsplit(")", 1)[1].split()[0]
+                    if st == "Z":
+                        continue
+                except (OSError, ValueError, KeyError, IndexError):
+                    continue
+            out.append(rec)
+    return out
+
+
+def stop_run(rec, reason):
+    unit = (rec.get("scope") or {}).get("unit") if isinstance(rec.get("scope"), dict) else None
+    if unit:
+        subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True, timeout=30)
+    else:
+        try:
+            os.killpg(int(rec["pid"]), signal.SIGTERM)
+        except (OSError, ValueError, KeyError):
+            pass
+    log("STOPPED run %s: %s" % (rec.get("id"), reason))
+
+
+def archive_inbox():
+    """routing D-617: a restarted weak model must never re-run old orders. Keep ONLY the newest task message in the inbox (kind lane/accept/
+    message from L1-main or the L0); archive every other file (stale task messages, status chatter, acked messages) into inbox-done/.
+    Returns the file name of the current task (or '')."""
+    done = INBOX + "/../inbox-done"
+    os.makedirs(done, exist_ok=True)
+    acked = set()
+    for f in glob.glob(OUTBOX + "/*.json"):
+        try:
+            d = json.load(open(f))
+        except (OSError, ValueError):
+            continue
+        if d.get("kind") == "ack" and d.get("ref"):
+            acked.add(str(d["ref"]))
+    tasks = []
+    for f in glob.glob(INBOX + "/*.json"):
+        name = os.path.basename(f)
+        try:
+            d = json.load(open(f))
+        except (OSError, ValueError):
+            d = {}
+        is_task = d.get("kind") in ("lane", "accept", "message") and d.get("from") in ("autoos-L1-main", "autoos-oc-L0") \
+            and str(d.get("id")) not in acked and name != "progress.json"
+        if is_task:
+            tasks.append((os.path.getmtime(f), name))
+        elif name != "progress.json":
+            os.replace(f, done + "/" + name)
+    tasks.sort()
+    for _m, name in tasks[:-1]:
+        os.replace(INBOX + "/" + name, done + "/" + name)
+    return tasks[-1][1] if tasks else ""
+
+
+def progress_note():
+    subj = []
+    for f in sorted(glob.glob(OUTBOX + "/*.json"))[-6:]:
+        try:
+            d = json.load(open(f))
+            subj.append("%s: %s" % (d.get("kind"), d.get("subject")))
+        except (OSError, ValueError):
+            pass
+    git = subprocess.run(["git", "-C", CLONE, "log", "--oneline", "origin/main..HEAD"], capture_output=True, text=True,
+                         stdin=subprocess.DEVNULL).stdout
+    dirty = subprocess.run(["git", "-C", CLONE, "status", "--short"], capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL).stdout
+    running = [r["id"] for r in worker_records() if not r.get("ended")]
+    current = archive_inbox()
+    body = ("YOUR CURRENT TASK is the file inbox/%s: read ONLY that file; every older order is archived in inbox-done/ and must NEVER be re-run. " % (current or "(none)")
+            + "SESSION RESTARTED by the watcher (fresh context, same role). Re-read your card and rules first. NEVER git reset / checkout -B / re-plan from step 1: your finished steps are the commits on your lane branch (`git log origin/main..HEAD`); continue at the first unfinished step. Recent outbox: "
+            + " | ".join(subj) + "\nClone log:\n" + git + "Uncommitted:\n" + dirty + "Spawned runs still running: " + ", ".join(running))
+    json.dump({"id": "progress", "from": "watcher", "to": LANE, "kind": "message", "subject": "restarted: short progress note",
+               "body": body[:1900]}, open(INBOX + "/progress.json", "w"), indent=1)
+
+
+def start_lane():
+    env = dict(os.environ)
+    if BLOCK:
+        env["AUTOOS_DAILY_GATE_FILE"] = HOME + "/fleet/oc-pilot/gate-block.json"
+    env["AUTOOS_OCL1_PW"] = PW
+    if os.environ.get("SESSION_GATEWAY_URL"):   # route this session's model calls through its throttling proxy (D-615)
+        env["AUTOOS_OMNIROUTE_URL"] = os.environ["SESSION_GATEWAY_URL"]
+    for i in range(3):
+        if i:
+            # lane d (2026-10-05): back off between start attempts - an rc=5
+            # canary is usually a transient gateway error (503 resource
+            # pressure, measured during the 11:0xZ incident), not a broken
+            # guard; immediate retries just re-pay the ~90 s canary against
+            # the same broken gateway. 30 s (muse-spark seat finding 6: the
+            # sleep blocks the whole watcher cycle, so keep it short).
+            time.sleep(30)
+        try:
+            r = subprocess.run([sys.executable, REPO + "/tools/oc_l1.py", "start", "--name", LANE], env=env, capture_output=True,
+                               text=True, cwd=REPO, stdin=subprocess.DEVNULL, timeout=400)
+        except subprocess.TimeoutExpired:
+            # muse-spark seat 2026-10-06, finding 1: a hung start must count as a failed
+            # attempt, not kill the watcher (TimeoutExpired escaped start_lane).
+            st = read_state()
+            if st:
+                stop_server(st)
+            log("start attempt %d timeout after 400s" % (i + 1))
+            continue
+        if r.returncode == 0:
+            log("lane (re)started")
+            return True
+        st = read_state()
+        if st:
+            stop_server(st)
+        log("start attempt %d rc=%s %s" % (i + 1, r.returncode, (r.stdout.strip().splitlines() or [""])[-1][:100]))
+    return False
+
+
+def lane_is_google():
+    """The Google cost gate only governs sessions whose own model is a Google leg (gemini/ or vertex/ gateway ids); an OVH-model
+    session is bounded by the OVH alert instead (D-615: OVH draws on the voucher)."""
+    try:
+        m = json.load(open(HOME + "/.config/autoos/oc-l1.json"))[LANE]["model"]["modelID"]
+        return str(m).startswith(("gemini/", "vertex/"))
+    except (OSError, ValueError, KeyError):
+        return True
+
+
+def gate_verdict():
+    """Central cost gate verdict (ok|warn|block). The spawner gate does not cover an orchestrator's OWN model turns, so the
+    watcher enforces it: warn = no nudges / no rotation, block = stop the session by recorded pid and do not restart."""
+    try:
+        d = json.load(open(HOME + "/.local/state/autoos/daily-gate.json"))
+        if time.time() - os.path.getmtime(HOME + "/.local/state/autoos/daily-gate.json") > 3600:
+            return "ok"
+        return str(d.get("verdict") or "ok").lower()
+    except (OSError, ValueError):
+        return "ok"
+
+
+def set_lane_model(key, model_id, limit_context=None):
+    """Lane c (2026-10-05): the third argument pins the rendered client limit
+    alongside the model swap - a 1M leg must not render at the hardcoded
+    131072 (the client would compact at 128k), and the deepseek fallback's
+    catalog claims 128000 so it keeps the safe 131072."""
+    p = HOME + "/.config/autoos/oc-l1.json"
+    d = json.load(open(p))
+    m = d[LANE]["model"]
+    m["key"], m["modelID"] = key, model_id
+    if limit_context:
+        m["limit"] = {"context": limit_context, "output": 16000}
+    else:
+        m.pop("limit", None)
+    m.pop("fallback_key", None); m.pop("fallback_modelID", None)
+    # muse-spark seat 2026-10-06, finding 2: atomic write - a crash mid-dump
+    # truncated oc-l1.json in place and took both lanes down with it.
+    tmp = p + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f, indent=2)
+    os.replace(tmp, p)
+    os.chmod(p, 0o600)
+
+
+FALLBACK_FILE = HOME + "/fleet/%s/ovh-fallback-day" % LANE
+
+
+def gate_fallback(st, recs, gate):
+    """routing D-616, CACHEORCH 2026-10-05: at the HOST gate block do not stop the Google lane: switch it to
+    ds/deepseek-flash (gateway-served, prompt-caching, paid from the deepseek credits) until the UTC day rolls, then
+    back to AI Studio Gemini. Was ovh/gpt-oss-120b: OVH does not cache, and the operator's caching rule keeps the
+    orchestrator lanes (L0/L1) on caching providers - OVH is for implementation work only. Never while a spawned run
+    is active (a restart kills its process group)."""
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    try:
+        flagged = open(FALLBACK_FILE).read().strip()
+    except OSError:
+        flagged = ""
+    if gate == "block" and lane_is_google() and not flagged:
+        if recs:
+            log("gate block: fallback to deepseek deferred, %d spawned run(s) active" % len(recs))
+            return False
+        set_lane_model("ds-deepseek-flash", "ds/deepseek-flash", 131072)
+        open(FALLBACK_FILE, "w").write(today)
+        log("GATE BLOCK: lane switched to ds/deepseek-flash until the UTC day rolls")
+        stop_server(st)
+        return True
+    if flagged and not recs and (flagged != today or gate != "block"):
+        # Lane d fix (2026-10-06): restore when the day rolled OR when the
+        # block has lifted. The old condition (flagged != today only) let a
+        # midnight flap stick the lane on OVH for a whole fresh day: at 00:0x
+        # the gate file still carried yesterday's block verdict with a fresh
+        # mtime, so the restore to gemini was immediately followed by a
+        # re-fallback (measured: both flag files rewritten 2026-10-06T00:01Z,
+        # lanes stuck on ovh while the new day's gate read ok $0.28/$14).
+        # The fallback exists only while the gate is at block.
+        set_lane_model("gemini-gemini-3.8-flash", "gemini/gemini-3.8-flash", 1048576)
+        os.remove(FALLBACK_FILE)
+        log("gate no longer block (flag %s, verdict %s): lane switched back to gemini/gemini-3.8-flash"
+            % (flagged, gate))
+        stop_server(st)
+        return True
+    return False
+
+
+def refresh_heartbeat(st, alive, outcome, n_asst, newest, recs):
+    """Lane b (2026-10-05): oc_l1_canary.write_heartbeat fires once at start
+    (state=started, current_step=canary) and nothing ever updates it, so the
+    heartbeat file says "canary" forever. The watcher refreshes it each cycle
+    from the live session view - the file becomes a real liveness record
+    (state, assistant count, newest assistant age, spawned runs) instead of a
+    stale birth certificate. The canary/turn keys are preserved."""
+    try:
+        hb = json.load(open(HOME + "/.config/autoos/oc-l1.json"))[LANE].get("heartbeat_file")
+        if not hb:
+            return
+        data = {}
+        try:
+            loaded = json.load(open(hb))
+            if isinstance(loaded, dict):
+                data = loaded
+        except (OSError, ValueError):
+            pass
+        now = time.time()
+        data["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        # muse-spark seat 2026-10-06, finding 7: a session with no assistant
+        # message yet is "starting", not "live" (None newest read as live forever).
+        data["state"] = "dead" if not alive else ("live" if newest and now - newest <= 600 else ("silent" if newest else "starting"))
+        data["current_step"] = str(outcome) if outcome else ("working" if alive else "stopped")
+        data["assistant_messages"] = n_asst
+        data["newest_assistant_age_s"] = int(now - newest) if newest else None
+        data["spawned_runs_running"] = len(recs or [])
+        tmp = hb + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, hb)
+    except (OSError, ValueError, KeyError):
+        pass
+
+
+def session_view(st):
+    """(alive, outcome, assistant_count, newest_assistant_ts, turn_input)
+
+    turn_input is the newest assistant turn's REAL context (input tokens plus
+    cache reads - what the model actually saw); None when unknown. The lane-c
+    rotation uses it ("rotation by real per-turn input, target <= 30k") instead
+    of counting messages only."""
+    try:
+        s1, p1 = h._request(st["port"], "GET", "/api/session/%s" % st["session_id"], password=PW)
+    except Exception:
+        return False, None, 0, 0.0, None
+    d1 = h._data(p1) if s1 == 200 else None
+    if not isinstance(d1, dict):
+        return False, None, 0, 0.0, None
+    s2, p2 = h._request(st["port"], "GET", "/api/session/%s/message?order=desc&limit=200" % st["session_id"], password=PW)
+    items = h._data(p2) if s2 == 200 else []
+    items = items.get("items") if isinstance(items, dict) else items
+    asst = [m for m in (items or []) if m.get("type") == "assistant"]
+    last["stuck_s"] = 0.0
+    for m in (items or []):
+        for c in (m.get("content") or []):
+            if c.get("type") == "tool" and (c.get("state") or {}).get("status") == "running":
+                last["stuck_s"] = max(last["stuck_s"], time.time() - (c.get("time") or {}).get("created", time.time() * 1000) / 1000.0)
+    newest = max([(m.get("time") or {}).get("created", 0) / 1000.0 for m in asst] or [0.0])
+    turn_input = None
+    for m in reversed(asst):
+        tk = (m.get("data") or m).get("tokens") or {}
+        if isinstance(tk, dict) and (tk.get("input") or tk.get("cache", {}).get("read")):
+            c = tk.get("cache") or {}
+            turn_input = (tk.get("input") or 0) + (c.get("read") or 0)
+            break
+    return True, d1.get("outcome"), len(asst), newest, turn_input
+
+
+def check_proxy():
+    """2026-10-06 incident: both throttle proxies died silently mid-day and every
+    lane start burned rc=5 canaries on ConnectionRefused until they were noticed.
+    The watcher owns the lane, so it also babysits the proxy: when the proxy port
+    refuses, restart its unit (max once per 5 minutes)."""
+    url = os.environ.get("SESSION_GATEWAY_URL") or ""
+    m = re.search(r":(\d+)", url)
+    if not m:
+        return
+    port = int(m.group(1))
+    import socket as _s
+    s = _s.socket()
+    s.settimeout(2.0)
+    try:
+        s.connect(("127.0.0.1", port))
+        s.close()
+        return
+    except OSError:
+        s.close()
+    if time.time() - last.get("proxy_restart", 0.0) < 300:
+        return
+    last["proxy_restart"] = time.time()
+    subprocess.run(["systemctl", "--user", "restart", "oc-throttle-%s" % ("l0" if LANE == "oc-l0" else "l1")],
+                   capture_output=True, stdin=subprocess.DEVNULL, timeout=30)
+    log("proxy port %d refused: restarted the throttle unit" % port)
+
+
+def main():
+    log("watcher up for %s" % LANE)
+    while True:
+        try:
+            check_proxy()
+            st = read_state()
+            now = time.time()
+            if not st:
+                # no state file = no session (after a fallback switch, a crash, or a manual stop): start the lane, max once per 10 min
+                if now - last["restart"] > RESTART_EVERY:
+                    last["restart"] = now
+                    log("no session state: starting the lane")
+                    progress_note()
+                    start_lane()
+                time.sleep(30)
+                continue
+            # per-run input cap (spawned runs of this lane)
+            recs = [r for r in worker_records() if not r.get("ended")]
+            if recs:
+                rows = rb.fetch_gateway_rows()
+                rows = rows[0] if isinstance(rows, tuple) else rows
+                for rec in recs:
+                    tot = sum((r.get("tokens") or {}).get("in", 0) or 0 for r in rows
+                              if str(r.get("sessionTag", "")).endswith("/" + rec["id"]))
+                    if tot > RUN_STOP:
+                        stop_run(rec, "input %d > %d" % (tot, RUN_STOP))
+            archive_inbox()
+            gate = gate_verdict() if lane_is_google() else "ok"
+            if gate_fallback(st, [r for r in worker_records() if not r.get("ended")], gate if lane_is_google() else gate_verdict()):
+                time.sleep(30)
+                continue
+            alive, outcome, n_asst, newest, turn_input = session_view(st)
+            dead = (not alive) or outcome in ("failed", "interrupted") or last.get("stuck_s", 0) > STUCK_TOOL_S
+            refresh_heartbeat(st, alive, outcome, n_asst, newest, recs)
+            if STATUS_FILE:
+                try:
+                    state_word = "dead" if dead else ("silent" if newest and now - newest > 600 else "live")
+                    open(STATUS_FILE, "w").write("%s %s last_assistant_age_s=%d running_spawned_runs=%d\n" % (
+                        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), state_word, int(now - newest) if newest else -1, len(recs)))
+                except OSError:
+                    pass
+            if dead:
+                last["dead_since"] = last["dead_since"] or now
+                # task 1 (2026-10-06): a restart must never kill spawned
+                # writer/seat runs. Defer while any run holds its scope; force
+                # only after 15 min of continuous deadness so a wedged lane
+                # with a stale run record still recovers.
+                if recs and now - last["dead_since"] < 900:
+                    pass
+                elif now - last["dead_since"] > 120 and now - last["restart"] > RESTART_EVERY:
+                    if recs:
+                        log("dead but forcing restart: %d run record(s) active for 15+ min" % len(recs))
+                    log("dead (alive=%s outcome=%s stuck_tool_s=%d): restarting" % (alive, outcome, last.get("stuck_s", 0)))
+                    last["restart"] = now
+                    stop_server(st)
+                    progress_note()
+                    start_lane()
+                    last["dead_since"] = 0.0
+            else:
+                last["dead_since"] = 0.0
+                if recs and not L1_OUTBOX:
+                    pass   # L1: a spawned run is active: it waits on the run's result, never nudge (D-614)
+                elif newest and now - newest > NUDGE_AFTER and now - last["nudge"] > NUDGE_EVERY and (
+                        not L1_OUTBOX or any(os.path.getmtime(f) > newest for f in glob.glob(L1_OUTBOX + "/*.json"))):
+                    last["nudge"] = now
+                    h._request(st["port"], "POST", "/api/session/%s/prompt" % st["session_id"], password=PW,
+                               body={"text": "Continue. You went idle. " + ROLE + " Do not end your turn until you have spawned a "
+                                     "step, finished a step, or written a status envelope (kind=status, state=blocked with the reason)."})
+                    log("nudged idle session (%d s without an assistant message)" % (now - newest))
+                # lane c/task 3 (2026-10-06): rotate on REAL per-turn input
+                # (input + cache reads, target <= 30k), not message counts;
+                # the message count stays as the backstop. Never while a
+                # spawned run holds the process group (D-614).
+                over_input = turn_input is not None and turn_input > ROTATE_INPUT
+                if (n_asst > ROTATE_MSGS or over_input) and not recs and now - last["rotate"] > 900:
+                    log("rotate: %d assistant messages, per-turn input %s (target <= %d)"
+                        % (n_asst, turn_input, ROTATE_INPUT))
+                    last["rotate"] = now
+                    stop_server(st)
+                    progress_note()
+                    start_lane()
+        except Exception as e:  # keep watching
+            log("error %s: %s" % (type(e).__name__, str(e)[:120]))
+        time.sleep(30)
+
+
+if __name__ == "__main__":
+    main()

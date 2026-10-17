@@ -1,0 +1,20 @@
+# Re-check MemAvailable every 10s and stop the newest agent run if it is
+# under the floor. This file is a template; @APPROOT@ is substituted by
+# install.sh (see install_memguard).
+#
+# OnUnitActiveSec (not OnCalendar) is deliberate: this is a pressure alarm,
+# not a daily chore, so it must tick on the wall clock since boot regardless
+# of when the service last succeeded. AccuracySec=1s keeps the 10s cadence
+# honest — the default 1min accuracy would effectively coalesce every tick
+# into one, defeating the point of a 10s poll.
+[Unit]
+Description=Periodic agent-run memory guard
+Documentation=file://@APPROOT@/docs/ai/memory-guard.md
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=10s
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

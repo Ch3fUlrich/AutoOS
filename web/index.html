@@ -1,0 +1,2996 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AutoOS</title>
+<style>
+/* ─────────────────────────────────────────────────────────────────────────
+   Theme tokens. Three states, not two: an explicit choice stamps
+   data-theme on <html>; the default "auto" stamps nothing and follows
+   prefers-color-scheme. Every colour is defined on bare :root first so
+   nothing is left undefined in the un-stamped state.
+   ───────────────────────────────────────────────────────────────────────── */
+:root{
+  --ground:#F5F7FA; --surface:#FFFFFF; --surface-2:#EDF0F5; --surface-3:#E1E6EF;
+  --ink:#141821; --ink-muted:#596373; --ink-faint:#8A93A2;
+  --rule:#DBE0E9; --rule-strong:#C2C9D5;
+  --accent:#2F5D8C; --accent-soft:#E3EBF5; --accent-ink:#FFFFFF;
+  --ok:#2E6B52; --ok-soft:#E0EFE8;
+  --warn:#A8620F; --warn-soft:#FBEEDC;
+  --err:#A3342A; --err-soft:#F8E5E2;
+  --dep:#6B4FA8; --dep-soft:#EDE7F8;
+  --shadow:0 1px 2px rgba(20,24,33,.06), 0 4px 12px rgba(20,24,33,.05);
+  --shadow-lg:0 2px 6px rgba(20,24,33,.08), 0 12px 32px rgba(20,24,33,.10);
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;
+  --radius:10px;
+  --cols:1;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0F1219; --surface:#171B23; --surface-2:#1F242E; --surface-3:#282F3B;
+    --ink:#E8EBF1; --ink-muted:#9AA4B4; --ink-faint:#6E7889;
+    --rule:#2A313D; --rule-strong:#3A4351;
+    --accent:#7FA8D8; --accent-soft:#1C2836; --accent-ink:#0F1219;
+    --ok:#6FBF97; --ok-soft:#16281F;
+    --warn:#DDA35C; --warn-soft:#2C2317;
+    --err:#E08579; --err-soft:#2E1D1B;
+    --dep:#B49BE8; --dep-soft:#241D33;
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.25);
+    --shadow-lg:0 2px 8px rgba(0,0,0,.4), 0 14px 36px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0F1219; --surface:#171B23; --surface-2:#1F242E; --surface-3:#282F3B;
+  --ink:#E8EBF1; --ink-muted:#9AA4B4; --ink-faint:#6E7889;
+  --rule:#2A313D; --rule-strong:#3A4351;
+  --accent:#7FA8D8; --accent-soft:#1C2836; --accent-ink:#0F1219;
+  --ok:#6FBF97; --ok-soft:#16281F;
+  --warn:#DDA35C; --warn-soft:#2C2317;
+  --err:#E08579; --err-soft:#2E1D1B;
+  --dep:#B49BE8; --dep-soft:#241D33;
+  --shadow:0 1px 2px rgba(0,0,0,.3), 0 4px 14px rgba(0,0,0,.25);
+  --shadow-lg:0 2px 8px rgba(0,0,0,.4), 0 14px 36px rgba(0,0,0,.35);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;background:var(--ground);color:var(--ink);
+  font:15px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  -webkit-font-smoothing:antialiased;padding-bottom:76px;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:22px 20px 40px}
+
+/* ─── header ─────────────────────────────────────────────────────────── */
+header{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+h1{font-size:1.4rem;margin:0;letter-spacing:-.02em;font-weight:700}
+.tagline{color:var(--ink-muted);font-size:.86rem}
+.header-right{margin-left:auto;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.host-pill{
+  display:inline-flex;align-items:center;gap:7px;background:var(--surface);
+  border:1px solid var(--rule);border-radius:999px;padding:5px 12px;
+  font-size:.79rem;color:var(--ink-muted);
+}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);flex:none}
+.dot.bad{background:var(--err)}
+.env-pill{
+  display:inline-flex;align-items:center;gap:6px;background:var(--accent-soft);
+  border:1px solid var(--rule);border-radius:999px;padding:5px 11px;
+  font-size:.75rem;font-weight:700;color:var(--accent);
+}
+/* A real <button>: it navigates to the Installed tab, so it has to be reachable
+   from the keyboard and announced as a control rather than as decoration. */
+.installed-pill{
+  display:inline-flex;align-items:center;gap:6px;background:var(--ok-soft);
+  border:1px solid var(--rule);border-radius:999px;padding:5px 11px;
+  font:inherit;font-size:.75rem;font-weight:700;color:var(--ok);cursor:pointer;
+}
+.installed-pill:hover{border-color:var(--ok)}
+.installed-pill:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* segmented control, used for theme + layout */
+.seg{display:inline-flex;border:1px solid var(--rule);border-radius:8px;overflow:hidden;background:var(--surface)}
+.seg button{
+  appearance:none;border:0;background:none;font:inherit;font-size:.78rem;font-weight:600;
+  padding:6px 11px;color:var(--ink-muted);cursor:pointer;
+}
+.seg button+button{border-left:1px solid var(--rule)}
+.seg button:hover{background:var(--surface-2);color:var(--ink)}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.seg button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+
+.banner{
+  background:var(--accent-soft);border:1px solid var(--rule);border-left:3px solid var(--accent);
+  border-radius:var(--radius);padding:11px 14px;font-size:.85rem;margin-bottom:16px;
+}
+.banner.bad{background:var(--err-soft);border-left-color:var(--err)}
+
+/* ─── tabs ───────────────────────────────────────────────────────────── */
+.tabs{display:flex;gap:2px;border-bottom:2px solid var(--rule);margin-bottom:18px;overflow-x:auto}
+.tab{
+  appearance:none;background:none;border:0;border-bottom:2px solid transparent;margin-bottom:-2px;
+  padding:10px 16px;font:inherit;font-size:.89rem;font-weight:600;color:var(--ink-muted);
+  cursor:pointer;white-space:nowrap;display:flex;align-items:center;gap:8px;
+}
+.tab:hover{color:var(--ink);background:var(--surface-2);border-radius:6px 6px 0 0}
+.tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+.tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:6px}
+.tab .badge{
+  background:var(--surface-3);color:var(--ink-muted);border-radius:999px;padding:1px 8px;
+  font-size:.71rem;font-weight:700;font-variant-numeric:tabular-nums;
+}
+.tabmenu > button[aria-checked="true"] .badge{background:var(--accent);color:var(--accent-ink)}
+/* Panels are regions now that the tab strip is a menu; a hidden one must stay
+   hidden even though .card and friends set display explicitly. */
+[role="region"][hidden]{display:none}
+
+/* ─── collapsible cards ──────────────────────────────────────────────── */
+details.card{
+  background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius);
+  box-shadow:var(--shadow);margin-bottom:16px;
+}
+details.card>summary{
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;list-style:none;cursor:pointer;
+  padding:12px 16px;border-radius:var(--radius);
+}
+details.card[open]>summary{border-bottom:1px solid var(--rule);border-radius:var(--radius) var(--radius) 0 0}
+details.card>summary::-webkit-details-marker{display:none}
+details.card>summary::before{
+  content:"▸";color:var(--ink-faint);font-size:.9rem;transition:transform .15s;flex:none;
+}
+details.card[open]>summary::before{transform:rotate(90deg)}
+details.card>summary:hover{background:var(--surface-2)}
+details.card>summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.card-title{font-size:.95rem;font-weight:700;letter-spacing:-.01em}
+.card-sub{color:var(--ink-muted);font-size:.81rem;margin-left:auto;text-align:right}
+.card-body{padding:14px 16px}
+
+/* ─── system grid ────────────────────────────────────────────────────── */
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}
+.kv{background:var(--surface-2);border:1px solid var(--rule);border-radius:8px;padding:9px 12px}
+.kv dt{color:var(--ink-faint);font-size:.69rem;text-transform:uppercase;letter-spacing:.08em;font-weight:700;margin:0}
+.kv dd{margin:3px 0 0;font-family:var(--mono);font-size:.81rem;word-break:break-word}
+.kv.highlight{background:var(--accent-soft);border-color:var(--accent)}
+
+/* ─── profile cards: the chosen one grows, the rest shrink ───────────── */
+/* A row of square chips, one per profile, then the selected one in full below. */
+.profiles{display:flex;flex-direction:column;gap:14px}
+.profile-strip{display:flex;gap:8px;flex-wrap:wrap}
+.profile-chip{
+  flex:0 0 auto;width:96px;min-width:0;padding:10px 8px;cursor:pointer;font:inherit;
+  display:flex;flex-direction:column;align-items:center;gap:4px;text-align:center;
+  background:var(--surface);border:1.5px solid var(--rule);border-radius:10px;color:var(--ink);
+  transition:background .15s, border-color .15s;
+}
+.profile-chip:hover{border-color:var(--rule-strong);background:var(--surface-2)}
+.profile-chip:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.profile-chip[aria-pressed="true"]{
+  border-color:var(--accent);background:var(--accent-soft);box-shadow:var(--shadow);
+}
+.picon{font-size:1.25rem;line-height:1.1}
+.profile-chip .pname{font-weight:700;font-size:.76rem;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.profile-chip .pcount{font-size:.66rem;color:var(--ink-faint);font-weight:600;font-variant-numeric:tabular-nums}
+.profile-chip .tag-suggested{font-size:.52rem;padding:1px 5px}
+
+.profile-detail{
+  border:1.5px solid var(--accent);border-radius:10px;background:var(--accent-soft);
+  padding:14px 16px;
+}
+.profile-detail .pdhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:4px}
+.profile-detail .pdname{font-weight:700;font-size:1rem}
+.profile-detail .pdesc{color:var(--ink-muted);font-size:.84rem;margin-bottom:11px}
+.tag-suggested{font-size:.55rem;padding:1px 6px}
+.profile[aria-pressed="false"] .pcount{
+  display:block;font-size:.66rem;color:var(--ink-faint);font-weight:600;margin-top:4px;
+}
+.profile[aria-pressed="true"] .pcount{display:none}
+.tag-suggested{
+  background:var(--ok-soft);color:var(--ok);border-radius:999px;padding:1px 8px;
+  font-size:.64rem;font-weight:800;text-transform:uppercase;letter-spacing:.06em;
+}
+.psum-head{
+  display:flex;gap:14px;flex-wrap:wrap;font-size:.8rem;color:var(--ink-muted);margin-bottom:9px;
+}
+.psum-head b{color:var(--ink);font-variant-numeric:tabular-nums;font-size:.95rem}
+
+/* the process at a glance: step 1 -> step 2 -> step 3, with counts */
+.psum-steps{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:10px}
+.psum-step{
+  display:inline-flex;align-items:center;gap:6px;font-size:.74rem;background:var(--surface);
+  border:1px solid var(--rule);border-radius:999px;padding:3px 10px 3px 4px;color:var(--ink-muted);
+}
+.psum-arrow{color:var(--ink-faint);font-size:.8rem}
+
+/* one card per category; every component carries its install-order number */
+.psum-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:6px}
+.psum-card{
+  background:var(--surface);border:1px solid var(--rule);border-radius:8px;
+  padding:0;min-width:0;
+}
+/* Folded by default: the category and its count are the answer most of the time,
+   and twelve open lists of components are not a summary. */
+.psum-card > summary{
+  list-style:none;cursor:pointer;padding:6px 9px;border-radius:8px;
+}
+.psum-card > summary::-webkit-details-marker{display:none}
+.psum-card > summary:hover{background:var(--surface-2)}
+.psum-card > summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.psum-card[open] > summary{border-bottom:1px solid var(--rule);border-radius:8px 8px 0 0}
+.psum-card-body{padding:5px 9px 7px 9px}
+.psum-card-head{
+  display:flex;align-items:center;gap:6px;font-size:.68rem;font-weight:700;
+  text-transform:uppercase;letter-spacing:.07em;color:var(--accent);
+}
+.psum-card-head::before{
+  content:"\25B8";font-size:.72rem;color:var(--ink-faint);transition:transform .15s ease;
+}
+.psum-card[open] .psum-card-head::before{transform:rotate(90deg)}
+.psum-card-head .n{
+  margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink-faint);letter-spacing:0;
+}
+.psum-comp{display:flex;align-items:center;gap:6px;font-size:.77rem;padding:2px 0;min-width:0}
+.psum-comp .cname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.psum-comp.is-dep .cname{color:var(--dep)}
+.step-badge{
+  flex:none;width:17px;height:17px;border-radius:50%;display:grid;place-items:center;
+  font-size:.62rem;font-weight:800;font-variant-numeric:tabular-nums;
+  background:var(--accent);color:var(--accent-ink);
+}
+.step-badge.dep{background:var(--dep);color:#fff}
+/* the same badge, reused inline in the main component list */
+.chip-step{background:var(--accent);color:var(--accent-ink);font-variant-numeric:tabular-nums}
+
+/* ─── toolbar ────────────────────────────────────────────────────────── */
+.toolbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:13px}
+button,select,input[type=search]{
+  font:inherit;font-size:.84rem;padding:7px 11px;border-radius:7px;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink);cursor:pointer;
+}
+button:hover{background:var(--surface-2);border-color:var(--rule-strong)}
+button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:700}
+button.primary:hover{filter:brightness(1.08)}
+button.primary:disabled{opacity:.45;cursor:not-allowed;filter:none}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input[type=search]{cursor:text;min-width:170px;flex:1;max-width:260px}
+select:disabled{opacity:.45;cursor:not-allowed}
+.switch{display:inline-flex;align-items:center;gap:7px;font-size:.85rem;cursor:pointer;user-select:none}
+.switch input{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
+.tool-label{font-size:.78rem;color:var(--ink-faint);font-weight:600}
+
+/* ─── component groups ───────────────────────────────────────────────── */
+.group{margin-bottom:13px}
+.group>summary{
+  display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;padding:8px 13px;
+  background:var(--surface-2);border:1px solid var(--rule);border-radius:8px;
+  font-weight:700;font-size:.76rem;text-transform:uppercase;letter-spacing:.09em;color:var(--accent);
+}
+.group>summary::-webkit-details-marker{display:none}
+.group>summary::before{content:"▸";font-size:.82rem;transition:transform .15s}
+.group[open]>summary::before{transform:rotate(90deg)}
+.group>summary .count{margin-left:auto;color:var(--ink-faint);font-weight:700;font-size:.74rem;letter-spacing:0}
+.group-body{padding:8px 0 0 2px}
+
+/* list is the default; grid is opt-in and its density is user-set */
+.group-body{display:flex;flex-direction:column;gap:6px}
+body[data-layout="grid"] .group-body{
+  display:grid;gap:8px;
+  /* 290px fitted about three per row on a laptop. The compact row needs far less
+     than that, and seeing more of the catalog at once is the point. */
+  grid-template-columns:repeat(auto-fill,minmax(215px,1fr));
+}
+body[data-layout="grid"][data-cols="2"] .group-body{grid-template-columns:repeat(2,minmax(0,1fr))}
+body[data-layout="grid"][data-cols="3"] .group-body{grid-template-columns:repeat(3,minmax(0,1fr))}
+body[data-layout="grid"][data-cols="4"] .group-body{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:900px){
+  body[data-layout="grid"] .group-body{grid-template-columns:repeat(auto-fill,minmax(240px,1fr))!important}
+}
+@media (max-width:600px){
+  body[data-layout="grid"] .group-body{grid-template-columns:1fr!important}
+}
+
+.item{
+  display:grid;grid-template-columns:auto auto 1fr;gap:9px;align-items:start;
+  padding:8px 10px;border:1px solid var(--rule);border-left:3px solid transparent;
+  border-radius:8px;background:var(--surface);
+}
+
+/* A monogram, not a fetched favicon: the server is local and often offline, and
+   a per-row request to a remote icon service would leak the catalog. `icon` in
+   the catalog wins when a component declares one. */
+.item-icon{
+  position:relative;flex:none;width:26px;height:26px;border-radius:7px;
+  display:grid;place-items:center;overflow:hidden;
+  font-size:.8rem;font-weight:800;line-height:1;margin-top:1px;
+  background:var(--accent-soft);color:var(--accent);text-transform:uppercase;
+  user-select:none;
+}
+/* Sits on top of the monogram, so a blocked or offline request leaves a letter
+   rather than an empty box or a broken-image glyph. */
+.item-icon .icon-img{
+  position:absolute;inset:0;width:100%;height:100%;object-fit:contain;
+  border-radius:inherit;padding:2px;
+  /* A white tile in BOTH themes. Many of these favicons are a black glyph on
+     transparency (every GitHub-hosted project ships one), which disappears
+     entirely against a dark surface. */
+  background:#fff;box-shadow:inset 0 0 0 1px rgba(0,0,0,.08);
+}
+.item.is-installed .item-icon{background:var(--ok-soft);color:var(--ok)}
+
+/* Detail is opt-in. These chips answer "which package exactly" and "what pulls
+   this in", which matters when auditing a plan and never when picking one. The
+   compact row is icon + name + description, plus the two chips that describe the
+   CONTROL rather than the component: `auto` (ticked for you) and `locked`
+   (cannot be unticked). Losing those would make a checkbox behave inexplicably. */
+body:not([data-detail="on"]) .item .item-detail,
+body:not([data-detail="on"]) .item .item-meta,
+body:not([data-detail="on"]) .item .chip-step{display:none}
+body:not([data-detail="on"]) .item .item-meta{margin-top:0}
+.item-detail{display:contents}
+.detail-toggle[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+
+/* Quick install: one component, now, without touching the selection. */
+.quick-install{
+  flex:none;font:inherit;font-size:.68rem;font-weight:700;letter-spacing:.03em;
+  padding:2px 8px;border-radius:999px;cursor:pointer;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink-muted);
+}
+.quick-install:hover{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.quick-install:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.quick-install[disabled]{opacity:.5;cursor:default}
+
+/* Header progress, so a quick install started from the catalog is visible from
+   every tab instead of only on Run & log. */
+.header-progress{
+  display:flex;align-items:center;gap:10px;margin:0 0 14px 0;
+  font-size:.74rem;color:var(--ink-muted);
+}
+/* Same trap as the section menu: an author `display:flex` beats the browser's
+   own [hidden]{display:none}, so without this it renders empty on every load. */
+.header-progress[hidden]{display:none}
+.header-progress .bar{flex:1;height:5px;margin:0}
+.header-progress-label{white-space:nowrap;font-weight:600}
+.item:hover{background:var(--surface-2);border-color:var(--rule-strong)}
+.item.checked{border-left-color:var(--accent);background:var(--accent-soft)}
+.item.auto{border-left-color:var(--dep);background:var(--dep-soft);border-style:dashed}
+.item input[type=checkbox]{margin-top:3px;width:17px;height:17px;accent-color:var(--accent);cursor:pointer}
+.item input[type=checkbox]:disabled{cursor:not-allowed}
+.item-title{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.item-name{font-weight:650;font-size:.9rem}
+a.item-name{color:var(--ink);text-decoration:none;border-bottom:1px dotted var(--ink-faint)}
+a.item-name:hover{color:var(--accent);border-bottom-color:var(--accent)}
+a.item-name::after{content:"↗";font-size:.72em;margin-left:3px;color:var(--ink-faint);vertical-align:super}
+.item-desc{color:var(--ink-muted);font-size:.81rem;margin-top:2px}
+.item-meta{display:flex;gap:5px;flex-wrap:wrap;margin-top:6px;max-width:100%}
+/* A grid column is much narrower than a full-width row, so the long chips
+   ("needed by 7 (...)") must truncate rather than spill past the card edge.
+   min-width:0 is what actually lets a flex/grid child shrink below its content. */
+.item>span{min-width:0;overflow:hidden}
+.item-title{max-width:100%}
+.item-title .chip,.item-meta .chip{
+  max-width:100%;overflow:hidden;text-overflow:ellipsis;display:inline-block;
+}
+
+/* ─── chips ──────────────────────────────────────────────────────────── */
+.chip{
+  display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:2px 9px;
+  font-size:.7rem;font-weight:600;white-space:nowrap;border:1px solid transparent;
+}
+.chip-pkg{font-family:var(--mono);background:var(--surface-3);color:var(--ink-muted);font-size:.67rem;font-weight:500}
+.chip-req{background:var(--dep-soft);color:var(--dep);border-color:color-mix(in srgb,var(--dep) 30%,transparent)}
+.chip-by{background:var(--surface-3);color:var(--ink-muted)}
+.chip-auto{background:var(--dep);color:#fff}
+.chip-locked{background:var(--warn-soft);color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent)}
+.chip-note{background:var(--warn-soft);color:var(--warn)}
+.chip-plat{
+  background:var(--surface-3);color:var(--ink-muted);
+  border-color:var(--rule-strong);font-weight:700;
+}
+.chip-ok{background:var(--ok-soft);color:var(--ok)}
+.chip-retired{background:var(--surface-3);color:var(--ink-faint);border-color:var(--rule-strong)}
+.chip-missing{background:var(--warn-soft);color:var(--warn)}
+.providers{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:8px}
+.provider{
+  display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;
+  padding:8px 11px;border:1px solid var(--rule);border-radius:9px;background:var(--surface-2);
+}
+.provider .pname{font-weight:600;font-size:.84rem}
+.provider .pgroup{font-weight:400;font-size:.7rem;color:var(--ink-muted);margin-left:6px}
+.provider input[type=password]{
+  flex:1 1 9rem;min-width:7rem;font-family:var(--mono);font-size:.76rem;
+  padding:4px 6px;border:1px solid var(--rule);border-radius:6px;
+  background:var(--surface);color:var(--ink);
+}
+.provider .save-secret{
+  font-size:.74rem;padding:4px 10px;border:1px solid var(--rule);
+  border-radius:6px;background:var(--surface);color:var(--ink);cursor:pointer;
+}
+.provider .secret-apply{
+  flex-basis:100%;font-size:.7rem;color:var(--ink-muted);
+  font-family:var(--mono);word-break:break-all;
+}
+.provider.off{opacity:.62}
+.services{display:grid;gap:8px;margin-bottom:12px}
+.svc{
+  display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;
+  padding:8px 11px;border:1px solid var(--rule);border-radius:9px;background:var(--surface-2);
+}
+.svc .pname{font-weight:600;font-size:.84rem;min-width:11rem}
+.svc .svc-meta{font-size:.74rem;color:var(--ink-muted);flex:1 1 16rem}
+.svc .svc-actions{display:flex;gap:6px;flex-wrap:wrap}
+.svc.off{opacity:.8}
+.prov{font-family:var(--mono);font-size:.67rem;font-weight:700;text-transform:lowercase}
+.prov-winget{background:#DCE9F8;color:#1B4D80}
+.prov-choco{background:#DCE4F8;color:#2A3F80}
+.prov-npm{background:#F8DEDE;color:#8B2020}
+.prov-apt{background:#F6E2D8;color:#8A3E17}
+.prov-brew{background:#F8EBD3;color:#7A5310}
+.prov-snap{background:#F6DFD2;color:#8A3B12}
+.prov-script{background:#E6E1F6;color:#4A3A80}
+.prov-custom{background:#E0EDE6;color:#245741}
+:root[data-theme="dark"] .prov-winget,
+:root:not([data-theme="light"]) .prov-winget{background:#152A3F;color:#8DBDEC}
+:root[data-theme="dark"] .prov-choco,
+:root:not([data-theme="light"]) .prov-choco{background:#171F3B;color:#9AAAE8}
+:root[data-theme="dark"] .prov-npm,
+:root:not([data-theme="light"]) .prov-npm{background:#361A1A;color:#EE9C9C}
+:root[data-theme="dark"] .prov-apt,
+:root:not([data-theme="light"]) .prov-apt{background:#33231A;color:#E0A47E}
+:root[data-theme="dark"] .prov-brew,
+:root:not([data-theme="light"]) .prov-brew{background:#33290F;color:#E3BE6B}
+:root[data-theme="dark"] .prov-snap,
+:root:not([data-theme="light"]) .prov-snap{background:#331F14;color:#E09E76}
+:root[data-theme="dark"] .prov-script,
+:root:not([data-theme="light"]) .prov-script{background:#241F3B;color:#B0A2EA}
+:root[data-theme="dark"] .prov-custom,
+:root:not([data-theme="light"]) .prov-custom{background:#12291F;color:#7FC7A4}
+/* light mode must win over the auto-dark block above */
+:root[data-theme="light"] .prov-winget{background:#DCE9F8;color:#1B4D80}
+:root[data-theme="light"] .prov-choco{background:#DCE4F8;color:#2A3F80}
+:root[data-theme="light"] .prov-npm{background:#F8DEDE;color:#8B2020}
+:root[data-theme="light"] .prov-apt{background:#F6E2D8;color:#8A3E17}
+:root[data-theme="light"] .prov-brew{background:#F8EBD3;color:#7A5310}
+:root[data-theme="light"] .prov-snap{background:#F6DFD2;color:#8A3B12}
+:root[data-theme="light"] .prov-script{background:#E6E1F6;color:#4A3A80}
+:root[data-theme="light"] .prov-custom{background:#E0EDE6;color:#245741}
+
+/* ─── install order ──────────────────────────────────────────────────── */
+.tiers{display:flex;flex-direction:column}
+.tier{position:relative;padding-left:42px;padding-bottom:20px}
+.tier:last-child{padding-bottom:0}
+.tier::before{content:"";position:absolute;left:15px;top:30px;bottom:0;width:2px;background:var(--rule-strong)}
+.tier:last-child::before{display:none}
+.tier-num{
+  position:absolute;left:0;top:0;width:32px;height:32px;border-radius:50%;
+  background:var(--accent);color:var(--accent-ink);display:grid;place-items:center;
+  font-weight:800;font-size:.8rem;font-variant-numeric:tabular-nums;
+}
+.tier-head{font-weight:700;font-size:.85rem;margin:5px 0 3px}
+.tier-hint{color:var(--ink-muted);font-size:.79rem;margin-bottom:8px}
+.tier-items{display:flex;flex-wrap:wrap;gap:7px}
+.dep-node{
+  display:inline-flex;flex-direction:column;gap:3px;border:1px solid var(--rule);
+  border-left:3px solid var(--accent);background:var(--surface);border-radius:8px;
+  padding:7px 11px;min-width:145px;
+}
+.dep-node.auto{border-left-color:var(--dep);border-style:dashed;background:var(--dep-soft)}
+.dep-node .dn-name{font-weight:650;font-size:.84rem}
+.dep-node .dn-req{color:var(--ink-muted);font-size:.72rem}
+.dep-node .dn-req b{color:var(--dep);font-weight:600}
+
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:.77rem;color:var(--ink-muted);margin-bottom:11px}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.swatch{width:12px;height:12px;border-radius:3px;border:1px solid var(--rule);display:inline-block}
+.swatch.direct{background:var(--accent)}
+.swatch.autodep{background:var(--dep);border-style:dashed}
+
+/* ─── configuration & questions & log ────────────────────────────────── */
+.config-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:10px}
+.config-card{background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:12px}
+.config-card label{display:block;font-size:.82rem;font-weight:600;margin-bottom:5px}
+.config-card input, .config-card select{
+  width:100%;padding:7px 10px;border:1px solid var(--rule);border-radius:6px;
+  background:var(--surface-2);color:var(--ink);font-family:var(--mono);font-size:.8rem;
+}
+.config-card .help{color:var(--ink-faint);font-size:.74rem;margin-top:4px}
+.config-actions{margin-top:14px;display:flex;gap:12px;align-items:center}
+.cfg-save-btn{
+  background:var(--accent);color:var(--accent-ink);border:none;border-radius:6px;
+  padding:8px 16px;font-weight:700;font-size:.8rem;cursor:pointer;
+}
+.cfg-save-btn:hover{opacity:.9}
+.cfg-status{font-size:.8rem;font-weight:600;color:var(--ok)}
+.q{margin-bottom:13px}
+.q label{display:block;font-size:.85rem;font-weight:600;margin-bottom:5px}
+.q input[type=text]{
+  width:100%;padding:8px 11px;border:1px solid var(--rule);border-radius:7px;
+  background:var(--surface);color:var(--ink);font-family:var(--mono);font-size:.82rem;
+}
+.q .help{color:var(--ink-faint);font-size:.78rem;margin-top:5px}
+.q .why{color:var(--dep);font-size:.74rem;margin-top:4px;font-weight:600}
+#log{
+  background:#0C1016;color:#C9D1D9;font-family:var(--mono);font-size:.77rem;line-height:1.55;
+  padding:13px;border-radius:8px;height:360px;overflow:auto;white-space:pre-wrap;
+  word-break:break-word;border:1px solid var(--rule);
+}
+#log div{padding:1px 0}
+#log .ok{color:#7EE787}#log .warn{color:#E3B341}#log .err{color:#FF7B72}
+#log .muted{color:#8B949E}#log .step{color:#79C0FF;font-weight:600}
+/* Sits over the top-right corner of the log rather than above it, so it costs
+   no vertical space in a card whose whole point is showing as much output as
+   possible. */
+.log-wrap{position:relative}
+#copyLog{
+  position:absolute;top:8px;right:8px;z-index:1;
+  font-family:inherit;font-size:.72rem;font-weight:600;line-height:1;letter-spacing:.02em;
+  padding:6px 10px;border-radius:6px;cursor:pointer;
+  color:#C9D1D9;background:rgba(22,27,34,.92);border:1px solid #30363D;
+  opacity:.55;transition:opacity .15s,background .15s;
+}
+.log-wrap:hover #copyLog, #copyLog:focus-visible{opacity:1}
+#copyLog:hover{background:#21262D}
+#copyLog[data-copied="1"]{opacity:1;color:#7EE787;border-color:#238636}
+.bar{height:6px;background:var(--surface-3);border-radius:3px;overflow:hidden;margin:10px 0}
+.bar>div{height:100%;width:0;background:var(--accent);transition:width .3s}
+
+/* ─── sticky action bar ──────────────────────────────────────────────── */
+.actionbar{
+  position:fixed;left:0;right:0;bottom:0;z-index:20;background:var(--surface);
+  border-top:1px solid var(--rule-strong);box-shadow:0 -2px 12px rgba(0,0,0,.08);
+}
+.actionbar .inner{
+  max-width:1180px;margin:0 auto;padding:11px 20px;
+  display:flex;align-items:center;gap:14px;flex-wrap:wrap;
+}
+.tally{font-size:.84rem;color:var(--ink-muted)}
+.tally b{color:var(--ink);font-variant-numeric:tabular-nums}
+.tally .autoc{color:var(--dep);font-weight:700}
+.actionbar .spacer{margin-left:auto}
+.hint{font-size:.77rem;color:var(--ink-faint)}
+/* ─── usb-create dialog ──────────────────────────────────────────────── */
+.usb-dialog{
+  position:fixed;inset:0;z-index:30;display:flex;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.5);
+}
+/* An author `display:flex` rule beats the browser's own [hidden]{display:none}
+   (AGENTS.md §6 — this shipped twice in one afternoon already), so this class
+   needs its own explicit override rather than relying on the attribute alone. */
+.usb-dialog[hidden]{display:none}
+.usb-dialog-panel{
+  background:var(--surface);border:1px solid var(--rule-strong);border-radius:8px;
+  padding:20px;max-width:420px;width:90%;display:flex;flex-direction:column;gap:10px;
+  box-shadow:0 8px 30px rgba(0,0,0,.3);
+}
+.usb-dialog-panel label{display:flex;flex-direction:column;gap:4px;font-size:.85rem}
+.usb-dialog-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:8px}
+.usb-dialog-confirm{
+  font-size:.82rem;border-left:3px solid var(--err);background:var(--err-soft);
+  border-radius:4px;padding:8px 10px;
+}
+.empty{color:var(--ink-muted);font-size:.85rem;padding:14px;text-align:center}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+@media (max-width:640px){
+  .wrap{padding:15px 12px 30px}
+  .actionbar .inner{padding:9px 12px}
+  .tier{padding-left:35px}
+  .profile[aria-pressed="true"]{flex:1 1 100%}
+}
+.chip-installed{color:#267840;background:rgba(57,165,90,.12);border:1px solid rgba(57,165,90,.32)}
+.chip-manual{color:var(--ink-muted);border:1px solid currentColor}
+.item.unavailable{background:rgba(128,128,128,.08);color:var(--ink-muted);cursor:not-allowed}
+.item.unavailable .item-name,.item.unavailable .prov,.item.unavailable .item-desc{color:var(--ink-muted)}
+.item.unavailable input{cursor:not-allowed}
+.progress-label{display:flex;justify-content:space-between;font-size:.82rem;margin:8px 0;color:var(--ink-muted)}
+.bar.indeterminate>div{width:32%!important;animation:install-motion 1.7s ease-in-out infinite}
+@keyframes install-motion{from{transform:translateX(-100%)}to{transform:translateX(330%)}}
+@media(prefers-reduced-motion:reduce){.bar.indeterminate>div{animation:none}}
+/* ─── card chooser & visibility ──────────────────────────────────────── */
+.card-chooser-bar{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  background:var(--surface);border:1px solid var(--rule);border-radius:var(--radius);
+  padding:10px 14px;margin-bottom:16px;box-shadow:var(--shadow);
+}
+.card-chooser-title{font-size:.82rem;font-weight:700;color:var(--ink-muted);text-transform:uppercase;letter-spacing:.06em}
+.card-pills{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.card-pill{
+  appearance:none;border:1px solid var(--rule);background:var(--surface-2);color:var(--ink-muted);
+  font:inherit;font-size:.78rem;font-weight:600;padding:4px 11px;border-radius:999px;
+  cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s ease;
+}
+.card-pill:hover{border-color:var(--rule-strong);color:var(--ink)}
+.card-pill:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.card-pill[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.card-presets{margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.card-preset-label{font-size:.76rem;color:var(--ink-faint);font-weight:600}
+.card-preset-btn{
+  font:inherit;font-size:.74rem;padding:3px 8px;border-radius:6px;border:1px solid var(--rule);
+  background:var(--surface);color:var(--ink-muted);cursor:pointer;
+}
+.card-preset-btn:hover{background:var(--surface-2);color:var(--ink)}
+.card-preset-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+/* Which view you are in has to be visible, or the presets are four buttons that
+   appear to do nothing when the result happens to match what you already had. */
+.card-preset-btn[aria-pressed="true"]{
+  background:var(--accent-soft);border-color:var(--accent);color:var(--ink);font-weight:700;
+}
+
+/* ─── claude autostart card ──────────────────────────────────────────── */
+.claude-header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.claude-controls-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-bottom:16px}
+.claude-sessions-section{margin-top:16px;border-top:1px solid var(--rule);padding-top:14px}
+.claude-sessions-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.claude-section-title{font-size:.84rem;font-weight:700;letter-spacing:.02em}
+.claude-table-wrap{overflow-x:auto}
+.claude-sessions-table{width:100%;border-collapse:collapse;font-size:.8rem}
+.claude-sessions-table th,.claude-sessions-table td{padding:7px 10px;border-bottom:1px solid var(--rule);text-align:left}
+.claude-sessions-table th{font-size:.72rem;text-transform:uppercase;color:var(--ink-faint);letter-spacing:.06em}
+.btn-sm{font:inherit;font-size:.75rem;padding:4px 9px;border-radius:6px;border:1px solid var(--rule);background:var(--surface);cursor:pointer}
+.btn-sm:hover{background:var(--surface-2);border-color:var(--rule-strong)}
+.jump-link{
+  font:inherit;font-size:.72rem;font-weight:600;color:var(--accent);text-decoration:none;
+  cursor:pointer;border:1px solid var(--rule);padding:2px 8px;border-radius:5px;background:var(--surface);
+  display:inline-flex;align-items:center;gap:4px;
+}
+.jump-link:hover{background:var(--accent-soft);border-color:var(--accent)}
+.jump-link:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ─── claude status strip ────────────────────────────────────────────── */
+/* The card leads with the three facts that answer "will my sessions come back?"
+   — the service, the age of the snapshot, the count — because four settings
+   selects answer a question nobody asked first. */
+.claude-status{
+  display:flex;gap:18px;flex-wrap:wrap;align-items:baseline;
+  background:var(--surface-2);border:1px solid var(--rule);border-radius:8px;
+  padding:10px 14px;margin-bottom:14px;
+}
+.claude-status-item{display:flex;flex-direction:column;gap:2px;min-width:120px}
+.claude-status-label{font-size:.68rem;text-transform:uppercase;letter-spacing:.07em;color:var(--ink-faint);font-weight:700}
+.claude-status-value{font-size:.86rem;font-weight:600}
+.claude-status-value.is-warn{color:var(--warn,var(--ink))}
+.claude-hint{
+  font-size:.76rem;color:var(--ink-muted);margin:10px 0 0 0;padding:8px 11px;
+  border-left:2px solid var(--accent);background:var(--surface-2);border-radius:0 6px 6px 0;
+}
+
+/* ─── banner facts ───────────────────────────────────────────────────── */
+.banner-facts{
+  display:flex;gap:6px 18px;flex-wrap:wrap;align-items:baseline;
+  margin:-6px 0 16px 0;padding:0 2px;font-size:.78rem;
+}
+/* An author display rule beats the browser's [hidden]; see AGENTS.md. */
+.banner-facts[hidden]{display:none}
+.bfact{display:inline-flex;gap:6px;align-items:baseline}
+.bfact-k{color:var(--ink-faint);text-transform:uppercase;letter-spacing:.06em;font-size:.68rem;font-weight:700}
+.bfact-v{color:var(--ink-muted);font-weight:600}
+.banner-facts .jump-link{margin-left:auto}
+
+/* ─── header navigation ──────────────────────────────────────────────── */
+/* One labelled button instead of a strip that grew a tab every time the page
+   gained a job. The menu is a real menu: focusable, walkable, escapable. */
+.tabnav{position:relative;margin-left:18px}
+.tabnav-btn{
+  font:inherit;font-size:.86rem;font-weight:700;cursor:pointer;
+  display:inline-flex;align-items:center;gap:8px;
+  padding:6px 12px;border-radius:8px;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink);
+}
+.tabnav-btn:hover{background:var(--surface-2);border-color:var(--rule-strong)}
+.tabnav-btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.tabnav-caret{color:var(--ink-faint);font-size:.7rem}
+.tabnav-btn[aria-expanded="true"] .tabnav-caret{transform:rotate(180deg)}
+
+.tabmenu{
+  position:absolute;top:calc(100% + 6px);left:0;z-index:40;min-width:190px;
+  background:var(--surface);border:1px solid var(--rule-strong);border-radius:10px;
+  box-shadow:var(--shadow-lg);padding:5px;display:flex;flex-direction:column;gap:2px;
+}
+/* An author `display:flex` beats the browser's own [hidden]{display:none}, so
+   without this the menu renders open on every load. */
+.tabmenu[hidden]{display:none}
+.tabmenu > button{
+  font:inherit;font-size:.85rem;text-align:left;cursor:pointer;
+  display:flex;align-items:center;gap:8px;padding:7px 10px;border-radius:7px;
+  border:0;background:transparent;color:var(--ink);width:100%;
+}
+.tabmenu > button:hover{background:var(--surface-2)}
+.tabmenu > button:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+.tabmenu > button[aria-checked="true"]{background:var(--accent-soft);color:var(--ink);font-weight:700}
+.tabmenu > button[aria-checked="true"]::before{content:"¹3";color:var(--accent);font-weight:800}
+.tabmenu > button[aria-checked="false"]::before{content:"";width:0}
+.tabmenu .badge{margin-left:auto}
+
+/* ─── theme toggle ───────────────────────────────────────────────────── */
+.theme-toggle{
+  font:inherit;cursor:pointer;width:34px;height:34px;border-radius:8px;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink);
+  display:grid;place-items:center;font-size:1rem;line-height:1;
+}
+.theme-toggle:hover{background:var(--surface-2);border-color:var(--rule-strong)}
+.theme-toggle:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ─── installed tab ──────────────────────────────────────────────────── */
+.panel-lede{color:var(--ink-muted);font-size:.86rem;margin:0 0 16px 0;max-width:70ch}
+.installed-toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.installed-toolbar input[type=search]{
+  font:inherit;font-size:.86rem;padding:7px 11px;border-radius:8px;
+  border:1px solid var(--rule);background:var(--surface);color:var(--ink);min-width:240px;flex:1 1 240px;max-width:420px;
+}
+.installed-toolbar input[type=search]:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.installed-summary{font-size:.8rem;color:var(--ink-muted)}
+.installed-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.installed-row{
+  border:1px solid var(--rule);border-radius:8px;padding:10px 12px;background:var(--surface);
+  display:flex;flex-direction:column;gap:5px;
+}
+.installed-row-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.installed-row-meta{margin-top:2px}
+
+/* ─── modular SRP config sections ────────────────────────────────────── */
+.config-section{margin-bottom:18px}
+.config-section:last-child{margin-bottom:0}
+.config-section-title{
+  font-size:.82rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--accent);
+  padding-bottom:5px;margin-bottom:8px;border-bottom:1px solid var(--rule);display:flex;align-items:center;gap:6px;
+}
+.target-highlight{outline:2px solid var(--accent);outline-offset:3px;transition:outline .3s ease}
+</style>
+<!-- Every control on this page is driven by the inline script at the bottom.
+     If a script blocker, an extension or a policy kills it, none of this markup
+     means anything: the header pill would sit at "connecting…" for ever and the
+     banner would claim it is still contacting a server it never called. Hide the
+     inert half of the page and say what is actually wrong. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232f6f9f'/%3E%3Cpath d='M9 22 L16 9 L23 22 M12 18 H20' stroke='white' stroke-width='2.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<noscript><style>
+  #banner, .tabnav, [role="region"], .actionbar { display: none !important }
+  #hostName { display: none }
+  .host-pill::after { content: "scripts blocked" }
+</style></noscript>
+</head>
+<body data-layout="list" data-cols="auto">
+<div class="wrap">
+  <header>
+    <h1>AutoOS</h1>
+    <!-- Navigation lives in the header now: one labelled button instead of a strip
+         that grew a tab every time the page gained a job. -->
+    <nav class="tabnav" id="tabNav">
+      <button type="button" class="tabnav-btn" id="tabMenuBtn"
+              aria-haspopup="menu" aria-expanded="false" aria-controls="tabMenu">
+        <span id="tabMenuCurrent">Overview</span>
+        <span class="tabnav-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="tabmenu" id="tabMenu" role="menu" aria-label="Sections" hidden>
+        <button type="button" role="menuitemradio" aria-checked="true" id="tab-overview">
+          Overview <span class="badge" id="badgeSel">0</span>
+        </button>
+        <button type="button" role="menuitemradio" aria-checked="false" id="tab-configure">Configure</button>
+        <button type="button" role="menuitemradio" aria-checked="false" id="tab-run">Run &amp; log</button>
+        <button type="button" role="menuitemradio" aria-checked="false" id="tab-system">
+          System <span class="badge" id="badgeInstalled">0</span>
+        </button>
+      </div>
+    </nav>
+    <div class="header-right">
+      <!-- Which machine this is stays; what is on it moved to the System tab. -->
+      <span class="host-pill"><span class="dot bad" id="hostDot"></span><span id="hostName">connecting…</span></span>
+      <button type="button" class="theme-toggle" id="themeToggle"
+              title="Switch between light and dark" aria-label="Switch colour theme">
+        <span class="theme-icon" id="themeIcon" aria-hidden="true">◐</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="banner" id="banner">Contacting the AutoOS server…</div>
+  <!-- A one-line summary under the banner. The header keeps only which machine
+       this is; the full inventory is a click away on the System tab. -->
+  <div class="banner-facts" id="bannerFacts" hidden></div>
+  <!-- A quick install started from the catalog has to be visible from the tab you
+       started it on, not only from Run & log. -->
+  <div class="header-progress" id="headerProgress" hidden>
+    <span class="header-progress-label" id="headerProgressLabel"></span>
+    <div class="bar" role="progressbar" aria-label="Installation progress"
+         aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="headerBar"><div id="headerProg"></div></div>
+    <button type="button" class="jump-link" id="headerProgressLink">Open log &rarr;</button>
+  </div>
+
+  <noscript>
+    <div class="banner bad">
+      <b>JavaScript is blocked for this page, so AutoOS cannot start.</b>
+      Hardware detection, the component list and the installer are all driven by
+      the script served with this page — without it nothing on screen is live.
+      Allow scripts for <b>localhost:8777</b> in your browser or script blocker
+      and reload. Nothing has been installed.
+    </div>
+  </noscript>
+
+
+  <!-- ── Overview ─────────────────────────────────────────────────────── -->
+  <section role="region" id="panel-overview" aria-label="Overview" tabindex="0">
+    <div class="card-chooser-bar" id="cardChooserBar">
+      <span class="card-chooser-title">Choose Cards:</span>
+      <div class="card-pills" id="cardPills">
+        <button type="button" class="card-pill" data-target-card="cardProfile" aria-pressed="true">Profile</button>
+        <button type="button" class="card-pill" data-target-card="cardCatalog" aria-pressed="true">Components</button>
+        <button type="button" class="card-pill" data-target-card="cardOrder" aria-pressed="true">Install order</button>
+        <button type="button" class="card-pill" data-target-card="cardProviders" aria-pressed="true">Logins and keys</button>
+        <button type="button" class="card-pill" data-target-card="cardTiers" aria-pressed="true">Router tiers</button>
+      </div>
+      <div class="card-presets">
+        <span class="card-preset-label">Views:</span>
+        <button type="button" class="card-preset-btn" data-preset="all">All</button>
+        <button type="button" class="card-preset-btn" data-preset="suggested">Suggested</button>
+        <button type="button" class="card-preset-btn" data-preset="catalog">Catalog</button>
+        <button type="button" class="card-preset-btn" data-preset="config">Config</button>
+      </div>
+    </div>
+
+    <details class="card" id="cardProfile" open>
+      <summary>
+        <span class="card-title">Profile</span>
+        <span class="card-sub">a starting set of ticks — change anything below</span>
+      </summary>
+      <div class="card-body"><div class="profiles" id="profiles"></div></div>
+    </details>
+
+    <details class="card" id="cardProviders" open>
+      <summary>
+        <span class="card-title">Logins and keys</span>
+        <span class="card-sub" id="providersSub">from configuration/api-keys.yml</span>
+      </summary>
+      <div class="card-body">
+        <div class="legend">
+          <span><span class="chip chip-ok">configured</span> a value is set</span>
+          <span><span class="chip chip-missing">missing</span> add one, or routing skips it</span>
+          <span>Write-only: values are never shown, logged or read back.</span>
+        </div>
+        <div class="providers" id="providers"></div>
+      </div>
+    </details>
+
+    <details class="card" id="cardTiers" open>
+      <summary>
+        <span class="card-title">Router tiers</span>
+        <span class="card-sub" id="servicesSub">OmniRoute :20128 · free-first, paid overflow after · live service status below</span>
+      </summary>
+      <div class="card-body">
+        <div class="legend">
+          <span>Role labels explain themselves; the t1/t2/t3/t4 ids are the contract (renamed 2026-09-23).</span>
+          <span><span class="chip chip-by">-clean</span> same tier, nothing that trains on prompts</span>
+          <span><span class="chip chip-by">-free-only</span> same tier, zero paid legs</span>
+        </div>
+        <div class="legend">
+          <span><span class="chip chip-ok">up</span> answers on this machine</span>
+          <span><span class="chip chip-missing">down</span> not answering - the button next to it starts it</span>
+          <span>Every action except a dry run asks first, then streams into the Run tab.</span>
+        </div>
+        <div class="services" id="services"><div class="svc">checking services…</div></div>
+        <dl class="grid" id="routerTiers">
+          <div class="kv"><dt>l1-orchestrator · orchestrator-1M</dt><dd>1M ctx · spark-only + #high (xhigh) · sensitive: l1-orchestrator-clean (paid legs only) · zero spend: l1-orchestrator-free-only</dd></div>
+          <div class="kv"><dt>l2-worker · smart-reasoning-128k</dt><dd>≤128k ctx · gemini flash → gpt-oss → cheap-inference → deepseek → zen · sensitive: l2-worker-clean (paid only) · zero spend: l2-worker-free-only</dd></div>
+          <div class="kv"><dt>l3-driver · cheap-driver-128k</dt><dd>≤128k ctx · mistral code → qwen → cheap-inference → deepseek → zen · sensitive: l3-driver-clean (paid only) · zero spend: l3-driver-free-only</dd></div>
+          <div class="kv"><dt>t4-rag · rag-grounded-128k</dt><dd>cohere command-a → command-r-plus · grounded QA, not reasoning</dd></div>
+        </dl>
+      </div>
+    </details>
+
+    <details class="card" id="cardCatalog" open>
+      <summary>
+        <span class="card-title">Components</span>
+        <span class="card-sub" id="catalogSub"></span>
+      </summary>
+      <div class="card-body">
+        <div class="toolbar">
+          <input type="search" id="filter" placeholder="Filter components…" aria-label="Filter components">
+          <button id="filterInstalled" type="button" aria-pressed="false">✓ Installed (<span id="installedCount">0</span>)</button>
+          <button id="selAll" type="button">Select all</button>
+          <button id="selNone" type="button">Select none</button>
+          <button id="expandAll" type="button">Expand all</button>
+          <button id="collapseAll" type="button">Collapse all</button>
+          <button id="detailToggle" type="button" aria-pressed="false"
+                  title="Show the provider, the exact package and the platform for every component">Details</button>
+          <span class="spacer" style="margin-left:auto"></span>
+          <span class="tool-label">Layout</span>
+          <div class="seg" role="group" aria-label="Component layout">
+            <button type="button" data-layout-choice="list" aria-pressed="true">List</button>
+            <button type="button" data-layout-choice="grid" aria-pressed="false">Grid</button>
+          </div>
+          <label class="tool-label" for="cols">Columns</label>
+          <select id="cols" disabled aria-label="Grid columns">
+            <option value="auto">Auto-fit</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+          </select>
+        </div>
+        <div class="legend">
+          <span><span class="chip chip-ok">✓ installed</span> already on machine</span>
+          <span><i class="swatch direct"></i> chosen by you</span>
+          <span><i class="swatch autodep"></i> added automatically as a dependency</span>
+          <span><span class="chip chip-locked">locked</span> needed by something you ticked</span>
+        </div>
+        <div id="catalog"></div>
+      </div>
+    </details>
+
+    <details class="card" id="cardOrder" open>
+      <summary>
+        <span class="card-title">Install order</span>
+        <span class="card-sub" id="orderSub">dependencies first</span>
+      </summary>
+      <div class="card-body">
+        <div class="legend">
+          <span><i class="swatch direct"></i> chosen by you</span>
+          <span><i class="swatch autodep"></i> pulled in automatically</span>
+        </div>
+        <div class="tiers" id="tiers"></div>
+      </div>
+    </details>
+  </section>
+
+  <!-- ── Detected system ────────────────────────────────── -->
+  <section role="region" id="panel-system" aria-label="System" tabindex="0" hidden>
+    <p class="panel-lede">What AutoOS found on this machine, and what is already
+      on it. Read-only — nothing here changes anything; it is what the profile
+      suggestion is based on, and what a run will skip.</p>
+    <details class="card" id="cardSystem" open>
+      <summary>
+        <span class="card-title">Detected system</span>
+        <span class="card-sub" id="systemSub">read-only</span>
+      </summary>
+      <div class="card-body"><dl class="grid" id="sysinfo"></dl></div>
+    </details>
+  
+
+    <div class="installed-toolbar">
+      <input type="search" id="installedSearch" placeholder="Filter installed…"
+             aria-label="Filter installed applications" autocomplete="off">
+      <span class="installed-summary" id="installedSummary"></span>
+    </div>
+    <div id="installedList"></div>
+    </section>
+
+  <!-- ── Configure ──────────────────────────────────────── -->
+  <section role="region" id="panel-configure" aria-label="Configure" tabindex="0" hidden>
+    <p class="panel-lede">Settings for the things AutoOS installs. Saved to
+      <code>autoos.config.json</code>; the installers read them from there.</p>
+    <details class="card" id="questionsCard" open hidden>
+      <summary>
+        <span class="card-title">Questions</span>
+        <span class="card-sub">asked once, before anything is installed</span>
+      </summary>
+      <div class="card-body" id="qlist"></div>
+    </details>
+    <details class="card" id="cardConfig" open>
+      <summary>
+        <span class="card-title">Configuration</span>
+        <span class="card-sub" id="configSub">autoos.config.json</span>
+      </summary>
+      <div class="card-body">
+        <p style="color:var(--ink-muted);font-size:.84rem;margin:0 0 12px 0;">Configure deployment profile and prompt answers. Saved to <code>autoos.config.json</code>.</p>
+        <div class="config-grid" id="configGrid"></div>
+        <div class="config-actions">
+          <button type="button" id="saveConfigBtn" class="cfg-save-btn">Save Configuration</button>
+          <span id="configSaveStatus" class="cfg-status"></span>
+        </div>
+      </div>
+    </details>
+    <details class="card" id="cardClaudeAutostart">
+      <summary>
+        <span class="card-title">Claude autostart</span>
+        <span class="card-sub" id="claudeSub">reopen your sessions after a reboot</span>
+      </summary>
+      <div class="card-body">
+        <!-- State before settings: the three facts below are what "will my
+             sessions come back?" actually depends on. -->
+        <div class="claude-status" id="claudeStatus" aria-live="polite">
+          <div class="claude-status-item">
+            <span class="claude-status-label">Service</span>
+            <span class="claude-status-value" id="claudeStatusService">checking…</span>
+          </div>
+          <div class="claude-status-item">
+            <span class="claude-status-label">Last snapshot</span>
+            <span class="claude-status-value" id="claudeStatusSnapshot">—</span>
+          </div>
+          <div class="claude-status-item">
+            <span class="claude-status-label">Tracked sessions</span>
+            <span class="claude-status-value" id="claudeStatusCount">—</span>
+          </div>
+        </div>
+
+        <div class="claude-sessions-section">
+          <div class="claude-sessions-head">
+            <span class="claude-section-title">Sessions that would come back</span>
+            <div class="claude-sessions-actions" style="display:flex;gap:8px;">
+              <button type="button" id="claudeRefreshBtn" class="btn-sm">Refresh</button>
+              <button type="button" id="claudeSnapshotBtn" class="btn-sm">Capture snapshot now</button>
+            </div>
+          </div>
+          <div id="claudeSessionsContainer">
+            <div class="empty">Loading…</div>
+          </div>
+        </div>
+
+        <div class="claude-sessions-section">
+          <div class="claude-section-title" style="margin-bottom:10px;">Settings</div>
+          <div class="claude-controls-grid">
+            <div class="config-card">
+              <label for="cfg_claude_enabled">Autostart</label>
+              <select id="cfg_claude_enabled" data-claude-cfg="enabled">
+                <option value="true">On — reopen sessions at boot</option>
+                <option value="false">Paused — keep snapshotting, restore nothing</option>
+              </select>
+              <div class="help">Pausing leaves the service and the snapshots in place</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_resume_mode">Resume mode</label>
+              <select id="cfg_claude_resume_mode" data-claude-cfg="resume_mode">
+                <option value="full">In full — nothing compacted away</option>
+                <option value="summary">From a summary — faster, loses context</option>
+              </select>
+              <div class="help">Only enforced where the terminal can be typed into (herdr, tmux)</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_fallback">When there is no snapshot</label>
+              <select id="cfg_claude_fallback" data-claude-cfg="fallback">
+                <option value="continue">Start one session (claude --continue)</option>
+                <option value="none">Do nothing</option>
+              </select>
+              <div class="help">Applies on a fresh machine, or after a long shutdown</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_remote_control">Remote control</label>
+              <select id="cfg_claude_remote_control" data-claude-cfg="remote_control">
+                <option value="snapshot">Keep what was recorded</option>
+                <option value="always">Always enable</option>
+                <option value="never">Never enable</option>
+              </select>
+              <div class="help">Passes --rc to restored sessions</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_snapshot_interval_mins">Snapshot every (minutes)</label>
+              <input type="number" id="cfg_claude_snapshot_interval_mins" data-claude-cfg="snapshot_interval_mins" min="1" max="59" step="1" value="5">
+              <div class="help">How much session <em>membership</em> a crash can cost you</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_liveness_window_mins">Count as live for (minutes)</label>
+              <input type="number" id="cfg_claude_liveness_window_mins" data-claude-cfg="liveness_window_mins" min="5" max="10080" step="5" value="240">
+              <div class="help">How far back “was running before the shutdown” reaches</div>
+            </div>
+            <div class="config-card">
+              <label for="cfg_claude_max_sessions">Restore at most</label>
+              <input type="number" id="cfg_claude_max_sessions" data-claude-cfg="max_sessions" min="1" max="32" step="1" value="8">
+              <div class="help">Most recently active first</div>
+            </div>
+          </div>
+          <div class="config-actions" style="margin-top:14px;">
+            <button type="button" id="saveClaudeConfigBtn" class="cfg-save-btn">Save settings</button>
+            <span id="claudeConfigSaveStatus" class="cfg-status" role="status"></span>
+          </div>
+          <p class="claude-hint" id="claudeIntervalHint" hidden>
+            The snapshot interval is baked into the systemd timer and the Scheduled Task.
+            Re-run the installer for <code>claude-autostart</code> to apply a new value.
+          </p>
+        </div>
+      </div>
+    </details>
+
+  </section>
+
+  <section role="region" id="panel-run" aria-label="Run and log" tabindex="0" hidden>
+    <details class="card" open>
+      <summary>
+        <span class="card-title">Output</span>
+        <span class="card-sub" id="runStatus">idle</span>
+      </summary>
+      <div class="card-body">
+        <div class="progress-label"><span>Overall progress</span><span id="overallLabel">0 / 0 completed</span></div>
+        <div class="bar" role="progressbar" aria-label="Overall installation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="overallBar"><div id="prog"></div></div>
+        <div class="progress-label"><span id="currentLabel">Current application</span><span id="currentDetail">Waiting to start</span></div>
+        <div class="bar" role="progressbar" aria-label="Current application progress" aria-valuemin="0" aria-valuemax="100" id="currentBar"><div id="currentProg"></div></div>
+        <div class="log-wrap">
+          <button type="button" id="copyLog" title="Copy the whole output to the clipboard">Copy</button>
+          <div id="log">Ready. Pick your components, then press Install.</div>
+        </div>
+      </div>
+    </details>
+  </section>
+</div>
+
+<div class="actionbar">
+  <div class="inner">
+    <span class="tally" id="tally">nothing selected</span>
+    <!-- Unchecked by default: a run that installs nothing, when the button says
+         "Install selected", is a surprise in the wrong direction. The copy under
+         the button says what dry run is for, and the confirmation names it. -->
+    <label class="switch"><input type="checkbox" id="dryRun"> Dry run</label>
+    <span class="spacer"></span>
+    <span class="hint" id="elevHint"></span>
+    <button class="primary" id="run" type="button">Install selected</button>
+    <button id="createUsb" type="button" disabled>Create installer USB</button>
+  </div>
+</div>
+
+<div class="usb-dialog" id="usbDialog" hidden>
+  <div class="usb-dialog-panel" role="dialog" aria-modal="true" aria-labelledby="usbDialogTitle">
+    <h2 id="usbDialogTitle">Create installer USB</h2>
+    <p class="hint">Dry run only — this previews the exact write plan and never touches a disk.</p>
+    <label>Image
+      <select id="usbImage"></select>
+    </label>
+    <label>Kind
+      <select id="usbKind"></select>
+    </label>
+    <label>Engine
+      <select id="usbEngine"></select>
+    </label>
+    <label>Target device
+      <select id="usbDevice"><option value="">Loading devices…</option></select>
+    </label>
+    <div class="usb-dialog-confirm" id="usbConfirm" hidden></div>
+    <div class="usb-dialog-actions">
+      <button type="button" id="usbCancel">Cancel</button>
+      <button class="primary" type="button" id="usbConfirmBtn" disabled>Create (dry run)</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const token = new URLSearchParams(location.search).get("token") || "";
+const api = p => p + (p.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
+const el = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+
+let STATE = null, BY_ID = new Map(), REQUIRED_BY = new Map();
+let picked = new Set(), activeProfile = null;
+let running = false, logOffset = 0;
+let usbCatalog = null, usbDevicesData = null, usbCatalogUnavailable = null;
+let filterInstalledOnly = false;
+let CONFIG_DATA = null;
+
+/* ── preferences (theme + layout) survive a reload ─────────────────────── */
+const PREF = {
+  get(k, d) { try { return localStorage.getItem("autoos." + k) ?? d; } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("autoos." + k, v); } catch { /* private mode */ } }
+};
+
+/* One button, two states. "auto" is still the stored default until the user
+   expresses a preference; from then on the button flips light <-> dark and the
+   icon shows the theme you would switch TO, which is the one thing a single
+   toggle can say unambiguously. */
+function currentThemeIsDark() {
+  const stamped = document.documentElement.getAttribute("data-theme");
+  if (stamped) return stamped === "dark";
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+function applyTheme(choice) {
+  // "auto" removes the stamp entirely so prefers-color-scheme takes over.
+  if (choice === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", choice);
+  PREF.set("theme", choice);
+
+  const dark = currentThemeIsDark();
+  el("themeIcon").textContent = dark ? "☀" : "☾";
+  el("themeToggle").title = dark ? "Switch to light" : "Switch to dark";
+  el("themeToggle").setAttribute("aria-label", dark ? "Switch to light theme" : "Switch to dark theme");
+}
+
+function applyLayout(choice) {
+  document.body.dataset.layout = choice;
+  document.querySelectorAll("[data-layout-choice]").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.layoutChoice === choice)));
+  el("cols").disabled = choice !== "grid";
+  PREF.set("layout", choice);
+}
+function applyCols(v) { document.body.dataset.cols = v; el("cols").value = v; PREF.set("cols", v); }
+
+el("themeToggle").onclick = () => applyTheme(currentThemeIsDark() ? "light" : "dark");
+document.querySelectorAll("[data-layout-choice]").forEach(b =>
+  b.onclick = () => applyLayout(b.dataset.layoutChoice));
+el("cols").onchange = () => applyCols(el("cols").value);
+
+applyTheme(PREF.get("theme", "auto"));
+applyLayout(PREF.get("layout", "list"));
+applyCols(PREF.get("cols", "auto"));
+
+/* ── dependency maths ─────────────────────────────────────────────────── */
+function canInstall(c, seen = new Set()) {
+  // A retired id is not installable by definition: the catalog keeps it so old
+  // selections still resolve, and it installs nothing. Every path on the page —
+  // the profile pre-tick, the dependency closure, the questions, the quick
+  // install — asks this one function, so one answer here covers all of them.
+  if (!c || c.provider === 'manual' || c.tombstone || c.installable === false) return false;
+  if (seen.has(c.id)) return true;
+  seen.add(c.id);
+  return (c.requires || []).every(id => canInstall(BY_ID.get(id), seen));
+}
+function closure(ids) {
+  const out = new Set(), queue = [...ids].filter(id => canInstall(BY_ID.get(id)));
+  while (queue.length) {
+    const id = queue.pop();
+    if (out.has(id) || !BY_ID.has(id)) continue;
+    out.add(id);
+    for (const r of BY_ID.get(id).requires || []) queue.push(r);
+  }
+  return out;
+}
+const effective = () => closure(picked);
+const autoAdded = () => { const e = effective(); picked.forEach(p => e.delete(p)); return e; };
+
+const depthCache = new Map();
+function depth(id, seen = new Set()) {
+  if (depthCache.has(id)) return depthCache.get(id);
+  if (seen.has(id)) return 0;
+  seen.add(id);
+  const reqs = (BY_ID.get(id)?.requires || []).filter(r => BY_ID.has(r));
+  const d = reqs.length ? 1 + Math.max(...reqs.map(r => depth(r, seen))) : 0;
+  depthCache.set(id, d);
+  return d;
+}
+function lockedBy(id) {
+  const eff = effective();
+  return (REQUIRED_BY.get(id) || []).filter(d => eff.has(d) && d !== id);
+}
+/* id -> step number for a given set. Empty tiers are skipped, so the numbering
+   matches the Install order card exactly rather than being a raw depth. */
+function stepMap(ids) {
+  const depths = [...new Set([...ids].map(id => depth(id)))].sort((a, b) => a - b);
+  const rank = new Map(depths.map((d, i) => [d, i + 1]));
+  return new Map([...ids].map(id => [id, rank.get(depth(id))]));
+}
+
+/* What a profile would install, dependencies included. */
+function profileClosure(name) {
+  if (name === "custom") return new Set();
+  return closure(STATE.components.filter(c => canInstall(c) && (c.profiles || []).includes(name)).map(c => c.id));
+}
+
+/* ── tabs ─────────────────────────────────────────────────────────────── */
+const TABS = ["overview", "configure", "run", "system"];
+const TAB_LABEL = { overview: "Overview", configure: "Configure", run: "Run & log", system: "System" };
+
+function showTab(name) {
+  TABS.forEach(t => {
+    el("tab-" + t).setAttribute("aria-checked", String(t === name));
+    el("panel-" + t).hidden = t !== name;
+  });
+  el("tabMenuCurrent").textContent = TAB_LABEL[name] || name;
+  closeTabMenu();
+  // The questions a selection needs live on Configure now, so they have to be
+  // rendered when that tab opens rather than when the run starts.
+  if (name === "run" || name === "configure") renderQuestions();
+  if (name === "system") renderInstalledTab();
+}
+
+/* The section menu. A dropdown has to be openable, closable and walkable from
+   the keyboard or it is only a button that looks like navigation. */
+function openTabMenu() {
+  el("tabMenu").hidden = false;
+  el("tabMenuBtn").setAttribute("aria-expanded", "true");
+  const current = TABS.find(t => el("tab-" + t).getAttribute("aria-checked") === "true");
+  el("tab-" + (current || TABS[0])).focus();
+}
+function closeTabMenu() {
+  el("tabMenu").hidden = true;
+  el("tabMenuBtn").setAttribute("aria-expanded", "false");
+}
+function toggleTabMenu() {
+  if (el("tabMenu").hidden) openTabMenu(); else closeTabMenu();
+}
+
+el("tabMenuBtn").addEventListener("click", toggleTabMenu);
+el("tabMenuBtn").addEventListener("keydown", e => {
+  if (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ") { e.preventDefault(); openTabMenu(); }
+});
+
+TABS.forEach((t, i) => {
+  el("tab-" + t).addEventListener("click", () => showTab(t));
+  el("tab-" + t).addEventListener("keydown", e => {
+    if (e.key === "Escape") { closeTabMenu(); el("tabMenuBtn").focus(); return; }
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    e.preventDefault();
+    const next = TABS[(i + (e.key === "ArrowDown" ? 1 : TABS.length - 1)) % TABS.length];
+    el("tab-" + next).focus();
+  });
+});
+
+// Clicking anywhere else closes it, which is what every other menu on the
+// machine does and therefore what the user will try.
+document.addEventListener("click", e => {
+  if (!el("tabMenu").hidden && !el("tabNav").contains(e.target)) closeTabMenu();
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape" && !el("tabMenu").hidden) { closeTabMenu(); el("tabMenuBtn").focus(); }
+});
+
+/* ── boot ─────────────────────────────────────────────────────────────── */
+async function boot() {
+  try {
+    const r = await fetch(api("/api/state"));
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    STATE = await r.json();
+  } catch (e) {
+    el("banner").classList.add("bad");
+    el("banner").textContent = "Cannot reach the AutoOS server: " + e.message +
+      ". Open the URL printed in the terminal, including its token.";
+    el("hostName").textContent = "disconnected";
+    return;
+  }
+
+  BY_ID = new Map(STATE.components.map(c => [c.id, c]));
+  REQUIRED_BY = new Map();
+  for (const c of STATE.components) {
+    for (const r of c.requires || []) {
+      if (!REQUIRED_BY.has(r)) REQUIRED_BY.set(r, []);
+      REQUIRED_BY.get(r).push(c.id);
+    }
+  }
+
+  const s = STATE.system;
+  el("hostName").textContent = s.host || "this machine";
+  el("hostDot").classList.remove("bad");
+
+  // WSL changes what actually works, so it is named in the banner sentence below
+  // rather than in a header pill; the detail sits on the System tab.
+  const wsl = STATE.wsl || {};
+
+  el("banner").innerHTML = "Connected to <b>" + esc(s.host || "this machine") + "</b> (" +
+    esc(STATE.platform) + (wsl.isWsl ? ", under WSL" + esc(wsl.version || "") : "") +
+    "). Nothing is installed until you press <b>Install selected</b>, and the " +
+    "confirmation lists every package first. Tick <b>Dry run</b> to print the plan " +
+    "without touching the machine.";
+
+  const installedCount = (STATE.components || []).filter(c => c.installed).length;
+  el("installedCount").textContent = String(installedCount);
+
+  // Five facts, one line. Enough to re-check what you are provisioning without
+  // leaving the flow; the rest is on the System tab.
+  const facts = [
+    ["OS", s.distribution || s["operating system"]],
+    ["Arch", s.architecture],
+    ["CPU", s.cores ? s.cores + " cores" : null],
+    ["RAM", s.memory],
+    ["Free disk", s["free disk"]]
+  ].filter(([, v]) => v);
+  el("bannerFacts").hidden = !facts.length;
+  el("bannerFacts").innerHTML = facts.map(([k, v]) =>
+    '<span class="bfact"><span class="bfact-k">' + esc(k) + "</span>" +
+    '<span class="bfact-v">' + esc(String(v)) + "</span></span>").join("") +
+    '<button type="button" class="jump-link" id="bannerSystemLink">Full system &rarr;</button>';
+  el("bannerSystemLink").addEventListener("click", () => showTab("system"));
+
+  // "installed applications" is a 31-item comma-separated blob. As one <dd> in a
+  // key/value grid it pushed every other detected fact off the screen, so it gets
+  // the Installed tab instead and this card keeps the facts that fit a grid.
+  const HIDE_FROM_GRID = ["host", "installed applications"];
+  el("sysinfo").innerHTML = Object.entries(s).filter(([k]) => !HIDE_FROM_GRID.includes(k))
+    .map(([k, v]) => '<div class="kv' + (k === "environment" ? " highlight" : "") + '"><dt>' +
+      esc(k) + "</dt><dd>" + esc(v) + "</dd></div>").join("");
+  el("systemSub").textContent = (s.distribution || s["operating system"] || "") + " · " + (s.architecture || "");
+
+  const elev = String(s.elevated ?? "").toLowerCase();
+  el("elevHint").textContent = elev === "no"
+    ? "not elevated — some installers may request administrator approval" : "";
+
+  renderProfiles();
+  renderProviders();
+  loadServices();
+  renderCatalog();
+  applyProfile(STATE.suggested);
+
+  el("badgeInstalled").textContent = String(installedCount);
+  el("installedSearch").addEventListener("input", renderInstalledTab);
+
+  // Detail is off by default and remembered: the chips answer "which package
+  // exactly", which matters when auditing a plan and never when picking one.
+  const applyDetail = on => {
+    document.body.dataset.detail = on ? "on" : "off";
+    el("detailToggle").setAttribute("aria-pressed", String(on));
+    PREF.set("detail", on ? "on" : "off");
+  };
+  applyDetail(PREF.get("detail", "off") === "on");
+  el("detailToggle").onclick = () => applyDetail(document.body.dataset.detail !== "on");
+
+  el("headerProgressLink").addEventListener("click", () => showTab("run"));
+
+  el("selAll").onclick      = () => { STATE.components.filter(c => canInstall(c)).forEach(c => picked.add(c.id)); activeProfile = null; sync(); };
+  el("selNone").onclick     = () => { picked.clear(); activeProfile = null; sync(); };
+  el("expandAll").onclick   = () => document.querySelectorAll(".group").forEach(g => g.open = true);
+  el("collapseAll").onclick = () => document.querySelectorAll(".group").forEach(g => g.open = false);
+  el("filter").oninput      = applyFilter;
+  el("filterInstalled").onclick = () => {
+    filterInstalledOnly = !filterInstalledOnly;
+    el("filterInstalled").setAttribute("aria-pressed", String(filterInstalledOnly));
+    applyFilter();
+  };
+  el("run").onclick         = runInstall;
+  el("createUsb").onclick   = openUsbDialog;
+  el("usbCancel").onclick   = closeUsbDialog;
+  el("usbConfirmBtn").onclick = startUsbCreate;
+  el("usbDialog").addEventListener("click", e => { if (e.target === el("usbDialog")) closeUsbDialog(); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && !el("usbDialog").hidden) closeUsbDialog(); });
+  el("usbImage").addEventListener("change", () => { populateUsbKindOptions(); populateUsbEngineOptions(); });
+  el("usbKind").addEventListener("change", populateUsbEngineOptions);
+  el("usbDevice").addEventListener("change", updateUsbConfirm);
+  el("usbEngine").addEventListener("change", updateUsbConfirm);
+  refreshUsbElevation();
+  loadUsbCatalogOnce();
+
+  try {
+    const cfRes = await fetch(api("/api/config"));
+    if (cfRes.ok) CONFIG_DATA = await cfRes.json();
+  } catch (e) {}
+  if (!CONFIG_DATA) CONFIG_DATA = { version: 1, profile: STATE.suggested || "workstation", answers: {} };
+  renderConfigCard();
+  initCardChooser();
+  initConfigureLinks();
+  renderClaudeAutostartCard();
+
+  resumeIfRunning();
+  heartbeat();
+}
+
+/* ── card chooser & card visibility ───────────────────────────────────── */
+/* The chooser governs the Overview panel only. The settings cards live on the
+   Configure tab, where hiding them would just be a second way to lose them. */
+const ALL_CARDS = ["cardProfile", "cardCatalog", "cardOrder", "cardProviders", "cardTiers"];
+const PRESETS = {
+  all: ALL_CARDS,
+  suggested: ["cardProfile", "cardCatalog"],
+  catalog: ["cardCatalog", "cardOrder"]
+};
+
+/* Where each card lives, so a "⚙ Configure" link can switch tabs before it
+   scrolls — otherwise it silently scrolls a panel nobody is looking at. */
+const CARD_TAB = {
+  cardProfile: "overview", cardCatalog: "overview", cardOrder: "overview",
+  cardProviders: "overview", cardTiers: "overview",
+  cardSystem: "system",
+  cardConfig: "configure", cardClaudeAutostart: "configure", questionsCard: "configure"
+};
+
+/* Motion is opt-out at the OS level, so anything that scrolls or animates has to
+   ask first — the same reason the indeterminate progress bar has a guard. */
+const REDUCED_MOTION = window.matchMedia
+  ? window.matchMedia("(prefers-reduced-motion: reduce)")
+  : { matches: false };
+
+function getVisibleCards() {
+  const saved = PREF.get("cards", null);
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved);
+      // Drop ids from an older layout rather than resurrecting a card that no
+      // longer exists, which would leave a pill toggling nothing.
+      const known = parsed.filter(id => ALL_CARDS.includes(id));
+      if (known.length) return new Set(known);
+    } catch (e) {}
+  }
+  return new Set(ALL_CARDS);
+}
+
+function applyCardVisibility(visibleSet) {
+  ALL_CARDS.forEach(cardId => {
+    const card = el(cardId);
+    const isVis = visibleSet.has(cardId);
+    if (card) card.hidden = !isVis;
+    const pill = document.querySelector('.card-pill[data-target-card="' + cardId + '"]');
+    if (pill) pill.setAttribute("aria-pressed", String(isVis));
+  });
+
+  // Light up the preset whose set this is, so the active view is visible.
+  const current = [...visibleSet].sort().join(",");
+  document.querySelectorAll(".card-preset-btn").forEach(btn => {
+    const preset = PRESETS[btn.dataset.preset] || [];
+    btn.setAttribute("aria-pressed", String([...preset].sort().join(",") === current));
+  });
+
+  PREF.set("cards", JSON.stringify([...visibleSet]));
+}
+
+/* Choosing a card is a deliberate act, so it opens what it names. Without this a
+   preset can surface a card that is still folded and look like it did nothing —
+   and a folded card hides the very controls the preset was chosen for. */
+function openCards(cardIds) {
+  cardIds.forEach(cardId => {
+    const card = el(cardId);
+    if (card) card.open = true;
+  });
+}
+
+function initCardChooser() {
+  applyCardVisibility(getVisibleCards());
+
+  el("cardChooserBar").addEventListener("click", ev => {
+    const pill = ev.target.closest(".card-pill");
+    if (pill) {
+      const target = pill.dataset.targetCard;
+      const cur = getVisibleCards();
+      if (cur.has(target)) {
+        // Never leave an empty Overview: the last card stays.
+        if (cur.size > 1) cur.delete(target);
+        applyCardVisibility(cur);
+      } else {
+        cur.add(target);
+        applyCardVisibility(cur);
+        openCards([target]);
+      }
+      return;
+    }
+
+    const preset = ev.target.closest(".card-preset-btn");
+    if (preset && PRESETS[preset.dataset.preset]) {
+      const next = PRESETS[preset.dataset.preset];
+      applyCardVisibility(new Set(next));
+      // "All" is the default landing view, not a focused one: leave the cards
+      // folded as the user left them rather than expanding six at once.
+      if (preset.dataset.preset !== "all") openCards(next);
+    }
+  });
+}
+
+/* Reveal a card (unhiding it if the chooser had it off) and put the cursor where
+   the user was heading. Bound through delegation from the click handlers below
+   rather than an inline onclick: an inline handler would need a value
+   HTML-escaped into a JS string, which is the wrong escaper for that context. */
+function focusCard(cardId, elementId) {
+  // Only Overview cards can be hidden by the chooser; unhide before scrolling.
+  if (ALL_CARDS.includes(cardId)) {
+    const visible = getVisibleCards();
+    if (!visible.has(cardId)) {
+      visible.add(cardId);
+      applyCardVisibility(visible);
+    }
+  }
+  const card = el(cardId);
+  if (!card) return;
+  card.open = true;
+  showTab(CARD_TAB[cardId] || "overview");
+
+  const target = (elementId && el(elementId)) || card;
+  target.scrollIntoView({ behavior: REDUCED_MOTION.matches ? "auto" : "smooth", block: "center" });
+  if (elementId && el(elementId)) {
+    const field = el(elementId);
+    field.classList.add("target-highlight");
+    setTimeout(() => field.classList.remove("target-highlight"), 1600);
+    try { field.focus(); } catch (e) {}
+  }
+}
+
+/* One delegated listener for every "⚙ Configure" affordance on the page. */
+function initConfigureLinks() {
+  document.addEventListener("click", ev => {
+    const link = ev.target.closest("[data-configure-card]");
+    if (!link) return;
+    // These sit inside <label class="item">, whose activation would otherwise
+    // toggle the component's checkbox on the way past.
+    ev.preventDefault();
+    ev.stopPropagation();
+    focusCard(link.dataset.configureCard, link.dataset.configureField || null);
+  });
+}
+
+/* ── quick install ────────────────────────────────────────────────────── */
+/* Installing one component from the catalog without disturbing the selection.
+   A run is single-threaded on the server, so presses while one is in flight are
+   queued rather than dropped or run concurrently. */
+let quickQueue = [];
+
+function queueQuickInstall(id) {
+  const c = BY_ID.get(id);
+  if (!c || !canInstall(c) || c.installed) return;
+
+  if (!quickQueue.includes(id)) quickQueue.push(id);
+  markQuickPending();
+
+  if (running) {
+    setHeaderProgressNote(quickQueue.length + " queued");
+    return;
+  }
+  drainQuickQueue();
+}
+
+function markQuickPending() {
+  document.querySelectorAll("[data-quick]").forEach(btn => {
+    const queued = quickQueue.includes(btn.dataset.quick);
+    btn.disabled = queued;
+    btn.textContent = queued ? "queued…" : "⚡ Install";
+  });
+}
+
+async function drainQuickQueue() {
+  if (running || !quickQueue.length) return;
+  const id = quickQueue[0];
+  const c = BY_ID.get(id);
+  const dry = el("dryRun").checked;
+
+  // Dependencies still apply: installing a thing without what it needs fails.
+  const ids = [...closure(new Set([id]))].filter(x => !BY_ID.get(x)?.installed);
+  if (!ids.length) { quickQueue.shift(); markQuickPending(); return; }
+
+  running = true;
+  el("run").disabled = true;
+  logOffset = 0;
+  el("log").textContent = "";
+  renderProgress({ running: true, total: ids.length, done: 0, current: null });
+  showHeaderProgress(c ? c.name : id);
+
+  const r = await fetch(api("/api/install"), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids, answers: answers(), dryRun: dry })
+  });
+  if (!r.ok) {
+    appendLog([{ level: "err", text: "Server refused the quick install: HTTP " + r.status }]);
+    quickQueue.shift();
+    running = false; markQuickPending(); hideHeaderProgress(); sync();
+    return;
+  }
+  quickQueue.shift();
+  poll();
+}
+
+function showHeaderProgress(name) {
+  el("headerProgress").hidden = false;
+  el("headerProgressLabel").textContent = "Installing " + name;
+}
+function setHeaderProgressNote(note) {
+  if (!el("headerProgress").hidden) {
+    el("headerProgressLabel").textContent =
+      el("headerProgressLabel").textContent.split(" · ")[0] + " · " + note;
+  }
+}
+function hideHeaderProgress() {
+  el("headerProgress").hidden = true;
+}
+function renderHeaderProgress(d) {
+  if (el("headerProgress").hidden) return;
+  const total = Math.max(0, Number(d.total) || 0);
+  const done = Math.min(total, Math.max(0, Number(d.done) || 0));
+  const pct = total ? Math.floor(100 * done / total) : 0;
+  el("headerProg").style.width = pct + "%";
+  el("headerBar").setAttribute("aria-valuenow", String(pct));
+}
+
+/* ── installed tab ────────────────────────────────────────────────────── */
+/* The detected-system card used to carry every installed app as one long comma
+   separated <dd>, which buried the twelve facts around it. Same data, given
+   room: grouped by the catalog's own categories, filterable, and each row links
+   to its settings where it has any. */
+function renderInstalledTab() {
+  const all = (STATE.components || []).filter(c => c.installed);
+  el("badgeInstalled").textContent = String(all.length);
+
+  const needle = (el("installedSearch").value || "").trim().toLowerCase();
+  const shown = needle
+    ? all.filter(c => (c.id + " " + c.name + " " + (c.description || "") + " " + c.package)
+        .toLowerCase().includes(needle))
+    : all;
+
+  el("installedSummary").textContent = needle
+    ? shown.length + " of " + all.length + " shown"
+    : all.length + " already on this machine";
+
+  if (!shown.length) {
+    el("installedList").innerHTML = '<div class="empty">' +
+      (all.length ? "Nothing matches that filter." : "Nothing detected as installed yet.") + "</div>";
+    return;
+  }
+
+  const byCategory = new Map();
+  for (const c of shown) {
+    const category = c.category || "Other";
+    if (!byCategory.has(category)) byCategory.set(category, []);
+    byCategory.get(category).push(c);
+  }
+
+  let html = "";
+  for (const [category, items] of byCategory) {
+    html += '<details class="card" open><summary><span class="card-title">' + esc(category) +
+      '</span><span class="card-sub">' + items.length + " installed</span></summary>" +
+      '<div class="card-body"><div class="installed-grid">';
+    for (const c of items) {
+      const link = c.homepage
+        ? '<a class="item-name" href="' + esc(c.homepage) + '" target="_blank" rel="noopener">' + esc(c.name) + "</a>"
+        : '<span class="item-name">' + esc(c.name) + "</span>";
+      const configure = CONFIGURABLE_COMPONENTS[c.id]
+        ? '<button type="button" class="jump-link" data-configure-card="' +
+          esc(CONFIGURABLE_COMPONENTS[c.id].card) + '"' +
+          (CONFIGURABLE_COMPONENTS[c.id].field
+            ? ' data-configure-field="' + esc(CONFIGURABLE_COMPONENTS[c.id].field) + '"' : "") +
+          ">⚙ Configure</button>"
+        : "";
+      html += '<div class="installed-row">' +
+        '<div class="installed-row-head">' + link + configure + "</div>" +
+        '<div class="item-desc">' + esc(c.description || "") + "</div>" +
+        '<div class="installed-row-meta"><span class="chip chip-pkg" title="' +
+          esc(c.provider + ": " + c.package) + '">' + esc(c.package) + "</span></div>" +
+        "</div>";
+    }
+    html += "</div></div></details>";
+  }
+  el("installedList").innerHTML = html;
+}
+
+/* Which components have settings, and where those settings are. Derived from the
+   catalog's `prompt` field at render time for everything else; this map only
+   covers the components whose settings are a card of their own. */
+const CONFIGURABLE_COMPONENTS = {
+  "claude-autostart": { card: "cardClaudeAutostart" },
+  "claude-code": { card: "cardClaudeAutostart" },
+  git: { card: "cardConfig", field: "cfg_git_user_name" },
+  herdr: { card: "cardConfig", field: "cfg_herdr_source" },
+  ollama: { card: "cardConfig", field: "cfg_ollama_models" }
+};
+
+/* ── claude autostart & session tracking ──────────────────────────────── */
+
+/* The settings this card owns, and the id suffix each one is rendered under.
+   Held in one object because the first version wrote `resume_prompt_mode` and
+   `interval_minutes` while the scripts read `resume_mode` and
+   `snapshot_interval_mins` — the save succeeded and changed nothing. The test
+   `every claude_autostart key the web UI writes is a key the scripts read`
+   compares these names against autoos.config.example.json. */
+const CLAUDE_CFG_KEYS = {
+  enabled: "bool",
+  resume_mode: "string",
+  fallback: "string",
+  remote_control: "string",
+  snapshot_interval_mins: "int",
+  liveness_window_mins: "int",
+  max_sessions: "int"
+};
+
+function claudeAgo(iso) {
+  if (!iso) return "never";
+  const then = new Date(iso);
+  if (isNaN(then)) return "never";
+  const mins = Math.round((Date.now() - then.getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + " min ago";
+  const hours = Math.round(mins / 60);
+  if (hours < 48) return hours + " h ago";
+  return Math.round(hours / 24) + " days ago";
+}
+
+function renderClaudeStatus(data) {
+  const installed = !!data.installed;
+  const sessions = data.sessions || [];
+
+  const service = el("claudeStatusService");
+  service.textContent = installed ? "installed" : "not installed";
+  service.classList.toggle("is-warn", !installed);
+
+  const snap = el("claudeStatusSnapshot");
+  snap.textContent = claudeAgo(data.captured_at_iso);
+  snap.classList.toggle("is-warn", !data.captured_at_iso);
+
+  el("claudeStatusCount").textContent = String(sessions.length);
+
+  // The card is only worth opening on its own when the feature is actually on.
+  const card = el("cardClaudeAutostart");
+  if (card && !card.dataset.opened) {
+    card.open = installed;
+    card.dataset.opened = "1";
+  }
+  el("claudeSub").textContent = installed
+    ? sessions.length + " session(s) would be restored"
+    : "not installed — select claude-autostart in Components";
+}
+
+async function loadClaudeSessions() {
+  const container = el("claudeSessionsContainer");
+  try {
+    const res = await fetch(api("/api/claude/sessions"));
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    renderClaudeStatus(data);
+
+    const sessions = data.sessions || [];
+    if (!sessions.length) {
+      // An empty state that says what to do next, not just that it is empty.
+      container.innerHTML = data.installed
+        ? '<div class="empty">Nothing recorded yet. Open a Claude Code session, then ' +
+          '<button type="button" class="jump-link" id="claudeEmptySnapshot">capture a snapshot</button>.</div>'
+        : '<div class="empty">Nothing recorded — the snapshot service is not installed. ' +
+          '<button type="button" class="jump-link" data-configure-card="cardCatalog">Pick claude-autostart in Components →</button></div>';
+      const quick = el("claudeEmptySnapshot");
+      if (quick) quick.addEventListener("click", captureClaudeSnapshot);
+      return;
+    }
+
+    let html = '<div class="claude-table-wrap"><table class="claude-sessions-table"><thead><tr>' +
+      "<th>Session</th><th>Working directory</th><th>Branch</th><th>Last active</th><th>Flags</th>" +
+      "</tr></thead><tbody>";
+    for (const s of sessions) {
+      const rc = s.remote_control
+        ? '<span class="chip prov prov-npm">--rc</span>'
+        : '<span style="color:var(--ink-faint)">standard</span>';
+      html += "<tr>" +
+        "<td><b>" + esc(s.name || "unnamed") + "</b><br>" +
+          '<code style="font-size:.7rem;color:var(--ink-faint)" title="' + esc(s.session_uuid || "") + '">' +
+          esc((s.session_uuid || "").slice(0, 8)) + "…</code></td>" +
+        '<td style="font-family:var(--mono);font-size:.76rem;" title="' + esc(s.cwd || "") + '">' +
+          esc(s.cwd || "~") + "</td>" +
+        "<td>" + esc(s.git_branch || "—") + "</td>" +
+        "<td>" + esc(claudeAgo(s.last_active ? new Date(s.last_active * 1000).toISOString() : null)) + "</td>" +
+        "<td>" + rc + "</td>" +
+        "</tr>";
+    }
+    container.innerHTML = html + "</tbody></table></div>";
+  } catch (err) {
+    container.innerHTML = '<div class="empty" style="color:var(--err)">Could not read the session state: ' +
+      esc(err.message) + "</div>";
+  }
+}
+
+async function captureClaudeSnapshot() {
+  const btn = el("claudeSnapshotBtn");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Capturing…";
+  try {
+    const res = await fetch(api("/api/claude/snapshot"), { method: "POST" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    await loadClaudeSessions();
+  } catch (err) {
+    el("claudeSessionsContainer").innerHTML =
+      '<div class="empty" style="color:var(--err)">Snapshot failed: ' + esc(err.message) + "</div>";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+function renderClaudeAutostartCard() {
+  const cfg = (CONFIG_DATA && CONFIG_DATA.claude_autostart) || {};
+  for (const key of Object.keys(CLAUDE_CFG_KEYS)) {
+    const field = el("cfg_claude_" + key);
+    if (!field || cfg[key] === undefined || cfg[key] === null) continue;
+    field.value = CLAUDE_CFG_KEYS[key] === "bool" ? String(!!cfg[key]) : cfg[key];
+  }
+  // Remember what the interval was, so the "re-run the installer" hint appears
+  // only for the one setting that is genuinely baked into the supervisor.
+  el("cfg_claude_snapshot_interval_mins").dataset.saved =
+    el("cfg_claude_snapshot_interval_mins").value;
+
+  el("claudeRefreshBtn").addEventListener("click", loadClaudeSessions);
+  el("claudeSnapshotBtn").addEventListener("click", captureClaudeSnapshot);
+  el("saveClaudeConfigBtn").addEventListener("click", saveClaudeConfiguration);
+  loadClaudeSessions();
+}
+
+async function saveClaudeConfiguration() {
+  const status = el("claudeConfigSaveStatus");
+  const intervalField = el("cfg_claude_snapshot_interval_mins");
+  const intervalChanged = intervalField.value !== intervalField.dataset.saved;
+
+  if (!CONFIG_DATA) CONFIG_DATA = { version: 1, profile: activeProfile || "workstation", answers: {} };
+  // Merge, never replace: the block also holds fallback_cwd, fallback_name and
+  // terminal_host, which this card does not show and must not discard.
+  const block = Object.assign({}, CONFIG_DATA.claude_autostart || {});
+  for (const [key, kind] of Object.entries(CLAUDE_CFG_KEYS)) {
+    const field = el("cfg_claude_" + key);
+    if (!field) continue;
+    if (kind === "int") block[key] = parseInt(field.value, 10) || 0;
+    else if (kind === "bool") block[key] = field.value === "true";
+    else block[key] = field.value;
+  }
+  CONFIG_DATA.claude_autostart = block;
+
+  try {
+    const res = await fetch(api("/api/config"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(CONFIG_DATA)
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    status.textContent = "Saved";
+    intervalField.dataset.saved = intervalField.value;
+    // Not a toast: this one needs acting on, so it stays until the value changes.
+    el("claudeIntervalHint").hidden = !intervalChanged;
+    setTimeout(() => { status.textContent = ""; }, 4000);
+  } catch (err) {
+    status.textContent = "Save failed: " + err.message;
+  }
+}
+
+/* ── the page outlives its server, so it has to notice ─────────────────── */
+/* Ctrl-C in the terminal, a closed window, a crash: the server goes and this
+   tab keeps sitting there looking live, with buttons that look pressable and a
+   component list that is now fiction. Poll a cheap endpoint, and once the
+   server is definitely gone tear the page down instead of letting it lie. */
+const HEARTBEAT_MS = 2000, HEARTBEAT_MISSES = 3;
+let heartbeatTimer = null, misses = 0, dead = false;
+
+async function heartbeat() {
+  if (dead) return;
+  try {
+    // Any answer at all means someone is still listening, so the status is
+    // deliberately ignored: a 404 is an older server that predates this
+    // endpoint, a 403 is a stale token. Neither is a reason to kill the page -
+    // only fetch rejecting, which is the connection itself failing.
+    await fetch(api("/api/ping"), { cache: "no-store" });
+    misses = 0;
+  } catch (e) {
+    // One miss is a hiccup - a request that lost a race with a restarting
+    // listener, a machine that just woke up. Several in a row is a dead server.
+    if (++misses >= HEARTBEAT_MISSES) return serverGone();
+  }
+  heartbeatTimer = setTimeout(heartbeat, HEARTBEAT_MS);
+}
+
+function serverGone() {
+  if (dead) return;
+  dead = true;
+  clearTimeout(heartbeatTimer);
+  running = false;
+
+  // A tab the server opened with Start-Process was not opened by script, so
+  // window.close() is ignored in every browser. Ask anyway - it works for the
+  // window.open case - then replace the page so nothing stale is left to click.
+  try { window.close(); } catch { /* not ours to close */ }
+
+  document.title = "AutoOS — server stopped";
+  document.body.innerHTML =
+    '<div class="wrap"><header><h1>AutoOS</h1>' +
+    '<span class="tagline">post-install provisioning</span></header>' +
+    '<div class="banner bad"><b>The AutoOS server has stopped.</b> ' +
+    'This page is no longer connected to anything, so it has been cleared ' +
+    'rather than left showing a machine it can no longer see. Nothing was ' +
+    'changed by the server shutting down — any install that had already ' +
+    'started keeps running in its own process. ' +
+    'Run <b>setup.ps1 -Serve</b> (or <b>setup.sh --serve</b>) again for a new ' +
+    'URL; the token changes every run, so this one is now dead too.</div></div>';
+}
+
+/* ── logins and keys, write-only (GET/POST /api/secrets) ──────────────── */
+/* The server sends set/missing per key and an apply hint - never a value. A
+   save POSTs {id,value}, then clears the box and flips the chip. Nothing here
+   puts a value back into the DOM, the log or localStorage. */
+async function renderProviders() {
+  let rows = null, writable = true;
+  try {
+    const r = await fetch(api("/api/secrets"), { cache: "no-store" });
+    if (r.ok) {
+      const d = await r.json();
+      rows = d.secrets || [];
+      writable = d.writable !== false;
+    }
+  } catch (e) {
+    /* older server or a hiccup: fall back to the status the state carries */
+  }
+  if (!rows) rows = (STATE.providers || []).map(p => ({
+    id: p.id, name: p.name, group: "", apply: "", configured: p.configured
+  }));
+  const done = rows.filter(p => p.configured).length;
+  el("providersSub").textContent = done + " of " + rows.length +
+    " set · configuration/api-keys.yml · write-only";
+  el("providers").innerHTML = rows.map(p => providerRow(p, writable)).join("");
+  rows.forEach(p => {
+    const btn = el("save-" + p.id);
+    if (btn) btn.addEventListener("click", () => saveSecret(p));
+  });
+}
+
+function providerRow(p, writable) {
+  return '<div class="provider' + (p.configured ? "" : " off") +
+      '" data-secret="' + esc(p.id) + '">' +
+    '<span class="pname">' + esc(p.name) +
+      (p.group ? '<span class="pgroup">' + esc(p.group) + "</span>" : "") + "</span>" +
+    '<span class="chip ' + (p.configured ? "chip-ok" : "chip-missing") +
+      '" id="state-' + esc(p.id) + '">' +
+      (p.configured ? "configured" : "missing") + "</span>" +
+    '<input type="password" id="input-' + esc(p.id) +
+      '" autocomplete="new-password" spellcheck="false" aria-label="' +
+      esc(p.name) + '" placeholder="' +
+      (p.configured ? "replace value" : "paste value") + '">' +
+    '<button type="button" class="save-secret" id="save-' + esc(p.id) + '"' +
+      (writable ? "" : " disabled") + ">Save</button>" +
+    '<span class="secret-apply" id="apply-' + esc(p.id) + '"></span>' +
+  "</div>";
+}
+
+async function saveSecret(p) {
+  const input = el("input-" + p.id);
+  const note = el("apply-" + p.id);
+  const value = input ? input.value : "";
+  if (!value) { if (note) note.innerHTML = esc("enter a value first"); return; }
+  let r;
+  try {
+    r = await fetch(api("/api/secrets"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: p.id, value: value })
+    });
+  } catch (e) {
+    if (note) note.innerHTML = esc("could not reach the server");
+    return;
+  }
+  let d = {};
+  try { d = await r.json(); } catch (e) { d = {}; }
+  if (!r.ok) {
+    if (note) note.innerHTML = esc(d.error || ("save failed (HTTP " + r.status + ")"));
+    return;
+  }
+  if (input) input.value = "";
+  p.configured = true;
+  const chip = el("state-" + p.id);
+  if (chip) { chip.textContent = "configured"; chip.className = "chip chip-ok"; }
+  const row = document.querySelector('[data-secret="' + p.id + '"]');
+  if (row) row.classList.remove("off");
+  if (note) {
+    note.innerHTML = esc(d.apply ? ("apply: " + d.apply)
+                                 : (d.unchanged ? "unchanged" : "saved"));
+  }
+}
+
+/* ── AI services: live status + the existing setup actions ─────────────── */
+/* GET /api/services probes gateway, litellm, opencode serve and OpenHands on
+   the server's loopback; POST /api/services/action runs one allowlisted
+   script (apply.sh, start-stack.sh, Start-AutoOSStack.sh) into the Run tab. */
+let servicesTimer = null;
+async function loadServices() {
+  let r;
+  try { r = await fetch(api("/api/services")); } catch (e) { return; }
+  if (!r.ok) {
+    el("services").innerHTML = '<div class="svc">Service status needs a newer AutoOS server (HTTP ' +
+      esc(r.status) + ").</div>";
+    return;
+  }
+  const d = await r.json();
+  renderServices(d.services || []);
+  clearTimeout(servicesTimer);
+  servicesTimer = setTimeout(loadServices, 15000);
+}
+
+function renderServices(list) {
+  const up = list.filter(s => s.up).length;
+  el("servicesSub").textContent = up + " of " + list.length +
+    " services up · OmniRoute :20128 · free-first, paid overflow after";
+  el("services").innerHTML = list.map(s =>
+    '<div class="svc' + (s.up ? "" : " off") + '">' +
+      '<span class="pname">' + esc(s.name) + "</span>" +
+      '<span class="chip ' + (s.up ? "chip-ok" : "chip-missing") + '">' + (s.up ? "up" : "down") + "</span>" +
+      '<span class="svc-meta">' + esc(s.bind) + ":" + esc(s.port) + " · auth: " + esc(s.auth) +
+        (s.unit ? " · unit " + esc(s.unit) : "") + "</span>" +
+      '<span class="svc-actions">' + (s.actions || []).map(a =>
+        '<button type="button" data-svc-action="' + esc(a) + '" data-svc-live="' +
+          ((s.liveActions || []).includes(a) ? "1" : "0") + '">' +
+          esc((s.actionLabels || {})[a] || a) + "</button>").join("") +
+      "</span>" +
+    "</div>").join("");
+  el("services").querySelectorAll("[data-svc-action]").forEach(b =>
+    b.addEventListener("click", () =>
+      runServiceAction(b.dataset.svcAction, b.textContent, b.dataset.svcLive === "1")));
+}
+
+async function runServiceAction(action, label, live) {
+  if (running) return;
+  if (live && !confirm(label + " on " + (STATE.system.host || "this machine") + "?\n\n" +
+      "This starts or changes services on that machine (the Run tab shows every line).")) return;
+  running = true;
+  el("log").textContent = "";
+  logOffset = 0;
+  renderProgress({running:true,total:1,done:0,current:null});
+  el("runStatus").textContent = label + "…";
+  showTab("run");
+  const r = await fetch(api("/api/services/action"), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action })
+  });
+  if (!r.ok) {
+    let why = "HTTP " + r.status;
+    try { why = (await r.json()).error || why; } catch (e) { /* keep the status */ }
+    appendLog([{ level: "err", text: "Server refused the action: " + why }]);
+    running = false; sync(); return;
+  }
+  poll();
+  setTimeout(loadServices, 5000);
+}
+
+/* ── profiles, with the selected one expanded into a summary ───────────── */
+/* An icon per profile. Emoji rather than an icon font or sprite sheet: the page
+   is a single self-contained file served by a local one-file server. */
+const PROFILE_ICON = {
+  workstation: "\u{1F5A5}\uFE0F", "ai-coding": "\u{1F916}", light: "\u{1FAB6}",
+  server: "\u{1F5C4}\uFE0F", everyday: "\u{1F3E0}", custom: "\u2699\uFE0F"
+};
+
+function renderProfiles() {
+  const chips = Object.entries(STATE.profiles).map(([n]) =>
+    '<button class="profile-chip" type="button" data-profile="' + esc(n) + '" aria-pressed="false">' +
+      '<span class="picon" aria-hidden="true">' + (PROFILE_ICON[n] || "\u25A6") + "</span>" +
+      '<span class="pname">' + esc(n) + "</span>" +
+      '<span class="pcount">' + profileClosure(n).size + "</span>" +
+      (n === STATE.suggested ? '<span class="tag-suggested">suggested</span>' : "") +
+    "</button>").join("");
+
+  el("profiles").innerHTML =
+    '<div class="profile-strip" role="group" aria-label="Deployment profile">' + chips + "</div>" +
+    '<div class="profile-detail" id="profileDetail"></div>';
+
+  el("profiles").querySelectorAll(".profile-chip").forEach(b =>
+    b.onclick = () => applyProfile(b.dataset.profile));
+}
+
+function applyProfile(name) {
+  activeProfile = name;
+  picked = new Set(profileClosureDirect(name));
+  el("profiles").querySelectorAll(".profile-chip").forEach(b =>
+    b.setAttribute("aria-pressed", String(b.dataset.profile === name)));
+  sync();
+}
+/* Direct members only - dependencies get added by closure() during sync. */
+function profileClosureDirect(name) {
+  return name === "custom" ? []
+    : STATE.components.filter(c => canInstall(c) && (c.profiles || []).includes(name)).map(c => c.id);
+}
+
+/* The expanded card shows what that profile actually installs, as a grid of
+   category cards. Every component carries its install-order number so the whole
+   process is readable without opening the Install order card. */
+function renderProfileSummary() {
+  // One detail panel, not one per card: it gets the full width of the card now
+  // rather than whatever was left over after four collapsed siblings.
+  const box = el("profileDetail");
+  if (!box) return;
+  const name = activeProfile;
+  const heading = name
+    ? '<div class="pdhead"><span class="picon" aria-hidden="true">' +
+        (PROFILE_ICON[name] || "▦") + '</span><span class="pdname">' + esc(name) + "</span>" +
+        (name === STATE.suggested ? '<span class="tag-suggested">suggested</span>' : "") +
+      "</div>" +
+      '<div class="pdesc">' + esc(STATE.profiles[name] || "") + "</div>"
+    : "";
+
+  {
+    const ids = name === "custom" ? effective() : profileClosure(name);
+    if (!ids.size) {
+      box.innerHTML = heading +
+        '<div class="psum-head">Nothing pre-selected — tick components below.</div>';
+      return;
+    }
+
+    const direct = new Set(name === "custom" ? picked : profileClosureDirect(name));
+    const deps = [...ids].filter(i => !direct.has(i));
+    const steps = stepMap(ids);
+    const stepCount = Math.max(...steps.values());
+
+    // step 1 (6) -> step 2 (3) -> step 3 (2)
+    const perStep = new Map();
+    for (const n of steps.values()) perStep.set(n, (perStep.get(n) || 0) + 1);
+    const strip = [...perStep.keys()].sort((a, b) => a - b).map(n =>
+      '<span class="psum-step"><span class="step-badge">' + n + "</span>" +
+      perStep.get(n) + " component" + (perStep.get(n) === 1 ? "" : "s") + "</span>"
+    ).join('<span class="psum-arrow">&rarr;</span>');
+
+    const cats = new Map();
+    for (const id of ids) {
+      const c = BY_ID.get(id); if (!c) continue;
+      if (!cats.has(c.category)) cats.set(c.category, []);
+      cats.get(c.category).push(id);
+    }
+    // Order cards by when their work starts, so reading left-to-right follows
+    // the install sequence rather than an arbitrary category order.
+    const cards = [...cats].sort((a, b) => {
+      const sa = Math.min(...a[1].map(i => steps.get(i)));
+      const sb = Math.min(...b[1].map(i => steps.get(i)));
+      return sa - sb || b[1].length - a[1].length;
+    }).map(([cat, list]) => {
+      const rows = list
+        .sort((x, y) => steps.get(x) - steps.get(y) ||
+                        BY_ID.get(x).name.localeCompare(BY_ID.get(y).name))
+        .map(id => {
+          const isDep = !direct.has(id);
+          return '<span class="psum-comp' + (isDep ? " is-dep" : "") + '" title="' +
+            esc(BY_ID.get(id).name) + " - step " + steps.get(id) +
+            (isDep ? " (dependency)" : "") + '">' +
+            '<span class="step-badge' + (isDep ? " dep" : "") + '">' + steps.get(id) + "</span>" +
+            '<span class="cname">' + esc(BY_ID.get(id).name) + installedChip(BY_ID.get(id)) + "</span></span>";
+        }).join("");
+      return '<details class="psum-card"><summary><span class="psum-card-head">' + esc(cat) +
+        '<span class="n">' + list.length + "</span></span></summary>" +
+        '<div class="psum-card-body">' + rows + "</div></details>";
+    }).join("");
+
+    const psumInst = [...ids].filter(id => BY_ID.get(id)?.installed).length;
+    const hasClaude = ids.has("claude-autostart") || ids.has("claude-code");
+    const integratedHtml =
+      '<div class="psum-integrated" style="margin-top:10px;background:var(--surface);border:1px solid var(--rule);border-radius:8px;padding:9px 12px;display:flex;align-items:center;gap:12px;flex-wrap:wrap;">' +
+        '<span style="font-size:.8rem;font-weight:700;">🚀 Claude Autostart:</span>' +
+        '<span style="font-size:.76rem;color:var(--ink-muted);">' + (hasClaude ? 'Selected in this profile' : 'Not ticked by default') + '</span>' +
+        '<button type="button" class="jump-link" data-configure-card="cardClaudeAutostart">Configure Autostart &rarr;</button>' +
+        '<span style="margin-left:auto;font-size:.76rem;color:var(--ink-muted);">⚙ Stack:</span>' +
+        '<button type="button" class="jump-link" data-configure-card="cardConfig">Environment Config &rarr;</button>' +
+      '</div>';
+
+    box.innerHTML = heading +
+      '<div class="psum-head">' +
+        "<span><b>" + ids.size + "</b> components</span>" +
+        "<span><b>" + cats.size + "</b> categories</span>" +
+        "<span><b>" + stepCount + "</b> install step" + (stepCount === 1 ? "" : "s") + "</span>" +
+        (psumInst ? '<span style="color:var(--ok)"><b style="color:var(--ok)">✓ ' +
+                       psumInst + "</b> already installed</span>" : "") +
+        (deps.length ? '<span style="color:var(--dep)"><b style="color:var(--dep)">' +
+                       deps.length + "</b> dependencies</span>" : "") +
+      "</div>" +
+      '<div class="psum-steps">' + strip + "</div>" +
+      '<div class="psum-grid">' + cards + "</div>" +
+      integratedHtml;
+  }
+}
+
+/* ── component list ───────────────────────────────────────────────────── */
+function renderCatalog() {
+  const groups = new Map();
+  for (const c of STATE.components) {
+    if (!groups.has(c.category)) groups.set(c.category, []);
+    groups.get(c.category).push(c);
+  }
+  // Already installed sorts last in every group: it is the part of the list you
+  // have no decision left to make about.
+  for (const items of groups.values()) {
+    items.sort((a, b) => (a.installed ? 1 : 0) - (b.installed ? 1 : 0) ||
+                         a.name.localeCompare(b.name));
+  }
+  el("catalog").innerHTML = [...groups].map(([g, items]) =>
+    '<details class="group" open data-group="' + esc(g) + '">' +
+      "<summary>" + esc(g) + '<span class="count" data-count="' + esc(g) + '"></span></summary>' +
+      '<div class="group-body">' + items.map(itemHtml).join("") + "</div>" +
+    "</details>").join("");
+  el("catalog").addEventListener("error", ev => {
+    if (ev.target instanceof HTMLImageElement && ev.target.classList.contains("icon-img")) {
+      ev.target.remove();
+    }
+  }, true);
+  el("catalog").querySelectorAll("[data-quick]").forEach(btn => {
+    btn.addEventListener("click", ev => {
+      // Inside a <label>: without this the click also toggles the checkbox.
+      ev.preventDefault();
+      ev.stopPropagation();
+      queueQuickInstall(btn.dataset.quick);
+    });
+  });
+  el("catalog").querySelectorAll(".pick").forEach(cb => {
+    cb.onchange = () => {
+      if (cb.checked && canInstall(BY_ID.get(cb.dataset.id))) picked.add(cb.dataset.id); else picked.delete(cb.dataset.id);
+      activeProfile = "custom";
+      el("profiles").querySelectorAll(".profile-chip").forEach(b =>
+        b.setAttribute("aria-pressed", String(b.dataset.profile === "custom")));
+      sync();
+    };
+  });
+}
+
+const PLATFORM_NAME = { windows: "Windows", linux: "Linux", macos: "macOS" };
+const ALL_PLATFORMS = ["windows", "linux", "macos"];
+
+/* Only labels the exceptions. Something available everywhere needs no chip;
+   silence means "works on all three". */
+function platformChip(c) {
+  const on = (c.platforms || []).filter(p => ALL_PLATFORMS.includes(p));
+  if (!on.length || on.length === ALL_PLATFORMS.length) return "";
+  if (on.length === 1) {
+    return '<span class="chip chip-plat" title="Only packaged for ' +
+      esc(PLATFORM_NAME[on[0]]) + '">' + esc(PLATFORM_NAME[on[0]]) + " only</span>";
+  }
+  const missing = ALL_PLATFORMS.filter(p => !on.includes(p)).map(p => PLATFORM_NAME[p]);
+  return '<span class="chip chip-plat" title="Not packaged for ' + esc(missing.join(", ")) +
+    '">not on ' + esc(missing.join(", ")) + "</span>";
+}
+
+function installedChip(c) {
+  // A retired id is never reported installed: that is the one outcome a
+  // tombstone cannot claim, in the page exactly as in the terminal.
+  if (c.tombstone) return "";
+  if (c.installed) return '<span class="chip chip-installed" title="Detected locally; package installation will be skipped">✓ Installed</span>';
+  if (c.provider === 'manual') return '<span class="chip chip-manual">Vendor setup required</span>';
+  return c.installedStatus === 'unknown' ? '<span class="chip" title="No reliable installed-app probe is available">Not checked</span>' : '';
+}
+
+/* The real application icon, with a monogram underneath it.
+
+   The icon is the site's own favicon, fetched through DuckDuckGo's icon service
+   by the homepage domain the catalog already carries. Two consequences worth
+   knowing: the page tells that service which domains are in the catalog, and on
+   an offline machine — which a freshly provisioned box often is — none of them
+   load. So the monogram is not a fallback that gets swapped in; it is rendered
+   first and the image sits on top of it, which means a failed or blocked request
+   degrades to a letter with no flash of nothing. */
+function iconDomain(c) {
+  if (!c.homepage) return null;
+  try {
+    return new URL(c.homepage).hostname.replace(/^www\./, "");
+  } catch (e) {
+    return null;
+  }
+}
+
+function componentIcon(c) {
+  const letter = (c.name || c.id || "?").replace(/[^A-Za-z0-9]/g, "").charAt(0) || "?";
+  const domain = iconDomain(c);
+  const img = domain
+    ? '<img class="icon-img" alt="" loading="lazy" referrerpolicy="no-referrer" src="' +
+      esc("https://icons.duckduckgo.com/ip3/" + domain + ".ico") + '">'
+    : "";
+  return '<span class="item-icon" aria-hidden="true">' + esc(letter) + img + "</span>";
+}
+
+/* A retired id is shown, labelled and left where it is. Hiding the row would
+   hide the only answer to "where did that product go?", which is precisely why
+   the catalog still carries the id — so the page keeps it visible and makes it
+   un-tickable instead, the same choice the terminal menu makes. */
+function replacedByText(c) {
+  /* The ids that took the retired component's work, spelled the way the
+     terminal's skip line spells them. Empty when nothing replaced it. */
+  return (c.replaced_by && c.replaced_by.length)
+    ? "replaced by " + c.replaced_by.join(", ") : "";
+}
+
+function retiredChip(c) {
+  if (!c.tombstone) return "";
+  const why = [c.note, replacedByText(c)].filter(Boolean).join(" — ");
+  return '<span class="chip chip-retired" title="' +
+    esc(why || "Retired: the id stays known, nothing installs.") + '">retired</span>';
+}
+
+function itemDescription(c) {
+  if (!c.tombstone) return c.description;
+  // The same wording the terminal row uses, plus the note that names what
+  // replaced it: a reader comparing the two must read one product, not two.
+  const why = [c.note, replacedByText(c)].filter(Boolean);
+  return c.description + " (retired)" + (why.length ? " — " + why.join(" — ") : "");
+}
+
+function itemHtml(c) {
+  const name = c.homepage
+    ? '<a class="item-name" href="' + esc(c.homepage) + '" target="_blank" rel="noopener noreferrer">' +
+      esc(c.name) + "</a>"
+    : '<span class="item-name">' + esc(c.name) + "</span>";
+  const searchStr = (c.id + " " + c.name + " " + itemDescription(c) + " " + c.package +
+    (c.installed ? " installed already-installed" : "") +
+    (c.tombstone ? " retired" : "")).toLowerCase();
+  const configBtn = c.id === "claude-autostart"
+    ? '<button type="button" class="jump-link" data-configure-card="cardClaudeAutostart">⚙ Configure</button>'
+    // A retired entry keeps the prompt it had; nothing asks it, so offering to
+    // configure it would lead the reader to a field that changes nothing.
+    : (c.prompt && !c.tombstone
+      ? '<button type="button" class="jump-link" data-configure-card="cardConfig" data-configure-field="cfg_' + esc(String(c.prompt).split(/[\s,]+/)[0]) + '">⚙ Configure</button>'
+      : "");
+
+  // Installed components cannot be quick-installed; there is nothing to do.
+  const quick = (canInstall(c) && !c.installed)
+    ? '<button type="button" class="quick-install" data-quick="' + esc(c.id) +
+      '" title="Install just this one now">⚡ Install</button>'
+    : "";
+
+  return '<label class="item' + (canInstall(c) ? '' : ' unavailable') +
+      (c.installed ? ' is-installed' : '') + '" data-id="' + esc(c.id) +
+      '" data-installed="' + (c.installed ? "1" : "0") + '" data-search="' + esc(searchStr) + '">' +
+    '<input type="checkbox" class="pick" data-id="' + esc(c.id) + '"' + (canInstall(c) ? '' : ' disabled aria-disabled="true"') + '>' +
+    componentIcon(c) +
+    "<span>" +
+      '<span class="item-title">' + name + retiredChip(c) + installedChip(c) + quick +
+        // Everything below is detail: which package exactly, which platforms,
+        // where to configure it. Hidden unless the Details toggle is on.
+        '<span class="item-detail">' +
+          '<span class="chip prov prov-' + esc(c.provider) + '">' + esc(c.provider) + "</span>" +
+          '<span class="chip chip-pkg" title="' + esc(c.provider + ": " + c.package) + '">' +
+            esc(c.package) + "</span>" +
+          platformChip(c) + configBtn +
+        "</span>" +
+        '<span class="state-chips"></span>' +
+      "</span>" +
+      '<span class="item-desc">' + esc(itemDescription(c)) + "</span>" +
+      '<span class="item-meta"></span>' +
+    "</span></label>";
+}
+
+/* ── the one repaint ──────────────────────────────────────────────────── */
+let STEPS = new Map();
+function sync() {
+  picked = new Set([...picked].filter(id => canInstall(BY_ID.get(id))));
+  const eff = effective(), auto = autoAdded();
+  STEPS = stepMap(eff);
+
+  document.querySelectorAll(".item").forEach(node => {
+    const id = node.dataset.id, c = BY_ID.get(id);
+    const cb = node.querySelector(".pick");
+    const isEff = eff.has(id), isAuto = auto.has(id);
+    const locks = lockedBy(id);
+
+    cb.checked = isEff;
+    cb.disabled = !canInstall(c) || (isAuto && locks.length > 0);
+    // The disabled box has to say why, and for a retired id "use the vendor
+    // link" would be the wrong answer: the product is gone, not manual.
+    cb.title = c.tombstone
+      ? "Retired - " + (c.note || "the id stays known, nothing installs.")
+      : !canInstall(c) ? "AutoOS cannot install this application. Use the vendor link for manual setup." : cb.disabled
+        ? "Required by " + locks.map(d => BY_ID.get(d)?.name || d).join(", ") : "";
+
+    node.classList.toggle("checked", isEff && !isAuto);
+    node.classList.toggle("auto", isAuto);
+
+    const chips = [];
+    if (isEff) {
+      const st = STEPS.get(id);
+      if (st) chips.push('<span class="chip chip-step" title="installed in step ' + st +
+                         '">step ' + st + "</span>");
+    }
+    if (isAuto) chips.push('<span class="chip chip-auto">auto</span>');
+    if (cb.disabled) chips.push('<span class="chip chip-locked">locked</span>');
+    node.querySelector(".state-chips").innerHTML = chips.join("");
+
+    const meta = [];
+    const reqs = (c.requires || []).filter(r => BY_ID.has(r));
+    if (reqs.length) {
+      const names = reqs.map(r => BY_ID.get(r).name).join(" + ");
+      meta.push('<span class="chip chip-req" title="requires ' + esc(names) + '">needs ' +
+        esc(names) + "</span>");
+    }
+    const dependents = REQUIRED_BY.get(id) || [];
+    if (dependents.length) {
+      const names = dependents.map(d => BY_ID.get(d)?.name || d).join(", ");
+      meta.push('<span class="chip chip-by" title="' + esc(names) + '">needed by ' +
+        dependents.length + " (" + esc(names) + ")</span>");
+    }
+    if (c.verify) meta.push('<span class="chip chip-ok">verified with <code>' + esc(c.verify) + "</code></span>");
+    if (c.notes)  meta.push('<span class="chip chip-note">' + esc(c.notes) + "</span>");
+    node.querySelector(".item-meta").innerHTML = meta.join("");
+  });
+
+  document.querySelectorAll("[data-count]").forEach(span => {
+    const items = STATE.components.filter(c => c.category === span.dataset.count);
+    span.textContent = items.filter(c => eff.has(c.id)).length + " / " + items.length;
+  });
+
+  const steps = eff.size ? (Math.max(0, ...[...eff].map(id => depth(id))) + 1) : 0;
+  el("badgeSel").textContent = eff.size;
+  el("catalogSub").textContent = eff.size + " of " + STATE.components.length + " selected";
+  el("orderSub").textContent = steps ? steps + " step" + (steps === 1 ? "" : "s") : "nothing selected";
+  el("tally").innerHTML = eff.size
+    ? "<b>" + eff.size + "</b> selected · " + [...eff].filter(id => BY_ID.get(id).installed).length + " already installed · " + [...eff].filter(id => BY_ID.get(id).provider === "manual" && !BY_ID.get(id).installed).length + " vendor setup" +
+      (auto.size ? ' · <span class="autoc">' + auto.size + " pulled in as dependencies</span>" : "")
+    : "nothing selected";
+  el("run").disabled = running || eff.size === 0;
+  updateUsbButtonState();
+
+  renderProfileSummary();
+  renderTiers();
+  if (!el("panel-run").hidden) renderQuestions();
+  applyFilter();
+}
+
+function applyFilter() {
+  const q = (el("filter").value || "").trim().toLowerCase();
+  document.querySelectorAll(".group").forEach(g => {
+    let any = false;
+    g.querySelectorAll(".item").forEach(n => {
+      const matchSearch = !q || n.dataset.search.includes(q);
+      const matchInst = !filterInstalledOnly || n.dataset.installed === "1";
+      const show = matchSearch && matchInst;
+      n.style.display = show ? "" : "none";
+      if (show) any = true;
+    });
+    g.style.display = any ? "" : "none";
+    if ((q || filterInstalledOnly) && any) g.open = true;
+  });
+}
+
+/* ── install order ────────────────────────────────────────────────────── */
+function renderTiers() {
+  const eff = [...effective()], auto = autoAdded();
+  if (!eff.length) {
+    el("tiers").innerHTML = '<div class="empty">Nothing selected yet — tick components above.</div>';
+    return;
+  }
+  const byTier = new Map();
+  for (const id of eff) {
+    // Already installed means the run will skip it, so it is not a step in the
+    // order — listing it made the plan look longer than the work.
+    if (BY_ID.get(id)?.installed) continue;
+    const d = depth(id);
+    if (!byTier.has(d)) byTier.set(d, []);
+    byTier.get(d).push(id);
+  }
+  if (!byTier.size) {
+    el("tiers").innerHTML = '<div class="empty">Everything selected is already installed — nothing to do.</div>';
+    return;
+  }
+  // Same numbering the profile summary shows, from the one shared stepMap().
+  el("tiers").innerHTML = [...byTier.keys()].sort((a, b) => a - b).map((d, i) => {
+    const ids = byTier.get(d).sort((a, b) => BY_ID.get(a).name.localeCompare(BY_ID.get(b).name));
+    const hint = d === 0 ? "Needs nothing else — installed first."
+                         : "Cannot start until step " + d + " has finished.";
+    return '<div class="tier"><div class="tier-num">' + (i + 1) + "</div>" +
+      '<div class="tier-head">Step ' + (i + 1) + " · " + ids.length +
+        " component" + (ids.length === 1 ? "" : "s") + "</div>" +
+      '<div class="tier-hint">' + hint + "</div>" +
+      '<div class="tier-items">' + ids.map(id => {
+        const c = BY_ID.get(id);
+        const reqs = (c.requires || []).filter(r => BY_ID.has(r)).map(r => esc(BY_ID.get(r).name));
+        return '<div class="dep-node' + (auto.has(id) ? " auto" : "") + '">' +
+          '<span class="dn-name">' + esc(c.name) + installedChip(c) + "</span>" +
+          '<span class="dn-req">' + (reqs.length ? "after <b>" + reqs.join("</b>, <b>") + "</b>"
+                                                 : "no prerequisites") + "</span></div>";
+      }).join("") + "</div></div>";
+  }).join("");
+}
+
+/* ── configuration editor ─────────────────────────────────────────────── */
+/* Which section each prompt belongs in, and a short label for it. The catalog
+   owns the questions themselves — this only groups them and gives them a name
+   that fits above a field, falling back to the catalog's own wording.
+
+   The list of FIELDS is not here on purpose. It used to be, and it was wrong:
+   the form hardcoded six, of which ollama_models (and the since-removed
+   antigravity_url) were asked only by the Linux catalog, so on Windows it
+   showed boxes whose answers no installer ever read. Rendering from
+   STATE.prompts also means the reverse works: git_user_name/git_user_email
+   became Windows prompts later, and the Developer identity section appeared
+   there with no change to this file. */
+const CONFIG_SECTIONS = [
+  { title: "Developer identity", keys: ["git_user_name", "git_user_email"] },
+  { title: "Knowledge & MCP stack", keys: ["omnigraph_url", "herdr_source", "context7_api_key"] },
+  { title: "Local AI & inference", keys: ["ollama_models"] }
+];
+
+const CONFIG_LABELS = {
+  git_user_name: "Git user name",
+  git_user_email: "Git user email",
+  omnigraph_url: "Omnigraph URL",
+  herdr_source: "Herdr source",
+  ollama_models: "Ollama models",
+  context7_api_key: "Context7 API key"
+};
+
+function renderConfigCard() {
+  const cbox = el("configGrid");
+  if (!cbox) return;
+  const curProf = CONFIG_DATA?.profile || activeProfile || STATE.suggested || "workstation";
+  const answers = CONFIG_DATA?.answers || {};
+  const prompts = STATE.prompts || {};
+  const profOpts = Object.keys(STATE.profiles).map(p =>
+    '<option value="' + esc(p) + '"' + (p === curProf ? " selected" : "") + ">" + esc(p) + "</option>"
+  ).join("");
+
+  const field = key => {
+    const spec = prompts[key];
+    if (!spec) return "";   // not a prompt on this platform: do not offer it
+    // An answer fills the box; a catalog default only suggests one. Putting the
+    // default in `value` made every field look answered — and a Save then wrote
+    // the suggestion back as though the user had chosen it.
+    const answered = answers[key];
+    const suggestion = spec.default ?? "";
+    const label = CONFIG_LABELS[key] || spec.question || key;
+    return '<div class="config-card">' +
+      '<label for="cfg_' + esc(key) + '">' + esc(label) + "</label>" +
+      '<input type="text" id="cfg_' + esc(key) + '" data-cfg-key="' + esc(key) + '"' +
+        ' value="' + esc(answered ?? "") + '"' +
+        (suggestion ? ' placeholder="' + esc(suggestion) + '"' : "") + ">" +
+      '<div class="help">' + esc(spec.help || spec.question || "") + "</div>" +
+      "</div>";
+  };
+
+  let html = '<div class="config-section" style="grid-column:1 / -1;">' +
+    '<div class="config-section-title">System &amp; deployment</div>' +
+    '<div class="config-grid" style="margin-top:8px;">' +
+    '<div class="config-card">' +
+      '<label for="cfg_profile">Deployment profile</label>' +
+      '<select id="cfg_profile">' + profOpts + "</select>" +
+      '<div class="help">Default starting set of components</div>' +
+    "</div></div></div>";
+
+  const placed = new Set();
+  for (const sec of CONFIG_SECTIONS) {
+    const fields = sec.keys.filter(k => prompts[k]);
+    if (!fields.length) continue;          // nothing this platform asks: no empty heading
+    fields.forEach(k => placed.add(k));
+    html += '<div class="config-section" style="grid-column:1 / -1;">' +
+      '<div class="config-section-title">' + esc(sec.title) + "</div>" +
+      '<div class="config-grid" style="margin-top:8px;">' +
+      fields.map(field).join("") +
+      "</div></div>";
+  }
+
+  // A prompt added to a catalog but not to CONFIG_SECTIONS still gets a field,
+  // rather than silently never being asked in the browser.
+  const rest = Object.keys(prompts).filter(k => !placed.has(k));
+  if (rest.length) {
+    html += '<div class="config-section" style="grid-column:1 / -1;">' +
+      '<div class="config-section-title">Other settings</div>' +
+      '<div class="config-grid" style="margin-top:8px;">' +
+      rest.map(field).join("") +
+      "</div></div>";
+  }
+
+  cbox.innerHTML = html;
+  el("saveConfigBtn").onclick = saveConfiguration;
+}
+
+async function saveConfiguration() {
+  const prof = el("cfg_profile")?.value || "workstation";
+  const ans = {};
+  document.querySelectorAll("[data-cfg-key]").forEach(inp => {
+    // An empty box means "not answered", not "answered with nothing". Writing ""
+    // would shadow the catalog default: `herdr_source: ""` reaches the installer
+    // as a real answer and fails the source check instead of using npm:herdr.
+    const value = inp.value.trim();
+    if (value) ans[inp.dataset.cfgKey] = value;
+  });
+  if (!CONFIG_DATA) CONFIG_DATA = { version: 1 };
+  CONFIG_DATA.profile = prof;
+  CONFIG_DATA.answers = ans;
+  try {
+    const res = await fetch(api("/api/config"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(CONFIG_DATA)
+    });
+    if (res.ok) {
+      el("configSaveStatus").textContent = "✓ Saved to autoos.config.json";
+      setTimeout(() => { el("configSaveStatus").textContent = ""; }, 4000);
+    } else {
+      el("configSaveStatus").textContent = "Save failed (" + res.status + ")";
+    }
+  } catch (err) {
+    el("configSaveStatus").textContent = "Save failed: " + err.message;
+  }
+}
+
+/* ── questions ────────────────────────────────────────────────────────── */
+function renderQuestions() {
+  const eff = effective();
+  const keys = [...new Set(
+    STATE.components
+      .filter(c => eff.has(c.id) && c.prompt)
+      .flatMap(c => String(c.prompt).split(/[,\s]+/))
+  )].filter(Boolean);
+  const card = el("questionsCard");
+  if (!keys.length) { card.hidden = true; el("qlist").innerHTML = ""; return; }
+  card.hidden = false;
+  el("qlist").innerHTML = keys.map(k => {
+    const q = STATE.prompts[k] || {};
+    const prev = document.querySelector('[data-q="' + CSS.escape(k) + '"]')?.value;
+    const cfgVal = CONFIG_DATA?.answers?.[k];
+    const asked = STATE.components.filter(c => eff.has(c.id) && String(c.prompt || "").includes(k)).map(c => c.name);
+    return '<div class="q"><label for="q_' + esc(k) + '">' + esc(q.question || k) + "</label>" +
+      '<input type="text" id="q_' + esc(k) + '" data-q="' + esc(k) + '" value="' +
+        esc(prev ?? cfgVal ?? q.default ?? "") + '">' +
+      (q.help ? '<div class="help">' + esc(q.help) + "</div>" : "") +
+      '<div class="why">asked because you selected: ' + asked.map(esc).join(", ") + "</div></div>";
+  }).join("");
+}
+function answers() {
+  const out = {};
+  document.querySelectorAll("[data-q]").forEach(i => out[i.dataset.q] = i.value);
+  return out;
+}
+
+/* ── running ──────────────────────────────────────────────────────────── */
+/* ── copying the output ───────────────────────────────────────────────── */
+/* The log is what people paste into a bug report, and hand-selecting 400 lines
+   out of a scroll box is miserable. Read the text off the child elements rather
+   than with innerText: innerText returns nothing at all while the Output card is
+   collapsed, and textContent would run every line together without newlines. */
+function logText() {
+  const box = el("log");
+  return box.children.length
+    ? [...box.children].map(d => d.textContent).join("\n")
+    : box.textContent.trim();
+}
+
+function copyFallback(text) {
+  // navigator.clipboard needs a secure context. localhost counts; a --bind LAN
+  // address over plain http does not, and that is exactly the headless case
+  // this UI exists for.
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:-1000px;opacity:0";
+  document.body.appendChild(ta);
+  ta.select();
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
+  ta.remove();
+  return ok;
+}
+
+let copyResetTimer = null;
+async function copyLog() {
+  const btn = el("copyLog"), text = logText();
+  let ok = false;
+  try {
+    if (!navigator.clipboard?.writeText) throw new Error("no clipboard API");
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch (e) {
+    ok = copyFallback(text);
+  }
+  if (!ok) {
+    // Both routes refused - select the log so Ctrl-C still gets them there.
+    const sel = window.getSelection(), range = document.createRange();
+    range.selectNodeContents(el("log"));
+    sel.removeAllRanges(); sel.addRange(range);
+  }
+  btn.textContent = ok ? "Copied" : "Selected — press Ctrl-C";
+  btn.dataset.copied = "1";
+  clearTimeout(copyResetTimer);
+  copyResetTimer = setTimeout(() => {
+    btn.textContent = "Copy";
+    delete btn.dataset.copied;
+  }, ok ? 1600 : 4000);
+}
+
+el("copyLog").addEventListener("click", e => {
+  // The button lives inside a <details>; without this the click would also
+  // collapse the card it is trying to copy from.
+  e.preventDefault(); e.stopPropagation();
+  copyLog();
+});
+
+function appendLog(lines) {
+  const box = el("log");
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  for (const l of lines) {
+    const d = document.createElement("div");
+    if (l.level) d.className = l.level;
+    d.textContent = l.text;
+    box.appendChild(d);
+  }
+  if (atBottom) box.scrollTop = box.scrollHeight;
+}
+
+async function runInstall() {
+  if (running) return;
+  const ids = [...effective()];
+  if (!ids.length) return;
+  const dry = el("dryRun").checked, auto = autoAdded();
+  if (!dry) {
+    const msg = "Install " + ids.length + " component(s) on " +
+      (STATE.system.host || "this machine") + "?" +
+      (auto.size ? "\n\n" + auto.size + " of them are dependencies added automatically." : "");
+    if (!confirm(msg)) return;
+  }
+  running = true;
+  el("run").disabled = true;
+  el("log").textContent = "";
+  logOffset = 0;
+  renderProgress({running:true,total:ids.length,done:0,current:null});
+  el("runStatus").textContent = dry ? "dry run in progress…" : "installing…";
+  showTab("run");
+
+  const r = await fetch(api("/api/install"), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ids, answers: answers(), dryRun: dry })
+  });
+  if (!r.ok) {
+    appendLog([{ level: "err", text: "Server refused the request: HTTP " + r.status }]);
+    running = false; sync(); return;
+  }
+  poll();
+}
+
+function renderProgress(d) {
+  const total = Math.max(0, Number(d.total) || 0), done = Math.min(total, Math.max(0, Number(d.done) || 0));
+  const pct = total ? Math.floor(100 * done / total) : 0;
+  el("prog").style.width = pct + "%";
+  el("overallBar").setAttribute("aria-valuenow", String(pct));
+  el("overallLabel").textContent = done + " / " + total + " completed (" + pct + "%)";
+  const c = d.current;
+  el("currentLabel").textContent = c?.name || "Current application";
+  const active = Boolean(d.running && c?.status === "running");
+  const known = c && typeof c.percent === "number" && Number.isFinite(c.percent);
+  el("currentBar").classList.toggle("indeterminate", active && !known);
+  el("currentProg").style.width = known ? Math.max(0, Math.min(100, c.percent)) + "%" : "0%";
+  if (known) el("currentBar").setAttribute("aria-valuenow", String(Math.max(0, Math.min(100, c.percent))));
+  else el("currentBar").removeAttribute("aria-valuenow");
+  el("currentDetail").textContent = c ? (c.phase + " · " + (known ? c.percent + "% · " : active ? "percentage unavailable · " : "") + (c.elapsedSeconds || 0) + "s") : d.running ? "Detecting and planning…" : "Waiting to start";
+}
+
+/* ── USB creation dialog (Task 11) ───────────────────────────────────────
+ * Image / kind / engine / device, with the device list fetched fresh every
+ * time the dialog opens (a stick plugged in five minutes ago should show
+ * up). The confirm box names the device model, size and "destroyed" in the
+ * dialog itself (AGENTS.md hard rule 3: a destructive action must be chosen
+ * and seen, not waved through by window.confirm). Progress reuses the exact
+ * poll()/renderProgress() the install path already drives — usb_write_raw's
+ * own NN% lines land in the same current-item bar, nothing new invented. */
+
+const USB_KIND_LABEL = { installer: "Installer", "live-persistent": "Live (persistent)", "full-os": "Full OS" };
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n <= 0) return "unknown size";
+  const gb = n / 1e9;
+  return gb >= 1 ? gb.toFixed(1) + " GB" : (n / 1e6).toFixed(0) + " MB";
+}
+
+function updateUsbButtonState() {
+  const btn = el("createUsb");
+  // Task 11b: an older server (or a platform that hasn't shipped these
+  // endpoints yet) must produce a disabled button with a reason, never a
+  // control that opens an empty dialog or 404s when clicked.
+  if (usbCatalogUnavailable) {
+    btn.disabled = true;
+    btn.title = usbCatalogUnavailable;
+    return;
+  }
+  if (!usbDevicesData) return;
+  btn.disabled = running || !usbDevicesData.elevated;
+  btn.title = usbDevicesData.elevated ? "" : (usbDevicesData.reason || "not elevated");
+}
+
+async function refreshUsbElevation() {
+  try {
+    const r = await fetch(api("/api/usb/devices"));
+    usbDevicesData = r.ok ? await r.json() : { devices: [], elevated: false, reason: "HTTP " + r.status };
+  } catch (e) {
+    usbDevicesData = { devices: [], elevated: false, reason: "could not reach the server" };
+  }
+  updateUsbButtonState();
+}
+
+async function loadUsbCatalogOnce() {
+  if (usbCatalog) return usbCatalog;
+  try {
+    const r = await fetch(api("/api/images"));
+    if (r.ok) {
+      usbCatalog = await r.json();
+      usbCatalogUnavailable = null;
+    } else {
+      usbCatalog = { images: [], engines: [] };
+      usbCatalogUnavailable = "this server does not support installer USB creation (HTTP " + r.status + ")";
+    }
+  } catch (e) {
+    usbCatalog = { images: [], engines: [] };
+    usbCatalogUnavailable = "could not reach the server for the installer USB catalog";
+  }
+  updateUsbButtonState();
+  return usbCatalog;
+}
+
+function populateUsbKindOptions() {
+  const image = usbCatalog.images.find(i => i.id === el("usbImage").value);
+  const kinds = (image && image.kinds && image.kinds.length) ? image.kinds : ["installer"];
+  el("usbKind").innerHTML = kinds.map(k =>
+    '<option value="' + esc(k) + '">' + esc(USB_KIND_LABEL[k] || k) + "</option>").join("");
+}
+
+function populateUsbEngineOptions() {
+  const image = usbCatalog.images.find(i => i.id === el("usbImage").value);
+  const kind = el("usbKind").value;
+  const engines = (usbCatalog.engines || []).filter(e =>
+    (e.kinds || []).includes(kind) &&
+    (!image || !image.writeMode || (e.writeModes || []).includes(image.writeMode)));
+  el("usbEngine").innerHTML = engines.length
+    ? engines.map(e => '<option value="' + esc(e.id) + '">' + esc(e.name) + "</option>").join("")
+    : '<option value="">No compatible engine on this machine</option>';
+  updateUsbConfirm();
+}
+
+function updateUsbConfirm() {
+  const box = el("usbConfirm"), btn = el("usbConfirmBtn");
+  const dev = usbDevicesData?.devices.find(d => d.device === el("usbDevice").value);
+  if (!dev) { box.hidden = true; btn.disabled = true; return; }
+  box.hidden = false;
+  box.innerHTML = "<b>" + esc(dev.model) + "</b> (" + esc(dev.device) + ", " + fmtBytes(dev.size) +
+    ") — all data on this device will be destroyed.";
+  btn.disabled = !el("usbImage").value || !el("usbEngine").value;
+}
+
+async function refreshUsbDevices() {
+  const sel = el("usbDevice");
+  sel.innerHTML = '<option value="">Loading devices…</option>';
+  await refreshUsbElevation();
+  const devices = usbDevicesData.devices || [];
+  sel.innerHTML = devices.length
+    ? '<option value="">Choose a device…</option>' + devices.map(d =>
+        '<option value="' + esc(d.device) + '">' + esc(d.device) + " — " + esc(d.model) +
+        " (" + fmtBytes(d.size) + ")</option>").join("")
+    : '<option value="">No USB devices found</option>';
+  updateUsbConfirm();
+}
+
+async function openUsbDialog() {
+  if (el("createUsb").disabled) return;
+  el("usbDialog").hidden = false;
+  await loadUsbCatalogOnce();
+  el("usbImage").innerHTML = usbCatalog.images.map(i =>
+    '<option value="' + esc(i.id) + '">' + esc(i.name) + "</option>").join("");
+  populateUsbKindOptions();
+  populateUsbEngineOptions();
+  await refreshUsbDevices();
+}
+
+function closeUsbDialog() { el("usbDialog").hidden = true; }
+
+async function startUsbCreate() {
+  if (running || el("usbConfirmBtn").disabled) return;
+  const image = el("usbImage").value, kind = el("usbKind").value,
+        engine = el("usbEngine").value, device = el("usbDevice").value;
+  if (!image || !engine || !device) return;
+  closeUsbDialog();
+  running = true;
+  el("run").disabled = true;
+  updateUsbButtonState();
+  el("log").textContent = "";
+  logOffset = 0;
+  renderProgress({ running: true, total: 1, done: 0, current: null });
+  el("runStatus").textContent = "previewing installer USB write (dry run)…";
+  showTab("run");
+
+  const r = await fetch(api("/api/usb/create"), {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ image, kind, engine, device })
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    appendLog([{ level: "err", text: "Server refused the request: " + (body.error || ("HTTP " + r.status)) }]);
+    running = false; sync(); return;
+  }
+  poll();
+}
+
+async function refreshInstalled() {
+  const r = await fetch(api("/api/state"));
+  if (!r.ok) return;
+  const fresh = await r.json();
+  for (const app of fresh.components || []) {
+    const current = BY_ID.get(app.id);
+    if (current) { current.installed = app.installed; current.installedStatus = app.installedStatus; }
+  }
+  renderCatalog(); sync();
+}
+
+async function poll() {
+  if (dead) return;
+  try {
+    const r = await fetch(api("/api/log?offset=" + logOffset));
+    const d = await r.json();
+    if (d.lines?.length) { appendLog(d.lines); logOffset = d.offset; }
+    renderProgress(d);
+    renderHeaderProgress(d);
+    if (d.running) { setTimeout(poll, 600); return; }
+    running = false;
+    el("runStatus").textContent = d.summary || "done";
+    sync();
+    await refreshInstalled();
+    // A queued quick install starts only once the previous run has finished:
+    // the server runs one at a time and rejects a second with HTTP 409.
+    if (quickQueue.length) { markQuickPending(); drainQuickQueue(); }
+    else { hideHeaderProgress(); markQuickPending(); }
+  } catch (e) {
+    // The heartbeat may have torn the page down while this request was in
+    // flight; there is no log element left to write the failure into.
+    if (dead) return;
+    appendLog([{ level: "err", text: "Lost contact with the server: " + e.message }]);
+    running = false; sync();
+  }
+}
+
+async function resumeIfRunning() {
+  try {
+    const r = await fetch(api("/api/log?offset=0"));
+    if (!r.ok) return;
+    const d = await r.json();
+    if (!d.lines?.length) return;
+    el("log").textContent = "";
+    appendLog(d.lines);
+    logOffset = d.offset;
+    renderProgress(d);
+    if (d.running) {
+      running = true; sync();
+      el("runStatus").textContent = "a run is already in progress…";
+      showTab("run"); poll();
+    } else {
+      el("runStatus").textContent = d.summary || "previous run finished";
+      renderProgress(d);
+    }
+  } catch (e) { /* nothing in progress */ }
+}
+
+boot();
+</script>
+</body>
+</html>

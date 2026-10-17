@@ -1,0 +1,4 @@
+interface:
+  display_name: "Coding Principles"
+  short_description: "DRY, TDD, single responsibility, docs, changelog backtracking, MCP-first"
+  default_prompt: "Use $coding-principles to apply the core engineering discipline (DRY, TDD, single responsibility, document-the-why, changelog/ADR backtracking, MCP-first navigation) to this task."

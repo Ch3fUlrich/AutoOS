@@ -1,0 +1,29 @@
+{
+  "labels": "workst,workstation,fleet-ci",
+  "prepull": ["postgres:16"],
+  "cpus_default": 8,
+  "disk_floor_gb": 50,
+  "repos": [
+    {
+      "repo": "example-owner/example",
+      "prefix": "workst-example",
+      "slots": 2,
+      "memory": "8g",
+      "cache": true
+    },
+    {
+      "repo": "example-owner/other-project",
+      "prefix": "workst-other",
+      "slots": 1,
+      "memory": "4g",
+      "image": "workst-runner:2.338.0-2"
+    },
+    {
+      "repo": "example-owner/netns-suite",
+      "prefix": "workst-netns",
+      "slots": 1,
+      "memory": "4g",
+      "netns": true
+    }
+  ]
+}

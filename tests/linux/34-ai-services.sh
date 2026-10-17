@@ -1,0 +1,7417 @@
+# shellcheck shell=bash
+# sourced by tests/run-tests.sh; shares its harness and globals
+# shellcheck disable=SC2034,SC2154
+
+# ─── AI services (reboot-safe units, lane A) ────────────────────────────────
+# Every case here asserts on a dry run or a pure decision: nothing is started,
+# stopped, registered or written outside a mktemp directory.
+describe "AI services"
+
+# A fake litellm dir: config.yaml plus a .env that tries shell injection.
+_svc_litellm_fixture() {
+    local d
+    d="$(mktemp -d)"
+    : >"$d/config.yaml"
+    cat >"$d/.env" <<'ENV'
+# comment line
+GROQ_API_KEY=gsk_fake_value_1
+MISTRAL_API_KEY="quoted-fake-2"
+META_API_KEY=REPLACE_WITH_META_KEY
+EVIL_KEY=$(touch INJECTED)
+EMPTY_KEY=
+not a pair
+ENV
+    printf '%s' "$d"
+}
+
+# A throwaway HTTP server on an ephemeral loopback port for the
+# start-litellm.sh probes below: it writes the chosen port to "$1/port" and
+# sets the variable named by "$2" to the server's PID, so the caller can stop
+# it. Any further args are appended to the server's argv (the handler ignores
+# them); the "merely mentions litellm" case uses that to give the process a
+# misleading directory argument.
+_svc_loopback_server() {
+    local d pid_var
+    d="$1"; pid_var="$2"; shift 2
+    python3 -c 'import http.server,socketserver,sys
+s=socketserver.TCPServer(("127.0.0.1",0),http.server.SimpleHTTPRequestHandler)
+open(sys.argv[1],"w").write(str(s.server_address[1])); s.serve_forever()' "$d/port" "$@" >/dev/null 2>&1 &
+    printf -v "$pid_var" '%s' "$!"
+    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
+    # A stand-in that never bound its port would otherwise leave
+    # "$(cat "$d/port")" empty and report a wrong start-litellm.sh verdict
+    # instead of "the server did not start" (REVFIX review 7).
+    if [[ ! -s "$d/port" ]]; then
+        kill "${!pid_var}" 2>/dev/null
+        fail "the loopback stand-in server never wrote $d/port"
+        return 1
+    fi
+}
+
+# Review finding 2026-09-25: without /proc (macOS) the stale-key check can
+# never run, and the old message blamed "another user". Say what is true.
+if it "svc: start-litellm.sh says stale-key restart is Linux-only where /proc is missing"; then
+    d="$(mktemp -d)"
+    # Hermetic: a dummy .env in a temp dir, never the machine's own (CI has none).
+    printf 'LITELLM_MASTER_KEY=TEST-ONLY-fake-litellm-key\n' >"$d/.env"
+    if _svc_loopback_server "$d" srv; then
+        out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" AUTOOS_PROC_ROOT="$d/no-proc" \
+            bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"; rc=$?
+        kill "$srv" 2>/dev/null
+        if [[ $rc -eq 0 && "$out" == *"Linux-only"* && "$out" != *"another user"* ]]; then pass
+        else fail "rc=$rc: $out"; fi
+    fi
+    rm -rf "$d"
+fi
+
+# Found in review 2026-09-25: the restart path killed whatever same-user
+# process held the port, litellm or not (AGENTS.md rule 3). It must refuse.
+if it "svc: start-litellm.sh never kills a program on its port that is not litellm"; then
+    d="$(mktemp -d)"
+    # Hermetic: a dummy .env in a temp dir, never the machine's own (CI has none).
+    printf 'LITELLM_MASTER_KEY=TEST-ONLY-fake-litellm-key\n' >"$d/.env"
+    if _svc_loopback_server "$d" srv; then
+        out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
+        alive=0; kill -0 "$srv" 2>/dev/null && alive=1
+        kill "$srv" 2>/dev/null
+        if [[ $rc -ne 0 && $alive -eq 1 && "$out" == *"not litellm"* ]]; then pass
+        else fail "rc=$rc alive=$alive: $out"; fi
+    fi
+    rm -rf "$d"
+fi
+
+# Re-review 2026-09-25: "litellm" anywhere in the command line is not proof;
+# only the program name (argv[0] or the script in argv[1]) counts.
+if it "svc: start-litellm.sh leaves a program alone that merely mentions litellm in its arguments"; then
+    d="$(mktemp -d)"
+    # Hermetic: a dummy .env in a temp dir, never the machine's own (CI has none).
+    printf 'LITELLM_MASTER_KEY=TEST-ONLY-fake-litellm-key\n' >"$d/.env"
+    mkdir -p "$d/my-litellm-docs"
+    if _svc_loopback_server "$d" srv "$d/my-litellm-docs"; then
+        out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT="$(cat "$d/port")" bash "$ROOT/configuration/litellm/start-litellm.sh" 2>&1)"; rc=$?
+        alive=0; kill -0 "$srv" 2>/dev/null && alive=1
+        kill "$srv" 2>/dev/null
+        if [[ $rc -ne 0 && $alive -eq 1 && "$out" == *"not litellm"* ]]; then pass
+        else fail "rc=$rc alive=$alive: $out"; fi
+    fi
+    rm -rf "$d"
+fi
+
+if it "svc: start-litellm.sh loads .env literally, never evaluates it"; then
+    d="$(_svc_litellm_fixture)"
+    out="$(cd "$d" && AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    ok=1
+    [[ -e "$d/INJECTED" ]] && { ok=0; echo "the .env was evaluated" >&2; }
+    [[ "$out" == *"GROQ_API_KEY"* && "$out" == *"MISTRAL_API_KEY"* && "$out" == *"EVIL_KEY"* ]] \
+        || { ok=0; echo "keys not reported: $out" >&2; }
+    [[ "$out" == *"META_API_KEY"* || "$out" == *"EMPTY_KEY"* ]] && { ok=0; echo "placeholder/empty loaded" >&2; }
+    [[ "$out" == *"fake_value"* || "$out" == *"quoted-fake"* ]] && { ok=0; echo "a value was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-litellm.sh .env parsing is unsafe"; fi
+fi
+
+if it "svc: start-litellm.sh binds loopback with PYTHONUTF8 and starts nothing in a dry run"; then
+    d="$(_svc_litellm_fixture)"
+    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    rm -rf "$d"
+    ok=1
+    [[ "$out" == *"PYTHONUTF8=1 litellm --config config.yaml --host 127.0.0.1 --port 1"* ]] \
+        || { ok=0; echo "planned command wrong: $out" >&2; }
+    [[ "$out" == *"would start"* ]] || { ok=0; echo "dry run did not announce" >&2; }
+    if (( ok )); then pass; else fail "start-litellm.sh plan is wrong"; fi
+fi
+
+if it "svc: start-litellm.sh honors AUTOOS_LITELLM_HOST in the planned bind"; then
+    d="$(_svc_litellm_fixture)"
+    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_LITELLM_HOST=0.0.0.0 \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    rm -rf "$d"
+    if [[ "$out" == *"litellm --config config.yaml --host 0.0.0.0 --port 1"* ]]; then pass
+    else fail "host override ignored: $out"; fi
+fi
+
+if it "svc: start-litellm.sh reads the master key from AUTOOS_LITELLM_MASTER_KEY_FILE without printing it"; then
+    d="$(_svc_litellm_fixture)"
+    printf 'sk-file-do-not-print\n' >"$d/master.key"
+    out="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_LITELLM_MASTER_KEY_FILE="$d/master.key" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    rm -rf "$d"
+    ok=1
+    [[ "$out" == *"LITELLM_MASTER_KEY"* ]] || { ok=0; echo "key file not loaded: $out" >&2; }
+    [[ "$out" == *"do-not-print"* || "$out" == *"sk-file"* ]] && { ok=0; echo "the key was printed" >&2; }
+    if (( ok )); then pass; else fail "master-key-file wiring wrong"; fi
+fi
+
+if it "svc: start-litellm.sh fails loudly on an unreadable or empty master-key file"; then
+    d="$(_svc_litellm_fixture)"
+    missing="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_LITELLM_MASTER_KEY_FILE="$d/nope.key" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"; rc_missing=$?
+    : >"$d/empty.key"
+    empty="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_LITELLM_MASTER_KEY_FILE="$d/empty.key" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"; rc_empty=$?
+    rm -rf "$d"
+    ok=1
+    [[ $rc_missing -ne 0 && "$missing" == *"AUTOOS_LITELLM_MASTER_KEY_FILE"* ]] \
+        || { ok=0; echo "missing: rc=$rc_missing $missing" >&2; }
+    [[ $rc_empty -ne 0 && "$empty" == *"AUTOOS_LITELLM_MASTER_KEY_FILE"* ]] \
+        || { ok=0; echo "empty: rc=$rc_empty $empty" >&2; }
+    if (( ok )); then pass; else fail "an unusable key file must be a hard error"; fi
+fi
+
+if it "svc: start-litellm.sh puts its log under AUTOOS_LITELLM_STATE_DIR"; then
+    src="$(cat "$ROOT/configuration/litellm/start-litellm.sh")"
+    if [[ "$src" == *'AUTOOS_LITELLM_STATE_DIR'* && "$src" == *'litellm.log'* ]]; then pass
+    else fail "state-dir override or log name missing"; fi
+fi
+
+if it "svc: start-litellm.sh restarts a proxy with stale keys and no-ops a current one"; then
+    d="$(_svc_litellm_fixture)"
+    env_now="$(mktemp)"; env_old="$(mktemp)"
+    printf 'PATH=/usr/bin\0GROQ_API_KEY=gsk_fake_value_1\0MISTRAL_API_KEY=quoted-fake-2\0EVIL_KEY=$(touch INJECTED)\0PYTHONUTF8=1\0' >"$env_now"
+    printf 'PATH=/usr/bin\0GROQ_API_KEY=gsk_old_value\0PYTHONUTF8=1\0' >"$env_old"
+    cur="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_FAKE_LITELLM_ENVIRON="$env_now" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    old="$(AUTOOS_LITELLM_DIR="$d" AUTOOS_LITELLM_PORT=1 AUTOOS_FAKE_LITELLM_ENVIRON="$env_old" \
+        bash "$ROOT/configuration/litellm/start-litellm.sh" --dry-run 2>&1)"
+    rm -rf "$d" "$env_now" "$env_old"
+    ok=1
+    [[ "$cur" == *"already up with the current keys"* ]] || { ok=0; echo "current: $cur" >&2; }
+    [[ "$old" == *"would restart"* && "$old" == *"GROQ_API_KEY"* && "$old" == *"MISTRAL_API_KEY"* ]] \
+        || { ok=0; echo "stale: $old" >&2; }
+    [[ "$old" == *"gsk_old"* || "$old" == *"fake_value"* ]] && { ok=0; echo "a value was printed" >&2; }
+    if (( ok )); then pass; else fail "stale-key convergence is wrong"; fi
+fi
+
+if it "svc: the stack launcher starts litellm through start-litellm.sh"; then
+    ok=1
+    grep -q 'start-litellm.sh' configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "starter not used" >&2; }
+    grep -qE '^[[:space:]]*\. \./\.env|set -a' configuration/autostart/Start-AutoOSStack.sh \
+        && { ok=0; echo "inline .env sourcing is still there" >&2; }
+    [[ -x configuration/litellm/start-litellm.sh ]] || { ok=0; echo "starter not executable" >&2; }
+    if (( ok )); then pass; else fail "launcher still sources .env inline"; fi
+fi
+
+# The client key cannot PATCH /api/resilience (403 "Invalid management
+# token", measured 2026-09-24); the CLI sends the machine loopback token.
+if it "svc: apply sets resilience through the omniroute CLI, not curl + client key"; then
+    ok=1
+    for f in configuration/omniroute/apply.sh configuration/omniroute/apply.ps1; do
+        grep -q 'patch-api-resilience' "$f" || { ok=0; echo "no CLI patch: $f" >&2; }
+        grep -q 'get-api-resilience' "$f" || { ok=0; echo "no CLI read: $f" >&2; }
+        grep -qE 'X PATCH|Method Patch' "$f" && { ok=0; echo "still PATCHes over HTTP: $f" >&2; }
+    done
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE=/dev/null \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    [[ "$out" == *"would set requestQueue.maxWaitMs = 180000 (omniroute api system patch-api-resilience)"* ]] \
+        || { ok=0; echo "dry run: $out" >&2; }
+    if (( ok )); then pass; else fail "resilience still goes through the client key"; fi
+fi
+
+# The dry run must not read the live gateway's provider list: with a gateway
+# up, every provider reads "already registered" and the placeholder test
+# above became machine-dependent.
+if it "svc: apply --dry-run against a down gateway plans from the key file alone"; then
+    keys="$(mktemp)"
+    # D657-D2: every google_ai_studio leg is gated now, so apply no longer plans
+    # a gemini row at all. `vertex` is a provider the D2 chains do ride, so the
+    # placeholder-counts-as-no-key rule is proved on a row that is still planned.
+    printf 'vertex: REPLACE_WITH_VERTEX_KEY\nmistral: not-a-real-key-123\n' >"$keys"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -f "$keys"
+    ok=1
+    [[ "$out" == *"vertex: no key in api-keys.yml, skipped"* ]] || { ok=0; echo "vertex: $out" >&2; }
+    [[ "$out" == *"mistral: would register"* ]] || { ok=0; echo "mistral: $out" >&2; }
+    [[ "$out" == *"already registered"* ]] && { ok=0; echo "read the live gateway" >&2; }
+    if (( ok )); then pass; else fail "apply dry run depends on the live gateway"; fi
+fi
+
+# combos.json "retired" is the one list of ids a rename or removal left in the
+# gateway store (9 orphans were deleted by hand on 2026-09-25); apply prunes
+# those and nothing else. The sandbox: a stand-in omniroute first on PATH that
+# answers `combo list` from list.txt (rendered like the real CLI: ANSI icon,
+# padded name, [strategy], status) and logs every other call to calls.log,
+# plus a loopback stand-in gateway serving a static /api/health. Nothing here
+# reaches the live gateway or its store.
+# _is_readonly_run [apply args] — is this apply.sh invocation read-only (--dry-run
+# or --drift)? apply.sh's fleet-rule D-825 gate skips those; a mutating run refuses
+# without --go/--go-sha. The sandbox helpers below run real (mutating) apply.sh, so
+# they add a valid GO for the code under test, and no GO to a read-only run.
+_is_readonly_run() {
+    local a
+    for a in "$@"; do
+        [[ "$a" == --dry-run || "$a" == --drift ]] && return 0
+    done
+    return 1
+}
+
+export AUTOOS_DRIFT_SNAPSHOT=/nonexistent
+
+# _go_flags <root> — the --go/--go-sha flags that clear apply.sh's D-825 gate for a
+# mutating run against this checkout, as an array (empty for a read-only run). <ref>
+# is OS-0, a valid OS-<n> item; the sha is the real HEAD so apply.sh's own
+# `git rev-parse HEAD` matches it.
+_go_flags() {
+    local root="$1"
+    shift
+    if _is_readonly_run "$@"; then
+        return
+    fi
+    printf '%s\0' "--go=OS-0" "--go-sha=$(git -C "$root" rev-parse HEAD)"
+}
+
+_prune_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/gw/api"
+    # D-852: two stand-in sets, because the batteries differ in one binary.
+    # $d/stub is the full set (curl included) for the D-825 gate battery, whose
+    # cases must not open a socket at all; $d/hstub is the host-mutating set
+    # (docker, systemctl, ssh, npx, node) for the batteries that read their own
+    # loopback stand-in over a real curl — a down-gateway case there depends on
+    # curl FAILING, so a blind exit-0 stub in front of it would be a false green.
+    # Which one a run gets is the PATH it is launched with; both sit after $d/bin,
+    # so a case's own stand-in always answers first.
+    gate_stubs_make "$d/stub"
+    gate_stubs_make "$d/hstub" $GATE_STUB_HOST_BINS
+    printf 'ok\n' >"$d/gw/api/health"
+    printf '# no keys: every provider is skipped\n' >"$d/keys.yml"
+    : >"$d/calls.log"
+    : >"$d/providers.txt"
+    # The ids `omniroute providers available` really lists (measured 2026-09-28)
+    # for the providers these combos are built from, so apply's built-in check
+    # answers here instead of falling back.
+    printf '%s\n' free-ai opencode-zen openai groq openrouter sambanova cerebras \
+        >"$d/builtins.txt"
+    # The combo store the stand-in CLI keeps state in (live.json), shared by
+    # `combo list`, `--output json combo list`, `combo create` and `combo
+    # delete` so the fake holds the real CLI's observable contract: creating a
+    # name the store already has fails "already exists" (which is exactly why
+    # apply.sh's re-run fell through to delete+create every time), and a delete
+    # of an absent name fails too.
+    cat >"$d/store.py" <<'STORE'
+import json, os, sys
+
+D = os.path.dirname(os.path.abspath(__file__))
+PATH = os.path.join(D, "live.json")
+mode = sys.argv[1] if len(sys.argv) > 1 else ""
+
+
+def load():
+    """The store document. A live.json that is not a JSON object is what the
+    CLI would have printed: `list` echoes it verbatim (so the caller sees a
+    non-JSON answer), the write modes treat the store as empty."""
+    raw = ""
+    if os.path.exists(PATH):
+        with open(PATH, encoding="utf-8") as fh:
+            raw = fh.read()
+    if raw.strip():
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            doc = None
+        if isinstance(doc, dict):
+            doc.setdefault("combos", [])
+            return doc
+        if mode == "list":
+            sys.stdout.write(raw if raw.endswith("\n") else raw + "\n")
+            sys.exit(0)
+        return {"combos": []}
+    return {"combos": [], "active": None, "error": None}
+
+
+def save(doc):
+    with open(PATH, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=1)
+
+
+def save_combos(rows):
+    doc = load()
+    doc["combos"] = rows
+    save(doc)
+
+
+mode = sys.argv[1]
+combos = load()["combos"]
+if mode == "list":
+    # The JSON document form, with the step shape the live 3.8.51 store prints
+    # (measured 2026-09-27T08:4xZ): "model" carries the full provider/model ref.
+    print(json.dumps(load()))
+elif mode == "has":
+    sys.exit(0 if any(c.get("name") == sys.argv[2] for c in combos) else 1)
+elif mode == "put":
+    name, strategy, models = sys.argv[2], sys.argv[3], sys.argv[4]
+    refs = [r for r in models.split(",") if r]
+    combos.append({"name": name, "strategy": strategy,
+                   "models": [{"kind": "model",
+                               "providerId": r.partition("/")[0], "model": r}
+                              for r in refs]})
+    save_combos(combos)
+elif mode == "drop":
+    kept = [c for c in combos if c.get("name") != sys.argv[2]]
+    if len(kept) == len(combos):
+        print("Error: combo %r not found" % sys.argv[2], file=sys.stderr)
+        sys.exit(1)
+    save_combos(kept)
+STORE
+    cat >"$d/bin/omniroute" <<'SH'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ "${1:-} ${2:-}" == "combo list" ]]; then
+    printf '%s\n' "$*" >>"$d/listed"
+    cat "$d/list.txt"
+    exit 0
+fi
+# apply.sh reads the live store before writing combos (--output json, the same
+# call --drift uses): answered from live.json through store.py.
+if [[ "${1:-} ${2:-} ${3:-} ${4:-} ${5:-}" == "--output json --no-color combo list" ]]; then
+    printf '%s\n' "$*" >>"$d/calls.log"
+    if [[ -e "$d/live.fail" ]]; then
+        echo "Error: connect ECONNREFUSED" >&2
+        exit 1
+    fi
+    printf '  Loaded env from /home/autoos-test/.omniroute/.env\n'
+    python3 "$d/store.py" list
+    exit 0
+fi
+if [[ "${1:-} ${2:-}" == "combo create" ]]; then
+    printf '%s\n' "$*" >>"$d/calls.log"
+    name="${3:-}"; strategy="priority"; models=""
+    shift 3
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --strategy) strategy="${2:-}"; shift 2 ;;
+            --models)   models="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [[ -f "$d/fail_create" ]] && grep -qxF "$models" "$d/fail_create"; then
+        # APPLYADOPT B: a create whose legs are listed (one per line) in
+        # $d/fail_create fails, the way a gateway-side validation error does.
+        # That is how a test reaches the retry path's SECOND failure - and the
+        # restore apply owes the operator after it has already deleted.
+        printf 'Error: creating combo "%s" failed (stand-in)\n' "$name" >&2
+        exit 1
+    fi
+    if ! [[ -s "$d/live.json" ]]; then
+        printf 'Created combo %s.\n' "$name"; exit 0
+    fi
+    if python3 "$d/store.py" has "$name"; then
+        printf 'Error: Combo "%s" already exists\n' "$name" >&2
+        exit 1
+    fi
+    python3 "$d/store.py" put "$name" "$strategy" "$models"
+    printf 'Created combo %s.\n' "$name"
+    exit 0
+fi
+if [[ "${1:-} ${2:-}" == "combo delete" ]]; then
+    printf '%s\n' "$*" >>"$d/calls.log"
+    [[ -s "$d/live.json" ]] || exit 0
+    python3 "$d/store.py" drop "${3:-}"
+    exit 0
+fi
+if [[ "${1:-} ${2:-}" == "providers available" ]]; then
+    printf '  Loaded env from /home/autoos-test/.omniroute/.env\n'
+    python3 - "$d/builtins.txt" <<'PY'
+import json, sys
+rows = [{"id": s, "name": s, "category": "api-key", "alias": s}
+        for s in (l.strip() for l in open(sys.argv[1], encoding="utf-8")) if s]
+print(json.dumps({"count": len(rows), "categories": ["api-key"], "providers": rows},
+                 indent=2))
+PY
+    exit 0
+fi
+# apply.sh reads the live connection list before registering anything (the
+# "already registered" branch). The store is providers.txt, in the real CLI's
+# shape: two-space indent, hex id, name.
+if [[ "${1:-} ${2:-}" == "providers list" ]]; then
+    cat "$d/providers.txt"
+    exit 0
+fi
+# `omniroute models <provider>` is what makes the gateway enumerate a freshly
+# registered provider's models into /v1/models. The stand-in catalog is
+# gw/v1/models (served by the static gateway): its baseline is catalog.base,
+# plus the models of every provider this process has enumerated, read from
+# provider_models.tsv ("<provider>\t<model id>" lines). Nothing is served
+# until a caller writes catalog.base, so every other test here keeps the old
+# "no catalog to validate against" behaviour.
+if [[ "${1:-}" == "models" ]]; then
+    printf '%s\n' "$*" >>"$d/calls.log"
+    [[ -n "${2:-}" ]] && printf '%s\n' "$2" >>"$d/enumerated"
+    [[ -f "$d/gw/v1/models" ]] || exit 0
+    python3 - "$d" <<'PY'
+import json, os, sys
+d = sys.argv[1]
+ids = []
+base = os.path.join(d, "catalog.base")
+if os.path.exists(base):
+    ids += [l.strip() for l in open(base, encoding="utf-8") if l.strip()]
+pairs = []
+table = os.path.join(d, "provider_models.tsv")
+if os.path.exists(table):
+    for line in open(table, encoding="utf-8"):
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) == 2:
+            pairs.append(parts)
+enum = set()
+seen = os.path.join(d, "enumerated")
+if os.path.exists(seen):
+    enum = {l.strip() for l in open(seen, encoding="utf-8") if l.strip()}
+ids += [m for p, m in pairs if p in enum]
+with open(os.path.join(d, "gw", "v1", "models"), "w", encoding="utf-8") as fh:
+    json.dump({"data": [{"id": i} for i in dict.fromkeys(ids)]}, fh)
+PY
+    exit 0
+fi
+printf '%s\n' "$*" >>"$d/calls.log"
+exit 0
+SH
+    chmod +x "$d/bin/omniroute"
+    printf '%s\n' "$d"
+}
+# _prune_list <dir> <name>... - the store as `omniroute combo list` prints it.
+_prune_list() {
+    local d="$1" n
+    shift
+    printf '\n\033[1mCombos\033[0m\n' >"$d/list.txt"
+    for n in "$@"; do
+        printf '  \033[2m○\033[0m %-25s [%-12s] \033[32menabled\033[0m\n' "$n" priority >>"$d/list.txt"
+    done
+}
+# _prune_apply <dir> [apply args] - apply.sh against the two stand-ins.
+_prune_apply() {
+    local d="$1" pid port
+    shift
+    read -r pid port < <(_start_test_http_server "$d/gw")
+    if [[ -z "$port" ]]; then
+        kill "$pid" 2>/dev/null
+        echo "no stand-in gateway"
+        return 1
+    fi
+    local -a _go_arr=()
+    mapfile -d '' -t _go_arr < <(_go_flags "$ROOT" "$@")
+    PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" "$@" ${_go_arr[@]+"${_go_arr[@]}"} 2>&1
+    kill "$pid" 2>/dev/null
+}
+# _omitted_combo - one orphaned id, read from combos.json's own "omitted" list.
+# Derived, not hardcoded: which route is orphaned right now is registry data,
+# and a pinned name goes stale the moment a re-cut gates a leg (AO-DENYLEGS D2
+# did exactly that to the l1-orchestrator-clean pin this replaced).
+_omitted_combo() {
+    python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+print(data["omitted"][0])' "$ROOT/configuration/omniroute/combos.json"
+}
+
+if it "apply prune: deletes only the retired combos the store holds, never a user-made one"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2 l2-worker my-own-combo
+    out="$(_prune_apply "$d")"
+    ok=1
+    deletes="$(grep '^combo delete' "$d/calls.log")"
+    [[ "$deletes" == "combo delete tier2 --yes" ]] || { ok=0; echo "deleted: [$deletes]" >&2; }
+    grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    [[ "$out" == *"  - tier2: retired, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "prune deleted something other than the retired combo"; fi
+fi
+
+if it "apply prune: --dry-run names the retired combo and deletes nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2 l2-worker my-own-combo
+    out="$(_prune_apply "$d" --dry-run)"
+    ok=1
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"  - tier2: retired, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"retired, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the prune dry run is not a dry run"; fi
+fi
+
+if it "apply prune: a second run finds no retired or omitted combos and deletes nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" l2-worker my-own-combo
+    out="$(_prune_apply "$d")"
+    ok=1
+    grep -q '^combo delete' "$d/calls.log" && { ok=0; echo "deleted: $(grep '^combo delete' "$d/calls.log")" >&2; }
+    [[ "$out" == *"  = no retired or omitted combos in the store"* ]] || { ok=0; echo "out: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a clean store is not reported as clean"; fi
+fi
+
+# OR1g: combos.json "omitted" lists only the ORPHANED routes - a route that
+# declared legs but has no servable one left. A live combo with such an id is a
+# managed orphan, so apply prunes it - but never a user-made combo, and never a
+# current combo. Which id that is today comes from the render (_omitted_combo),
+# not from a name pinned here.
+if it "apply prune: deletes an omitted (orphaned) combo the store holds, never a user-made one"; then
+    orphan="$(_omitted_combo)"
+    d="$(_prune_sandbox)"
+    _prune_list "$d" "$orphan" l2-worker my-own-combo
+    out="$(_prune_apply "$d")"
+    ok=1
+    deletes="$(grep '^combo delete' "$d/calls.log")"
+    [[ "$deletes" == "combo delete $orphan --yes" ]] \
+        || { ok=0; echo "deleted: [$deletes]" >&2; }
+    grep -q 'my-own-combo' "$d/calls.log" && { ok=0; echo "the user-made combo was touched" >&2; }
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    [[ "$out" == *"  - $orphan: omitted, deleted"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "prune did not delete exactly the omitted combo"; fi
+fi
+
+if it "apply prune: --dry-run names the omitted combo and deletes nothing"; then
+    orphan="$(_omitted_combo)"
+    d="$(_prune_sandbox)"
+    _prune_list "$d" "$orphan" my-own-combo
+    out="$(_prune_apply "$d" --dry-run)"
+    ok=1
+    [[ -s "$d/listed" ]] || { ok=0; echo "the store was never listed" >&2; }
+    grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"  - $orphan: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" == *"omitted, deleted"* ]] && { ok=0; echo "dry run claims a deletion" >&2; }
+    [[ "$out" == *"my-own-combo"* ]] && { ok=0; echo "the user-made combo was named" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the omitted prune dry run is not a dry run"; fi
+fi
+
+# OR1g: a deliberately legless route (*-paid, auto*) is in neither "retired" nor
+# "omitted", so a live combo a user or OmniRoute itself named "auto" (or
+# "l2-worker-paid") is never deleted - and a dry run never even names it.
+if it "apply prune: a live legless combo (auto, l2-worker-paid) is never deleted or named"; then
+    orphan="$(_omitted_combo)"
+    d="$(_prune_sandbox)"
+    _prune_list "$d" auto l2-worker-paid "$orphan" my-own-combo
+    out="$(_prune_apply "$d" --dry-run)"
+    ok=1
+    grep -q 'auto' "$d/calls.log" && { ok=0; echo "a legless combo was touched: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"  - auto:"* ]] && { ok=0; echo "a live auto combo was named: $out" >&2; }
+    [[ "$out" == *"  - l2-worker-paid:"* ]] && { ok=0; echo "a live l2-worker-paid combo was named: $out" >&2; }
+    [[ "$out" == *"  - $orphan: omitted, would delete"* ]] || { ok=0; echo "out: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the legless combos were not left alone"; fi
+fi
+
+# A down gateway must not be listed: the real CLI then falls back to reading
+# the store file directly, which is how a test would reach the live store.
+if it "apply prune: a down gateway is never listed and nothing is pruned"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    ok=1
+    [[ -e "$d/listed" ]] && { ok=0; echo "a down gateway was listed" >&2; }
+    grep -q '^combo ' "$d/calls.log" && { ok=0; echo "dry run changed combos: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"Prune:"*"gateway down - the store is not read, nothing pruned"* ]] || { ok=0; echo "out: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "prune read the store behind a down gateway"; fi
+fi
+
+# _node_registry <dir> - the fixture registry the meta-api cases point apply at.
+# AO-DENYLEGS D2 gated every muse-spark-1.3-contributor leg (§8), so the shipped
+# catalog says meta_api has no leg that can ever route and apply.sh — correctly —
+# skips the provider instead of registering a connection nothing can route to.
+# That removes the only node-type provider the suite could exercise, so these
+# cases run against a copy whose gate is lifted. Test data only:
+# catalog/ai-registry.json is never modified and nothing here claims the leg
+# should be served.
+_node_registry() {
+    python3 - "$ROOT/catalog/ai-registry.json" "$1/registry.json" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+doc.setdefault("routes", {}).setdefault("spark-1.3-contributor", {})["unavailable_legs"] = {}
+json.dump(doc, open(sys.argv[2], "w", encoding="utf-8"), indent=2)
+PY
+}
+
+# ─── MUSEAPI step 4: a provider that reads another's api-keys.yml key ───────
+# providers.meta_api has no key entry of its own — the registry says key_name:
+# meta, because the user's single Meta key serves both the direct opencode
+# provider and the Model API gateway connection. Two failures follow if apply
+# ignores that: it looks for a 'meta_api' nobody has and prints "no key in
+# api-keys.yml" (the connection is never registered), and a run against a store
+# that already holds meta-api must not add it a second time.
+if it "svc: apply registers meta_api from the shared 'meta' key, not a phantom 'meta_api'"; then
+    keys="$(mktemp)"
+    reg="$(mktemp -d)"
+    _node_registry "$reg"
+    printf 'meta: not-a-real-key-123\n' >"$keys"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        AUTOOS_REGISTRY_FILE="$reg/registry.json" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -f "$keys"
+    rm -rf "$reg"
+    ok=1
+    [[ "$out" == *"  - meta-api: would register (key from meta)"* ]] || { ok=0; echo "plan: $out" >&2; }
+    [[ "$out" == *"meta-api: no key in api-keys.yml"* ]] && { ok=0; echo "looked for a 'meta_api' key" >&2; }
+    if (( ok )); then pass; else fail "apply did not read the shared 'meta' key for meta-api"; fi
+fi
+
+# ─── MUSEREG: a provider the gateway has no built-in connection for ──────────
+# routing-00 04:5xZ, live gateway: apply.sh printed
+#   ! meta-api registration failed — register it in the dashboard
+# and threw the CLI's stderr away (`>/dev/null 2>&1`, apply.sh:378), so the
+# reason could not be read. The reason: catalog/ai-registry.json gives meta_api
+# the omniroute_id 'meta-api' with its own api_base, and 'meta-api' is not one
+# of the built-ins `omniroute providers available` lists (352 measured
+# 2026-09-28 against omniroute 3.8.51 — openai, meta-llama, muse-code, free-ai,
+# opencode-zen are, meta-api is not), so `providers add meta-api` has nothing
+# to attach a key to. OmniRoute serves such an OpenAI-compatible endpoint as a
+# PROVIDER NODE (REST /api/provider-nodes) and the key then binds to that node:
+# omniroute src/lib/db/providers/nodes.ts:64-74 names the concrete node id
+# ("<type>-<uuid>") as "what the dashboard sends" for a new connection. The
+# create body is createProviderNodeSchema, omniroute
+# src/shared/validation/schemas/provider.ts:307-385 — name and prefix, an
+# apiType for type "openai-compatible", and a baseUrl only for the
+# "vibeproxy-openai" preset; apply sends the baseUrl anyway, because a node
+# without the endpoint the registry names routes nowhere:
+#   {"name":"meta-api","prefix":"meta-api","type":"openai-compatible",
+#    "apiType":"chat","baseUrl":"https://api.meta.ai/v1"}
+# The stand-ins reproduce that contract rather than a convenient fiction
+# (R-worker-04): the fake CLI refuses `providers add` for an id that is neither
+# a built-in nor a node in the store, and the fake curl answers the REST
+# surface from the same files and validates a create body the way the schema
+# does. Both log every argv, so a test can also show a key never reached a
+# command line, where `ps` could read it.
+_node_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin"
+    # D-852: a cleared D-825 gate hands apply.sh the gateway-start path next, and
+    # that is a docker/systemctl call through the ai-stack helper. The host-mutating
+    # set is stand-ins here; curl stays the case's own, which answers /api/health.
+    gate_stubs_make "$d/hstub" $GATE_STUB_HOST_BINS
+    : >"$d/calls.log"
+    : >"$d/curl.log"
+    : >"$d/argv.log"
+    : >"$d/bearer.log"
+    printf '[]\n' >"$d/nodes.json"
+    printf '[]\n' >"$d/connections.json"
+    printf '%s\n' openai meta-llama muse-code free-ai opencode-zen cheaperinference groq \
+        >"$d/builtins.txt"
+    cat >"$d/bin/omniroute" <<'NODECLI'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"
+printf '%s\n' "$*" >>"$d/calls.log"
+printf '%s\n' "$*" >>"$d/argv.log"
+if [[ "${1:-} ${2:-}" == "providers list" ]]; then
+    # APPLYADOPT A: this is the divergence the live host shows today — the CLI
+    # answers from its own ~/.omniroute store while the dockerised gateway's
+    # REST list holds twice as many connections. $d/local_stale makes the list
+    # answer nothing while /api/providers still serves connections.json, so a
+    # test can tell the two sources apart.
+    [[ -f "$d/local_stale" ]] && exit 0
+    # The real columns (measured 2026-09-28): 8-char hex id, provider, name,
+    # status. A node-bound connection's provider is its node id, which is why
+    # apply.sh's own "already registered" scan cannot see it and the REST
+    # connection check has to.
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+for c in json.load(open(sys.argv[1], encoding="utf-8")):
+    print("  %s %-22s %-16s active"
+          % (str(c.get("id", ""))[:8], c.get("provider", ""), c.get("name", "")))
+PY
+    exit 0
+fi
+if [[ "${1:-} ${2:-}" == "providers available" ]]; then
+    # The real CLI prints its .env banner, then the JSON document.
+    printf '  Loaded env from /home/autoos-test/.omniroute/.env\n'
+    # no_available: the banner with no document after it - what a CLI that
+    # cannot answer the question at all looks like.
+    [[ -f "$d/no_available" ]] && exit 0
+    python3 - "$d/builtins.txt" <<'PY'
+import json, sys
+rows = [{"id": s, "name": s, "category": "api-key", "alias": s}
+        for s in (l.strip() for l in open(sys.argv[1], encoding="utf-8")) if s]
+print(json.dumps({"count": len(rows), "categories": ["api-key"], "providers": rows},
+                 indent=2))
+PY
+    exit 0
+fi
+if [[ "${1:-} ${2:-}" == "providers add" ]]; then
+    provider="${3:-}"
+    shift 3
+    name="$provider" cred=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --name) name="${2:-}"; shift 2 ;;
+            --credential-env) cred="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [[ -f "$d/fail_add" ]]; then
+        key=""
+        [[ -n "$cred" ]] && key="${!cred:-}"
+        printf 'Error: no active credentials for %s (key %s)\n' "$provider" "$key" >&2
+        exit 1
+    fi
+    known=0
+    grep -qxF "$provider" "$d/builtins.txt" && known=1
+    if [[ $known -eq 0 ]] && python3 - "$d/nodes.json" "$provider" <<'PY'
+import json, sys
+ids = [n.get("id") for n in json.load(open(sys.argv[1], encoding="utf-8"))]
+sys.exit(0 if sys.argv[2] in ids else 1)
+PY
+    then known=1; fi
+    if [[ $known -eq 0 ]]; then
+        printf 'Error: Unknown provider: %s\n' "$provider" >&2
+        exit 1
+    fi
+    python3 - "$d/connections.json" "$provider" "$name" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+rows.append({"id": "%08x" % (len(rows) + 0xabcd), "provider": sys.argv[2],
+             "name": sys.argv[3], "apiKey": "***", "isActive": True})
+json.dump(rows, open(sys.argv[1], "w"), indent=1)
+PY
+    printf "Added provider connection '%s'.\n" "$name"
+    exit 0
+fi
+exit 0
+NODECLI
+    cat >"$d/bin/curl" <<'NODECURL'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"
+printf '%s\n' "$*" >>"$d/argv.log"
+method=GET url="" out="" fmt="" fail=0 has_body=0 cfg=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -X|--request) method="${2:-GET}"; shift 2 ;;
+        -o|--output) out="${2:-}"; shift 2 ;;
+        -w|--write-out) fmt="${2:-}"; shift 2 ;;
+        --config|-K) cfg="${2:-}"; shift 2 ;;
+        --data|--data-raw|--data-binary|--data-urlencode) has_body=1; shift 2 ;;
+        -m|--max-time|-H|--header) shift 2 ;;
+        --fail) fail=1; shift ;;
+        -s|-S) shift ;;
+        -sf|-fs|-sS|-fsS) fail=1; shift ;;
+        *) url="$1"; shift ;;
+    esac
+done
+printf '%s %s\n' "$method" "$url" >>"$d/curl.log"
+reply="" code=200
+case "$url" in
+    */api/health) reply='{"status":"ok"}' ;;
+    */v1/models)
+        # APPLYADOPT-2 H: this read carries the omniroute *client* key. The
+        # stand-in takes the bearer out of apply.sh's own curl --config file and
+        # records what it found, so a key sent as -H argv (readable in `ps` for
+        # the lifetime of the call) cannot pass: with $d/require_bearer an empty
+        # bearer answers 401.
+        bearer=""
+        [[ -n "$cfg" && -f "$cfg" ]] && bearer="$(sed -n 's/.*Bearer //p' "$cfg" |
+            head -n 1 | tr -d '"')"
+        printf 'bearer=%s\n' "${bearer:-none}" >>"$d/bearer.log"
+        if [[ -f "$d/require_bearer" && -z "$bearer" ]]; then
+            reply='{"error":"no bearer in the request"}'; code=401
+        elif [[ -f "$d/models.json" ]]; then reply="$(cat "$d/models.json")"
+        else reply='{"data":[]}'; fi ;;
+    */api/provider-nodes*)
+        if [[ "$method" == "GET" ]]; then
+            if [[ -f "$d/stall" ]]; then
+                # A call in flight: apply.sh is interrupted (SIGTERM) while its
+                # two mktemp files - the curl config holding the manage key and
+                # the response file - still exist. Marks the moment it started
+                # answering, then answers two seconds later, so the test can
+                # kill the run in between and still have a live process.
+                rm -f "$d/stall"
+                : >"$d/curl-stalled"
+                sleep 2
+            fi
+            # The live shape (measured 2026-09-28): {"nodes":[…],"total":N,
+            # "ccCompatibleProviderEnabled":false}.
+            reply="$(python3 - "$d/nodes.json" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+print(json.dumps({"nodes": rows, "total": len(rows),
+                  "ccCompatibleProviderEnabled": False}))
+PY
+)"
+        else
+            req=""
+            [[ $has_body -eq 1 ]] && req="$(cat)"
+            printf '%s' "$req" >"$d/last_body.json"
+            if [[ -f "$d/reserved" ]]; then
+                # The gateway refuses a prefix that collides with one of its
+                # reserved ids (omniroute src/shared/constants/
+                # reservedProviderPrefixes.ts). This stand-in additionally
+                # echoes the bearer token it refused with - read out of the very
+                # curl config file apply.sh wrote - because that is the worst
+                # case apply's redaction has to survive: a 4xx body that repeats
+                # the request's own credential.
+                bearer=""
+                [[ -f "$cfg" ]] && bearer="$(sed -n 's/.*Bearer //p' "$cfg" |
+                    head -n 1 | tr -d '"')"
+                reply="$(python3 - "$req" "$bearer" <<'RESPY'
+import json, sys
+try:
+    prefix = json.loads(sys.argv[1] or "{}").get("prefix", "?")
+except ValueError:
+    prefix = "?"
+print(json.dumps({"error": {"message": '"%s" is a reserved provider prefix '
+                                      '(refused with token %s)' % (prefix, sys.argv[2])}}))
+RESPY
+)"
+                code=400
+            else
+                reply="$(python3 - "$d/nodes.json" "$d/builtins.txt" "$req" <<'PY'
+import json, sys
+try:
+    body = json.loads(sys.argv[3] or "{}")
+except ValueError:
+    print(json.dumps({"error": {"message": "request body is not JSON"}}))
+    sys.exit(1)
+built = {l.strip() for l in open(sys.argv[2], encoding="utf-8") if l.strip()}
+missing = [k for k in ("name", "prefix", "baseUrl") if not body.get(k)]
+if missing:
+    print(json.dumps({"error": {"message": "Missing " + ", ".join(missing)}}))
+    sys.exit(1)
+if body["prefix"] in built:
+    print(json.dumps({"error": {"message":
+          '"%s" is a reserved provider prefix' % body["prefix"]}}))
+    sys.exit(1)
+if body.get("type", "openai-compatible") == "openai-compatible" and not body.get("apiType"):
+    print(json.dumps({"error": {"message": "Invalid OpenAI compatible API type"}}))
+    sys.exit(1)
+nodes = json.load(open(sys.argv[1], encoding="utf-8"))
+node = {"id": "openai-compatible-chat-%08d" % (len(nodes) + 1),
+        "type": body.get("type", "openai-compatible"), "apiType": body["apiType"],
+        "name": body["name"], "prefix": body["prefix"], "baseUrl": body["baseUrl"]}
+nodes.append(node)
+json.dump(nodes, open(sys.argv[1], "w"), indent=1)
+print(json.dumps(node))
+PY
+)" && code=201 || code=400
+            fi
+        fi ;;
+    */api/providers*)
+        # The live shape: {"connections":[…],"total":N}. The stored apiKey is a
+        # stand-in, never a real value, and apply.sh must not print this body.
+        # $d/no_rest makes the gateway refuse the read (a wrong-scope key, a
+        # 5xx) instead: /api/health still answers, so the gateway reads "up".
+        if [[ -f "$d/no_rest" ]]; then
+            reply='{"error":"HTTP 503"}'
+            code=503
+        else
+            # $d/partial_total reports a page that served fewer connections
+            # than the document counts (APPLYADOPT-2 E): the shape of a
+            # truncated list, which must not be read as "these are all there
+            # is".
+            reply="$(python3 - "$d/connections.json" <<'PY'
+import json, os, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+total = len(rows)
+path = os.path.join(os.path.dirname(os.path.abspath(sys.argv[1])), "partial_total")
+if os.path.exists(path):
+    total = len(rows) + int(open(path, encoding="utf-8").read().strip() or 0)
+print(json.dumps({"connections": rows, "total": total}))
+PY
+)"
+        fi ;;
+    *) reply='{}' ;;
+esac
+if [[ -n "$out" ]]; then printf '%s' "$reply" >"$out"; else printf '%s' "$reply"; fi
+# -w is honoured for the one format apply.sh asks for, the status code.
+[[ -n "$fmt" ]] && printf '%s' "$code"
+[[ $fail -eq 1 && $code -ge 400 ]] && exit 22
+exit 0
+NODECURL
+    chmod +x "$d/bin/omniroute" "$d/bin/curl"
+    _node_registry "$d"
+    printf '%s\n' "$d"
+}
+# _node_apply <dir> [apply args] - apply.sh against the two stand-ins. The
+# manage key is the env var the CLI would inherit (OMNIROUTE_API_KEY), so the
+# test can grep every recorded argv for it and show it never went there. The
+# stand-in curl answers /api/health, so the gateway is "up" on a closed port.
+_node_apply() {
+    local d="$1"
+    shift
+    local -a _go_arr=()
+    mapfile -d '' -t _go_arr < <(_go_flags "$ROOT" "$@")
+    PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_REGISTRY_FILE="$d/registry.json" \
+        OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" \
+        bash "$ROOT/configuration/omniroute/apply.sh" "$@" ${_go_arr[@]+"${_go_arr[@]}"} 2>&1
+}
+# _node_post_count <dir> - how many provider nodes the run created.
+_node_post_count() {
+    grep -c '^POST .*/api/provider-nodes' "$1/curl.log"
+}
+
+if it "svc: apply surfaces the CLI's redacted stderr when a registration fails"; then
+    d="$(_node_sandbox)"
+    # A key with glob and regex characters: a redaction that read it as a
+    # pattern would leave part of it in the log.
+    printf 'free_ai: sk-1.[x]*?/Z\n' >"$d/keys.yml"
+    touch "$d/fail_add"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"free-ai registration failed"* ]] || { ok=0; echo "no failure line: $out" >&2; }
+    [[ "$out" == *"no active credentials"* ]] || { ok=0; echo "the CLI's reason was swallowed: $out" >&2; }
+    [[ "$out" == *"[REDACTED]"* ]] || { ok=0; echo "no redaction marker: $out" >&2; }
+    [[ "$out" == *"sk-1"* ]] && { ok=0; echo "the provider key was printed: $out" >&2; }
+    [[ "$out" == *"fake-manage-key-MUSEREG"* ]] && { ok=0; echo "the manage key was printed" >&2; }
+    grep -q 'sk-1' "$d/argv.log" && { ok=0; echo "the key reached a command line" >&2; }
+    grep -q 'fake-manage-key-MUSEREG' "$d/argv.log" \
+        && { ok=0; echo "the manage key reached a command line: $(cat "$d/argv.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed registration still hides, or leaks, what the CLI said"; fi
+fi
+
+if it "svc: apply registers a built-in provider through the CLI alone, with no provider node"; then
+    d="$(_node_sandbox)"
+    printf 'free_ai: not-a-real-key-123\n' >"$d/keys.yml"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  + free-ai registered"* ]] || { ok=0; echo "first run: $out" >&2; }
+    grep -qx 'providers add free-ai --credential-env AUTOOS_KEY_FREE_AI --yes' "$d/calls.log" \
+        || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "a node was created for a built-in: $(cat "$d/curl.log")" >&2; }
+    [[ "$(cat "$d/nodes.json")" == "[]" ]] || { ok=0; echo "node store: $(cat "$d/nodes.json")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a built-in provider's registration changed"; fi
+fi
+
+if it "svc: apply creates a provider node for meta-api and binds the shared meta key to it"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"provider node created"* ]] || { ok=0; echo "no node line: $out" >&2; }
+    [[ "$out" == *"  + meta-api registered"* ]] || { ok=0; echo "first run: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "1" ]] || { ok=0; echo "curl.log: $(cat "$d/curl.log")" >&2; }
+    node_id="$(python3 -c 'import json;print(json.load(open("'"$d"'/nodes.json"))[0]["id"])' 2>/dev/null)"
+    grep -qx "providers add $node_id --name meta-api --credential-env AUTOOS_KEY_META --yes" "$d/calls.log" \
+        || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    python3 - "$d/nodes.json" "$d/last_body.json" "$d/connections.json" <<'PY' || ok=0
+import json, sys
+node = json.load(open(sys.argv[1]))[0]
+body = json.load(open(sys.argv[2]))
+conns = json.load(open(sys.argv[3]))
+checks = [
+    ("create body prefix", body.get("prefix"), "meta-api"),
+    ("create body type", body.get("type"), "openai-compatible"),
+    ("create body apiType", body.get("apiType"), "chat"),
+    ("create body baseUrl", body.get("baseUrl"), "https://api.meta.ai/v1"),
+    ("stored prefix", node.get("prefix"), "meta-api"),
+    ("connection provider", conns[0].get("provider") if conns else None, node["id"]),
+    ("connection name", conns[0].get("name") if conns else None, "meta-api"),
+]
+for name, got, want in checks:
+    if got != want:
+        print("%s: expected [%s] got [%s]" % (name, want, got))
+        sys.exit(1)
+PY
+    grep -q 'fake-manage-key-MUSEREG' "$d/argv.log" \
+        && { ok=0; echo "the manage key reached a command line" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "meta-api did not become an OpenAI-compatible provider node"; fi
+fi
+
+if it "svc: apply creates the meta-api node once and reports the connection as already registered"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  + meta-api registered"* ]] || { ok=0; echo "first run: $out" >&2; }
+    : >"$d/calls.log"
+    : >"$d/curl.log"
+    out="$(_node_apply "$d")"
+    [[ "$out" == *"  = meta-api already registered"* ]] || { ok=0; echo "second run: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "the node was created twice: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers add' "$d/calls.log" && { ok=0; echo "a run re-added the connection" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/nodes.json'))))")" == "1" ]] \
+        || { ok=0; echo "node store: $(cat "$d/nodes.json")" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "1" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the provider-node path is not idempotent"; fi
+fi
+
+if it "svc: apply --dry-run plans the meta-api provider node and creates or adds nothing"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    out="$(_node_apply "$d" --dry-run)"
+    ok=1
+    [[ "$out" == *"would register (key from meta)"* ]] || { ok=0; echo "plan: $out" >&2; }
+    [[ "$out" == *"would create its provider node"* ]] || { ok=0; echo "node plan: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] || { ok=0; echo "dry run wrote: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers add' "$d/calls.log" && { ok=0; echo "dry run added a connection" >&2; }
+    [[ "$(cat "$d/nodes.json")" == "[]" ]] || { ok=0; echo "the node store changed" >&2; }
+    [[ "$(cat "$d/connections.json")" == "[]" ]] || { ok=0; echo "the connection store changed" >&2; }
+    [[ "$out" == *"would refresh meta-api's models"* ]] || { ok=0; echo "catalog plan: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the provider-node dry run is not a dry run"; fi
+fi
+
+# A CLI that cannot answer `providers available` says nothing about who is
+# built-in. The safe reading is "everything is" - the behaviour this script had
+# before - because the other reading invents a provider node for every registry
+# entry on a machine where the CLI merely did not answer.
+if it "svc: apply treats every id as built-in when the CLI's catalog is unreadable"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    touch "$d/no_available"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"provider catalog is unreadable"* ]] || { ok=0; echo "no warning: $out" >&2; }
+    [[ "$out" == *"provider node created"* ]] && { ok=0; echo "a node was created on a guess" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "the gateway was written to: $(cat "$d/curl.log")" >&2; }
+    grep -qx 'providers add meta-api --credential-env AUTOOS_KEY_META --yes' "$d/calls.log" \
+        || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an unreadable catalog became a licence to create provider nodes"; fi
+fi
+
+# ─── MUSEFIX S1: an interrupted REST call leaves no temp file behind ─────────
+# omni_rest writes the manage key into a mktemp curl --config file and the
+# response into a second mktemp, and GET /api/providers answers with every
+# provider's live apiKey. Both were removed only on the normal path, so a run
+# interrupted with Ctrl-C - or killed - while a call was in flight left a 0600
+# file holding the manage key in /tmp on the user's machine, which is exactly
+# what an onboarding run that a user gets impatient with looks like.
+# TMPDIR points at a directory this case alone owns (mktemp honours it), the
+# stand-in holds its first provider-nodes answer for two seconds (a call in
+# flight), and SIGTERM goes to the run's whole process group inside that window
+# - the shape of a real Ctrl-C. Red before the fix: the run dies and both files
+# stay in the directory.
+if it "svc: apply removes the REST temp files when a call is interrupted"; then
+    d="$(_node_sandbox)"
+    mkdir -p "$d/tmp"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    touch "$d/stall"
+    # Monitor mode around the launch only, so the run starts in its own process
+    # group: Ctrl-C signals the whole foreground group, and that is the
+    # interrupt that leaks - the call in flight is killed too and never reaches
+    # the rm that follows it. Signalling just the script's pid lets the call
+    # finish and clean up behind it, and the case proves nothing.
+    set -m
+    PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_REGISTRY_FILE="$d/registry.json" \
+        OMNIROUTE_API_KEY="fake-manage-key-MUSEREG" TMPDIR="$d/tmp" \
+        bash "$ROOT/configuration/omniroute/apply.sh" --go=OS-0 "--go-sha=$(git -C "$ROOT" rev-parse HEAD)" >"$d/run.out" 2>&1 &
+    apply_pid=$!
+    set +m
+    ok=1
+    stalled=""
+    for _ in $(seq 1 200); do
+        [[ -e "$d/curl-stalled" ]] && { stalled=1; break; }
+        kill -0 "$apply_pid" 2>/dev/null || break
+        sleep 0.05
+    done
+    [[ -n "$stalled" ]] || { ok=0; echo "the stand-in never took the call: $(cat "$d/run.out")" >&2; }
+    # The window has to be real: at this moment the temp files exist. Without
+    # this the case could pass on a run that never reached omni_rest at all.
+    [[ -n "$(ls -A "$d/tmp" 2>/dev/null)" ]] ||
+        { ok=0; echo "no temp file existed during the call - the case proves nothing" >&2; }
+    kill -TERM -- "-$apply_pid" 2>/dev/null || { ok=0; echo "the run was already gone" >&2; }
+    wait "$apply_pid" 2>/dev/null || true
+    # The interrupted call was in flight when the signal landed, so the run has
+    # up to its timeout left to do. Give it a bounded window and judge what is
+    # still on disk when the window closes.
+    clean=""
+    for _ in $(seq 1 300); do
+        [[ -z "$(ls -A "$d/tmp" 2>/dev/null)" ]] && { clean=1; break; }
+        sleep 0.05
+    done
+    [[ -n "$clean" ]] ||
+        { ok=0; echo "survived the interrupt in $d/tmp: $(ls -A "$d/tmp")" >&2; }
+    grep -q 'fake-manage-key-MUSEREG' "$d/argv.log" \
+        && { ok=0; echo "the manage key reached a command line" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an interrupted REST call left the manage key in a temp file"; fi
+fi
+
+# A gateway refuses a provider-node prefix that collides with one of its
+# reserved ids (omniroute src/shared/constants/reservedProviderPrefixes.ts), and
+# ensure_provider_node's failure path prints REST_ERROR through print_cli_error
+# with both keys as redaction arguments. The stand-in answers the POST with that
+# refusal AND the bearer token it read out of apply.sh's own curl config file -
+# the worst case the redaction has to survive, a 4xx body that repeats the
+# request's credential. The reason must reach the log; the key must not, and it
+# must never have reached a command line, where `ps` reads argv for the
+# lifetime of the call.
+if it "svc: apply prints the gateway's reserved-prefix refusal with the token redacted"; then
+    d="$(_node_sandbox)"
+    printf 'meta: sk-not-a-real-key-456\n' >"$d/keys.yml"
+    touch "$d/reserved"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"provider node could not be created"* ]] || { ok=0; echo "no failure line: $out" >&2; }
+    [[ "$out" == *"register it in the dashboard"* ]] || { ok=0; echo "no operator route: $out" >&2; }
+    [[ "$out" == *"reserved provider prefix"* ]] || { ok=0; echo "the gateway's reason was swallowed: $out" >&2; }
+    [[ "$out" == *"[REDACTED]"* ]] || { ok=0; echo "the refusal printed the token raw: $out" >&2; }
+    [[ "$out" != *"fake-manage-key-MUSEREG"* ]] || { ok=0; echo "the manage key was printed" >&2; }
+    [[ "$out" != *"sk-not-a-real-key-456"* ]] || { ok=0; echo "the provider key was printed" >&2; }
+    grep -q 'fake-manage-key-MUSEREG' "$d/argv.log" \
+        && { ok=0; echo "the manage key reached a command line: $(cat "$d/argv.log")" >&2; }
+    [[ "$(cat "$d/nodes.json")" == "[]" ]] || { ok=0; echo "a node was stored: $(cat "$d/nodes.json")" >&2; }
+    grep -q '^providers add' "$d/calls.log" \
+        && { ok=0; echo "a connection was added for a refused node" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a refused provider node leaked, or hid, what the gateway said"; fi
+fi
+
+# The state the dashboard leaves behind: the provider node exists, no key is
+# bound to it. apply has to add the connection to THAT node and POST no second
+# one - the GET-first order in ensure_provider_node is what keeps a re-run from
+# storing one node per connection.
+if it "svc: apply binds the key to an existing provider node instead of making a second one"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    python3 - "$d/nodes.json" <<'PY'
+import json, sys
+json.dump([{"id": "openai-compatible-chat-00000001",
+            "type": "openai-compatible", "apiType": "chat",
+            "name": "meta-api", "prefix": "meta-api",
+            "baseUrl": "https://api.meta.ai/v1"}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  + meta-api registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" != *"provider node created"* ]] || { ok=0; echo "a node was announced: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "a node was POSTed: $(cat "$d/curl.log")" >&2; }
+    grep -qx 'providers add openai-compatible-chat-00000001 --name meta-api --credential-env AUTOOS_KEY_META --yes' \
+        "$d/calls.log" || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/nodes.json'))))")" == "1" ]] \
+        || { ok=0; echo "node store: $(cat "$d/nodes.json")" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "1" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an existing node with no connection was not simply bound"; fi
+fi
+
+# ─── APPLYADOPT A: the gateway, not the CLI's local store, decides ───────────
+# `omniroute providers list` reads the CLI's own ~/.omniroute store. On the
+# dockerised gateway that store is not the gateway: measured 2026-09-29, the CLI
+# listed 14 connections while GET /api/providers answered 32 (many of them named
+# "main"). Deciding "already registered" from the CLI therefore re-added
+# scaleway, nebius, free-ai, bazaarlink, navy, arcee-ai, bluesminds, agentrouter,
+# novita and together — a second connection for each, on someone's real machine.
+# With a manage key the existing set comes from the gateway's own connection
+# list. The stand-in divergence is $d/local_stale: the fake CLI's list answers
+# nothing while the fake REST surface keeps serving connections.json.
+if it "apply adopt: a connection the gateway holds but the CLI's list hides is already registered"; then
+    d="$(_node_sandbox)"
+    printf 'scaleway: not-a-real-key-1\nnebius: not-a-real-key-2\n' >"$d/keys.yml"
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([
+    {"id": "abcd0001", "provider": "scaleway", "name": "main",
+     "apiKey": "sk-stand-in-key-do-not-print", "isActive": True},
+    {"id": "abcd0002", "provider": "nebius", "name": "main",
+     "apiKey": "sk-stand-in-key-do-not-print", "isActive": True},
+], open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/local_stale"
+    out="$(_node_apply "$d")"
+    ok=1
+    # The line the CLI list could not produce, in the wording the idempotence
+    # contract already promises.
+    [[ "$out" == *"  = scaleway already registered"* ]] || { ok=0; echo "scaleway: $out" >&2; }
+    [[ "$out" == *"  = nebius already registered"* ]] || { ok=0; echo "nebius: $out" >&2; }
+    [[ "$out" == *"  + scaleway registered"* ]] && { ok=0; echo "a duplicate was added: $out" >&2; }
+    grep -q '^providers add' "$d/calls.log" \
+        && { ok=0; echo "providers add ran: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    # It took the REST branch, not the convenient one: the gateway was asked,
+    # and the stale local store was never read at all.
+    grep -qE '^GET .*/api/providers' "$d/curl.log" \
+        || { ok=0; echo "no REST read: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers list' "$d/calls.log" \
+        && { ok=0; echo "the CLI's stale store was consulted too: $(cat "$d/calls.log")" >&2; }
+    # The connection store is unchanged — two rows, no duplicates.
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "2" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    # And the body, which carries every stored apiKey, was never printed.
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the connection body was printed" >&2; }
+    [[ "$out" == *"fake-manage-key-MUSEREG"* ]] && { ok=0; echo "the manage key was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the CLI's stale local list decided what the gateway already holds"; fi
+fi
+
+# A node provider is the harder half: its connection's `provider` field is the
+# node's own "<type>-<uuid>" id, never the registry id, so an id match against
+# the connection list cannot see it. It counts as registered when the node
+# exists AND a connection is bound to it. The dry run has to say the same —
+# before this change it planned "would create its provider node" for a node and
+# a connection that were both already there.
+if it "apply adopt: a node provider whose node and connection exist is already registered, dry run too"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    python3 - "$d/nodes.json" <<'PY'
+import json, sys
+json.dump([{"id": "openai-compatible-chat-00000001",
+            "type": "openai-compatible", "apiType": "chat",
+            "name": "meta-api", "prefix": "meta-api",
+            "baseUrl": "https://api.meta.ai/v1"}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "openai-compatible-chat-00000001",
+            "name": "meta-api", "apiKey": "sk-stand-in-key-do-not-print",
+            "isActive": True}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/local_stale"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  = meta-api already registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "a second node was POSTed: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers add' "$d/calls.log" \
+        && { ok=0; echo "a duplicate connection was added: $(cat "$d/calls.log")" >&2; }
+    : >"$d/calls.log"
+    : >"$d/curl.log"
+    out="$(_node_apply "$d" --dry-run)"
+    [[ "$out" == *"  = meta-api already registered"* ]] || { ok=0; echo "dry run: $out" >&2; }
+    [[ "$out" == *"would create its provider node"* ]] && { ok=0; echo "the dry run plans an existing node: $out" >&2; }
+    [[ "$out" == *"meta-api: would register"* ]] && { ok=0; echo "the dry run plans an existing connection: $out" >&2; }
+    [[ "$out" == *"would refresh meta-api's models"* ]] && { ok=0; echo "the plan registers what exists: $out" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "the dry run wrote the gateway: $(cat "$d/curl.log")" >&2; }
+    grep -qE '^providers add|^combo create' "$d/calls.log" \
+        && { ok=0; echo "the dry run called the CLI: $(cat "$d/calls.log")" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "1" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the connection body was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an existing provider node and connection were planned as new"; fi
+fi
+
+# The fallback is the point of the flag, not an afterthought: a gateway that
+# refuses the connection read (a key with no manage scope, a 5xx) must leave the
+# behaviour the script had before — the CLI's list decides. Asserting the
+# fallback through the same sandbox means a REST failure cannot silently become
+# "register everything again".
+if it "apply adopt: a gateway that refuses the REST read falls back to the CLI list"; then
+    d="$(_node_sandbox)"
+    printf 'scaleway: not-a-real-key-1\n' >"$d/keys.yml"
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
+            "apiKey": "sk-stand-in-key-do-not-print", "isActive": True}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/no_rest"
+    out="$(_node_apply "$d")"
+    ok=1
+    grep -qE '^GET .*/api/providers' "$d/curl.log" \
+        || { ok=0; echo "the REST read was never attempted: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers list' "$d/calls.log" \
+        || { ok=0; echo "the CLI fallback never ran: $(cat "$d/calls.log")" >&2; }
+    # The degraded source is announced — an operator who later finds a duplicate
+    # connection has to be able to see that this run could not ask the gateway.
+    [[ "$out" == *"the gateway's connection list is unreadable"* ]] \
+        || { ok=0; echo "the fallback was silent: $out" >&2; }
+    [[ "$out" == *"  = scaleway already registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    grep -q '^providers add scaleway' "$d/calls.log" \
+        && { ok=0; echo "the fallback still re-added it: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the refused body was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an unreadable REST list lost the CLI fallback"; fi
+fi
+
+# A gateway with no manage key has no REST branch to take: the CLI list alone
+# decides, exactly as before. (`providers list` is what the local, non-docker
+# gateway's store answers, so the fallback is not a degraded path there.)
+if it "apply adopt: with no manage key the CLI list alone decides, and nothing is duplicated"; then
+    d="$(_node_sandbox)"
+    printf 'scaleway: not-a-real-key-1\n' >"$d/keys.yml"
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
+            "apiKey": "sk-stand-in-key-do-not-print", "isActive": True}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    out="$(PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:1" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" --go=OS-0 "--go-sha=$(git -C "$ROOT" rev-parse HEAD)" 2>&1)"
+    ok=1
+    grep -q '^providers list' "$d/calls.log" \
+        || { ok=0; echo "the CLI list never decided: $(cat "$d/calls.log")" >&2; }
+    # No key is not a failed read: on a local gateway the CLI store IS the
+    # gateway, so this path must not cry wolf about an unreadable list.
+    [[ "$out" == *"connection list is unreadable"* ]] \
+        && { ok=0; echo "a keyless run warned about a read it never needed: $out" >&2; }
+    [[ "$out" == *"  = scaleway already registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    grep -q '^providers add scaleway' "$d/calls.log" \
+        && { ok=0; echo "the keyless run re-added it: $(cat "$d/calls.log")" >&2; }
+    # /api/health and /v1/models are public reads and go through curl with no
+    # key; a *management* call here would mean the run guessed at a credential.
+    grep -qE '^(GET|POST) .*/api/(provider-nodes|providers)' "$d/curl.log" \
+        && { ok=0; echo "a keyless run made a management call: $(cat "$d/curl.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the no-manage-key run changed the existing-source rule"; fi
+fi
+
+# ─── L0 2026-09-27T19:07:39Z: register -> refresh -> read -> combos ─────────
+# On a fresh machine free-ai/qwen7b only appeared in l3-driver-free-only on the
+# SECOND apply run. The first run registered the connection, then read
+# /v1/models — which the gateway had not enumerated for a provider it had just
+# added — so the leg failed the catalog check and was dropped as "catalog does
+# not know". Reading the catalog is only meaningful after the enumeration the
+# CLI performs when asked for a provider's models, so apply must refresh
+# between registering and writing combos.
+# The sandbox catalog: catalog.base holds every combos.json ref EXCEPT the new
+# provider's, and the stand-in serves it as /v1/models until `omniroute models
+# <provider>` is called — that call rebuilds the document from catalog.base
+# plus provider_models.tsv, exactly as the gateway learns a fresh provider's
+# models on demand. A run that skips the refresh cannot see the leg.
+# D657-D2 (2026-10-08): free_ai and the single combo named here are both out of
+# the render now, so which provider and which combos carry its legs is read from
+# the render instead of pinned — the check is the same, only the names come from
+# the data (and it covers EVERY combo that carries the fresh leg, not one).
+if it "apply: one run registers a provider, refreshes the catalog, and writes its leg into the combos"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    python3 - "$d" "$ROOT" <<'PY'
+import json, os, sys
+d, root = sys.argv[1], sys.argv[2]
+combos = json.load(open(os.path.join(root, "configuration", "omniroute", "combos.json"),
+                        encoding="utf-8"))["combos"]
+# A provider the stand-in CLI lists as built-in, so registering it needs no
+# gateway provider node: the test is about the refresh order, not the node path.
+builtins = {l.strip() for l in open(os.path.join(d, "builtins.txt"), encoding="utf-8")
+            if l.strip()}
+refs = {ref for c in combos for ref in c["models"]}
+by_provider = {}
+for ref in sorted(refs):
+    prefix = ref.split("/", 1)[0]
+    if prefix in builtins:
+        by_provider.setdefault(prefix, []).append(ref)
+if not by_provider:
+    sys.exit("no built-in provider carries a leg in the render")
+provider = max(by_provider, key=lambda p: (len(by_provider[p]), p))
+fresh = by_provider[provider]
+base = sorted(refs - set(fresh))
+os.makedirs(os.path.join(d, "gw", "v1"), exist_ok=True)
+with open(os.path.join(d, "catalog.base"), "w", encoding="utf-8") as fh:
+    fh.write("".join(r + "\n" for r in base))
+with open(os.path.join(d, "provider_models.tsv"), "w", encoding="utf-8") as fh:
+    fh.write("".join("%s\t%s\n" % (provider, r) for r in fresh))
+with open(os.path.join(d, "gw", "v1", "models"), "w", encoding="utf-8") as fh:
+    json.dump({"data": [{"id": r} for r in base]}, fh)
+with open(os.path.join(d, "provider"), "w", encoding="utf-8") as fh:
+    fh.write(provider + "\n")
+# Every combo the fresh provider's legs ride, as the exact line apply must write.
+with open(os.path.join(d, "expected.combos"), "w", encoding="utf-8") as fh:
+    for c in combos:
+        if set(c["models"]) & set(fresh):
+            fh.write("combo create %s --strategy %s --models %s\n"
+                     % (c["name"], c["strategy"], ",".join(c["models"])))
+PY
+    provider="$(cat "$d/provider")"
+    printf '%s: not-a-real-key-123\n' "$provider" >"$d/keys.yml"
+    out="$(_prune_apply "$d")"
+    ok=1
+    # The leg is in the combo the FIRST run writes, in every combo that rides it.
+    while IFS= read -r want; do
+        grep -qxF "$want" "$d/calls.log" \
+            || { ok=0; echo "missing write: [$want] created: [$(grep '^combo create' "$d/calls.log")]" >&2; }
+    done <"$d/expected.combos"
+    # ... and specifically the freshly registered provider's leg is in them.
+    grep -q "^combo create .* --models .*${provider}/" "$d/calls.log" \
+        || { ok=0; echo "the new leg is not in the first combo write" >&2; }
+    [[ "$out" != *"catalog does not know ${provider}"* ]] || { ok=0; echo "leg dropped: $out" >&2; }
+    # The refresh is what put it there, and it happened before any combo write.
+    [[ "$out" == *"  + ${provider} registered"* ]] || { ok=0; echo "register: $out" >&2; }
+    [[ "$out" == *"  + ${provider} enumerated"* ]] || { ok=0; echo "refresh: $out" >&2; }
+    refresh_line="$(grep -nx "models ${provider}" "$d/calls.log" | cut -d: -f1 | head -1)"
+    combo_line="$(grep -nx 'combo create .*' "$d/calls.log" | cut -d: -f1 | head -1)"
+    [[ -n "$refresh_line" && -n "$combo_line" && $refresh_line -lt $combo_line ]] \
+        || { ok=0; echo "order: refresh=$refresh_line first-combo=$combo_line" >&2; }
+    [[ "$out" != *"could not read /v1/models"* ]] || { ok=0; echo "no catalog read: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a freshly registered provider's leg needed a second run"; fi
+fi
+
+# ─── MUSEAPI review F1: apply.sh raises apply.ps1's duplicate key_name guard ─
+# Two connections from one api-keys.yml entry (the shape that would follow if
+# meta and meta_api both said key_name: meta) means one of them silently gets no
+# key. apply.ps1 throws; apply.sh must not quietly register whichever row it
+# reads second. A synthesized registry, so the real catalog is untouched.
+if it "svc: apply refuses a registry where two providers claim one api-keys.yml name"; then
+    reg="$(mktemp)"
+    cat >"$reg" <<'JSON'
+{"providers": {
+   "meta":     {"omniroute_id": "meta",     "key_name": "meta"},
+   "meta_api": {"omniroute_id": "meta-api", "key_name": "meta"}},
+ "routes": {},
+ "models": {}}
+JSON
+    keys="$(mktemp)"
+    printf 'meta: not-a-real-key-123\n' >"$keys"
+    rc=0
+    out="$(AUTOOS_REGISTRY_FILE="$reg" AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)" || rc=$?
+    rm -f "$reg" "$keys"
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "rc=$rc, out: $out" >&2; }
+    [[ "$out" == *"is claimed by both meta and meta-api"* ]] || { ok=0; echo "out: $out" >&2; }
+    [[ "$out" != *"would register"* ]] || { ok=0; echo "registered anyway: $out" >&2; }
+    if (( ok )); then pass; else fail "apply.sh accepted a duplicated key_name"; fi
+fi
+
+if it "svc: apply --dry-run plans the catalog refresh for the provider it would register"; then
+    keys="$(mktemp)"
+    printf 'free_ai: not-a-real-key-123\n' >"$keys"
+    out="$(AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1 AUTOOS_KEYS_FILE="$keys" \
+        bash configuration/omniroute/apply.sh --dry-run 2>&1)"
+    rm -f "$keys"
+    ok=1
+    [[ "$out" == *"  - free-ai: would register (key from free_ai)"* ]] || { ok=0; echo "plan: $out" >&2; }
+    [[ "$out" == *"would refresh free-ai's models (omniroute models free-ai)"* ]] \
+        || { ok=0; echo "refresh plan: $out" >&2; }
+    [[ "$out" != *"nothing new registered"* ]] || { ok=0; echo "claimed a current catalog: $out" >&2; }
+    if (( ok )); then pass; else fail "the dry run does not plan the catalog refresh"; fi
+fi
+
+# ─── Fleet rule D-825: apply.sh mutates live gateway state only on an explicit GO ──
+# 2026-10-09 06:27Z a real apply run began with no judge GO — it stopped only on a
+# missing key file. The gate refuses a mutating run without --go/--go-sha, checks the
+# reference's shape and that the sha IS this checkout's HEAD, and leaves --dry-run and
+# --drift untouched. These drive apply.sh directly (no GO added) so each case asserts
+# exactly the D-825 args it means to test; the _prune_apply/_node_apply helpers add a
+# valid GO to the mutating runs they issue.
+# _gate_run <dir> [apply args] — apply.sh against the prune stand-ins with the args
+# verbatim. Returns apply's exit code; prints its merged stdout+stderr. D-852: it runs
+# through gate_stub_run, so $d/bin (the store stand-in) and then $d/stub (docker, curl,
+# systemctl, ssh, npx, node) come before anything the host offers and the gateway URL is
+# this case's own loopback server — a run that clears the gate reaches a record, not the
+# live stack, which is what the cleared cases below assert.
+_gate_run() {
+    local d="$1" pid port out rc
+    shift
+    read -r pid port < <(_start_test_http_server "$d/gw")
+    if [[ -z "$port" ]]; then
+        kill "$pid" 2>/dev/null
+        echo "no stand-in gateway"
+        return 1
+    fi
+    out="$(gate_stub_run "$d" "AUTOOS_OMNIROUTE_URL=http://127.0.0.1:$port" "AUTOOS_KEYS_FILE=$d/keys.yml" \
+        -- bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1)"; rc=$?
+    kill "$pid" 2>/dev/null
+    printf '%s' "$out"
+    return "$rc"
+}
+
+if it "D-825: apply refuses a live run with no --go and mutates nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(_gate_run "$d")"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a mutating run with no --go exited 0" >&2; }
+    [[ "$out" == *"refusing to change live gateway state without --go"* ]] \
+        || { ok=0; echo "no D-825 refusal: $out" >&2; }
+    [[ "$out" != *"GO:"* ]] || { ok=0; echo "printed a GO line on a refused run: $out" >&2; }
+    [[ ! -s "$d/listed" ]] || { ok=0; echo "the refused run listed the live store" >&2; }
+    [[ ! -s "$d/calls.log" ]] || { ok=0; echo "the refused run called the store stand-in: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply ran live mutations with no --go"; fi
+fi
+
+if it "D-825: apply refuses a malformed --go reference"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_run "$d" --go "not-a-real-ref" --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a malformed --go reference exited 0" >&2; }
+    [[ "$out" == *"is not a judge run id"* ]] || { ok=0; echo "no reference-format refusal: $out" >&2; }
+    [[ ! -s "$d/calls.log" ]] || { ok=0; echo "the refused run called the store stand-in" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply accepted a malformed --go reference"; fi
+fi
+
+if it "D-825: apply refuses when --go-sha is not this checkout's HEAD"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(_gate_run "$d" --go D-825 --go-sha 0000000000000000000000000000000000000000)"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a wrong --go-sha exited 0" >&2; }
+    [[ "$out" == *"is not this checkout's HEAD"* ]] || { ok=0; echo "no sha-mismatch refusal: $out" >&2; }
+    [[ ! -s "$d/calls.log" ]] || { ok=0; echo "the refused run called the store stand-in" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply mutated on a --go-sha that is not HEAD"; fi
+fi
+
+if it "D-825: a valid --go + --go-sha echoes GO first and lets the live run proceed"; then
+    # D-852: the GO line proves the gate opened; the stand-in record proves what the
+    # run reached afterwards was the case's own — never the host's curl or docker.
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_run "$d" --go "20261009-064139-goref-fix" --go-sha "$sha")"; rc=$?
+    ok=1
+    first_line="$(printf '%s\n' "$out" | head -1)"
+    [[ "$first_line" == "GO: 20261009-064139-goref-fix sha=$sha" ]] \
+        || { ok=0; echo "GO line was not first: [$first_line]" >&2; }
+    [[ "$out" != *"refusing to change live"* ]] || { ok=0; echo "a GO'd run was refused: $out" >&2; }
+    [[ -s "$d/listed" ]] || { ok=0; echo "the GO'd run never reached the live store" >&2; }
+    gate_stub_saw "$d/stub" curl || { ok=0; echo "the cleared run resolved no stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a valid GO did not let the run proceed"; fi
+fi
+
+if it "D-825: --dry-run needs no --go and never hits the gate"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(_gate_run "$d" --dry-run)"; rc=$?
+    ok=1
+    [[ "$out" == *"This is a dry run"* ]] || { ok=0; echo "no dry-run banner: $out" >&2; }
+    [[ "$out" != *"refusing to change live gateway state"* ]] \
+        || { ok=0; echo "--dry-run hit the D-825 gate: $out" >&2; }
+    grep -qE '^combo (delete|create)' "$d/calls.log" && { ok=0; echo "the dry run mutated the store: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--dry-run was gated or mutated state"; fi
+fi
+
+if it "D-825: --drift needs no --go and stays read-only"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(_gate_run "$d" --drift)"; rc=$?
+    ok=1
+    [[ "$out" != *"refusing to change live gateway state"* ]] \
+        || { ok=0; echo "--drift hit the D-825 gate: $out" >&2; }
+    grep -qE '^combo (delete|create)' "$d/calls.log" && { ok=0; echo "--drift mutated the store: $(cat "$d/calls.log")" >&2; }
+    # --drift exits 0/1/3 (sync/drift/unreadable) — never a bare gate refusal.
+    [[ $rc -eq 0 || $rc -eq 1 || $rc -eq 3 ]] || { ok=0; echo "--drift exited $rc" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift was gated or mutated state"; fi
+fi
+
+if it "D-825: --go on a --dry-run is echoed and stays read-only"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_run "$d" --dry-run --go D-825 --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ "$out" == *"GO: D-825 sha=$sha"* ]] || { ok=0; echo "the --go was not echoed on a dry run: $out" >&2; }
+    [[ "$out" == *"This is a dry run"* ]] || { ok=0; echo "not a dry run: $out" >&2; }
+    grep -qE '^combo (delete|create)' "$d/calls.log" && { ok=0; echo "the dry run mutated the store" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--go on a --dry-run was refused or mutated state"; fi
+fi
+
+# ─── Fleet rule D-825 part 2: the named artefact must EXIST, not just look right ──
+# A format check alone let `--go D-1` through: it matches the shape and names nothing.
+# The gate now proves the ref against the sources it comes from — a D-<n> line in the
+# routing decisions log (or the consolidated DECISIONS.md), an OS-<n> item in the
+# routing QUESTIONS.md / ANSWERS.md, a worker record for a judge run id — and refuses
+# when the id is absent OR the source cannot be read. `--go-offline` is the operator's
+# declared exception: it proceeds and logs `GO-OFFLINE: <ref> unverified` first.
+# The sources are a host's own files, so each case below points AUTOOS_DECISIONS_LOG /
+# AUTOOS_ROUTING_DIR / AUTOOS_WORKERS_DIR at a throwaway tree it writes; the suite-wide
+# default is tests/fixtures/go-gate (exported by tests/run-tests.sh).
+# _gate_ref_run <dir> [KEY=VAL ...] -- <apply args...>: apply.sh against the prune
+# stand-ins with EXTRA env first (the ref sources), the args verbatim. Prints merged
+# stdout+stderr, returns apply's exit code.
+_gate_ref_run() {
+    local d="$1" pid port out rc
+    shift
+    local envs=()
+    while [[ $# -gt 0 && "$1" != "--" ]]; do envs+=("$1"); shift; done
+    [[ "${1:-}" == "--" ]] && shift
+    read -r pid port < <(_start_test_http_server "$d/gw")
+    if [[ -z "$port" ]]; then
+        kill "$pid" 2>/dev/null
+        echo "no stand-in gateway"
+        return 1
+    fi
+    out="$(gate_stub_run "$d" "AUTOOS_OMNIROUTE_URL=http://127.0.0.1:$port" "AUTOOS_KEYS_FILE=$d/keys.yml" \
+        ${envs[@]+"${envs[@]}"} -- bash "$ROOT/configuration/omniroute/apply.sh" "$@" 2>&1)"; rc=$?
+    kill "$pid" 2>/dev/null
+    printf '%s' "$out"
+    return "$rc"
+}
+
+if it "D-825: apply refuses a --go decision id that is in no decisions log"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    printf '| D-825 | all L1s | a live step runs only on an explicit GO |\n' >"$d/log.md"
+    out="$(_gate_ref_run "$d" "AUTOOS_DECISIONS_LOG=$d/log.md" -- --go D-9999 --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "a --go naming no artefact exited 0" >&2; }
+    [[ "$out" == *"names no decision"* ]] || { ok=0; echo "no ref-existence refusal: $out" >&2; }
+    [[ "$out" != *"GO:"* ]] || { ok=0; echo "printed a GO line for an artefact that does not exist: $out" >&2; }
+    [[ ! -s "$d/calls.log" ]] || { ok=0; echo "the refused run called the store stand-in" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply accepted a --go that names nothing"; fi
+fi
+
+if it "D-825: a decision id matches exactly — D-82 is not D-825"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    # One log line, one id: D-825. The substring D-82 sits inside it, so a plain
+    # substring search would let D-82 through; the boundary must stop it.
+    printf '| D-825 | all L1s | a live step runs only on an explicit GO |\n' >"$d/log.md"
+    out="$(_gate_ref_run "$d" "AUTOOS_DECISIONS_LOG=$d/log.md" -- --go D-82 --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "D-82 matched the D-825 line" >&2; }
+    [[ "$out" == *"names no decision"* ]] || { ok=0; echo "no exact-id refusal: $out" >&2; }
+    out="$(_gate_ref_run "$d" "AUTOOS_DECISIONS_LOG=$d/log.md" -- --go D-825 --go-sha "$sha")"; rc=$?
+    first_line="$(printf '%s\n' "$out" | head -1)"
+    [[ "$first_line" == "GO: D-825 sha=$sha" ]] \
+        || { ok=0; echo "the id that IS in the log was refused: [$first_line]" >&2; }
+    gate_stub_saw "$d/stub" curl || { ok=0; echo "the cleared run resolved no stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the exact-id match is wrong in one direction"; fi
+fi
+
+if it "D-825: an OS-<n> item is checked against QUESTIONS.md / ANSWERS.md"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    mkdir -p "$d/routing"
+    printf '## OS-1 — where does the gate run?\n\nBefore any gateway call.\n' >"$d/routing/QUESTIONS.md"
+    printf '## OS-10 — answered in the answers file\n\nclose\n' >"$d/routing/ANSWERS.md"
+    out="$(_gate_ref_run "$d" "AUTOOS_ROUTING_DIR=$d/routing" -- --go OS-1 --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ "$(printf '%s\n' "$out" | head -1)" == "GO: OS-1 sha=$sha" ]] \
+        || { ok=0; echo "an OS item present in QUESTIONS.md was refused: $out" >&2; }
+    out="$(_gate_ref_run "$d" "AUTOOS_ROUTING_DIR=$d/routing" -- --go OS-10 --go-sha "$sha")"; rc=$?
+    [[ "$(printf '%s\n' "$out" | head -1)" == "GO: OS-10 sha=$sha" ]] \
+        || { ok=0; echo "an OS item present only in ANSWERS.md was refused: $out" >&2; }
+    out="$(_gate_ref_run "$d" "AUTOOS_ROUTING_DIR=$d/routing" -- --go OS-9 --go-sha "$sha")"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"names no OS"* ]] \
+        || { ok=0; echo "an absent OS item was accepted: rc=$rc out=$out" >&2; }
+    gate_stub_saw "$d/stub" curl || { ok=0; echo "a cleared OS run reached no stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the OS-<n> source check is wrong"; fi
+fi
+
+if it "D-825: a judge run id needs a worker record (json or agent dir)"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    mkdir -p "$d/logs/workers" "$d/logs/agents/20261009-070000-goref-agent"
+    printf '{"id":"20261009-064139-goref-fix"}\n' >"$d/logs/workers/20261009-064139-goref-fix.json"
+    out="$(_gate_ref_run "$d" "AUTOOS_WORKERS_DIR=$d/logs/workers" -- \
+        --go 20261009-064139-goref-fix --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ "$(printf '%s\n' "$out" | head -1)" == "GO: 20261009-064139-goref-fix sha=$sha" ]] \
+        || { ok=0; echo "a run id with logs/workers/<id>.json was refused: $out" >&2; }
+    out="$(_gate_ref_run "$d" "AUTOOS_WORKERS_DIR=$d/logs/workers" -- \
+        --go 20261009-070000-goref-agent --go-sha "$sha")"; rc=$?
+    [[ "$(printf '%s\n' "$out" | head -1)" == "GO: 20261009-070000-goref-agent sha=$sha" ]] \
+        || { ok=0; echo "a run id with only logs/agents/<id>/ was refused: $out" >&2; }
+    out="$(_gate_ref_run "$d" "AUTOOS_WORKERS_DIR=$d/logs/workers" -- \
+        --go 20261009-000000-nosuchrun --go-sha "$sha")"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"names no worker record"* ]] \
+        || { ok=0; echo "a run id with no record was accepted: rc=$rc out=$out" >&2; }
+    gate_stub_saw "$d/stub" curl || { ok=0; echo "a cleared run-id run reached no stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the run-id worker-record check is wrong"; fi
+fi
+
+if it "D-825: an unreadable source refuses — no artefact tree, no GO"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DECISIONS_LOG=$d/no-such-dir/decisions-log.md" -- \
+        --go D-825 --go-sha "$sha")"; rc=$?
+    ok=1
+    [[ $rc -ne 0 ]] || { ok=0; echo "an unreadable decisions log let the run through" >&2; }
+    [[ "$out" == *"cannot read the routing decisions log"* ]] \
+        || { ok=0; echo "no unreadable-source refusal: $out" >&2; }
+    [[ "$out" != *"GO:"* ]] || { ok=0; echo "printed a GO line on a refused run: $out" >&2; }
+    [[ ! -s "$d/calls.log" ]] || { ok=0; echo "the refused run called the store stand-in" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply ran live on a GO it could not verify"; fi
+fi
+
+if it "D-825: --go-offline proceeds and logs the unverified ref first"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DECISIONS_LOG=$d/no-such-dir/decisions-log.md" -- \
+        --go D-825 --go-sha "$sha" --go-offline)"; rc=$?
+    ok=1
+    first_line="$(printf '%s\n' "$out" | head -1)"
+    [[ "$first_line" == "GO-OFFLINE: D-825 unverified" ]] \
+        || { ok=0; echo "the first line was not the offline log: [$first_line]" >&2; }
+    [[ "$out" == *"GO: D-825 sha=$sha"* ]] || { ok=0; echo "the gate refused offline: $out" >&2; }
+    [[ -s "$d/listed" ]] || { ok=0; echo "the offline run never reached the live store" >&2; }
+    gate_stub_saw "$d/stub" curl || { ok=0; echo "the offline run reached no stand-in binary: $(cat "$d/stub/calls.log")" >&2; }
+    # --go-offline still cannot carry a bad sha: the offline flag waives the
+    # artefact lookup, not the sha the GO has to name.
+    out="$(_gate_ref_run "$d" -- --go D-825 --go-sha 0000000000000000000000000000000000000000 --go-offline)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"is not this checkout's HEAD"* ]] \
+        || { ok=0; echo "--go-offline waived the sha check: rc=$rc out=$out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--go-offline did not proceed, log, or keep the sha bar"; fi
+fi
+
+if it "D-825: --go-offline is echoed on a read-only run and gates nothing"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d" tier2
+    out="$(_gate_run "$d" --dry-run --go-offline)"; rc=$?
+    ok=1
+    [[ "$out" == *"This is a dry run"* ]] || { ok=0; echo "no dry-run banner: $out" >&2; }
+    [[ "$out" != *"refusing to change live gateway state"* ]] \
+        || { ok=0; echo "--go-offline hit the gate on a dry run: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--go-offline was gated on a read-only run"; fi
+fi
+
+# ─── apply.sh refuses an unknown flag rather than ignoring it ────────────────
+# The arg loop had no `*` arm, so `apply.sh --bogus` parsed as "no flags given" and
+# ran on — silently dropping whatever the flag was meant to prevent (apply-cluster.sh
+# has refused unknown arguments from the start). A typo'd --go-sha or a stale
+# --apply would be swallowed exactly that way.
+if it "apply.sh: an unknown flag is refused with rc 2 and runs nothing"; then
+    d="$(mktemp -d)"
+    gate_stubs_make "$d/stub"
+    out="$(gate_stub_run "$d" -- bash "$ROOT/configuration/omniroute/apply.sh" --bogus 2>&1)"; rc=$?
+    ok=1
+    [[ $rc -eq 2 ]] || { ok=0; echo "rc=$rc (expected 2)" >&2; }
+    [[ "$out" == *"unknown argument '--bogus'"* ]] \
+        || { ok=0; echo "no unknown-flag refusal: $out" >&2; }
+    [[ "$out" != *"This is a dry run"* && "$out" != *"GO:"* ]] \
+        || { ok=0; echo "the run went on past the parser: $out" >&2; }
+    [[ ! -s "$d/stub/calls.log" ]] \
+        || { ok=0; echo "a refused parse reached a host binary: $(gate_stub_log "$d/stub")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply.sh accepted an unknown flag"; fi
+fi
+
+# ─── apply.sh --drift: live combos vs combos.json ───────────────────────────
+# Nothing today says whether the live combos equal the file (OR1b). --drift
+# reads `omniroute --output json combo list` ({"combos":[{"name","models":[
+# {"kind":"model","providerId","model"}...]}],...} — a leg ref reconstructs as
+# providerId/model, the same spelling combos.json uses) and compares name +
+# ordered models per combo, ignoring retired ids. The sandbox reuses the prune
+# stand-ins: a stub omniroute on PATH answers the list from drift.json, plus a
+# loopback stand-in gateway for /api/health. Nothing reaches the live gateway.
+_drift_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/gw/api"
+    # D-852: the host-mutating set, so a --drift run that ever stopped reading and
+    # started converging could not reach the host's docker.
+    gate_stubs_make "$d/hstub" $GATE_STUB_HOST_BINS
+    printf 'ok\n' >"$d/gw/api/health"
+    printf '# no keys: no provider step runs under --drift anyway\n' >"$d/keys.yml"
+    cat >"$d/bin/omniroute" <<'SH'
+#!/usr/bin/env bash
+d="$(cd "$(dirname "$0")/.." && pwd)"
+for a in "$@"; do
+    if [[ "$a" == list ]]; then
+        # -e, not -s: the unreadable-store case writes the marker with `: >`.
+        if [[ -e "$d/drift.fail" ]]; then
+            echo "Error: connect ECONNREFUSED" >&2
+            exit 1
+        fi
+        printf 'Loaded env from somewhere\n'   # banner the JSON reader must skip
+        cat "$d/drift.json"
+        exit 0
+    fi
+done
+echo "unexpected call: $*" >>"$d/calls.log"
+exit 0
+SH
+    chmod +x "$d/bin/omniroute"
+    : >"$d/calls.log"
+    printf '%s\n' "$d"
+}
+# _drift_json <dir> [swap] [split] - render the live list from combos.json
+# itself; "swap" reverses one combo's legs so the orders differ. The default
+# step shape is the live one (measured 2026-09-27T08:4xZ, omniroute 3.8.51 in
+# docker): "model" carries the full ref, providerId repeats its first segment.
+# "split" is the upstream-source shape (model without the provider segment).
+_drift_json() {
+    local d="$1" swap="${2:-}" split="${3:-}" broken="${4:-}"
+    python3 - "$ROOT/configuration/omniroute/combos.json" "$swap" "$split" "$broken" >"$d/drift.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+combos = []
+for c in data.get("combos", []):
+    models = []
+    for ref in c["models"]:
+        provider, _, model = ref.partition("/")
+        models.append({"kind": "model", "providerId": provider,
+                       "model": model if sys.argv[3] else ref})
+    combos.append({"name": c["name"], "strategy": c.get("strategy", "priority"),
+                   "models": models})
+if sys.argv[2] and combos:
+    for c in combos:
+        if len(c["models"]) > 1:
+            c["models"].reverse()
+            break
+if sys.argv[4] and combos:
+    # APPLYADOPT-2 B: a step the normaliser cannot turn into a ref — the shape
+    # of a leg type this version of apply.sh does not understand. The store
+    # still answers, so a caller that reads the combo must be able to see that
+    # what it got back is not the whole tier.
+    for c in combos:
+        if len(c["models"]) > 1:
+            c["models"][0] = {"kind": "combo", "comboId": "an-older-sub-tier"}
+            break
+print(json.dumps({"combos": combos, "active": None, "error": None}))
+PY
+}
+# _drift_apply <dir> - apply.sh --drift against the two stand-ins.
+_drift_apply() {
+    local d="$1" pid port; shift
+    read -r pid port < <(_start_test_http_server "$d/gw")
+    [[ -z "$port" ]] && { kill "$pid" 2>/dev/null; echo "no stand-in gateway"; return 1; }
+    PATH="$d/bin:$d/hstub:$PATH" AUTOOS_OMNIROUTE_URL="http://127.0.0.1:$port" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" --drift "$@" 2>&1
+    local rc=$?; kill "$pid" 2>/dev/null; return "$rc"
+}
+
+if it "apply drift: live combos equal combos.json -> exit 0, no difference lines"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *drift:* || "$out" == *"missing "* || "$out" == *"extra "* ]] \
+        && { ok=0; echo "differences on an in-sync store: $out" >&2; }
+    # --drift is read-only: it never creates, deletes, patches or registers.
+    [[ -s "$d/calls.log" ]] && { ok=0; echo "wrote through the CLI: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift reported drift on an in-sync store"; fi
+fi
+
+if it "apply drift: the upstream split step shape (model without provider) is in sync too"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d" "" split
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
+    rm -rf "$d"
+    if [[ $rc -eq 0 && "$out" == *"in sync"* ]]; then pass; else fail "rc=$rc: $out"; fi
+fi
+
+if it "apply drift: one combo's leg order differs -> exit 1 and names it"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d" swap
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
+    # The first multi-leg combo in combos.json is the one _drift_json swapped.
+    want="$(python3 -c 'import json
+for c in json.load(open("configuration/omniroute/combos.json"))["combos"]:
+    if len(c["models"]) > 1:
+        print(c["name"]); break')"
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"drift $want: live=["*" file=["* ]] || { ok=0; echo "no drift line for $want: $out" >&2; }
+    [[ -s "$d/calls.log" ]] && { ok=0; echo "wrote through the CLI: $(cat "$d/calls.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift did not name the reordered combo"; fi
+fi
+
+if it "apply drift: an unreadable live store -> exit 3 with a one-line reason"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    : >"$d/drift.fail"
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
+    ok=1
+    [[ $rc -eq 3 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$(grep -c . <<<"$out")" -le 3 ]] || { ok=0; echo "not one line: $out" >&2; }
+    [[ "$out" == *drift* && "$out" == *unreadable* || "$out" == *"could not"* || "$out" == *"failed"* ]] \
+        || { ok=0; echo "no reason line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift did not exit 3 on an unreadable store"; fi
+fi
+
+# The other half of the comparison: a file combo the store lacks is "missing",
+# a store combo the file does not know is "extra", and a store combo whose name
+# is a retired id is ignored (it is not a combo the file forgot; the file
+# itself consigned it). A user-made combo is never a difference.
+if it "apply drift: reports missing and extra, and ignores a retired live combo"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    doc="$ROOT/configuration/omniroute/combos.json"
+    missing="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["combos"][0]["name"])' "$doc")"
+    retired="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["retired"][0])' "$doc")"
+    python3 - "$doc" "$d/drift.json" "$missing" "$retired" >"$d/drift.json.new" <<'PY'
+import json, sys
+live = json.load(open(sys.argv[2], encoding="utf-8"))
+live["combos"] = [c for c in live["combos"] if c["name"] != sys.argv[3]]
+live["combos"].append({"name": "user-made-combo", "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "x"}]})
+live["combos"].append({"name": sys.argv[4], "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "y"}]})
+print(json.dumps(live))
+PY
+    mv "$d/drift.json.new" "$d/drift.json"
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"missing $missing"* ]] || { ok=0; echo "no missing line: $out" >&2; }
+    [[ "$out" == *"extra user-made-combo"* ]] || { ok=0; echo "no extra line: $out" >&2; }
+    [[ "$out" == *"$retired"* ]] && { ok=0; echo "named the retired live combo: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift missed missing/extra or touched a retired id"; fi
+fi
+
+# OR1e: a live combo whose id the registry lists in "omitted" is a managed
+# orphan the render dropped (no servable leg). It is still an "extra" (the file
+# does not carry it as a combo), but the reason is named so the operator knows
+# a prune will remove it rather than thinking it is a user-made combo.
+if it "apply drift: an omitted live combo is reported as extra with the omitted reason"; then
+    d="$(_drift_sandbox)"
+    _drift_json "$d"
+    doc="$ROOT/configuration/omniroute/combos.json"
+    omitted="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["omitted"][0])' "$doc")"
+    python3 - "$doc" "$d/drift.json" "$omitted" >"$d/drift.json.new" <<'PY'
+import json, sys
+live = json.load(open(sys.argv[2], encoding="utf-8"))
+live["combos"].append({"name": sys.argv[3], "strategy": "priority",
+                       "models": [{"kind": "model", "providerId": "someone", "model": "x"}]})
+print(json.dumps(live))
+PY
+    mv "$d/drift.json.new" "$d/drift.json"
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
+    ok=1
+    [[ $rc -eq 1 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"extra $omitted (omitted: no servable leg)"* ]] || { ok=0; echo "no labeled extra line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift did not label the omitted live combo"; fi
+fi
+
+# OR1e: the CLI can answer a management call with a bare JSON list. The old
+# isinstance(...) or live_doc.get(...) form short-circuited the guard but then
+# called .get() on the list, so --drift died with a traceback and exit 1
+# instead of the one-line "unreadable" reason and exit 3.
+if it "apply drift: a bare JSON list is an unreadable store, not a crash"; then
+    d="$(_drift_sandbox)"
+    printf '[]' >"$d/drift.json"
+    out="$(_drift_apply "$d" --drift-against registry)"; rc=$?
+    ok=1
+    [[ $rc -eq 3 ]] || { ok=0; echo "rc=$rc: $out" >&2; }
+    grep -qi 'traceback' <<<"$out" && { ok=0; echo "crashed: $out" >&2; }
+    [[ "$(grep -c . <<<"$out")" -eq 1 ]] || { ok=0; echo "not one line: $out" >&2; }
+    [[ "$out" == *unreadable* ]] || { ok=0; echo "no reason line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--drift crashed on a JSON list instead of exiting 3"; fi
+fi
+
+if it "apply drift: snapshot == live -> exit 0, in sync"; then
+    d="$(_drift_sandbox)"
+    printf '{"combos": {"t1": ["p/m1", "p/m2"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "t1", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m1"}, {"kind": "model", "providerId": "p", "model": "p/m2"}]}]}\n' >"$d/drift.json"
+    out="$(AUTOOS_DRIFT_SNAPSHOT="$d/snap.json" _drift_apply "$d")"; rc=$?
+    ok=1; [[ $rc -eq 0 && "$out" == *"in sync: live combos match "* && "$out" == *"(1 combos)"* && ! -s "$d/calls.log" ]] || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "snapshot == live failed: rc=$rc $out"; fi
+fi
+
+if it "apply drift: one changed leg -> exit 1, output names that combo"; then
+    d="$(_drift_sandbox)"
+    printf '{"combos": {"t1": ["p/m1", "p/m2"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "t1", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m1"}, {"kind": "model", "providerId": "p", "model": "p/m3"}]}]}\n' >"$d/drift.json"
+    out="$(AUTOOS_DRIFT_SNAPSHOT="$d/snap.json" _drift_apply "$d")"; rc=$?
+    ok=1; [[ $rc -eq 1 && "$out" == *"drift t1: live=[p/m1, p/m3] file=[p/m1, p/m2]"* && ! -s "$d/calls.log" ]] || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "changed leg failed: rc=$rc $out"; fi
+fi
+
+if it "apply drift: mutating run on drifted combo without --allow-drift refuses and does not mutate"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"
+    printf '{"combos": {"l1-orchestrator": ["p/m-snap"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "l1-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}]}\n' >"$d/live.json"
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --go D-825 --go-sha "$sha" --go-offline)"; rc=$?
+    ok=1
+    [[ $rc -eq 1 && "$out" == *"  ! l1-orchestrator: live differs from the server snapshot - refused (needs --go <ref> and --allow-drift l1-orchestrator)"* ]] || ok=0
+    grep -qE 'combo (create|delete) l1-orchestrator ' "$d/calls.log" && ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "drifted combo without --allow-drift was not refused"; fi
+fi
+
+if it "apply drift: mutating run on drifted combo with --allow-drift proceeds"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"
+    printf '{"combos": {"l1-orchestrator": ["p/m-snap"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "l1-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}]}\n' >"$d/live.json"
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --go D-825 --go-sha "$sha" --go-offline --allow-drift l1-orchestrator)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 && "$out" != *"live differs from the server snapshot - refused"* ]] || ok=0
+    grep -qE 'combo (create|delete) l1-orchestrator ' "$d/calls.log" || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "drifted combo with --allow-drift did not proceed"; fi
+fi
+
+if it "apply drift: an unreadable snapshot -> exit 3 with a drift: line"; then
+    d="$(_drift_sandbox)"
+    printf '{"combos": [{"name": "t1", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m1"}, {"kind": "model", "providerId": "p", "model": "p/m2"}]}]}\n' >"$d/drift.json"
+    printf 'not json\n' >"$d/snap.json"
+    out="$(AUTOOS_DRIFT_SNAPSHOT="$d/snap.json" _drift_apply "$d")"; rc=$?
+    ok=1; [[ $rc -eq 3 && "$out" == *"drift: snapshot unreadable"* && ! -s "$d/calls.log" ]] || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "unreadable snapshot failed: rc=$rc $out"; fi
+fi
+
+if it "apply drift: --dry-run on a drifted combo prints would refuse and an in-sync combo is not flagged"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"
+    printf '{"combos": {"l1-orchestrator": ["p/m-snap"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "l1-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}]}\n' >"$d/live.json"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --dry-run)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 && "$out" == *"l1-orchestrator: live differs from the server snapshot - would refuse"* ]] || ok=0
+    grep -qE 'combo (create|delete)' "$d/calls.log" && ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "dry-run on drifted combo failed: rc=$rc $out"; fi
+fi
+
+if it "apply drift: mutating run with an unreadable snapshot refuses (fail closed)"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"; printf 'not json
+' >"$d/snap.json"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --go D-825 --go-sha "$(git -C "$ROOT" rev-parse HEAD)" --go-offline)"; rc=$?
+    ok=1; [[ $rc -eq 3 && "$out" == *"server snapshot unreadable"* ]] || ok=0; grep -qE 'combo (create|delete)' "$d/calls.log" && ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "unreadable snapshot did not refuse: rc=$rc $out"; fi
+fi
+
+if it "apply drift: --drift-against without --drift, or with another value -> exit 2"; then
+    out1="$(bash "$ROOT/configuration/omniroute/apply.sh" --drift-against registry 2>&1)"; rc1=$?
+    out2="$(bash "$ROOT/configuration/omniroute/apply.sh" --drift --drift-against bogus 2>&1)"; rc2=$?
+    ok=1; [[ $rc1 -eq 2 && $rc2 -eq 2 ]] || ok=0
+    if (( ok )); then pass; else fail "rc1=$rc1 rc2=$rc2"; fi
+fi
+
+if it "apply drift: snapshot mode reports missing and extra"; then
+    d="$(_drift_sandbox)"
+    printf '{"combos": {"t1": ["p/m1"], "t2": ["p/m2"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "t2", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m2"}]}, {"name": "t3", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m3"}]}]}\n' >"$d/drift.json"
+    out="$(AUTOOS_DRIFT_SNAPSHOT="$d/snap.json" _drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 1 && "$out" == *"missing t1"* && "$out" == *"extra t3"* && "$out" != *"omitted"* && ! -s "$d/calls.log" ]] || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "rc=$rc $out"; fi
+fi
+
+if it "apply drift: --allow-drift is repeatable"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"
+    printf '{"combos": {"l1-orchestrator": ["p/m-snap"], "l2-orchestrator": ["p/m-snap"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "l1-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}, {"name": "l2-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}]}\n' >"$d/live.json"
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --go D-825 --go-sha "$sha" --go-offline --allow-drift l1-orchestrator --allow-drift l2-orchestrator)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 && "$out" != *"live differs from the server snapshot - refused"* ]] || ok=0
+    grep -qE 'combo (create|delete) l1-orchestrator ' "$d/calls.log" || ok=0
+    grep -qE 'combo (create|delete) l2-orchestrator ' "$d/calls.log" || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "repeatable --allow-drift failed: rc=$rc $out"; fi
+fi
+
+if it "apply drift: no /dev/fd remains in apply.sh"; then
+    hits="$(grep -n '/dev/fd' "$ROOT/configuration/omniroute/apply.sh" || true)"
+    [[ -z "$hits" ]] && pass || fail "apply.sh still uses /dev/fd: $hits"
+fi
+
+# ─── APPLYIDEM S1: apply.sh leaves an unchanged combo alone ─────────────────
+# AGENTS.md rule 4 ("A component that is already installed reports skipped, not
+# failed") and the header's own "safe to re-run" promise were both false for
+# combos: the Combos loop always tried `omni combo create`, the CLI refuses an
+# existing name, and the retry path deleted and re-created the combo. Measured
+# 2026-09-28: a re-run against a store --drift reports in sync printed
+# "+ <name> replaced" for every combo (14 of them), and each delete+create is a
+# window where the tier does not exist. The fix reads the live store once with
+# the same call --drift uses and skips a combo that already equals the file.
+# The stand-in this needs, all of it inside _prune_sandbox (line numbers as of
+# this change): the store itself is store.py (:254-318, seeded from live.json),
+# `--output json --no-color combo list` answers it verbatim (:329-338), `combo
+# create` refuses a name the store holds with 'Error: Combo "x" already exists'
+# (:339-360, the refusal at :354 — the real CLI's observable contract, and the
+# exact fact that drove apply.sh into delete+create), and `combo delete` fails on
+# an absent name (:361-366, store.py's "not found" at :315). Every one of them
+# logs its argv to calls.log, which is how "zero combo create/delete calls" is
+# asserted rather than inferred.
+# The default document carries a "strategy" per combo because _drift_json renders
+# it from combos.json (:1207-1228, the field at :1219) — that is RICHER than the
+# live 3.8.51 document recorded at 59aa3a9 apply.sh:252-253, which names no
+# strategy field. The "no strategy field" case below is therefore the one that
+# matches the measured gateway, and it must reach the same verdict; a fake that
+# only ever answered the rich shape would hide the bug it is meant to prevent.
+# _combo_live_json <dir> [swap] [split] - seed the stand-in store from
+# combos.json itself: the same document _drift_json renders for --drift, so the
+# two paths cannot drift apart.
+_combo_live_json() {
+    local d="$1" swap="${2:-}" split="${3:-}" broken="${4:-}"
+    _drift_json "$d" "$swap" "$split" "$broken"
+    mv "$d/drift.json" "$d/live.json"
+}
+# _combo_names - every combo id in combos.json, one per line.
+_combo_names() {
+    python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in data["combos"]:
+    print(c["name"])' "$ROOT/configuration/omniroute/combos.json"
+}
+
+if it "apply combos: an in-sync store is left alone and every combo reports unchanged"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d"
+    out="$(_prune_apply "$d")"; rc=$?
+    ok=1
+    want="$(_combo_names)"
+    want_n="$(printf '%s\n' "$want" | grep -c .)"
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    while IFS= read -r name; do
+        [[ -z "$name" ]] && continue
+        [[ "$out" == *"  = $name unchanged"* ]] || { ok=0; echo "no unchanged line for $name" >&2; }
+    done <<<"$want"
+    (( "$(grep -c '^  = .* unchanged' <<<"$out")" == want_n )) \
+        || { ok=0; echo "unchanged lines: [$(grep '^  = ' <<<"$out")]" >&2; }
+    # The whole point: not one write to the store.
+    grep -qE '^combo (create|delete)' "$d/calls.log" \
+        && { ok=0; echo "the store was written: [$(grep '^combo' "$d/calls.log")]" >&2; }
+    [[ "$out" == *"Combos: $want_n unchanged, 0 created, 0 replaced, 0 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    (( "$(grep -cE '^  \+ .* (created|replaced) \(' <<<"$out")" == 0 )) \
+        || { ok=0; echo "a combo change was announced: $out" >&2; }
+    # And an unchanged combo is still probed: --probe lists every managed combo.
+    printf 'omniroute: not-a-real-key-123\n' >"$d/keys.yml"
+    out2="$(_prune_apply "$d" --probe)"
+    [[ "$out2" == *"  = $(_combo_names | head -1) unchanged"* ]] \
+        || { ok=0; echo "second run: $out2" >&2; }
+    [[ "$out2" == *"Probe (one tiny request per combo)"* ]] \
+        || { ok=0; echo "probe skipped although the run manages combos: $out2" >&2; }
+    # Run it twice and the section is identical — AGENTS.md §4's acceptance bar.
+    # out3 is compared against out2 (same key file, so the same catalog-filtered
+    # legs); only --probe differs, and that is outside the Combos section. The
+    # section alone is compared because the rest of the output carries the
+    # stand-in gateway's port, which is a different number every run.
+    : >"$d/calls.log"
+    out3="$(_prune_apply "$d")"
+    if ! diff -q <(sed -n '/^Combos:/,/^Combos: [0-9]/p' <<<"$out2") \
+                  <(sed -n '/^Combos:/,/^Combos: [0-9]/p' <<<"$out3") >/dev/null; then
+        ok=0
+        echo "second run differs: [$(sed -n '/^Combos:/,/^Combos: [0-9]/p' <<<"$out3")]" >&2
+    fi
+    grep -qE '^combo (create|delete)' "$d/calls.log" \
+        && { ok=0; echo "the second run wrote the store: [$(grep '^combo' "$d/calls.log")]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply re-created combos the store already had"; fi
+fi
+
+if it "apply combos: only the combo that differs from the file is replaced"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d" swap
+    swapped="$(python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in data["combos"]:
+    if len(c["models"]) > 1:
+        print(c["name"]); break' "$ROOT/configuration/omniroute/combos.json")"
+    out="$(_prune_apply "$d")"
+    ok=1
+    want_n="$(_combo_names | grep -c .)"
+    [[ "$out" == *"  + $swapped replaced ("* ]] || { ok=0; echo "no replaced line for $swapped: $out" >&2; }
+    (( "$(grep -c '^  = .* unchanged' <<<"$out")" == want_n - 1 )) \
+        || { ok=0; echo "unchanged lines: [$(grep '^  = ' <<<"$out")]" >&2; }
+    deletes="$(grep '^combo delete' "$d/calls.log")"
+    [[ "$deletes" == "combo delete $swapped --yes" ]] \
+        || { ok=0; echo "deletes: [$deletes]" >&2; }
+    (( "$(grep -c '^combo create' "$d/calls.log")" == 2 )) \
+        || { ok=0; echo "creates: [$(grep '^combo create' "$d/calls.log")]" >&2; }
+    [[ "$out" == *"Combos: $((want_n - 1)) unchanged, 0 created, 1 replaced, 0 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    # The replacement landed: a second run leaves every combo alone.
+    : >"$d/calls.log"
+    out="$(_prune_apply "$d")"
+    [[ "$out" == *"Combos: $want_n unchanged, 0 created, 0 replaced, 0 failed"* ]] \
+        || { ok=0; echo "second run: $out" >&2; }
+    grep -qE '^combo (create|delete)' "$d/calls.log" \
+        && { ok=0; echo "second run wrote the store" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply replaced more than the combo that differs"; fi
+fi
+
+if it "apply combos: a strategy that differs from the file replaces that combo"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d"
+    victim="$(_combo_names | head -1)"
+    python3 - "$d/live.json" "$victim" <<'PY' >"$d/live.json.new"
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+doc = json.load(open(path, encoding="utf-8"))
+for c in doc["combos"]:
+    if c["name"] == name:
+        c["strategy"] = "roundRobin"
+print(json.dumps(doc))
+PY
+    mv "$d/live.json.new" "$d/live.json"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  + $victim replaced ("* ]] || { ok=0; echo "no replaced line for $victim: $out" >&2; }
+    [[ "$out" == *"  = $victim unchanged"* ]] && { ok=0; echo "a wrong strategy was kept" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply ignored the live combo's strategy"; fi
+fi
+
+# The two live shapes the recorded measurement leaves open: the JSON document
+# this script was written against (59aa3a9 apply.sh:252-253) names no "strategy"
+# field at all, and the upstream step shape splits providerId from a bare model.
+# Both must read as unchanged — the comparison takes the strategy only when the
+# store reports one, and the refs come from the same normaliser --drift uses, so
+# a shape --drift calls in sync cannot make the loop rewrite the tier.
+if it "apply combos: no strategy field, and the upstream split step shape, are both unchanged"; then
+    ok=1
+    for shape in nostrategy split; do
+        d="$(_prune_sandbox)"
+        _prune_list "$d"
+        if [[ "$shape" == "nostrategy" ]]; then
+            _combo_live_json "$d"
+            python3 - "$d/live.json" >"$d/live.json.new" <<'PY'
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in doc["combos"]:
+    c.pop("strategy", None)
+print(json.dumps(doc))
+PY
+            mv "$d/live.json.new" "$d/live.json"
+        else
+            _combo_live_json "$d" "" split
+        fi
+        out="$(_prune_apply "$d")"
+        want_n="$(_combo_names | grep -c .)"
+        [[ "$out" == *"Combos: $want_n unchanged, 0 created, 0 replaced, 0 failed"* ]] \
+            || { ok=0; echo "$shape: $out" >&2; }
+        grep -qE '^combo (create|delete)' "$d/calls.log" \
+            && { ok=0; echo "$shape: the store was written: $(grep '^combo' "$d/calls.log")" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "apply replaced a combo the store already had in another shape"; fi
+fi
+
+if it "apply combos: an unreadable live list falls back to replacing every combo, with one warning"; then
+    ok=1
+    for shape in refused notjson; do
+        d="$(_prune_sandbox)"
+        _prune_list "$d"
+        if [[ "$shape" == "refused" ]]; then
+            : >"$d/live.fail"
+        else
+            printf 'not a JSON document\n' >"$d/live.json"
+        fi
+        out="$(_prune_apply "$d")"
+        [[ "$out" == *"! live combo list unreadable - replacing every combo"* ]] \
+            || { ok=0; echo "$shape: no fallback line: $out" >&2; }
+        (( "$(grep -c 'live combo list unreadable' <<<"$out")" == 1 )) \
+            || { ok=0; echo "$shape: not exactly one fallback line: $out" >&2; }
+        # Today's behaviour: create first, so a failed create leaves the old tier.
+        want_n="$(_combo_names | grep -c .)"
+        (( "$(grep -c '^combo create' "$d/calls.log")" == want_n )) \
+            || { ok=0; echo "$shape: creates: $(grep -c '^combo create' "$d/calls.log") of $want_n" >&2; }
+        [[ "$out" == *"Combos: 0 unchanged, $want_n created, 0 replaced, 0 failed"* ]] \
+            || { ok=0; echo "$shape: tally: $out" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "an unreadable live combo list did not fall back to today's behaviour"; fi
+fi
+
+if it "apply combos: --dry-run says what it would keep, what it would replace, and writes nothing"; then
+    ok=1
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d"
+    out="$(_prune_apply "$d" --dry-run)"
+    want_n="$(_combo_names | grep -c .)"
+    (( "$(grep -c ': would keep unchanged' <<<"$out")" == want_n )) \
+        || { ok=0; echo "plan: $out" >&2; }
+    grep -qE '^combo (create|delete)' "$d/calls.log" \
+        && { ok=0; echo "the dry run wrote the store" >&2; }
+    [[ "$out" == *"Combos: $want_n would keep unchanged, 0 would create, 0 would replace"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    # One combo differs: the plan names it as a replace, the rest stay. The
+    # ": " anchor skips the section's own tally line.
+    _combo_live_json "$d" swap
+    out="$(_prune_apply "$d" --dry-run)"
+    (( "$(grep -c ': would keep unchanged' <<<"$out")" == want_n - 1 )) \
+        || { ok=0; echo "swap plan: $out" >&2; }
+    (( "$(grep -c '^  - .*: would replace' <<<"$out")" == 1 )) \
+        || { ok=0; echo "no would-replace line: $out" >&2; }
+    # Unreadable list - the shape a host without a running gateway gives on a
+    # dry run: today's "would create" plan, and no claim about keeping anything.
+    : >"$d/live.fail"
+    out="$(_prune_apply "$d" --dry-run)"
+    [[ "$out" == *"would create"* ]] || { ok=0; echo "no would-create plan: $out" >&2; }
+    (( "$(grep -c ': would keep unchanged' <<<"$out")" == 0 )) \
+        || { ok=0; echo "claimed a live read it could not make: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the combos dry run does not say what it would keep"; fi
+fi
+
+# ─── APPLYADOPT B: the retry path restores what it deleted ──────────────────
+# `omni combo create` refuses a name the store holds, so the retry deletes and
+# re-creates. When the re-create fails too the old tier is already gone, and
+# apply printed "previous version, if any, is untouched" — after a delete that
+# is simply false, and it hid a hole in a live tier (AGENTS.md rule 3: no
+# destructive action nobody opted into). The refs and strategy read from the
+# store BEFORE the delete are what make the restore possible, so they are
+# remembered. $d/fail_create is the stand-in's "a create with these legs fails"
+# switch (one --models value per line).
+# _combo_legs <name> [rev] - the --models value combos.json gives for <name>.
+_combo_legs() {
+    python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in data["combos"]:
+    if c["name"] == sys.argv[2]:
+        refs = list(c["models"])
+        if sys.argv[3]:
+            refs.reverse()
+        print(",".join(refs))
+        break' "$ROOT/configuration/omniroute/combos.json" "$1" "${2:-}"
+}
+# _combo_strategy <name> - the strategy combos.json asks for.
+_combo_strategy() {
+    python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in data["combos"]:
+    if c["name"] == sys.argv[2]:
+        print(c.get("strategy", "priority"))
+        break' "$ROOT/configuration/omniroute/combos.json" "$1"
+}
+# _combo_swap_victim - the first multi-leg combo, the one _combo_live_json swap
+# holds in the reversed order (so apply wants to replace it).
+_combo_swap_victim() {
+    python3 -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+for c in data["combos"]:
+    if len(c["models"]) > 1:
+        print(c["name"])
+        break' "$ROOT/configuration/omniroute/combos.json"
+}
+# _combo_unique_victim - the first combo whose leg list no other combo shares.
+# The stand-in's fail_create switch is keyed on --models, and several tiers do
+# ship the same legs (three "deepseek/deepseek-flash" as of 2026-09-29), so a
+# test that means to fail exactly one tier has to pick one of these.
+_combo_unique_victim() {
+    python3 -c 'import json,sys,collections
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+rows = [(c["name"], ",".join(c["models"])) for c in data["combos"]]
+seen = collections.Counter(models for _name, models in rows)
+for name, models in rows:
+    if seen[models] == 1:
+        print(name)
+        break' "$ROOT/configuration/omniroute/combos.json"
+}
+
+if it "apply combos: a create that fails after the delete restores the previous version"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d" swap
+    victim="$(_combo_swap_victim)"
+    new_legs="$(_combo_legs "$victim")"
+    old_legs="$(_combo_legs "$victim" rev)"
+    strat="$(_combo_strategy "$victim")"
+    printf '%s\n' "$new_legs" >"$d/fail_create"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! $victim creation failed - previous version restored"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"untouched"* ]] && { ok=0; echo "the false claim is still there: $out" >&2; }
+    grep -qxF "combo create $victim --strategy $strat --models $old_legs" "$d/calls.log" \
+        || { ok=0; echo "creates: [$(grep '^combo create' "$d/calls.log")]" >&2; }
+    python3 - "$d/live.json" "$victim" "$old_legs" <<'PY' || ok=0
+import json, sys
+path, name, want = sys.argv[1], sys.argv[2], sys.argv[3].split(",")
+doc = json.load(open(path, encoding="utf-8"))
+combo = next((c for c in doc.get("combos", []) if c.get("name") == name), None)
+if combo is None:
+    print("the store no longer holds %s" % name)
+    sys.exit(1)
+refs = [m.get("model") for m in combo.get("models", [])]
+if refs != want:
+    print("%s legs: expected %s got %s" % (name, want, refs))
+    sys.exit(1)
+PY
+    want_n="$(_combo_names | grep -c .)"
+    [[ "$out" == *"Combos: $((want_n - 1)) unchanged, 0 created, 0 replaced, 1 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed re-create left the tier deleted and claimed it untouched"; fi
+fi
+
+if it "apply combos: a restore that fails too names the exact command, never a false claim"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d" swap
+    victim="$(_combo_swap_victim)"
+    new_legs="$(_combo_legs "$victim")"
+    old_legs="$(_combo_legs "$victim" rev)"
+    strat="$(_combo_strategy "$victim")"
+    printf '%s\n%s\n' "$new_legs" "$old_legs" >"$d/fail_create"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! $victim creation failed - previous version LOST, restore failed: \
+omniroute combo create $victim --strategy $strat --models $old_legs"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"untouched"* ]] && { ok=0; echo "the false claim is still there: $out" >&2; }
+    (( "$(grep -c "^combo create $victim " "$d/calls.log")" == 3 )) \
+        || { ok=0; echo "creates: [$(grep "^combo create $victim " "$d/calls.log")]" >&2; }
+    python3 "$d/store.py" has "$victim" && { ok=0; echo "the store still holds the combo" >&2; }
+    want_n="$(_combo_names | grep -c .)"
+    [[ "$out" == *"Combos: $((want_n - 1)) unchanged, 0 created, 0 replaced, 1 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a lost combo was not reported as lost, with the way back"; fi
+fi
+
+# Nothing to restore when the store never held the name: the message must say so
+# plainly, and must not invent a restore attempt for a combo that did not exist.
+if it "apply combos: a create that fails for a combo the store never held says no previous version"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d"
+    victim="$(_combo_names | head -1)"
+    new_legs="$(_combo_legs "$victim")"
+    python3 - "$d/live.json" "$victim" <<'PY' >"$d/live.json.new"
+import json, sys
+doc = json.load(open(sys.argv[1], encoding="utf-8"))
+doc["combos"] = [c for c in doc["combos"] if c["name"] != sys.argv[2]]
+print(json.dumps(doc))
+PY
+    mv "$d/live.json.new" "$d/live.json"
+    printf '%s\n' "$new_legs" >"$d/fail_create"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! $victim creation failed (no previous version)"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"untouched"* ]] && { ok=0; echo "the false claim is still there: $out" >&2; }
+    [[ "$out" == *"restored"* ]] && { ok=0; echo "claimed a restore it never attempted: $out" >&2; }
+    (( "$(grep -c "^combo create $victim " "$d/calls.log")" == 2 )) \
+        || { ok=0; echo "creates: [$(grep "^combo create $victim " "$d/calls.log")]" >&2; }
+    want_n="$(_combo_names | grep -c .)"
+    [[ "$out" == *"Combos: $((want_n - 1)) unchanged, 0 created, 0 replaced, 1 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a brand-new combo's failure was reported as a restore"; fi
+fi
+
+# ─── APPLYADOPT-2: the REST adoption review findings ────────────────────────
+# c7ca607 made the gateway decide "already registered" and made a failed combo
+# re-create restore what it deleted. Review found seven ways each can still be
+# wrong — a false "no previous version", a restore of a combo whose live legs
+# were only partly readable, an inactive connection read as usable, another
+# node's connection adopted by name, a truncated page read as complete, the
+# key-carrying response body left in a variable, and the client key in argv.
+# Each case below has one switch on the stand-in side and asserts the real path
+# (a management call the run actually made, recorded in curl.log / argv.log /
+# bearer.log), never a convenient inner function.
+
+# Item H: `curl -H "Authorization: Bearer <client key>"` puts the key in argv,
+# where any user on the machine reads it out of `ps` for the lifetime of the
+# call — the reason omni_rest writes a 0600 --config file instead. The stand-in
+# answers /v1/models only with a bearer taken out of that config file, so the
+# case proves both halves: the key arrived, and it never arrived as an argument.
+if it "apply adopt2: the /v1/models read carries the client key in a curl config file, never in argv"; then
+    d="$(_node_sandbox)"
+    printf 'omniroute: sk-client-key-DO-NOT-PS\n' >"$d/keys.yml"
+    touch "$d/require_bearer"
+    # A catalog that answers with real refs, so "the read worked" is observable
+    # rather than an empty list that reads the same as a refused call.
+    python3 - "$ROOT/configuration/omniroute/combos.json" "$d/models.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+refs = {ref for c in data.get("combos", []) for ref in c.get("models", [])}
+json.dump({"data": [{"id": r} for r in sorted(refs)]},
+          open(sys.argv[2], "w", encoding="utf-8"))
+PY
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"could not read /v1/models"* ]] \
+        && { ok=0; echo "the gateway refused the read: $(tr '\n' ' ' <"$d/bearer.log") / $(head -3 <<<"$out")" >&2; }
+    grep -q '^bearer=sk-client-key-DO-NOT-PS$' "$d/bearer.log" \
+        || { ok=0; echo "the key never reached the config file: $(cat "$d/bearer.log")" >&2; }
+    grep -q 'sk-client-key-DO-NOT-PS' "$d/argv.log" \
+        && { ok=0; echo "the client key reached a command line: $(cat "$d/argv.log")" >&2; }
+    [[ "$out" == *"sk-client-key-DO-NOT-PS"* ]] && { ok=0; echo "the client key was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the catalog read passed the omniroute client key through argv"; fi
+fi
+
+# Item E: {"connections":[…],"total":N} with N > the rows served is a truncated
+# page, not the gateway's whole answer. Deciding "not registered" from it would
+# add a duplicate connection, so it is treated exactly like a refused read: the
+# CLI's list decides, and the run says which and why.
+if it "apply adopt2: a partial connection page is not read as the whole list"; then
+    d="$(_node_sandbox)"
+    printf 'scaleway: not-a-real-key-1\n' >"$d/keys.yml"
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
+            "apiKey": "sk-stand-in-key-do-not-print", "isActive": True}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    printf '2\n' >"$d/partial_total"
+    out="$(_node_apply "$d")"
+    ok=1
+    grep -qE '^GET .*/api/providers' "$d/curl.log" \
+        || { ok=0; echo "the REST read never ran: $(cat "$d/curl.log")" >&2; }
+    grep -q '^providers list' "$d/calls.log" \
+        || { ok=0; echo "the truncated page was trusted, the CLI fallback never ran: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"connection list is partial"* ]] \
+        || { ok=0; echo "the fallback did not say why: $out" >&2; }
+    [[ "$out" == *"  = scaleway already registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    grep -q '^providers add scaleway' "$d/calls.log" \
+        && { ok=0; echo "the truncated page still re-added it: $(cat "$d/calls.log")" >&2; }
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the connection body was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a truncated connection list was read as complete"; fi
+fi
+
+# Item C: a connection with isActive == false serves nothing. Adopting it would
+# print "already registered" for a provider that answers no request, so it does
+# not count — but adding a second connection would not fix the operator's
+# problem either, and leaves a row to clean up. The run names the one action
+# that does fix it.
+if it "apply adopt2: an inactive connection is not adopted and gets no second one"; then
+    d="$(_node_sandbox)"
+    printf 'scaleway: not-a-real-key-1\n' >"$d/keys.yml"
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "scaleway", "name": "main",
+            "apiKey": "sk-stand-in-key-do-not-print", "isActive": False}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/local_stale"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! scaleway has an inactive connection - enable it in the dashboard"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"  = scaleway already registered"* ]] \
+        && { ok=0; echo "a dead connection was reported as registered: $out" >&2; }
+    grep -q '^providers add scaleway' "$d/calls.log" \
+        && { ok=0; echo "a second connection was added: $(cat "$d/calls.log")" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "1" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    # The key the run would have used is still not printed, and the one
+    # connection the gateway holds is the one it already had.
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the connection body was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an inactive connection was adopted, or duplicated"; fi
+fi
+
+# The same rule for a node-bound connection: the node exists and is active, the
+# key bound to it is disabled. Reporting "already registered" would hide that
+# nothing routes; adding a second connection would hide it differently.
+if it "apply adopt2: a node provider whose connection is inactive is reported, not duplicated"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    python3 - "$d/nodes.json" <<'PY'
+import json, sys
+json.dump([{"id": "openai-compatible-chat-00000001",
+            "type": "openai-compatible", "apiType": "chat",
+            "name": "meta-api", "prefix": "meta-api",
+            "baseUrl": "https://api.meta.ai/v1"}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "openai-compatible-chat-00000001",
+            "name": "meta-api", "apiKey": "sk-stand-in-key-do-not-print",
+            "isActive": False}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/local_stale"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! meta-api has an inactive connection - enable it in the dashboard"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"  = meta-api already registered"* ]] \
+        && { ok=0; echo "a dead connection was reported as registered: $out" >&2; }
+    grep -q '^providers add' "$d/calls.log" \
+        && { ok=0; echo "a second connection was added: $(cat "$d/calls.log")" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "a second node was POSTed: $(cat "$d/curl.log")" >&2; }
+    [[ "$(python3 -c "import json;print(len(json.load(open('$d/connections.json'))))")" == "1" ]] \
+        || { ok=0; echo "connections: $(cat "$d/connections.json")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an inactive node-bound connection was adopted, or duplicated"; fi
+fi
+
+# Item D: a connection bound to SOME OTHER node can carry the name apply gives
+# its own connections ("meta-api", say, from a node the operator renamed and
+# re-created). Adopting it by name alone would report the provider as
+# registered while its key is bound to an endpoint that is not the registry's —
+# and would never bind it to the right node.
+if it "apply adopt2: a connection bound to another provider node is not adopted by name"; then
+    d="$(_node_sandbox)"
+    printf 'meta: not-a-real-key-123\n' >"$d/keys.yml"
+    python3 - "$d/nodes.json" <<'PY'
+import json, sys
+json.dump([{"id": "openai-compatible-chat-00000001",
+            "type": "openai-compatible", "apiType": "chat",
+            "name": "meta-api", "prefix": "meta-api",
+            "baseUrl": "https://api.meta.ai/v1"},
+           {"id": "openai-compatible-chat-00000002",
+            "type": "openai-compatible", "apiType": "chat",
+            "name": "somewhere-else", "prefix": "somewhere-else",
+            "baseUrl": "https://example.invalid/v1"}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    python3 - "$d/connections.json" <<'PY'
+import json, sys
+json.dump([{"id": "abcd0001", "provider": "openai-compatible-chat-00000002",
+            "name": "meta-api", "apiKey": "sk-stand-in-key-do-not-print",
+            "isActive": True}],
+          open(sys.argv[1], "w"), indent=1)
+PY
+    touch "$d/local_stale"
+    out="$(_node_apply "$d")"
+    ok=1
+    [[ "$out" == *"  = meta-api already registered"* ]] \
+        && { ok=0; echo "another node's connection was adopted: $out" >&2; }
+    [[ "$out" == *"  + meta-api registered"* ]] || { ok=0; echo "run: $out" >&2; }
+    grep -qx 'providers add openai-compatible-chat-00000001 --name meta-api --credential-env AUTOOS_KEY_META --yes' \
+        "$d/calls.log" \
+        || { ok=0; echo "add call: [$(grep '^providers add' "$d/calls.log")]" >&2; }
+    [[ "$(_node_post_count "$d")" == "0" ]] \
+        || { ok=0; echo "a second node was POSTed: $(cat "$d/curl.log")" >&2; }
+    python3 - "$d/connections.json" <<'PY' || ok=0
+import json, sys
+rows = json.load(open(sys.argv[1], encoding="utf-8"))
+bound = [r for r in rows if r.get("provider") == "openai-compatible-chat-00000001"]
+if len(bound) != 1:
+    print("the key was never bound to the meta-api node: %s" % rows)
+    sys.exit(1)
+PY
+    [[ "$out" == *"sk-stand-in-key-do-not-print"* ]] && { ok=0; echo "the connection body was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a connection on a different node satisfied the name match"; fi
+fi
+
+# Items F and G have no observable behaviour of their own — a shell variable a
+# later line never prints, and a function-local that leaks into the script's
+# global scope — so the assertion is on the source: the parse that consumes the
+# key-carrying body is followed by the clear, and register_provider declares its
+# own node_exists. Red before: the reader kept REST_BODY set and node_exists was
+# a bare assignment.
+if it "apply adopt2: the connection reader clears the key-carrying body and keeps no leaked global"; then
+    src="$ROOT/configuration/omniroute/apply.sh"
+    ok=1
+    body="$(awk '/^omni_connections\(\) \{/,/^\}/' "$src")"
+    [[ -n "$body" ]] || { ok=0; echo "omni_connections is gone from $src" >&2; }
+    # The clear has to come AFTER the parse: the parse is what reads the body.
+    parse_line="$(printf '%s\n' "$body" | grep -n 'python3' | head -1 | cut -d: -f1)"
+    clear_line="$(printf '%s\n' "$body" | grep -n 'REST_BODY=""' | head -1 | cut -d: -f1)"
+    [[ -n "$parse_line" && -n "$clear_line" && $clear_line -gt $parse_line ]] \
+        || { ok=0; echo "the reader never clears the key-carrying body after parsing it: [$body]" >&2; }
+    fn="$(awk '/^register_provider\(\) \{/,/^\}/' "$src")"
+    [[ "$fn" == *'local '*node_exists* ]] \
+        || { ok=0; echo "register_provider does not declare node_exists local" >&2; }
+    printf '%s\n' "$fn" | grep -qE '^[[:space:]]+node_exists=' \
+        && { ok=0; echo "register_provider assigns node_exists outside its local block" >&2; }
+    if (( ok )); then pass; else fail "a key-carrying body or a leaked global survived"; fi
+fi
+
+# Item A: "(no previous version)" is only true when the store was read and did
+# not hold the name. When the list was unreadable apply never looked, and the
+# delete it just performed may well have removed a tier — the operator has to be
+# told the state is unknown, not that there was nothing there.
+if it "apply combos: a failed re-create over an unreadable store says the previous version is unknown"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d"
+    victim="$(_combo_unique_victim)"
+    new_legs="$(_combo_legs "$victim")"
+    printf '%s\n' "$new_legs" >"$d/fail_create"
+    # The store holds the combo (live.json) but the CLI cannot report it — the
+    # state the sentence must describe is "unknown", not "absent".
+    touch "$d/live.fail"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! $victim creation failed - previous version unknown (live list unreadable)"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"(no previous version)"* ]] \
+        && { ok=0; echo "claimed the store never held it: $out" >&2; }
+    [[ "$out" == *"untouched"* ]] && { ok=0; echo "the false claim is still there: $out" >&2; }
+    [[ "$out" == *"restored"* ]] && { ok=0; echo "claimed a restore it never attempted: $out" >&2; }
+    python3 "$d/store.py" has "$victim" && { ok=0; echo "the combo survived the delete it should have taken" >&2; }
+    want_n="$(_combo_names | grep -c .)"
+    # An unreadable store means every tier is rewritten, so the run is 1 failed
+    # and the rest replaced — the failure must be counted, not hidden.
+    [[ "$out" == *"Combos: 0 unchanged, 0 created, $((want_n - 1)) replaced, 1 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an unreadable store was reported as an empty one"; fi
+fi
+
+# Item B: the restore is only faithful if the live combo was read whole. A leg
+# the normaliser could not parse (a step shape this script does not know) is
+# dropped from the refs it remembers, so a re-create from those refs would put
+# back a SHORTER tier and print "restored" over the loss. Refuse it and say so.
+if it "apply combos: a restore with unreadable live legs is refused, never a partial re-create"; then
+    d="$(_prune_sandbox)"
+    _prune_list "$d"
+    _combo_live_json "$d" swap '' broken
+    victim="$(_combo_swap_victim)"
+    new_legs="$(_combo_legs "$victim")"
+    old_legs="$(_combo_legs "$victim" rev)"
+    printf '%s\n%s\n' "$new_legs" "$old_legs" >"$d/fail_create"
+    out="$(_prune_apply "$d")"
+    ok=1
+    [[ "$out" == *"  ! $victim creation failed - previous version LOST, restore refused"* ]] \
+        || { ok=0; echo "run: $out" >&2; }
+    [[ "$out" == *"previous version restored"* ]] \
+        && { ok=0; echo "a partial tier was restored and called restored: $out" >&2; }
+    [[ "$out" == *"untouched"* ]] && { ok=0; echo "the false claim is still there: $out" >&2; }
+    # Two create attempts for the victim and no third: a partial --models value
+    # would be the third call, and it would SUCCEED against the stand-in (the
+    # legs it drops are not listed in fail_create), which is the whole danger.
+    (( "$(grep -c "^combo create $victim " "$d/calls.log")" == 2 )) \
+        || { ok=0; echo "creates: [$(grep "^combo create $victim " "$d/calls.log")]" >&2; }
+    python3 "$d/store.py" has "$victim" && { ok=0; echo "a partial combo was written back" >&2; }
+    want_n="$(_combo_names | grep -c .)"
+    [[ "$out" == *"Combos: $((want_n - 1)) unchanged, 0 created, 0 replaced, 1 failed"* ]] \
+        || { ok=0; echo "tally: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a combo whose live legs were partly unreadable was restored short"; fi
+fi
+
+# A sandbox for register-autostart.sh: fake tool binaries on PATH, a temp
+# unit dir, and stubs for systemctl/loginctl that only log their arguments.
+# The stub reports every unit as active, so no port probing reaches the
+# live machine's listeners.
+_svc_reg_sandbox() {
+    local d
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/units"
+    for t in node omniroute opencode litellm; do
+        printf '#!/bin/sh\nexit 0\n' >"$d/bin/$t"; chmod +x "$d/bin/$t"
+    done
+    printf '#!/bin/sh\necho "$*" >>"%s/systemctl.log"\nexit 0\n' "$d" >"$d/bin/fake-systemctl"
+    printf '#!/bin/sh\necho "$*" >>"%s/loginctl.log"\n[ "$1" = show-user ] && echo yes\nexit 0\n' "$d" >"$d/bin/fake-loginctl"
+    chmod +x "$d/bin/fake-systemctl" "$d/bin/fake-loginctl"
+    printf '%s' "$d"
+}
+_svc_reg() {
+    local d="$1"; shift
+    # The docker AI stack's ownership marker lives in the operator's config:
+    # point is-active at the sandbox so a migrated host cannot change these tests.
+    AUTOOS_AI_STACK_CONFIG="${AUTOOS_AI_STACK_CONFIG:-$d/ai-stack}" \
+    PATH="$d/bin:$PATH" AUTOOS_SYSTEMD_USER_DIR="$d/units" AUTOOS_OMNIROUTE_ENV="$d/omniroute.env" \
+        AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" AUTOOS_LOGINCTL="$d/bin/fake-loginctl" \
+        bash "$ROOT/configuration/autostart/register-autostart.sh" "$@" 2>&1
+}
+
+if it "svc: the omniroute unit requires a client key and gets this machine's PATH"; then
+    d="$(_svc_reg_sandbox)"
+    out="$(_svc_reg "$d" --render autoos-omniroute)"
+    ok=1
+    # The key requirement comes from ~/.omniroute/.env (operator 2026-09-24):
+    # a unit Environment= line would silently override the operator's file.
+    [[ "$out" == *"Environment=REQUIRE_API_KEY"* ]] && { ok=0; echo "unit overrides REQUIRE_API_KEY" >&2; }
+    [[ "$out" == *"ExecStart=$d/bin/omniroute serve --no-open --port 20128"* ]] || { ok=0; echo "ExecStart: $out" >&2; }
+    [[ "$out" == *"Environment=PATH=$d/bin:"* ]] || { ok=0; echo "PATH not filled" >&2; }
+    [[ "$out" == *"@"*"@"* ]] && { ok=0; echo "unfilled placeholder" >&2; }
+    [[ "$out" == *"Managed by AutoOS"* ]] || { ok=0; echo "no marker" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "omniroute unit render is wrong"; fi
+fi
+
+# Review finding 2026-09-25: sed's replacement treats & as "the match", so a
+# path holding & rendered @OMNIROUTE@ back into the unit.
+if it "svc: a unit renders a tool path that contains an ampersand intact"; then
+    d="$(_svc_reg_sandbox)"
+    mkdir -p "$d/r&d"
+    printf '#!/bin/sh\nexit 0\n' >"$d/r&d/omniroute"; chmod +x "$d/r&d/omniroute"
+    out="$(PATH="$d/r&d:$d/bin:$PATH" AUTOOS_SYSTEMD_USER_DIR="$d/units" AUTOOS_OMNIROUTE_ENV="$d/omniroute.env" \
+        AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" AUTOOS_LOGINCTL="$d/bin/fake-loginctl" \
+        bash "$ROOT/configuration/autostart/register-autostart.sh" --render autoos-omniroute 2>&1)"
+    ok=1
+    [[ "$out" == *"ExecStart=$d/r&d/omniroute serve"* ]] || { ok=0; echo "ExecStart: $(grep ExecStart <<<"$out")" >&2; }
+    [[ "$(grep '^Environment=PATH=' <<<"$out")" == *":$d/r&d:"* || "$(grep '^Environment=PATH=' <<<"$out")" == *"=$d/r&d:"* ]] \
+        || { ok=0; echo "PATH: $(grep 'PATH=' <<<"$out")" >&2; }
+    [[ "$out" == *"@"*"@"* ]] && { ok=0; echo "placeholder leaked back" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an & in a path corrupts the unit"; fi
+fi
+
+if it "svc: register-autostart --dry-run writes, enables and starts nothing"; then
+    d="$(_svc_reg_sandbox)"
+    out="$(_svc_reg "$d" --dry-run)"
+    ok=1
+    [[ -z "$(ls -A "$d/units")" ]] || { ok=0; echo "wrote a unit" >&2; }
+    [[ -e "$d/systemctl.log" ]] && grep -qE 'enable|start|daemon-reload' "$d/systemctl.log" && { ok=0; echo "called systemctl" >&2; }
+    [[ "$out" == *"would write $d/units/autoos-omniroute.service"* ]] || { ok=0; echo "not announced: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dry run had side effects"; fi
+fi
+
+if it "svc: register-autostart twice: the second run skips, a changed unit is backed up"; then
+    d="$(_svc_reg_sandbox)"
+    first="$(_svc_reg "$d")"
+    second="$(_svc_reg "$d")"
+    echo "# hand edit" >>"$d/units/autoos-omniroute.service"
+    third="$(_svc_reg "$d")"
+    ok=1
+    [[ "$first" == *"+ autoos-omniroute: wrote"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ "$second" == *"unit unchanged (skipped)"* && "$second" == *"running (skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$second" == *"+ autoos-omniroute"* ]] && { ok=0; echo "second run changed something" >&2; }
+    compgen -G "$d/units/autoos-omniroute.service.autoos-backup-*" >/dev/null || { ok=0; echo "no backup" >&2; }
+    grep -q '# hand edit' "$d/units/autoos-omniroute.service" && { ok=0; echo "not converged" >&2; }
+    [[ "$third" == *"replaced"* ]] || { ok=0; echo "third: $third" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart is not idempotent"; fi
+fi
+
+# Same class as lib/linux/install.sh backup_path/backup_file (main fixed
+# this there): register-autostart.sh's own unit backup used a plain
+# <unit>.autoos-backup-<stamp> name with a bare cp, so two changed units in
+# the same second let the second cp overwrite the first backup and destroy
+# it. Pin `date` on PATH so both runs land in the same "second".
+if it "backup residual: register-autostart backs up a unit twice in one second without overwriting"; then
+    d="$(_svc_reg_sandbox)"
+    printf '#!/bin/sh\necho 20260101-000000\n' >"$d/bin/date"; chmod +x "$d/bin/date"
+    _svc_reg "$d" --only autoos-omniroute >/dev/null
+    printf '# hand-edit-1\n' >>"$d/units/autoos-omniroute.service"
+    contentA="$(cat "$d/units/autoos-omniroute.service")"
+    second="$(_svc_reg "$d" --only autoos-omniroute)"
+    printf '# hand-edit-2\n' >>"$d/units/autoos-omniroute.service"
+    contentB="$(cat "$d/units/autoos-omniroute.service")"
+    third="$(_svc_reg "$d" --only autoos-omniroute)"
+    ok=1
+    base="$d/units/autoos-omniroute.service.autoos-backup-20260101-000000"
+    [[ "$second" == *"+ autoos-omniroute: replaced"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$third" == *"+ autoos-omniroute: replaced"* ]] || { ok=0; echo "third: $third" >&2; }
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup lost the hand edit" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d/units" -name 'autoos-omniroute.service.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    grep -q 'hand-edit' "$d/units/autoos-omniroute.service" && { ok=0; echo "final unit still holds a hand edit" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart overwrote a same-second unit backup"; fi
+fi
+
+if it "svc: register-autostart appends REQUIRE_API_KEY=true once, with a backup"; then
+    d="$(_svc_reg_sandbox)"
+    printf 'STORAGE_ENCRYPTION_KEY=keep-me\n' >"$d/omniroute.env"
+    _svc_reg "$d" >/dev/null
+    second="$(_svc_reg "$d")"
+    ok=1
+    grep -q '^STORAGE_ENCRYPTION_KEY=keep-me$' "$d/omniroute.env" || { ok=0; echo "existing line lost" >&2; }
+    [[ "$(grep -c '^REQUIRE_API_KEY=true$' "$d/omniroute.env")" == 1 ]] || { ok=0; echo "not exactly one line" >&2; }
+    compgen -G "$d/omniroute.env.autoos-backup-*" >/dev/null || { ok=0; echo "no backup" >&2; }
+    [[ "$second" == *"REQUIRE_API_KEY=true is set"*"(skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    printf 'REQUIRE_API_KEY=false\n' >"$d/omniroute.env"
+    third="$(_svc_reg "$d")"
+    grep -q '^REQUIRE_API_KEY=false$' "$d/omniroute.env" || { ok=0; echo "overrode an explicit operator value" >&2; }
+    [[ "$third" == *"left alone"* ]] || { ok=0; echo "third: $third" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "REQUIRE_API_KEY handling is wrong"; fi
+fi
+
+if it "svc: register-autostart defaults the 429-rotation policy in omniroute.env, respect-set"; then
+    # The autoos-omniroute unit carries no Environment= (it would shadow the
+    # operator's .env); its env surface is ~/.omniroute/.env, which OmniRoute's
+    # own loadEnvFile() reads (bin/omniroute.mjs). register-autostart.sh must
+    # append each policy default only when the key is absent, exactly once.
+    d="$(_svc_reg_sandbox)"
+    printf 'STORAGE_ENCRYPTION_KEY=keep-me\nOMNIROUTE_ROTATE_429_THRESHOLD=7\n' >"$d/omniroute.env"
+    first="$(_svc_reg "$d" --only autoos-omniroute)"
+    second="$(_svc_reg "$d" --only autoos-omniroute)"
+    ok=1
+    for pair in OMNIROUTE_ROTATION_ENABLED=true OMNIROUTE_ROTATE_ON_429=true \
+                OMNIROUTE_ROTATE_429_THRESHOLD=7 OMNIROUTE_ROTATE_429_WINDOW_SECONDS=120 \
+                OMNIROUTE_ROTATION_RATE_LIMIT_RESET_SECONDS=300 \
+                OMNIROUTE_PROVIDER_BREAKER_API_KEY_COOLDOWN_MS=1800000; do
+        name="${pair%%=*}"
+        [[ "$(grep -cE "^${name}=" "$d/omniroute.env")" == 1 ]] || { ok=0; echo "$name not exactly once" >&2; }
+    done
+    grep -q '^OMNIROUTE_ROTATE_429_THRESHOLD=7$' "$d/omniroute.env" || { ok=0; echo "operator value overwritten" >&2; }
+    grep -q '^STORAGE_ENCRYPTION_KEY=keep-me$' "$d/omniroute.env" || { ok=0; echo "existing line lost" >&2; }
+    [[ "$(grep -cE '^OMNIROUTE_' "$d/omniroute.env")" == 6 ]] || { ok=0; echo "expected exactly 6 policy lines" >&2; }
+    [[ "$first" == *"+ appended 5 rotation default(s)"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ "$second" == *"429 rotation policy already set"* ]] || { ok=0; echo "second: $second" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart 429-rotation policy is wrong"; fi
+fi
+
+# Same class, the omni_env append site: two backups of ~/.omniroute/.env in
+# the same second must not collide either.
+if it "backup residual: register-autostart backs up omniroute.env twice in one second without overwriting"; then
+    d="$(_svc_reg_sandbox)"
+    printf '#!/bin/sh\necho 20260101-000000\n' >"$d/bin/date"; chmod +x "$d/bin/date"
+    printf 'SOME=1\n' >"$d/omniroute.env"
+    contentA="$(cat "$d/omniroute.env")"
+    first="$(_svc_reg "$d" --only autoos-omniroute)"
+    sed -i '/^REQUIRE_API_KEY=/d' "$d/omniroute.env"
+    contentB="$(cat "$d/omniroute.env")"
+    second="$(_svc_reg "$d" --only autoos-omniroute)"
+    ok=1
+    base="$d/omniroute.env.autoos-backup-20260101-000000"
+    [[ "$first" == *"+ appended REQUIRE_API_KEY=true"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ "$second" == *"+ appended REQUIRE_API_KEY=true"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup content wrong" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d" -maxdepth 1 -name 'omniroute.env.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    grep -q '^REQUIRE_API_KEY=true$' "$d/omniroute.env" || { ok=0; echo "final file lost the key" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "register-autostart overwrote a same-second omniroute.env backup"; fi
+fi
+
+# register-autostart.sh keeps the old unit when its backup copy fails
+# (continue at the unit-replace site): the file must be unchanged.
+if it "backup residual: register-autostart leaves the unit in place when its backup copy fails"; then
+    d="$(_svc_reg_sandbox)"
+    _svc_reg "$d" --only autoos-omniroute >/dev/null
+    printf '# hand-edit\n' >>"$d/units/autoos-omniroute.service"
+    cp "$d/units/autoos-omniroute.service" "$d/units/autoos-omniroute.service.orig"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" _svc_reg "$d" --only autoos-omniroute 2>&1)"; rc=$?
+    ok=1
+    cmp -s "$d/units/autoos-omniroute.service" "$d/units/autoos-omniroute.service.orig" \
+        || { ok=0; echo "the unit was replaced without a backup" >&2; }
+    [[ "$out" == *"could not back up $d/units/autoos-omniroute.service"* ]] \
+        || { ok=0; echo "no warning naming the unit: ${out:0:300}" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "register-autostart replaces a unit it could not back up"; fi
+fi
+
+if it "svc: register-autostart never runs a second gateway next to omniroute autostart"; then
+    d="$(_svc_reg_sandbox)"
+    echo "[Service]" >"$d/units/omniroute.service"
+    out="$(_svc_reg "$d")"
+    ok=1
+    [[ -e "$d/units/autoos-omniroute.service" ]] && { ok=0; echo "wrote a second gateway" >&2; }
+    [[ "$out" == *"omniroute autostart disable"* ]] || { ok=0; echo "no hint: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "two gateways would fight over :20128"; fi
+fi
+
+if it "svc: register-autostart --unregister removes only units AutoOS wrote"; then
+    d="$(_svc_reg_sandbox)"
+    _svc_reg "$d" >/dev/null
+    printf '[Service]\nExecStart=/bin/true\n' >"$d/units/autoos-foreign.service"
+    out="$(_svc_reg "$d" --unregister)"
+    ok=1
+    [[ -e "$d/units/autoos-omniroute.service" ]] && { ok=0; echo "our unit stayed" >&2; }
+    [[ -e "$d/units/autoos-foreign.service" ]] || { ok=0; echo "removed a foreign unit" >&2; }
+    grep -q 'disable --now autoos-omniroute.service' "$d/systemctl.log" || { ok=0; echo "not disabled" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "unregister is wrong"; fi
+fi
+
+if it "svc: opencode-cli (V2) writes the global provider config after install"; then
+    report="$(python3 - <<'PY'
+import json, io
+want = {"catalog/linux.json": "setup_opencode_config",
+        "catalog/macos.json": "setup_opencode_config",
+        "catalog/windows.json": "Set-AutoOSOpenCodeConfig"}
+bad = []
+for f, fn in want.items():
+    d = json.load(io.open(f, encoding="utf-8-sig"))
+    comps = [c for cat in d["categories"] for c in cat["components"] if c["id"] == "opencode-cli"]
+    if not comps or comps[0].get("postInstall") != fn:
+        bad.append(f)
+print(" ".join(bad) or "ok")
+PY
+)"
+    assert_eq "$report" "ok"
+fi
+
+# The user's own config may be JSONC (comments, trailing commas). json.load
+# used to fail on it and the writer then started from {} - every provider,
+# MCP server and setting the user had was replaced wholesale.
+if it "svc: the opencode writer merges into a JSONC config and never writes a key value"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/opencode"
+    cat >"$scratch/.config/opencode/config.json" <<'JSONC'
+{
+  // the user's own theme and provider
+  "theme": "nord",
+  /* block comment */
+  "provider": {
+    "mine": {"options": {"baseURL": "http://example.invalid/v1"}},
+  },
+}
+JSONC
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY CONTEXT7_API_KEY
+      export OPENROUTER_API_KEY="sk-or-v1-notarealkeyatall0123456789"
+      curl() { return 6; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    report="$(python3 - "$scratch/.config/opencode" <<'PY'
+import io, json, os, sys
+d = sys.argv[1]
+problems = []
+for name in ("config.json", "opencode.json"):
+    p = os.path.join(d, name)
+    if not os.path.isfile(p):
+        problems.append("missing:" + name); continue
+    raw = io.open(p, encoding="utf-8").read()
+    doc = json.loads(raw)
+    if doc.get("theme") != "nord": problems.append(name + ":theme-lost")
+    if "mine" not in doc.get("provider", {}): problems.append(name + ":provider-lost")
+    if "omniroute" not in doc.get("provider", {}): problems.append(name + ":no-omniroute")
+    if "notarealkey" in raw: problems.append(name + ":plaintext-key")
+    orr = doc.get("provider", {}).get("openrouter", {}).get("options", {}).get("apiKey")
+    if orr != "{env:OPENROUTER_API_KEY}": problems.append(name + ":openrouter=%s" % orr)
+print(" ".join(problems) or "ok")
+PY
+)"
+    rm -rf "$scratch"
+    assert_eq "$report" "ok"
+    fi
+fi
+
+# Measured live 2026-09-24: the harness rewrote config.json with a trailing
+# newline the writer did not emit, so every re-run took a backup; and the
+# seeded opencode.json was backed up on its very first write.
+if it "svc: the opencode writer takes no backup on a fresh machine or a re-run"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    for _ in 1 2 3; do
+        ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    done
+    n="$(compgen -G "$scratch/.config/opencode/*.autoos-backup-*" | wc -l)"
+    rm -rf "$scratch"
+    assert_eq "$n" "0"
+    fi
+fi
+
+# V2 (@opencode/cli) reads `providers` (package/env/settings), not V1's
+# `provider`: measured 2026-09-24, serve from $HOME listed no provider at all
+# with only the V1 block written. The V2 block is projected from the repo's
+# opencode.jsonc (single source) into opencode.json, never into config.json
+# (V1's file).
+if it "svc: the opencode writer adds the V2 providers block when the CLI is V2"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+      curl() { return 6; }
+      opencode_is_v2() { return 0; }
+      OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    report="$(python3 - "$scratch/.config/opencode" <<'PY2'
+import io, json, os, re, sys
+d = sys.argv[1]
+problems = []
+oc = json.load(io.open(os.path.join(d, "opencode.json"), encoding="utf-8"))
+v1 = json.load(io.open(os.path.join(d, "config.json"), encoding="utf-8"))
+repo = json.loads(re.sub(r"(?m)^\s*//.*$", "", io.open("opencode.jsonc", encoding="utf-8").read()))
+for name in ("omniroute", "litellm"):
+    got = (oc.get("providers") or {}).get(name)
+    if got != repo["providers"][name]:
+        problems.append("v2-" + name + "-differs")
+if "providers" in v1:
+    problems.append("v1-file-got-v2-block")
+if oc.get("model") != repo["model"]:
+    problems.append("model=%s" % oc.get("model"))
+print(" ".join(problems) or "ok")
+PY2
+)"
+    rm -rf "$scratch"
+    assert_eq "$report" "ok"
+    fi
+fi
+
+if it "svc: the opencode writer leaves an unparseable config alone"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/opencode"
+    printf '{ "theme": "nord", BROKEN\n' >"$scratch/.config/opencode/config.json"
+    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; curl() { return 6; }
+      setup_opencode_config >/dev/null 2>&1 )
+    got="$(cat "$scratch/.config/opencode/config.json")"
+    rm -rf "$scratch"
+    assert_eq "$got" '{ "theme": "nord", BROKEN'
+    fi
+fi
+
+if it "svc: opencode.json is backed up before it changes and untouched on a re-run"; then
+    if ! has_cmd python3; then skip "python3 not found"; else
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/opencode"
+    printf '{"theme": "gruvbox"}\n' >"$scratch/.config/opencode/opencode.json"
+    for _ in 1 2; do
+        ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+          unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+          curl() { return 6; }
+          OLLAMA_BASE_URL="http://ollama:11434" setup_opencode_config >/dev/null 2>&1 )
+    done
+    n="$(compgen -G "$scratch/.config/opencode/opencode.json.autoos-backup-*" | wc -l)"
+    rm -rf "$scratch"
+    assert_eq "$n" "1"
+    fi
+fi
+
+# opencode serve (V2) answers the static UI to anyone and guards /api/* with
+# HTTP Basic (user "opencode", password from OPENCODE_PASSWORD; measured on
+# 2.0.16). Without the variable it invents a random password per start, so
+# the phone could never log in twice. The wrapper pins one, in a 0600 file.
+if it "svc: run-opencode-serve binds the LAN port with a pinned password and keys by name"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/lit"
+    printf 'LITELLM_MASTER_KEY=sk-litellm-fake-000\nOPENROUTER_API_KEY=REPLACE_WITH_X\n' >"$d/lit/.env"
+    printf 'omniroute: sk-omni-fake-111\n' >"$d/keys.yml"
+    out="$(env -u AUTOOS_OMNIROUTE_KEY AUTOOS_LITELLM_DIR="$d/lit" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/pw" \
+        bash "$ROOT/configuration/autostart/run-opencode-serve.sh" --dry-run 2>&1)"
+    ok=1
+    [[ "$out" == *"opencode serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "bind: $out" >&2; }
+    [[ "$out" == *"LITELLM_MASTER_KEY"* && "$out" == *"AUTOOS_OMNIROUTE_KEY"* ]] || { ok=0; echo "keys: $out" >&2; }
+    [[ "$out" == *"OPENROUTER_API_KEY"* ]] && { ok=0; echo "placeholder loaded" >&2; }
+    [[ "$out" == *"fake-000"* || "$out" == *"fake-111"* ]] && { ok=0; echo "a value was printed" >&2; }
+    [[ "$out" == *"would generate"*"$d/pw"* ]] || { ok=0; echo "password plan: $out" >&2; }
+    [[ -e "$d/pw" ]] && { ok=0; echo "dry run wrote the password file" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "run-opencode-serve plan is wrong"; fi
+fi
+
+if it "svc: run-opencode-serve generates the password once, private, and reuses it"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin"
+    # A fake opencode that reports whether it received a password.
+    printf '#!/bin/sh\n[ -n "$OPENCODE_PASSWORD" ] && echo "pw-set $*" || echo "pw-missing $*"\n' >"$d/bin/opencode"
+    chmod +x "$d/bin/opencode"
+    run() { PATH="$d/bin:$PATH" AUTOOS_LITELLM_DIR="$d/none" AUTOOS_KEYS_FILE="$d/none.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/cfg/pw" bash "$ROOT/configuration/autostart/run-opencode-serve.sh" 2>&1; }
+    first="$(run)"; pw1="$(cat "$d/cfg/pw" 2>/dev/null)"
+    second="$(run)"; pw2="$(cat "$d/cfg/pw" 2>/dev/null)"
+    mode="$(stat -c %a "$d/cfg/pw" 2>/dev/null)"
+    ok=1
+    [[ "$first" == *"pw-set serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ ${#pw1} -ge 24 && "$pw1" == "$pw2" ]] || { ok=0; echo "password not stable" >&2; }
+    [[ "$mode" == 600 ]] || { ok=0; echo "mode $mode" >&2; }
+    [[ "$first$second" == *"$pw1"* ]] && { ok=0; echo "password printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "password handling is wrong"; fi
+fi
+
+# api-keys.yml's opencode_password is the single source (ai-stack.sh init
+# writes it); the pinned file is only the fallback. The value must reach
+# opencode through the environment and never appear on stdout.
+if it "svc: run-opencode-serve takes the password from api-keys.yml opencode_password"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/home"
+    printf '#!/bin/sh\n[ "$OPENCODE_PASSWORD" = "new-pass" ] && echo "pw-match $*" || echo "pw-other $*"\n' >"$d/bin/opencode"
+    chmod +x "$d/bin/opencode"
+    printf "omniroute: sk-test-key\nopencode_password: 'new-pass'\n" >"$d/keys.yml"
+    _run() { env -u OPENCODE_PASSWORD HOME="$d/home" PATH="$d/bin:$PATH" \
+        AUTOOS_LITELLM_DIR="$d/none" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/cfg/pw" \
+        bash "$ROOT/configuration/autostart/run-opencode-serve.sh" "$@" 2>&1; }
+    out="$(_run)"
+    plan="$(_run --dry-run)"
+    ok=1
+    [[ "$out" == *"pw-match serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "password not from the keys file: $out" >&2; }
+    [[ "$out" == *"new-pass"* ]] && { ok=0; echo "the password was printed" >&2; }
+    [[ -e "$d/cfg/pw" ]] && { ok=0; echo "the fallback file was written despite a keys password" >&2; }
+    [[ "$plan" == *"$d/keys.yml"* ]] || { ok=0; echo "the dry run did not name the source: $plan" >&2; }
+    [[ "$plan" == *"new-pass"* ]] && { ok=0; echo "the dry run printed the password" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "run-opencode-serve does not read opencode_password"; fi
+fi
+
+if it "svc: the opencode unit runs the wrapper from this checkout"; then
+    d="$(_svc_reg_sandbox)"
+    out="$(_svc_reg "$d" --render autoos-opencode)"
+    ok=1
+    [[ "$out" == *"ExecStart=$ROOT/configuration/autostart/run-opencode-serve.sh"* ]] || { ok=0; echo "$out" >&2; }
+    [[ "$out" == *"Environment=PATH=$d/bin:"* ]] || { ok=0; echo "PATH" >&2; }
+    [[ "$out" == *"@"*"@"* ]] && { ok=0; echo "unfilled placeholder" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "opencode unit render is wrong"; fi
+fi
+
+# A service started by systemd never sees a token exported from ~/.zshrc, so
+# opencode's omnigraph bridge "connects" and then fails every read with
+# "missing bearer token" (B-omnigraph 2026-09-24, item 6). The per-user env
+# file write_omnigraph_env keeps is the one source; the leading dash makes it
+# optional so a machine without it still starts. Only units that start an
+# omnigraph client get it: OmniRoute listens on the LAN and never needs it.
+if it "svc: omnigraph units read the per-user env file (optional), the gateways do not"; then
+    d="$(_svc_reg_sandbox)"
+    want='EnvironmentFile=-%h/.autoos-omnigraph.env'
+    ok=1
+    for u in autoos-opencode autoos-stack; do
+        out="$(_svc_reg "$d" --render "$u")" || { ok=0; echo "$u: render failed: $out" >&2; continue; }
+        [[ "$(grep -c '^EnvironmentFile=' <<<"$out")" == 1 ]] || { ok=0; echo "$u: not exactly one EnvironmentFile= line" >&2; }
+        grep -qxF "$want" <<<"$out" || { ok=0; echo "$u: missing [$want]" >&2; }
+        # In [Service]: after its header, before [Install].
+        svc_line="$(grep -nx '\[Service\]' <<<"$out" | cut -d: -f1)"
+        env_line="$(grep -nxF "$want" <<<"$out" | cut -d: -f1)"
+        inst_line="$(grep -nx '\[Install\]' <<<"$out" | cut -d: -f1)"
+        [[ -n "$env_line" && "$env_line" -gt "$svc_line" && "$env_line" -lt "$inst_line" ]] \
+            || { ok=0; echo "$u: EnvironmentFile= is outside [Service]" >&2; }
+        # Comments may name the variable; a directive must never carry a value.
+        [[ "$(grep -v '^#' <<<"$out")" == *"OMNIGRAPH_TOKEN"* ]] && { ok=0; echo "$u: a token is set in the unit text" >&2; }
+    done
+    for u in autoos-omniroute autoos-litellm; do
+        out="$(_svc_reg "$d" --render "$u")" || { ok=0; echo "$u: render failed: $out" >&2; continue; }
+        [[ "$out" == *"autoos-omnigraph.env"* ]] && { ok=0; echo "$u: the LAN-facing gateway must not get the omnigraph token" >&2; }
+    done
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "units do not read ~/.autoos-omnigraph.env as expected"; fi
+fi
+
+if it "svc: an installed opencode unit gains the omnigraph line once: backed up, then skipped"; then
+    d="$(_svc_reg_sandbox)"
+    # What an earlier AutoOS wrote: today's render minus the new line.
+    _svc_reg "$d" --render autoos-opencode | grep -v '^EnvironmentFile=' >"$d/old.service"
+    cp "$d/old.service" "$d/units/autoos-opencode.service"
+    first="$(_svc_reg "$d" --only autoos-opencode)"
+    second="$(_svc_reg "$d" --only autoos-opencode)"
+    nbak="$(find "$d/units" -name 'autoos-opencode.service.autoos-backup-*' | wc -l)"
+    ok=1
+    [[ "$first" == *"+ autoos-opencode: replaced"*"(backup: "* ]] || { ok=0; echo "first: $first" >&2; }
+    grep -qxF 'EnvironmentFile=-%h/.autoos-omnigraph.env' "$d/units/autoos-opencode.service" \
+        || { ok=0; echo "unit did not gain the line" >&2; }
+    [[ "$nbak" == 1 ]] || { ok=0; echo "expected exactly one backup, found $nbak" >&2; }
+    cmp -s "$d/old.service" "$(find "$d/units" -name 'autoos-opencode.service.autoos-backup-*' | head -n1)" \
+        || { ok=0; echo "the backup is not the previous unit" >&2; }
+    [[ "$second" == *"= autoos-opencode: unit unchanged (skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$second" == *"+ autoos-opencode"* ]] && { ok=0; echo "second run changed something" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "adding the omnigraph line is not idempotent and backed up"; fi
+fi
+
+# systemd runs ExecStart directly: a 100644 launcher fails with 203/EXEC.
+if it "svc: every script a unit or the healthcheck runs is executable in git"; then
+    bad=""
+    for f in configuration/autostart/Start-AutoOSStack.sh configuration/autostart/register-autostart.sh \
+             configuration/autostart/run-opencode-serve.sh configuration/litellm/start-litellm.sh \
+             configuration/healthcheck.sh configuration/start-stack.sh; do
+        mode="$(git ls-files -s -- "$f" | cut -d' ' -f1)"
+        [[ "$mode" == 100755 ]] || bad+="$f=$mode "
+    done
+    assert_eq "$bad" ""
+fi
+
+if it "svc: every unit template renders with this checkout and no placeholder left"; then
+    d="$(_svc_reg_sandbox)"
+    ok=1
+    for u in autoos-omniroute autoos-litellm autoos-opencode autoos-stack; do
+        out="$(_svc_reg "$d" --render "$u")" || { ok=0; echo "$u: render failed: $out" >&2; continue; }
+        [[ "$out" =~ @[A-Z]+@ ]] && { ok=0; echo "$u: unfilled placeholder" >&2; }
+        [[ "$out" == *"%h/AutoOS"* ]] && { ok=0; echo "$u: hard-coded ~/AutoOS" >&2; }
+        [[ "$out" == *"WantedBy=default.target"* ]] || { ok=0; echo "$u: not boot-wanted" >&2; }
+    done
+    stack="$(_svc_reg "$d" --render autoos-stack)"
+    [[ "$stack" == *"ExecStart=$ROOT/configuration/autostart/Start-AutoOSStack.sh"* ]] || { ok=0; echo "stack ExecStart" >&2; }
+    [[ "$stack" == *"Type=oneshot"* ]] || { ok=0; echo "stack not oneshot" >&2; }
+    lit="$(_svc_reg "$d" --render autoos-litellm)"
+    [[ "$lit" == *"start-litellm.sh --foreground"* ]] || { ok=0; echo "litellm ExecStart" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "unit templates do not render cleanly"; fi
+fi
+
+if it "svc: register-autostart registers the four units in dependency order"; then
+    d="$(_svc_reg_sandbox)"
+    _svc_reg "$d" >/dev/null
+    order="$(grep -oE '^--user enable autoos-[a-z]+' "$d/systemctl.log" | awk '{print $3}' | tr '\n' ' ')"
+    rm -rf "$d"
+    assert_eq "$order" "autoos-omniroute autoos-litellm autoos-opencode autoos-stack "
+fi
+
+if it "svc: the stack launcher starts each service through its unit when one is installed"; then
+    ok=1
+    for u in autoos-omniroute autoos-litellm autoos-opencode; do
+        grep -q "unit_installed $u" configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "no unit path: $u" >&2; }
+        grep -q "systemctl --user start $u.service" configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "not started via unit: $u" >&2; }
+    done
+    grep -q 'run-opencode-serve.sh' configuration/autostart/Start-AutoOSStack.sh || { ok=0; echo "serve fallback bypasses the password wrapper" >&2; }
+    grep -q '/tmp/' configuration/autostart/Start-AutoOSStack.sh && { ok=0; echo "logs to /tmp" >&2; }
+    if (( ok )); then pass; else fail "launcher bypasses the units"; fi
+fi
+
+if it "svc: healthcheck --fix resumes opencode serve and litellm too"; then
+    ok=1
+    grep -qE 'ANY_DOWN=1' configuration/healthcheck.sh || { ok=0; echo "no combined down flag" >&2; }
+    grep -qE 'OC_UP -eq 0' configuration/healthcheck.sh || { ok=0; echo "serve not in the fix condition" >&2; }
+    grep -qE 'LT_UP -eq 0' configuration/healthcheck.sh || { ok=0; echo "litellm not in the fix condition" >&2; }
+    grep -q '4000' configuration/healthcheck.sh || { ok=0; echo "no :4000 probe" >&2; }
+    if (( ok )); then pass; else fail "healthcheck --fix leaves a service down"; fi
+fi
+
+# The profiles in ~/.openhands are read by whichever OpenHands runs with that
+# directory: the docker app (host.docker.internal via --add-host) or a native
+# host process such as agent-canvas, which cannot resolve that name on a
+# native Linux host. Like resolve_ollama_base_url: keep it where it resolves.
+if it "svc: profile sync picks the gateway host per consumer"; then
+    d="$(mktemp -d)"
+    # sync_base <resolves 0|1> [--consumer X]: the l2-worker base_url.
+    sync_base() {
+        local resolves="$1"; shift
+        rm -rf "$d/oh"
+        env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key AUTOOS_FAKE_HDI_RESOLVES="$resolves" \
+            python3 "$ROOT/tools/sync-openhands-profiles.py" --openhands-dir "$d/oh" \
+            --keys-file "$d/none.yml" --litellm-env "$d/none.env" "$@" >/dev/null 2>&1
+        python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base_url"])' \
+            "$d/oh/profiles/l2-worker.json" 2>/dev/null
+    }
+    got="$(sync_base 0)|$(sync_base 0 --consumer native)|$(sync_base 1 --consumer native)"
+    rm -rf "$d"
+    assert_eq "$got" \
+        "http://host.docker.internal:20128/v1|http://127.0.0.1:20128/v1|http://host.docker.internal:20128/v1"
+fi
+
+# The image's entrypoint runs everything as root unless SANDBOX_USER_ID names
+# the host user (image default 0): ~/.openhands then fills with root-owned
+# files the host-side profile sync can no longer write. A missing host dir is
+# created by docker as root, so it must exist before `docker run`.
+if it "svc: start-stack openhands runs as the host user, survives reboots and is capped"; then
+    block="$(sed -n '/^    openhands)/,/^        ;;/p' configuration/start-stack.sh)"
+    ok=1
+    [[ "$block" == *'SANDBOX_USER_ID="$(id -u)"'* ]] || { ok=0; echo "no SANDBOX_USER_ID" >&2; }
+    [[ "$block" == *'mkdir -p "$HOME/.openhands"'* ]] || { ok=0; echo "dir not pre-created" >&2; }
+    [[ "$block" == *'--restart unless-stopped'* ]] || { ok=0; echo "not reboot-safe" >&2; }
+    [[ "$block" == *'docker run -d --rm'* ]] && { ok=0; echo "--rm defeats the restart policy" >&2; }
+    [[ "$block" == *'--memory'* ]] || { ok=0; echo "no memory cap" >&2; }
+    [[ "$block" == *'--consumer container'* ]] || { ok=0; echo "profile consumer not named" >&2; }
+    # Remote browsers need the sandbox URL pattern; opt-in, never a default.
+    [[ "$block" == *'OH_SANDBOX_CONTAINER_URL_PATTERN="$AUTOOS_OPENHANDS_SANDBOX_URL"'* ]] || { ok=0; echo "no sandbox URL passthrough" >&2; }
+    [[ "$block" == *'if [[ -n "${AUTOOS_OPENHANDS_SANDBOX_URL:-}" ]]'* ]] || { ok=0; echo "sandbox URL not opt-in" >&2; }
+    if (( ok )); then pass; else fail "OpenHands launch is not native-Linux safe"; fi
+fi
+
+# SDK-1.36 OpenHands keeps LLM profiles in its own settings store and never
+# reads profiles/*.json (measured 2026-09-24: /api/v1/settings/profiles was
+# empty with 16 files synced). The push saves them through the app's API.
+if it "svc: profile sync pushes the tiers into a running app, idempotently and capped"; then
+    d="$(mktemp -d)"
+    python3 "$ROOT/tests/helpers/fake_openhands_app.py" "$d/port" "$d/req.log" >/dev/null 2>&1 &
+    fake_pid=$!
+    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
+    url="http://127.0.0.1:$(cat "$d/port")"
+    push() { env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key python3 "$ROOT/tools/sync-openhands-profiles.py" \
+        --openhands-dir "$d/oh" --keys-file "$d/none.yml" --litellm-env "$d/none.env" --push-url "$url" 2>&1; }
+    first="$(push)"
+    : >"$d/req.log"
+    second="$(push)"
+    kill "$fake_pid" 2>/dev/null
+    ok=1
+    [[ "$first" == *"app settings seeded with l1-orchestrator"* ]] || { ok=0; echo "not seeded: $first" >&2; }
+    # Spec order = configuration/openhands/tier-profiles.json: the three
+    # hierarchy tiers (t1 -> t2 -> t3) fill the fake's cap of 3; the red-by-
+    # design the last tier (litellm-l2-worker-free-only) is last and never
+    # takes a slot.
+    for _t in l1-orchestrator l2-worker l3-driver; do
+        [[ "$first" == *"app profile $_t saved"* ]] || { ok=0; echo "spec order ($_t): $first" >&2; }
+    done
+    [[ "$first" == *"app profile l2-orchestrator saved"* ]] && { ok=0; echo "cap 3 should stop before l2-orchestrator" >&2; }
+    [[ "$first" == *"app profile litellm-l2-worker-free-only saved"* ]] && { ok=0; echo "free-only took a slot" >&2; }
+    [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
+    [[ "$first" == *"FAILED"* ]] && { ok=0; echo "a push failed (StrictLLM?): $first" >&2; }
+    grep -q '^POST' "$d/req.log" && grep -q '^POST /api/v1/settings/profiles/l1-orchestrator$' "$d/req.log" \
+        && { ok=0; echo "second run re-posted an unchanged profile" >&2; }
+    [[ "$second" == *"l1-orchestrator skipped (up to date)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$first$second" == *"sk-fake-profile-key"* ]] && { ok=0; echo "key printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "profile push is wrong"; fi
+fi
+
+# The app keeps at most 10 profiles and never forgets one, so a renamed or
+# dropped tier kept its slot forever. The push deletes the profiles AutoOS
+# owns that the spec no longer lists, before it pushes. Ownership is a RECORD,
+# never a name prefix (review 2026-09-25: a user's `omniroute-personal` must
+# survive): the names this sync pushed (.autoos-pushed.json next to the
+# profiles) plus the spec's retired_ids (the ids from before that record).
+# The active profile is never deleted, and nothing is when the app does not
+# say which one is active.
+# _fake_app <dir> [<seed.json>]: starts the fake and sets fake_pid + url.
+# Never call it inside $(...): the pid would be set in that subshell only,
+# the caller's kill would miss, and the fake would outlive the test.
+_fake_app() {
+    python3 "$ROOT/tests/helpers/fake_openhands_app.py" "$1/port" "$1/req.log" ${2:+"$2"} >/dev/null 2>&1 &
+    fake_pid=$!
+    for _ in $(seq 1 50); do [[ -s "$1/port" ]] && break; sleep 0.1; done
+    url="http://127.0.0.1:$(cat "$1/port")"
+}
+_fake_profiles() {  # _fake_profiles <url>: the app's profile names, one per line
+    python3 -c 'import json,sys,urllib.request; print("\n".join(p["name"] for p in json.load(urllib.request.urlopen(sys.argv[1] + "/api/v1/settings/profiles"))["profiles"]))' "$1"
+}
+_push_to() {  # _push_to <dir> <url>
+    env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key python3 "$ROOT/tools/sync-openhands-profiles.py" \
+        --openhands-dir "$1/oh" --keys-file "$1/none.yml" --litellm-env "$1/none.env" --push-url "$2" 2>&1
+}
+_seed_pushed() {  # _seed_pushed <dir> <name>...: records <name>s as pushed by an earlier sync
+    local dir="$1"; shift
+    mkdir -p "$dir/oh/profiles"
+    python3 -c 'import json,sys; json.dump({n: "seeded" for n in sys.argv[2:]}, open(sys.argv[1], "w"))' \
+        "$dir/oh/profiles/.autoos-pushed.json" "$@"
+}
+
+if it "svc: profile push deletes retired AutoOS profiles, never a foreign one"; then
+    d="$(mktemp -d)"
+    cat >"$d/seed.json" <<'JSON'
+{"cap": 10, "settings": {"agent_settings_diff": {}},
+ "profiles": {"omniroute-tier1": {"model": "openai/tier1"},
+              "litellm-tier2": {"model": "openai/tier2"},
+              "openrouter-gone": {"model": "openrouter/x"},
+              "omniroute-personal": {"model": "openai/mine", "api_key": "k"},
+              "my-own-profile": {"model": "openai/mine", "api_key": "k"},
+              "omniroute": {"model": "openai/prefix-without-dash"}}}
+JSON
+    _seed_pushed "$d" openrouter-gone
+    _fake_app "$d" "$d/seed.json"
+    first="$(_push_to "$d" "$url")"
+    after="$(_fake_profiles "$url")"
+    first_log="$(cat "$d/req.log")"
+    : >"$d/req.log"
+    second="$(_push_to "$d" "$url")"
+    second_deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
+    kill "$fake_pid" 2>/dev/null
+    ok=1
+    # legacy retired_ids (tier1, litellm-tier2) and a recorded push (gone) go
+    for _r in omniroute-tier1 litellm-tier2 openrouter-gone; do
+        [[ "$first" == *"app profile $_r deleted (retired"* ]] || { ok=0; echo "not deleted: $_r: $first" >&2; }
+        grep -qx "$_r" <<<"$after" && { ok=0; echo "still in the app: $_r" >&2; }
+    done
+    # an AutoOS-looking prefix is not ownership
+    for _k in omniroute-personal my-own-profile omniroute; do
+        grep -qx "$_k" <<<"$after" || { ok=0; echo "a foreign profile was deleted: $_k" >&2; }
+        grep -q "^DELETE .*/$_k\$" <<<"$first_log" && { ok=0; echo "DELETE sent for $_k" >&2; }
+    done
+    grep -qx l1-orchestrator <<<"$after" || { ok=0; echo "t1 not pushed: $after" >&2; }
+    [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run deleted again ($second_deletes)" >&2; }
+    [[ "$second" == *"deleted"* ]] && { ok=0; echo "second run reports a delete: $second" >&2; }
+    [[ "$first$second" == *"sk-fake-profile-key"* ]] && { ok=0; echo "key printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "retired profiles are not cleaned up safely"; fi
+fi
+
+if it "svc: profile push deletes retired profiles before it saves any"; then
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-tier1": {"model": "openai/tier1"}, "omniroute-tier2": {"model": "openai/tier2"}, "omniroute-tier3": {"model": "openai/tier3"}}}' >"$d/seed.json"
+    _fake_app "$d" "$d/seed.json"
+    out="$(_push_to "$d" "$url")"
+    kill "$fake_pid" 2>/dev/null
+    last_delete="$(grep -n '^DELETE' "$d/req.log" | tail -1 | cut -d: -f1)"
+    first_save="$(grep -n '^POST /api/v1/settings/profiles/' "$d/req.log" | head -1 | cut -d: -f1)"
+    rm -rf "$d"
+    ok=1
+    [[ -n "$last_delete" && -n "$first_save" && "$last_delete" -lt "$first_save" ]] || { ok=0; echo "delete line $last_delete, first save line $first_save" >&2; }
+    [[ "$out" == *"app profile l3-driver saved"* ]] || { ok=0; echo "freed slots unused: $out" >&2; }
+    if (( ok )); then pass; else fail "retired profiles still hold slots during the push"; fi
+fi
+
+if it "svc: profile push never deletes the active profile, even a retired one"; then
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 10, "settings": {"agent_settings_diff": {}}, "active": "omniroute-tier1", "profiles": {"omniroute-tier1": {"model": "openai/tier1"}}}' >"$d/seed.json"
+    _fake_app "$d" "$d/seed.json"
+    out="$(_push_to "$d" "$url")"
+    after="$(_fake_profiles "$url")"
+    kill "$fake_pid" 2>/dev/null
+    deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
+    rm -rf "$d"
+    ok=1
+    [[ "$deletes" == 0 ]] || { ok=0; echo "DELETE sent ($deletes)" >&2; }
+    grep -qx omniroute-tier1 <<<"$after" || { ok=0; echo "active profile gone" >&2; }
+    [[ "$out" == *"omniroute-tier1 is retired but active"* ]] || { ok=0; echo "not announced: $out" >&2; }
+    if (( ok )); then pass; else fail "the active profile was not protected"; fi
+fi
+
+if it "svc: profile push deletes nothing when the app does not name its active profile"; then
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 10, "omit_active_key": true, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-tier1": {"model": "openai/tier1"}}}' >"$d/seed.json"
+    _fake_app "$d" "$d/seed.json"
+    out="$(_push_to "$d" "$url")"
+    kill "$fake_pid" 2>/dev/null
+    deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
+    saves="$(grep -c '^POST /api/v1/settings/profiles/' "$d/req.log" || true)"
+    rm -rf "$d"
+    ok=1
+    [[ "$deletes" == 0 ]] || { ok=0; echo "DELETE sent ($deletes)" >&2; }
+    [[ "$out" == *"does not say which profile is active - deleting nothing"* ]] || { ok=0; echo "not warned: $out" >&2; }
+    (( saves > 0 )) || { ok=0; echo "the push itself stopped" >&2; }
+    if (( ok )); then pass; else fail "a delete ran without knowing the active profile"; fi
+fi
+
+if it "svc: profile push re-checks the active profile right before each delete"; then
+    # The fake makes omniroute-tier1 active on its 2nd profile listing - a
+    # UI switch between the push's first look and its delete.
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 10, "activate_on_list": {"call": 2, "name": "omniroute-tier1"}, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-tier1": {"model": "openai/tier1"}}}' >"$d/seed.json"
+    _fake_app "$d" "$d/seed.json"
+    out="$(_push_to "$d" "$url")"
+    after="$(_fake_profiles "$url")"
+    kill "$fake_pid" 2>/dev/null
+    deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
+    rm -rf "$d"
+    ok=1
+    [[ "$deletes" == 0 ]] || { ok=0; echo "DELETE sent ($deletes)" >&2; }
+    grep -qx omniroute-tier1 <<<"$after" || { ok=0; echo "the newly active profile was deleted" >&2; }
+    [[ "$out" == *"omniroute-tier1 became the active profile - left in place"* ]] || { ok=0; echo "not announced: $out" >&2; }
+    if (( ok )); then pass; else fail "a profile made active mid-run was deleted"; fi
+fi
+
+# Spec order decides which tiers make the cap - also in an app that already
+# holds lower-ranked AutoOS profiles from an older order (measured 2026-09-25:
+# the live app held 10 in-spec profiles, 0 retired, so deleting retired ids
+# alone freed nothing and l3-driver/t4-rag still never fit).
+# These seeds are the spec's two lowest ranks, which are the litellm
+# free-only twins regardless of which gateway route is servable: a tier that
+# fails closed simply stops being ranked, so this test needed no re-pin for
+# MUSEAPI 2026-09-27 (the omniroute spark tier re-entered the spec above them).
+if it "svc: profile push makes room for a higher-ranked tier by removing the lowest-ranked AutoOS one"; then
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"litellm-l2-worker-free-only": {"model": "openai/l2-worker-free-only"}, "litellm-l3-driver-free-only": {"model": "openai/l3-driver-free-only"}, "my-own-profile": {"model": "openai/mine"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-l2-worker-free-only litellm-l3-driver-free-only
+    _fake_app "$d" "$d/seed.json"
+    first="$(_push_to "$d" "$url")"
+    after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
+    : >"$d/req.log"
+    second="$(_push_to "$d" "$url")"
+    second_deletes="$(grep -c '^DELETE' "$d/req.log" || true)"
+    kill "$fake_pid" 2>/dev/null
+    rm -rf "$d"
+    ok=1
+    # One slot is the user's; the two AutoOS slots go to the spec's top two.
+    [[ "$after" == "l1-orchestrator l2-worker my-own-profile " ]] || { ok=0; echo "app holds: $after" >&2; }
+    [[ "$first" == *"litellm-l3-driver-free-only removed to make room for l1-orchestrator"* ]] || { ok=0; echo "first eviction not announced: $first" >&2; }
+    [[ "$first" == *"litellm-l2-worker-free-only removed to make room for l2-worker"* ]] || { ok=0; echo "second eviction not announced: $first" >&2; }
+    [[ "$first" == *"profile cap is reached"* ]] || { ok=0; echo "cap not reported" >&2; }
+    [[ "$second_deletes" == 0 ]] || { ok=0; echo "second run evicted again ($second_deletes)" >&2; }
+    if (( ok )); then pass; else fail "the cap is not filled in spec order"; fi
+fi
+
+# Rank comes from the FULL spec order: an AutoOS tier the app holds but this
+# run could not build (no key for its gateway) still ranks, so it can make
+# room for a higher tier. A prefix-named profile nobody recorded never does.
+if it "svc: profile push evicts an unbuilt AutoOS tier below the refused one, never a foreign profile"; then
+    d="$(mktemp -d)"
+    printf '%s' '{"cap": 3, "settings": {"agent_settings_diff": {}}, "profiles": {"omniroute-personal": {"model": "openai/mine"}, "litellm-l2-worker": {"model": "openai/l2-worker"}, "litellm-l2-worker-free-only": {"model": "openai/l2-worker-free-only"}}}' >"$d/seed.json"
+    _seed_pushed "$d" litellm-l2-worker litellm-l2-worker-free-only
+    _fake_app "$d" "$d/seed.json"
+    out="$(_push_to "$d" "$url")"
+    after="$(_fake_profiles "$url" | sort | tr '\n' ' ')"
+    kill "$fake_pid" 2>/dev/null
+    personal_deletes="$(grep -c '^DELETE .*/omniroute-personal$' "$d/req.log" || true)"
+    rm -rf "$d"
+    ok=1
+    [[ "$after" == "l1-orchestrator l2-worker omniroute-personal " ]] || { ok=0; echo "app holds: $after" >&2; }
+    [[ "$out" == *"litellm-l2-worker removed to make room for l2-worker"* ]] || { ok=0; echo "unbuilt tier not ranked: $out" >&2; }
+    [[ "$personal_deletes" == 0 ]] || { ok=0; echo "omniroute-personal DELETEd" >&2; }
+    if (( ok )); then pass; else fail "eviction ranks or ownership are wrong"; fi
+fi
+
+# The app never returns a profile's key (only api_key_set), so "every other
+# field matches" cannot see a rotated key - it was skipped forever (review
+# finding 2026-09-25). The sync records a short hash of the last pushed key.
+if it "svc: profile push re-sends a profile whose key was rotated"; then
+    d="$(mktemp -d)"
+    python3 "$ROOT/tests/helpers/fake_openhands_app.py" "$d/port" "$d/req.log" >/dev/null 2>&1 &
+    fake_pid=$!
+    for _ in $(seq 1 50); do [[ -s "$d/port" ]] && break; sleep 0.1; done
+    url="http://127.0.0.1:$(cat "$d/port")"
+    push() { env AUTOOS_OMNIROUTE_KEY="$1" python3 "$ROOT/tools/sync-openhands-profiles.py" \
+        --openhands-dir "$d/oh" --keys-file "$d/none.yml" --litellm-env "$d/none.env" --push-url "$url" 2>&1; }
+    push sk-fake-key-one >/dev/null
+    : >"$d/req.log"
+    same="$(push sk-fake-key-one)"
+    same_posts="$(grep -c '^POST /api/v1/settings/profiles/l1-orchestrator$' "$d/req.log" || true)"
+    : >"$d/req.log"
+    rotated="$(push sk-fake-key-two)"
+    rotated_posts="$(grep -c '^POST /api/v1/settings/profiles/l1-orchestrator$' "$d/req.log" || true)"
+    kill "$fake_pid" 2>/dev/null
+    state_mode="$(stat -c %a "$d/oh/profiles/.autoos-pushed.json" 2>/dev/null)"
+    leaked="$(grep -c 'sk-fake-key' "$d/oh/profiles/.autoos-pushed.json" 2>/dev/null || true)"
+    rm -rf "$d"
+    ok=1
+    [[ "$same_posts" == 0 ]] || { ok=0; echo "unchanged key re-posted ($same_posts)" >&2; }
+    [[ "$rotated_posts" == 1 ]] || { ok=0; echo "rotated key not pushed ($rotated_posts): $rotated" >&2; }
+    [[ "$state_mode" == 600 ]] || { ok=0; echo "state file mode $state_mode" >&2; }
+    [[ "$leaked" == 0 ]] || { ok=0; echo "raw key in the state file" >&2; }
+    if (( ok )); then pass; else fail "a rotated key never reaches the app"; fi
+fi
+
+# The push used to run as `... | grep -v skipped || true`, which swallowed a
+# failing sync (exit 2) under pipefail (review finding 2026-09-25).
+if it "svc: start-stack reports a failing profile push instead of hiding it"; then
+    block="$(sed -n '/^    openhands)/,/^        ;;/p' configuration/start-stack.sh)"
+    ok=1
+    [[ "$block" == *"skipped (up to date)\$' || true"* ]] && [[ "$block" != *"push_rc"* ]] && { ok=0; echo "push failure still swallowed" >&2; }
+    [[ "$block" == *'push_rc=$?'* ]] || { ok=0; echo "push exit code not kept" >&2; }
+    [[ "$block" == *'tier-profile push failed'* ]] || { ok=0; echo "no warning on a failed push" >&2; }
+    if (( ok )); then pass; else fail "a failed profile push is hidden"; fi
+fi
+
+if it "svc: profile push skips cleanly when no app answers"; then
+    d="$(mktemp -d)"
+    out="$(env AUTOOS_OMNIROUTE_KEY=sk-fake-profile-key python3 "$ROOT/tools/sync-openhands-profiles.py" \
+        --openhands-dir "$d/oh" --keys-file "$d/none.yml" --litellm-env "$d/none.env" \
+        --push-url http://127.0.0.1:1 2>&1)"; rc=$?
+    rm -rf "$d"
+    if [[ $rc -eq 0 && "$out" == *"push skipped"* ]]; then pass; else fail "rc=$rc $out"; fi
+fi
+
+# The browser UI shows the AI services live and offers the setup actions that
+# already exist. Payload and action mapping are tested through an injected
+# probe and runner: nothing is probed on this machine, nothing is started.
+_svc_serve_py() {
+    python3 - <<'PY'
+import importlib.util, json, pathlib, sys, tempfile
+root = pathlib.Path(tempfile.mkdtemp(prefix="autoos-serve-"))
+spec = importlib.util.spec_from_file_location("autoos_serve", "lib/linux/serve.py")
+mod = importlib.util.module_from_spec(spec)
+sys.argv = ["serve.py", str(root), "0", "127.0.0.1", "0"]
+spec.loader.exec_module(mod)
+codes = {20128: 200, 4000: 0, 4096: 401, 3000: 200}
+status = mod.service_status(probe=lambda port, path: codes[port])
+by = {s["id"]: s for s in status}
+problems = []
+for sid in ("omniroute", "litellm", "opencode", "openhands"):
+    s = by.get(sid)
+    if not s:
+        problems.append("missing:" + sid); continue
+    for k in ("name", "port", "bind", "auth", "health", "up", "actions"):
+        if k not in s: problems.append(sid + ":no-" + k)
+up = {k: v["up"] for k, v in by.items()}
+if up != {"omniroute": True, "litellm": False, "opencode": True, "openhands": True}:
+    problems.append("up=%s" % up)
+if by["litellm"]["bind"] != "127.0.0.1": problems.append("litellm-bind")
+if by["opencode"]["bind"] != "0.0.0.0": problems.append("opencode-bind")
+if "apply-dry-run" not in by["omniroute"]["actions"]: problems.append("no-apply-dry-run")
+if "start-openhands" not in by["openhands"]["actions"]: problems.append("no-start-openhands")
+if "start-opencode-serve" not in by["opencode"]["actions"]: problems.append("no-start-serve")
+# every advertised action is in the allowlist, with a repo script behind it
+for s in status:
+    for a in s["actions"]:
+        if a not in mod.SERVICE_ACTIONS: problems.append("unlisted:" + a)
+for key, act in mod.SERVICE_ACTIONS.items():
+    argv = act["argv"]
+    if argv[0] != "bash" or not (pathlib.Path("lib/linux/serve.py").resolve().parents[2] / argv[1]).is_file():
+        problems.append("not-a-repo-script:" + key)
+if mod.SERVICE_ACTIONS["apply-dry-run"]["live"] or "--dry-run" not in mod.SERVICE_ACTIONS["apply-dry-run"]["argv"]:
+    problems.append("dry-run-action-is-live")
+# the request side: unknown refused, live refused under --dry-run serving
+ran = []
+mod.start_service_action = lambda key: ran.append(key)
+code, _ = mod.service_action_response({"action": "rm -rf /"})
+if code != 400: problems.append("unknown-action=%s" % code)
+code, _ = mod.service_action_response({"action": "apply-dry-run"})
+if code != 202 or ran != ["apply-dry-run"]: problems.append("dry-run-not-started:%s" % code)
+mod.FORCE_DRY = True
+code, _ = mod.service_action_response({"action": "start-openhands"})
+if code != 409 or ran != ["apply-dry-run"]: problems.append("live-action-under-dry-serve:%s" % code)
+print(" ".join(problems) or "ok")
+PY
+}
+
+if it "svc: the web server reports every AI service and maps actions to an allowlist"; then
+    assert_eq "$(_svc_serve_py 2>&1 | tail -n 1)" "ok"
+fi
+
+if it "svc: the web UI shows service status and confirms every live action"; then
+    ok=1
+    grep -q 'api("/api/services")' web/index.html || { ok=0; echo "no status fetch" >&2; }
+    grep -q '/api/services/action' web/index.html || { ok=0; echo "no action call" >&2; }
+    body="$(sed -n '/^async function runServiceAction/,/^}/p' web/index.html)"
+    [[ "$body" == *"confirm("* ]] || { ok=0; echo "live action without confirm" >&2; }
+    grep -q 'id="services"' web/index.html || { ok=0; echo "no services list" >&2; }
+    grep -q 'backend apply/switch not yet wired' web/index.html && { ok=0; echo "stale subtitle" >&2; }
+    if (( ok )); then pass; else fail "service status/actions not wired in the page"; fi
+fi
+
+# The page is shared: the Windows server must answer the same routes.
+if it "svc: the Windows server answers the same service routes"; then
+    ok=1
+    grep -q "'/api/services'" lib/windows/AutoOS.Serve.psm1 || { ok=0; echo "no GET route" >&2; }
+    grep -q "'/api/services/action'" lib/windows/AutoOS.Serve.psm1 || { ok=0; echo "no POST route" >&2; }
+    for a in apply-dry-run apply start-openhands start-opencode-serve resume-stack; do
+        grep -q "'$a'" lib/windows/AutoOS.Serve.psm1 || { ok=0; echo "missing action $a" >&2; }
+    done
+    if (( ok )); then pass; else fail "Windows server lacks the service routes"; fi
+fi
+
+if it "svc: docs/web-services.md lists every service port and no real host"; then
+    ok=1
+    for p in 20128 4096 3000 4000 8777 8080 8090 9000 9001 9121 24282 8199; do
+        grep -q "| $p |" docs/web-services.md || { ok=0; echo "port $p missing" >&2; }
+    done
+    if grep -oE '([0-9]{1,3}\.){3}[0-9]{1,3}' docs/web-services.md | grep -qvE '^(0\.0\.0\.0|127\.0\.0\.1)$'; then
+        ok=0; echo "a real IP in the doc" >&2
+    fi
+    grep -qE '[a-z0-9-]\.(com|net|org|de)\b' docs/web-services.md && { ok=0; echo "a real domain in the doc" >&2; }
+    if (( ok )); then pass; else fail "web-services.md incomplete or leaking"; fi
+fi
+
+# ─── Docker AI stack (server profile, lane S) ──────────────────────────────
+# Every test name carries "aistack" so `--filter aistack` reaches all of them.
+# Nothing here starts a container: docker and systemctl are stubs that log.
+AISTACK="$ROOT/configuration/docker/ai-stack"
+
+_aistack_sandbox() {
+    local d t
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/home/.config/opencode" "$d/repo" "$d/code"
+    # Stateful stand-ins (tests/helpers/aistack_fake.sh): docker, systemctl,
+    # ss, curl, sleep, the omniroute CLI, register-autostart.sh and
+    # start-stack.sh answer from files in $d and log their arguments. Nothing
+    # reaches the daemon, the user manager or the network.
+    for t in docker systemctl ss curl sleep omniroute register start-stack start-litellm; do
+        printf '#!/bin/sh\nexec bash "%s/tests/helpers/aistack_fake.sh" "%s" %s "$@"\n' "$ROOT" "$d" "$t" >"$d/bin/$t"
+        chmod +x "$d/bin/$t"
+    done
+    mv "$d/bin/systemctl" "$d/bin/fake-systemctl"
+    mv "$d/bin/register" "$d/bin/fake-register"
+    mv "$d/bin/start-stack" "$d/bin/fake-start-stack"
+    printf 'omniroute: sk-test-client-key\n' >"$d/repo/api-keys.yml"
+    printf '%s' "$d"
+}
+# _aistack <sandbox> [NAME=value...] <ai-stack.sh args...>
+_aistack() {
+    local d="$1" extra=()
+    shift
+    while (( $# )) && [[ "$1" == [A-Z]*=* ]]; do extra+=("$1"); shift; done
+    env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
+        -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
+        -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
+        -u OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT -u OMNIROUTE_CHAT_ADMISSION_QUEUE_MS -u AUTOOS_VERIFY_RETRY_SLEEP \
+        -u AUTOOS_LITELLM_HOST -u AUTOOS_LITELLM_PORT -u AUTOOS_LITELLM_MASTER_KEY_FILE -u AUTOOS_LITELLM_STATE_DIR \
+        -u AUTOOS_ZCODE_DIR -u AUTOOS_ZCODE_MOUNT_MODE \
+        HOME="$d/home" PATH="$d/bin:$PATH" AUTOOS_DOCKER="$d/bin/docker" AUTOOS_SYSTEMCTL="$d/bin/fake-systemctl" \
+        AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_AI_STACK_DATA="$d/data" AUTOOS_CODE_DIR="$d/code" \
+        AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" AUTOOS_LITELLM_DIR="$d/repo" AUTOOS_OMNIROUTE_HOME="$d/home/.omniroute" \
+        AUTOOS_OPENHANDS_DIR="$d/home/.openhands" XDG_CONFIG_HOME="$d/home/.config" \
+        AUTOOS_REGISTER_AUTOSTART="$d/bin/fake-register" AUTOOS_START_STACK="$d/bin/fake-start-stack" \
+        AUTOOS_START_LITELLM="$d/bin/start-litellm" \
+        "${extra[@]}" bash "${_AISTACK_SH:-$AISTACK/ai-stack.sh}" "$@" 2>&1
+}
+# _aistack_native <sandbox>: a host before the move - both units registered
+# and active, a gateway state dir, the firewall unit up, images present.
+_aistack_native() {
+    local d="$1" u
+    for u in autoos-omniroute autoos-opencode coding-agents-fw; do : >"$d/unit-$u"; : >"$d/active-$u"; done
+    mkdir -p "$d/home/.omniroute"
+    printf 'STORAGE_ENCRYPTION_KEY=test\n' >"$d/home/.omniroute/.env"
+    printf 'native-db\n' >"$d/home/.omniroute/storage.sqlite"
+    : >"$d/image-exists"
+}
+# _aistack_migrated <sandbox>: a host after a completed migrate.
+_aistack_migrated() {
+    local d="$1" c
+    mkdir -p "$d/cfg" "$d/data/omniroute"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\n" >"$d/cfg/stack.env"
+    printf 'owner=docker by=migrate\n' >"$d/cfg/stack.active"
+    for c in autoos-omniroute autoos-opencode openhands-app; do : >"$d/run-$c"; : >"$d/compose-$c"; done
+    : >"$d/unit-coding-agents-fw"; : >"$d/active-coding-agents-fw"
+    printf 'container-db\n' >"$d/data/omniroute/storage.sqlite"
+}
+# _aistack_seq <log> <needle...>: every needle appears, in this order.
+_aistack_seq() {
+    python3 - "$@" <<'PY'
+import sys
+text = open(sys.argv[1], encoding="utf-8").read() if sys.argv[1] != "-" else sys.stdin.read()
+at = 0
+for needle in sys.argv[2:]:
+    i = text.find(needle, at)
+    if i < 0:
+        print("missing (in order): %r after offset %d" % (needle, at), file=sys.stderr)
+        sys.exit(1)
+    at = i + len(needle)
+PY
+}
+
+if it "aistack: compose template keeps the hardening contract"; then
+    out="$(python3 "$ROOT/tests/helpers/check_compose.py" "$AISTACK/compose.yml" 2>&1)" && rc=0 || rc=$?
+    if (( rc == 0 )); then pass; else fail "$out"; fi
+fi
+
+# ─── The optional ZCode remote-server bundle (compose.zcode.yml) ───────────
+# The desktop app drops its bundle (server/node + server/zcode-server.cjs) and
+# the ZCode login into one host directory ($HOME/.zcode). Only the gateway
+# container mounts it, only as long as zcode-server.cjs is really a regular
+# file there, and every other host must keep today's single `-f` compose call.
+# _aistack_compose_up <sandbox>: the `compose ... up -d` line of docker.log.
+_aistack_compose_up() { grep -m1 '^compose .*up -d' "$1/docker.log" 2>/dev/null; }
+# _aistack_f_count <line>: how many -f files that compose call carried.
+_aistack_f_count() { tr ' ' '\n' <<<"$1" | grep -cx -- '-f'; }
+
+if it "aistack: the ZCode server bundle adds compose.zcode.yml after compose.yml"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/home/.zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/home/.zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed" >&2; }
+    line="$(_aistack_compose_up "$d")"
+    [[ -n "$line" ]] || { ok=0; echo "no compose up logged: $(tr '\n' '|' <"$d/docker.log" 2>/dev/null)" >&2; }
+    [[ "$(_aistack_f_count "$line")" == 2 ]] || { ok=0; echo "not two -f flags: [$line]" >&2; }
+    grep -qE -- '-f .*/compose\.yml -f .*/compose\.zcode\.yml' <<<"$line" \
+        || { ok=0; echo "the override did not follow compose.yml: [$line]" >&2; }
+    rm -rf "$d"
+    # AUTOOS_ZCODE_DIR in stack.env is the documented home for the variable:
+    # a directory the file names (not $HOME) must resolve the same way.
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_ZCODE_DIR=$d/zcode\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed (stack.env dir)" >&2; }
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 2 ]] || { ok=0; echo "stack.env AUTOOS_ZCODE_DIR was ignored: [$line]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the ZCode override never reached compose"; fi
+fi
+
+if it "aistack: without server/zcode-server.cjs the compose call keeps a single -f"; then
+    ok=1
+    for shape in nodir emptydir nobundle; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"
+        printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        : >"$d/image-exists"
+        case "$shape" in
+            nodir)    : ;;
+            emptydir) mkdir -p "$d/home/.zcode" ;;
+            nobundle) mkdir -p "$d/home/.zcode/server" ;;   # the dir holds no zcode-server.cjs
+        esac
+        _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed ($shape)" >&2; }
+        line="$(_aistack_compose_up "$d")"
+        [[ -n "$line" ]] || { ok=0; echo "no compose up logged ($shape)" >&2; }
+        [[ "$(_aistack_f_count "$line")" == 1 ]] || { ok=0; echo "$shape: not one -f flag: [$line]" >&2; }
+        grep -q 'compose.zcode.yml' "$d/docker.log" 2>/dev/null \
+            && { ok=0; echo "$shape: the override ran without the bundle" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "a host without the ZCode bundle got the override"; fi
+fi
+
+if it "aistack: a bogus AUTOOS_ZCODE_MOUNT_MODE falls back to ro with one warning line"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/home/.zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/home/.zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" AUTOOS_ZCODE_MOUNT_MODE=bogus up omniroute)"
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 2 ]] || { ok=0; echo "the override was dropped over the mode: [$line]" >&2; }
+    n="$(grep -c 'AUTOOS_ZCODE_MOUNT_MODE must be exactly ro or rw' <<<"$out")"
+    [[ "$n" == 1 ]] || { ok=0; echo "expected one warning line, got [$n]: $(grep 'AUTOOS_ZCODE_MOUNT_MODE' <<<"$out" | tr '\n' '|')" >&2; }
+    grep -q 'read-only' <<<"$out" || { ok=0; echo "the warning does not say it fell back to ro" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a bad mount mode never reached the operator"; fi
+fi
+
+if it "aistack: a relative, colon- or space-bearing AUTOOS_ZCODE_DIR skips the override with a warning"; then
+    # A real bundle exists in both cases: path validation - not a missing
+    # bundle - is what has to decide here.
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/home/.zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/home/.zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" AUTOOS_ZCODE_DIR=zcode-home up omniroute)"
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 1 ]] || { ok=0; echo "a relative dir kept the override: [$line]" >&2; }
+    grep -q 'AUTOOS_ZCODE_DIR must be an absolute path' <<<"$out" \
+        || { ok=0; echo "a relative dir warned nowhere: $(tr '\n' '|' <<<"$out" | head -c 300)" >&2; }
+    grep -q 'compose.zcode.yml' "$d/docker.log" 2>/dev/null && { ok=0; echo "the override ran for a relative dir" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" AUTOOS_ZCODE_DIR="$d/zcode:/host" up omniroute)"
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 1 ]] || { ok=0; echo "a colon-bearing dir kept the override: [$line]" >&2; }
+    grep -q 'AUTOOS_ZCODE_DIR must be an absolute path' <<<"$out" \
+        || { ok=0; echo "a colon-bearing dir warned nowhere" >&2; }
+    n="$(grep -c 'AUTOOS_ZCODE_DIR must be an absolute path' <<<"$out")"
+    [[ "$n" == 1 ]] || { ok=0; echo "expected one warning line, got [$n]" >&2; }
+    grep -q 'compose.zcode.yml' "$d/docker.log" 2>/dev/null && { ok=0; echo "the override ran for a colon dir" >&2; }
+    rm -rf "$d"
+    # A space splits the volume string compose builds from the dir (measured:
+    # `docker compose config` cut the source at the first space).
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/my zcode/server"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    printf 'fake bundle\n' >"$d/my zcode/server/zcode-server.cjs"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" AUTOOS_ZCODE_DIR="$d/my zcode" up omniroute)"
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 1 ]] || { ok=0; echo "a dir with a space kept the override: [$line]" >&2; }
+    grep -q 'AUTOOS_ZCODE_DIR must be an absolute path' <<<"$out" \
+        || { ok=0; echo "a dir with a space warned nowhere" >&2; }
+    grep -q 'compose.zcode.yml' "$d/docker.log" 2>/dev/null && { ok=0; echo "the override ran for a dir with a space" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a bad AUTOOS_ZCODE_DIR reached docker"; fi
+fi
+
+if it "aistack: compose.zcode.yml names only omniroute, mounts ro by default, and only ai-stack.sh knows .zcode"; then
+    ok=1
+    f="$AISTACK/compose.zcode.yml"
+    if [[ -f "$f" ]]; then
+        # One top-level key (services:), one service (omniroute), one volume.
+        [[ "$(grep -cE '^[A-Za-z][A-Za-z0-9_-]*:' "$f")" == 1 ]] \
+            || { ok=0; echo "top-level keys other than services: $(grep -E '^[A-Za-z][A-Za-z0-9_-]*:' "$f" | tr '\n' '|')" >&2; }
+        svc="$(grep -E '^  [A-Za-z0-9_-]+:' "$f")"
+        [[ "$svc" == "  omniroute:" ]] || { ok=0; echo "services named: [$(tr '\n' '|' <<<"$svc")]" >&2; }
+        vols="$(grep -cE '^[[:space:]]*-[[:space:]]' "$f")"
+        [[ "$vols" == 1 ]] || { ok=0; echo "$vols volume lines, expected 1" >&2; }
+        grep -qE -- '^[[:space:]]*-[[:space:]]+\$\{AUTOOS_ZCODE_DIR\}:/home/qoder/\.zcode:\$\{AUTOOS_ZCODE_MOUNT_MODE:-ro\}$' "$f" \
+            || { ok=0; echo "the volume line is not \${AUTOOS_ZCODE_DIR}:/home/qoder/.zcode:\${AUTOOS_ZCODE_MOUNT_MODE:-ro}: $(grep -E '^[[:space:]]*-[[:space:]]' "$f" | head -1)" >&2; }
+    else
+        ok=0; echo "missing $f" >&2
+    fi
+    # opencode/openhands must never see the directory: it carries the login.
+    stray="$(grep -rl '\.zcode' "$AISTACK" 2>/dev/null | grep -vE '/(ai-stack\.sh|compose\.zcode\.yml)$')"
+    [[ -z "$stray" ]] || { ok=0; echo "another ai-stack file mentions .zcode: $stray" >&2; }
+    if (( ok )); then pass; else fail "the ZCode mount leaks past the gateway"; fi
+fi
+
+if it "aistack: omniroute compose.yml sets the chat admission gate, the response-start timeout and carries no NODE_OPTIONS"; then
+    f="$AISTACK/compose.yml"
+    # The omniroute block: from its service header to the next service.
+    omni="$(sed -n '/^  omniroute:/,/^  [a-z]/p' "$f" | sed '$d')"
+    ok=1
+    grep -q 'OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT: ${OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT:-6}' <<<"$omni" \
+        || { ok=0; echo "MAX_HEAVY not set to default 6" >&2; }
+    grep -q 'OMNIROUTE_CHAT_ADMISSION_QUEUE_MS: ${OMNIROUTE_CHAT_ADMISSION_QUEUE_MS:-60000}' <<<"$omni" \
+        || { ok=0; echo "QUEUE_MS not set to default 60000" >&2; }
+    # Muse's first byte is slow (measured 2026-09-28: 3-32 s at
+    # minimal/low/medium; the high leg overruns the image's own 30 s
+    # response-start ceiling). Unset ships 30000 -> 504.
+    grep -q 'OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS: ${OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS:-180000}' <<<"$omni" \
+        || { ok=0; echo "DIRECT_HEADERS_TIMEOUT_MS not set to default 180000" >&2; }
+    # OMNIROUTE_MEMORY_MB is the heap knob (the entrypoint appends it to
+    # NODE_OPTIONS; last flag wins). A NODE_OPTIONS in compose would fight it.
+    grep -qE '^ +NODE_OPTIONS:' <<<"$omni" && { ok=0; echo "NODE_OPTIONS must not be in compose (OMNIROUTE_MEMORY_MB is the heap knob)" >&2; }
+    if (( ok )); then pass; else fail "omniroute compose.yml chat admission gate"; fi
+fi
+
+if it "aistack: stack.env.example documents the omniroute response-start timeout as a commented default"; then
+    f="$AISTACK/stack.env.example"
+    if grep -q '^# OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS=180000' "$f"; then pass
+    else fail "OMNIROUTE_DIRECT_HEADERS_TIMEOUT_MS default not documented"; fi
+fi
+
+if it "aistack: the opencode layer builds on a digest-pinned V2 image, never V1"; then
+    ok=1
+    f="$AISTACK/opencode.Dockerfile"
+    grep -qE '^FROM ghcr\.io/anomalyco/opencode:2\.[0-9]+\.[0-9]+@sha256:[0-9a-f]{64}$' "$f" || { ok=0; echo "FROM not pinned V2" >&2; }
+    grep -q 'opencode-ai' "$f" && { ok=0; echo "V1 package referenced" >&2; }
+    grep -qE '^RUN apk add --no-cache .*\bgit\b.*\bbash\b.*\bnodejs\b' "$f" || { ok=0; echo "agent tools missing" >&2; }
+    if (( ok )); then pass; else fail "opencode layer is not pinned V2"; fi
+fi
+
+if it "aistack: the env example carries no real value"; then
+    ok=1
+    [[ -f "$AISTACK/stack.env.example" ]] || { ok=0; echo "missing" >&2; }
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        v="${line#*=}"
+        [[ -z "$v" || "$v" == REPLACE_WITH_* || "$v" =~ ^[0-9]+[mg]?$ || "$v" == 0.0.0.0 || "$v" == /* ]] \
+            || { ok=0; echo "suspicious: $line" >&2; }
+        [[ "$v" == /home/* ]] && { ok=0; echo "home path: $line" >&2; }
+    done <"$AISTACK/stack.env.example"
+    if (( ok )); then pass; else fail "stack.env.example must stay generic"; fi
+fi
+
+if it "aistack: --dry-run init prints the plan and writes nothing"; then
+    d="$(_aistack_sandbox)"
+    out="$(_aistack "$d" --dry-run init)"
+    ok=1
+    [[ -e "$d/cfg" || -e "$d/data" ]] && { ok=0; echo "created a directory" >&2; }
+    [[ "$out" == *"dry run"* ]] || { ok=0; echo "no dry-run banner" >&2; }
+    [[ "$out" == *"would write $d/cfg/stack.env"* ]] || { ok=0; echo "stack.env not announced: $out" >&2; }
+    [[ "$out" == *"would write $d/cfg/opencode.env"* ]] || { ok=0; echo "opencode.env not announced" >&2; }
+    [[ "$out" == *"sk-test-client-key"* ]] && { ok=0; echo "printed a key" >&2; }
+    grep -qE 'compose|run|pull|build' "$d/docker.log" 2>/dev/null && { ok=0; echo "called docker" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dry run had side effects"; fi
+fi
+
+if it "aistack: init twice: 0600 env files, the second run skips, user values survive"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf '# mine\nOPENCODE_PASSWORD=operator-chosen\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
+    first="$(_aistack "$d" init)"
+    second="$(_aistack "$d" init)"
+    ok=1
+    for f in stack.env opencode.env openhands.env; do
+        [[ "$(stat -c %a "$d/cfg/$f")" == 600 ]] || { ok=0; echo "$f not 600" >&2; }
+    done
+    grep -q '^OPENCODE_PASSWORD=operator-chosen$' "$d/cfg/opencode.env" || { ok=0; echo "password overwritten" >&2; }
+    grep -q '^MY_EXTRA=keep$' "$d/cfg/opencode.env" || { ok=0; echo "extra line lost" >&2; }
+    grep -q '^# mine$' "$d/cfg/opencode.env" || { ok=0; echo "comment lost" >&2; }
+    grep -q "^AUTOOS_OMNIROUTE_KEY='sk-test-client-key'$" "$d/cfg/opencode.env" || { ok=0; echo "client key not added" >&2; }
+    grep -q "^LLM_API_KEY='sk-test-client-key'$" "$d/cfg/openhands.env" || { ok=0; echo "openhands key missing" >&2; }
+    compgen -G "$d/cfg/opencode.env.autoos-backup-*" >/dev/null || { ok=0; echo "no backup of the user's file" >&2; }
+    grep -q "^AUTOOS_CODE_DIR='$d/code'$" "$d/cfg/stack.env" || { ok=0; echo "code dir not recorded" >&2; }
+    [[ -d "$d/data/omniroute" && -d "$d/data/opencode-home" ]] || { ok=0; echo "data dirs missing" >&2; }
+    [[ "$second" == *"(skipped)"* ]] || { ok=0; echo "second: $second" >&2; }
+    [[ "$second" == *"+ "* ]] && { ok=0; echo "second run changed something: $second" >&2; }
+    [[ "$first$second" == *"sk-test-client-key"* ]] && { ok=0; echo "printed a key" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "init is not idempotent read-modify-write"; fi
+fi
+
+if it "aistack: init adds the admission gate keys to stack.env and keeps an operator's value"; then
+    d="$(_aistack_sandbox)"
+    _aistack "$d" init >/dev/null
+    ok=1
+    grep -q "^OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT='6'$" "$d/cfg/stack.env" \
+        || { ok=0; echo "MAX_HEAVY not added: $(grep OMNIROUTE_CHAT "$d/cfg/stack.env")" >&2; }
+    grep -q "^OMNIROUTE_CHAT_ADMISSION_QUEUE_MS='60000'$" "$d/cfg/stack.env" \
+        || { ok=0; echo "QUEUE_MS not added" >&2; }
+    # An operator's own value survives a second run (ensure_env_file only adds missing keys).
+    sed -i "s/^OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=.*/OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=99/" "$d/cfg/stack.env"
+    _aistack "$d" init >/dev/null
+    grep -q "^OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=99$" "$d/cfg/stack.env" \
+        || { ok=0; echo "operator's value was overwritten: $(grep OMNIROUTE_CHAT_MAX "$d/cfg/stack.env")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "init admission gate keys"; fi
+fi
+
+# Same class as lib/linux/install.sh backup_path/backup_file (main fixed
+# this there): ensure_env_file's own backup used a plain <file>.autoos-
+# backup-<stamp> name with a bare cp, so two changed writes to the same env
+# file in the same second let the second cp overwrite the first backup and
+# destroy it. Pin `date` on PATH so both writes land in the same "second".
+if it "backup residual: aistack backs up stack.env twice in one second without overwriting"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf '#!/bin/sh\necho 20260101-000000\n' >"$d/bin/date"; chmod +x "$d/bin/date"
+    printf '# mine\nMY_EXTRA=keep\n' >"$d/cfg/stack.env"
+    contentA="$(cat "$d/cfg/stack.env")"
+    _aistack "$d" init >/dev/null
+    sed -i '/^AUTOOS_UID=/d' "$d/cfg/stack.env"
+    contentB="$(cat "$d/cfg/stack.env")"
+    _aistack "$d" init >/dev/null
+    ok=1
+    base="$d/cfg/stack.env.autoos-backup-20260101-000000"
+    [[ -f "$base" ]] || { ok=0; echo "no first backup at the plain stamp name" >&2; }
+    [[ -f "$base-1" ]] || { ok=0; echo "no second backup (overwrote the first?)" >&2; }
+    [[ "$(cat "$base" 2>/dev/null)" == "$contentA" ]] || { ok=0; echo "first backup content wrong" >&2; }
+    [[ "$(cat "$base-1" 2>/dev/null)" == "$contentB" ]] || { ok=0; echo "second backup content wrong" >&2; }
+    [[ "$(find "$d/cfg" -maxdepth 1 -name 'stack.env.autoos-backup-*' | wc -l | tr -d ' ')" == 2 ]] \
+        || { ok=0; echo "expected exactly 2 backups" >&2; }
+    grep -q '^AUTOOS_UID=' "$d/cfg/stack.env" || { ok=0; echo "final file missing the re-added key" >&2; }
+    grep -q '^MY_EXTRA=keep$' "$d/cfg/stack.env" || { ok=0; echo "user's extra line lost" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "ai-stack overwrote a same-second stack.env backup"; fi
+fi
+
+# ensure_env_file returns 1 when its backup copy fails, but cmd_init's three
+# call sites ignored that answer. errexit is no help: up and migrate call
+# `cmd_init || return 1`, which suppresses set -e for the whole call, so the
+# failed backup was swallowed and up went on to start containers on a
+# half-written config. Each call site now passes the failure on - up must
+# stop before docker is touched at all (backup_fail_bin breaks the copy;
+# the firewall flag lets the 0.0.0.0 bind init writes pass its guard).
+if it "backup residual: aistack up fails before docker when init cannot back up an env file"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    # Pre-seed the single source so the first write needing a backup in init is
+    # opencode.env (the ensure_env_file call site this test guards), not the
+    # api-keys.yml opencode_password migration that now runs before it.
+    printf "omniroute: sk-test-client-key\nopencode_password: 'pinned-pass'\n" >"$d/repo/api-keys.yml"
+    printf '# operator\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
+    cp "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig"
+    : >"$d/active-coding-agents-fw"; : >"$d/image-exists"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" _aistack "$d" up omniroute)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "up continued after a failed backup: rc=$rc" >&2; }
+    [[ "$out" == *"could not back up $d/cfg/opencode.env"* ]] || { ok=0; echo "no warning naming the file: ${out:0:300}" >&2; }
+    cmp -s "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig" || { ok=0; echo "the env file was modified without a backup" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    [[ ! -e "$d/docker.log" ]] || { ok=0; echo "docker was driven although init had failed" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "a failed init backup does not stop up"; fi
+fi
+
+# ai-stack.sh ensure_env_file returns 1 when its backup copy fails: init
+# must stop there and leave the env file alone.
+if it "backup residual: aistack init leaves the env file in place when its backup copy fails"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    # See the test above: skip the api-keys.yml migration so opencode.env's
+    # backup is the first one attempted.
+    printf "omniroute: sk-test-client-key\nopencode_password: 'pinned-pass'\n" >"$d/repo/api-keys.yml"
+    printf '# operator\nMY_EXTRA=keep\n' >"$d/cfg/opencode.env"
+    cp "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig"
+    bin="$(backup_fail_bin)"
+    out="$(PATH="$bin:$PATH" _aistack "$d" init 2>&1)"; rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "init succeeded without a backup: rc=$rc" >&2; }
+    [[ "$out" == *"could not back up $d/cfg/opencode.env"* ]] || { ok=0; echo "no warning naming the file: ${out:0:300}" >&2; }
+    cmp -s "$d/cfg/opencode.env" "$d/cfg/opencode.env.orig" || { ok=0; echo "the env file was modified without a backup" >&2; }
+    [[ "$(backup_count "$d")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
+    rm -rf "$d" "$bin"
+    if (( ok )); then pass; else fail "aistack init edits an env file it could not back up"; fi
+fi
+
+# replace_dir_with_copy's own aside= (moving a non-empty dest out of the way
+# before the swap) used <dest>.autoos-backup-<ts>, then a single -$$ escape
+# if that name was taken - safe against a second SEPARATE process (a
+# different PID) but not against a second PRE-EXISTING collision at that
+# exact name. Extracted in isolation (sourcing the whole script would run its
+# case-driven CLI dispatch and exit this test shell): pre-seed both names an
+# old run could have left and confirm the previous dest still lands under a
+# genuinely free name, never inside either.
+if it "backup residual: aistack replace_dir_with_copy never lands inside a taken aside name"; then
+    d="$(mktemp -d)"
+    src="$d/src"; dest="$d/dest"
+    mkdir -p "$src" "$dest"
+    printf 'new\n' >"$src/data"
+    printf 'old\n' >"$dest/data"
+    ts="20260101-000000"
+    base="$dest.autoos-backup-$ts"
+    mkdir -p "$base"; printf 'sentinelA\n' >"$base/marker"
+    mkdir -p "$base-$$"; printf 'sentinelB\n' >"$base-$$/marker"
+    fn="$d/fn.sh"
+    sed -n '/^autoos_backup_path()/,/^}/p;/^replace_dir_with_copy()/,/^}/p' "$AISTACK/ai-stack.sh" >"$fn"
+    # shellcheck disable=SC1090  # $fn is a scratch fixture generated above, not a repo file
+    ( . "$fn"; replace_dir_with_copy "$src" "$dest" "$ts" ) >/dev/null 2>&1; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "replace_dir_with_copy failed, rc=$rc" >&2; }
+    [[ "$(cat "$dest/data" 2>/dev/null)" == "new" ]] || { ok=0; echo "dest not swapped to the new content" >&2; }
+    [[ "$(cat "$base/marker" 2>/dev/null)" == "sentinelA" ]] || { ok=0; echo "the first taken aside name was overwritten" >&2; }
+    [[ "$(cat "$base-$$/marker" 2>/dev/null)" == "sentinelB" ]] || { ok=0; echo "the second taken aside name (this process's PID) was overwritten" >&2; }
+    aside_dir=""
+    for cand in "$d"/dest.autoos-backup-"$ts"*; do
+        [[ "$cand" == "$base" || "$cand" == "$base-$$" ]] && continue
+        [[ -f "$cand/data" ]] && aside_dir="$cand"
+    done
+    [[ -n "$aside_dir" && "$(cat "$aside_dir/data" 2>/dev/null)" == "old" ]] \
+        || { ok=0; echo "the previous dest did not land under a third, genuinely free name" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "replace_dir_with_copy's aside collided with an existing name"; fi
+fi
+
+if it "backup collision: aistack archive backup chooses a free same-second name"; then
+    d="$(mktemp -d)"
+    src="$d/omniroute"
+    archive="$d/backups/omniroute-20260101-000000.tar.gz"
+    first_archive="${archive%.tar.gz}-1.tar.gz"
+    second_archive="${archive%.tar.gz}-2.tar.gz"
+    original="$d/original.tar.gz"
+    mkdir -p "$src" "$(dirname "$archive")"
+    printf 'first\n' >"$src/state"
+    printf 'original archive\n' >"$original"
+    ln -s "$original" "$archive"
+    fn="$d/fn.sh"
+    sed -n '/^autoos_backup_path()/,/^}/p;/^backup_dir()/,/^}/p' "$AISTACK/ai-stack.sh" >"$fn"
+    # shellcheck disable=SC1090  # $fn is a scratch fixture generated above, not a repo file
+    first_out="$( . "$fn"; backup_dir "$src" "$archive" )"; rc_first=$?
+    printf 'second\n' >"$src/state"
+    # shellcheck disable=SC1090  # $fn is a scratch fixture generated above, not a repo file
+    second_out="$( . "$fn"; backup_dir "$src" "$archive" )"; rc_second=$?
+    ok=1
+    [[ $rc_first -eq 0 && $rc_second -eq 0 ]] || { ok=0; echo "backup failed: first=$rc_first second=$rc_second" >&2; }
+    [[ -L "$archive" && "$(cat "$original" 2>/dev/null)" == 'original archive' ]] || { ok=0; echo "existing archive was changed" >&2; }
+    [[ "$first_out" == *"to $first_archive"* ]] || { ok=0; echo "first archive path not printed: $first_out" >&2; }
+    [[ "$second_out" == *"to $second_archive"* ]] || { ok=0; echo "second archive path not printed: $second_out" >&2; }
+    [[ "$(tar -xOf "$first_archive" "$(basename "$src")/state" 2>/dev/null)" == first ]] || { ok=0; echo "first archive is missing or wrong" >&2; }
+    [[ "$(tar -xOf "$second_archive" "$(basename "$src")/state" 2>/dev/null)" == second ]] || { ok=0; echo "second archive is missing or wrong" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "aistack archive backup overwrote a same-second archive"; fi
+fi
+
+if it "aistack: init reuses the pinned opencode-serve password so phone logins survive"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/home/.config/autoos"
+    printf 'phone-pass\n' >"$d/home/.config/autoos/opencode-serve.password"
+    _aistack "$d" init >/dev/null
+    if grep -q "^OPENCODE_PASSWORD='phone-pass'$" "$d/cfg/opencode.env"; then pass; else fail "password not carried over"; fi
+    rm -rf "$d"
+fi
+
+# ─── api-keys.yml opencode_password is the single source (OPENCODE-CFG) ─────
+# The derived copies are ~/.config/autoos/ai-stack/opencode.env's
+# OPENCODE_PASSWORD and ~/.config/autoos/opencode-serve.password. No case may
+# print a password value; each checks the value in the file, never in stdout.
+if it "aistack: init migrates opencode_password into api-keys.yml and skips a second run"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    mkdir -p "$d/home/.config/autoos"
+    printf 'phone-pass\n' >"$d/home/.config/autoos/opencode-serve.password"
+    first="$(_aistack "$d" init)"
+    sha_keys_first="$(sha256sum "$keys" | cut -d' ' -f1)"
+    sha_env_first="$(sha256sum "$d/cfg/opencode.env" | cut -d' ' -f1)"
+    second="$(_aistack "$d" init)"
+    sha_keys_second="$(sha256sum "$keys" | cut -d' ' -f1)"
+    sha_env_second="$(sha256sum "$d/cfg/opencode.env" | cut -d' ' -f1)"
+    ok=1
+    grep -qF "opencode_password: 'phone-pass'" "$keys" || { ok=0; echo "api-keys.yml did not gain the password" >&2; }
+    compgen -G "$keys.autoos-backup-*" >/dev/null || { ok=0; echo "no api-keys.yml backup" >&2; }
+    grep -q "^OPENCODE_PASSWORD='phone-pass'$" "$d/cfg/opencode.env" || { ok=0; echo "opencode.env missing the password" >&2; }
+    [[ "$second" == *"(skipped)"* ]] || { ok=0; echo "second run did not skip: $second" >&2; }
+    [[ "$sha_keys_first" == "$sha_keys_second" && "$sha_env_first" == "$sha_env_second" ]] \
+        || { ok=0; echo "a second run rewrote a file" >&2; }
+    [[ "$first$second" == *"phone-pass"* ]] && { ok=0; echo "a password was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "api-keys.yml is not the opencode_password source"; fi
+fi
+
+if it "aistack: a changed opencode_password flows into opencode.env and the serve file"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf "omniroute: sk-test-client-key\nopencode_password: 'new-pass'\n" >"$keys"
+    mkdir -p "$d/cfg"
+    printf '# keep me\nOPENCODE_PASSWORD=old-pass\nEXTRA=keep\n' >"$d/cfg/opencode.env"
+    touch -d '2 hours ago' "$d/cfg/opencode.env"
+    _aistack "$d" init >/dev/null
+    ok=1
+    grep -q "^OPENCODE_PASSWORD='new-pass'$" "$d/cfg/opencode.env" || { ok=0; echo "opencode.env not updated" >&2; }
+    grep -q '^EXTRA=keep$' "$d/cfg/opencode.env" || { ok=0; echo "an unrelated line was lost" >&2; }
+    grep -q '^# keep me$' "$d/cfg/opencode.env" || { ok=0; echo "a comment was lost" >&2; }
+    compgen -G "$d/cfg/opencode.env.autoos-backup-*" >/dev/null || { ok=0; echo "no opencode.env backup" >&2; }
+    [[ "$(cat "$d/home/.config/autoos/opencode-serve.password" 2>/dev/null)" == new-pass ]] \
+        || { ok=0; echo "serve password file not written" >&2; }
+    [[ "$(stat -c %a "$d/home/.config/autoos/opencode-serve.password" 2>/dev/null)" == 600 ]] \
+        || { ok=0; echo "serve password file is not 0600" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "changed opencode_password not propagated"; fi
+fi
+
+if it "aistack: a newer derived opencode password is left as is with a warning"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf "omniroute: sk-test-client-key\nopencode_password: 'new-pass'\n" >"$keys"
+    touch -d '2 hours ago' "$keys"
+    mkdir -p "$d/cfg"
+    printf "# keep\nOPENCODE_PASSWORD='old-pass'\nAUTOOS_OMNIROUTE_KEY='sk-test-client-key'\n" >"$d/cfg/opencode.env"
+    before="$(sha256sum "$d/cfg/opencode.env" | cut -d' ' -f1)"
+    out="$(_aistack "$d" init)"; rc=$?
+    after="$(sha256sum "$d/cfg/opencode.env" | cut -d' ' -f1)"
+    ok=1
+    [[ $rc -eq 0 ]] || { ok=0; echo "init failed: rc=$rc" >&2; }
+    [[ "$before" == "$after" ]] || { ok=0; echo "a newer opencode.env was rewritten" >&2; }
+    [[ "$out" == *"newer opencode password than"* ]] || { ok=0; echo "no warning: $out" >&2; }
+    [[ "$out" == *"old-pass"* || "$out" == *"new-pass"* ]] && { ok=0; echo "a password was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a newer derived password was not preserved"; fi
+fi
+
+if it "aistack: a REPLACE_WITH_ placeholder counts as an unset opencode_password"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf "omniroute: sk-test-client-key\nopencode_password: REPLACE_WITH_X\n" >"$keys"
+    mkdir -p "$d/home/.config/autoos"
+    printf 'phone-pass\n' >"$d/home/.config/autoos/opencode-serve.password"
+    _aistack "$d" init >/dev/null
+    _aistack "$d" init >/dev/null
+    ok=1
+    grep -qF "opencode_password: 'phone-pass'" "$keys" || { ok=0; echo "placeholder not migrated" >&2; }
+    grep -q "^OPENCODE_PASSWORD='phone-pass'$" "$d/cfg/opencode.env" || { ok=0; echo "opencode.env not set" >&2; }
+    [[ "$(grep -c '^opencode_password:' "$keys")" -le 2 ]] || { ok=0; echo "migration appended repeatedly" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "REPLACE_WITH_ was not treated as empty"; fi
+fi
+
+if it "aistack: --dry-run init announces the migration and writes no password"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    mkdir -p "$d/home/.config/autoos"
+    printf 'phone-pass\n' >"$d/home/.config/autoos/opencode-serve.password"
+    before="$(sha256sum "$keys" | cut -d' ' -f1)"
+    out="$(_aistack "$d" --dry-run init)"
+    after="$(sha256sum "$keys" | cut -d' ' -f1)"
+    ok=1
+    [[ "$before" == "$after" ]] || { ok=0; echo "dry run rewrote api-keys.yml" >&2; }
+    [[ -e "$d/cfg/opencode.env" ]] && { ok=0; echo "dry run wrote opencode.env" >&2; }
+    [[ "$out" == *"would add opencode_password to"* ]] || { ok=0; echo "migration not announced" >&2; }
+    [[ "$out" == *"phone-pass"* ]] && { ok=0; echo "a password was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "dry run wrote the opencode password"; fi
+fi
+
+if it "aistack: init reads an api-keys.yml value with a trailing comment"; then
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf 'opencode_password: "pw-with-comment"   # rotated by L0\nomniroute: '\''sk-x'\''  # client\n' >"$keys"
+    _aistack "$d" init >/dev/null
+    ok=1
+    grep -q "^OPENCODE_PASSWORD='pw-with-comment'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "OPENCODE_PASSWORD not exact: $(grep '^OPENCODE_PASSWORD=' "$d/cfg/opencode.env")" >&2; }
+    grep -q "^AUTOOS_OMNIROUTE_KEY='sk-x'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "AUTOOS_OMNIROUTE_KEY not exact: $(grep '^AUTOOS_OMNIROUTE_KEY=' "$d/cfg/opencode.env")" >&2; }
+    rm -rf "$d"
+
+    d="$(_aistack_sandbox)"
+    keys="$d/repo/api-keys.yml"
+    printf 'opencode_password: plain-pw # c\nomniroute: sk-plain # note\n' >"$keys"
+    _aistack "$d" init >/dev/null
+    grep -q "^OPENCODE_PASSWORD='plain-pw'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "unquoted OPENCODE_PASSWORD not exact: $(grep '^OPENCODE_PASSWORD=' "$d/cfg/opencode.env")" >&2; }
+    grep -q "^AUTOOS_OMNIROUTE_KEY='sk-plain'$" "$d/cfg/opencode.env" \
+        || { ok=0; echo "unquoted AUTOOS_OMNIROUTE_KEY not exact: $(grep '^AUTOOS_OMNIROUTE_KEY=' "$d/cfg/opencode.env")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a trailing # comment leaked into the value"; fi
+fi
+
+if it "svc: run-opencode-serve reads a quoted opencode_password with a trailing comment"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/bin" "$d/home"
+    printf '#!/bin/sh\n[ "$OPENCODE_PASSWORD" = "pw-with-comment" ] && echo "pw-match $*" || echo "pw-other $*"\n' >"$d/bin/opencode"
+    chmod +x "$d/bin/opencode"
+    printf 'opencode_password: "pw-with-comment"   # rotated by L0\nomniroute: sk-test\n' >"$d/keys.yml"
+    out="$(env -u OPENCODE_PASSWORD HOME="$d/home" PATH="$d/bin:$PATH" \
+        AUTOOS_LITELLM_DIR="$d/none" AUTOOS_KEYS_FILE="$d/keys.yml" \
+        AUTOOS_OPENCODE_PASSWORD_FILE="$d/cfg/pw" \
+        bash "$ROOT/configuration/autostart/run-opencode-serve.sh" 2>&1)"
+    ok=1
+    [[ "$out" == *"pw-match serve --hostname 0.0.0.0 --port 4096"* ]] \
+        || { ok=0; echo "password not from the keys file (with trailing comment): $out" >&2; }
+    [[ "$out" == *"pw-with-comment"* ]] && { ok=0; echo "the password was printed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "run-opencode-serve does not drop a trailing comment"; fi
+fi
+
+if it "aistack: the container opencode config reaches the gateway by name"; then
+    d="$(mktemp -d)"
+    mkdir -p "$d/code/repo"
+    cat >"$d/src.json" <<JSON
+{"model":"omniroute/l1-orchestrator",
+ "provider":{"omniroute":{"options":{"baseURL":"http://127.0.0.1:20128/v1","apiKey":"{env:AUTOOS_OMNIROUTE_KEY}"}},
+             "litellm":{"options":{"baseURL":"http://127.0.0.1:4000/v1"}},
+             "ollama":{"options":{"baseURL":"http://127.0.0.1:11434/v1"}},
+             "meta":{"options":{"baseURL":"https://api.example.invalid/v1","apiKey":"{env:META_API_KEY}"}}},
+ "providers":{"omniroute":{"settings":{"baseURL":"http://localhost:20128/v1"}},"litellm":{"settings":{"baseURL":"http://127.0.0.1:4000/v1"}}},
+ "mcp":{"serena":{"type":"local","command":["uvx","serena"],"enabled":true},
+        "omnigraph":{"type":"local","command":["npx","-y","x"],"enabled":true,"environment":{"OMNIGRAPH_BASE_URL":"http://localhost:8080"}},
+        "playwright":{"type":"local","command":["npx","-y","@playwright/mcp"],"enabled":true},
+        "graphify":{"type":"local","command":["uvx","graphify"],"enabled":true}},
+ "instructions":["$d/code/repo/AGENTS.md","/elsewhere/SKILL.md"]}
+JSON
+    out1="$(python3 "$ROOT/tools/render-opencode-container-config.py" --source "$d/src.json" --out "$d/out.json" --code-dir "$d/code" 2>&1)"
+    out2="$(python3 "$ROOT/tools/render-opencode-container-config.py" --source "$d/src.json" --out "$d/out.json" --code-dir "$d/code" 2>&1)"
+    got="$(python3 - "$d/out.json" "$d/code" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+p, v2, m = c["provider"], c["providers"], c["mcp"]
+print(p["omniroute"]["options"]["baseURL"], v2["omniroute"]["settings"]["baseURL"],
+      sorted(p), sorted(v2), m["serena"].get("type"), m["serena"].get("url"),
+      m["omnigraph"]["environment"]["OMNIGRAPH_BASE_URL"], m["playwright"]["enabled"],
+      m["graphify"]["enabled"], [i.replace(sys.argv[2], "CODE") for i in c["instructions"]],
+      p["omniroute"]["options"]["apiKey"])
+PY
+)"
+    assert_eq "$got|$([[ "$out1" == *"litellm"* && "$out2" == *"unchanged"* ]] && echo reported)" \
+        "http://omniroute:20128/v1 http://omniroute:20128/v1 ['meta', 'omniroute'] ['omniroute'] remote http://serena-mcp:9121/sse http://host.docker.internal:8080 False True ['CODE/repo/AGENTS.md'] {env:AUTOOS_OMNIROUTE_KEY}|reported"
+    rm -rf "$d"
+fi
+
+if it "aistack: server profile runs the docker stack, workstation keeps the native installs"; then
+    got="$(python3 - <<'PY'
+import json
+comps = {c["id"]: c for g in json.load(open("catalog/linux.json", encoding="utf-8"))["categories"] for c in g["components"]}
+s = comps.get("ai-stack-docker", {})
+out = [
+    "server" in s.get("profiles", []),
+    "workstation" not in s.get("profiles", []),
+    "docker" in s.get("requires", []),
+    s.get("provider") == "custom" and s.get("postInstall") == "install_ai_stack",
+    # The host CLI stays: apply.sh manages the container through it. The
+    # docker run OpenHands (a :latest pull) is replaced by the compose one.
+    "server" in comps["omniroute"]["profiles"],
+    "server" not in comps["openhands-docker"]["profiles"],
+    "workstation" in comps["omniroute"]["profiles"],
+    "workstation" in comps["openhands-docker"]["profiles"],
+]
+print(" ".join(str(x) for x in out))
+PY
+)"
+    assert_eq "$got" "True True True True True True True True"
+fi
+
+if it "aistack: installer announces the plan in dry run and detects the running stack"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    out="$( ( AUTOOS_DRY_RUN=1; AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; AUTOOS_AI_STACK_DATA="$d/data"
+              HOME="$d/home"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG AUTOOS_AI_STACK_DATA HOME; install_ai_stack ) 2>&1)"
+    [[ "$out" == *"would write"*"stack.env"* ]] || { ok=0; echo "plan not shown: $out" >&2; }
+    [[ -e "$d/cfg" ]] && { ok=0; echo "dry run wrote config" >&2; }
+    ( AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG
+      custom_is_installed ai-stack-docker ) && { ok=0; echo "detected without a container" >&2; }
+    # A leftover gateway container (a failed migrate) is not an installed stack.
+    mkdir -p "$d/cfg"; : >"$d/cfg/stack.env"; : >"$d/container-exists"; : >"$d/compose-autoos-omniroute"
+    ( AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG
+      custom_is_installed ai-stack-docker ) && { ok=0; echo "a stopped leftover container read as installed" >&2; }
+    printf 'owner=docker by=migrate\n' >"$d/cfg/stack.active"
+    ( AUTOOS_DOCKER="$d/bin/docker"; AUTOOS_AI_STACK_CONFIG="$d/cfg"; export AUTOOS_DOCKER AUTOOS_AI_STACK_CONFIG
+      custom_is_installed ai-stack-docker ) || { ok=0; echo "running stack not detected" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "installer dry run / detection is wrong"; fi
+fi
+
+if it "aistack: migrate without --yes is the announced plan and touches nothing"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/home/.omniroute"; printf 'STORAGE_ENCRYPTION_KEY=x\n' >"$d/home/.omniroute/.env"
+    out="$(_aistack "$d" migrate)"
+    ok=1
+    # Order is the contract: refuse early, stop (quiescent DB), back up, copy,
+    # start, prove - every service - then claim (marker) and only then
+    # disable the native units.
+    python3 - "$out" <<'PY' || ok=0
+import sys
+out = sys.argv[1]
+steps = ["refuses", "stop the autoos-omniroute unit", "back up", "copy", "start the omniroute container",
+         "answers", "autoos-opencode", "openhands", "stack.active", "unregister autoos-omniroute"]
+pos = [out.find(s) for s in steps]
+if -1 in pos or pos != sorted(pos):
+    print("plan order wrong:", list(zip(steps, pos)), file=sys.stderr)
+    sys.exit(1)
+PY
+    [[ "$out" == *"--yes"* ]] || { ok=0; echo "no hint how to run it" >&2; }
+    [[ -e "$d/data" || -e "$d/cfg" ]] && { ok=0; echo "created state" >&2; }
+    [[ -e "$d/systemctl.log" ]] && { ok=0; echo "called systemctl" >&2; }
+    grep -qE 'compose|rm|stop' "$d/docker.log" 2>/dev/null && { ok=0; echo "called docker" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "migrate plan is wrong or had side effects"; fi
+fi
+
+if it "aistack: rollback without --yes is the announced plan and touches nothing"; then
+    d="$(_aistack_sandbox)"
+    out="$(_aistack "$d" rollback)"
+    ok=1
+    [[ "$out" == *"register-autostart.sh"* && "$out" == *"--yes"* ]] || { ok=0; echo "plan: $out" >&2; }
+    [[ -e "$d/systemctl.log" ]] && { ok=0; echo "called systemctl" >&2; }
+    grep -qE 'compose' "$d/docker.log" 2>/dev/null && { ok=0; echo "called docker compose" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rollback plan is wrong or had side effects"; fi
+fi
+
+if it "aistack: register-autostart leaves the gateway and opencode units alone once docker owns them"; then
+    d="$(_svc_reg_sandbox)"
+    s="$(_aistack_sandbox)"
+    _aistack_migrated "$s"
+    out="$(AUTOOS_DOCKER="$s/bin/docker" AUTOOS_AI_STACK_CONFIG="$s/cfg" _svc_reg "$d")"
+    ok=1
+    [[ -e "$d/units/autoos-omniroute.service" || -e "$d/units/autoos-opencode.service" ]] && { ok=0; echo "wrote a native unit" >&2; }
+    [[ -e "$d/units/autoos-litellm.service" ]] || { ok=0; echo "litellm unit should still be written" >&2; }
+    [[ "$out" == *"docker AI stack"* ]] || { ok=0; echo "not explained: $out" >&2; }
+    rm -rf "$d" "$s"
+    if (( ok )); then pass; else fail "register-autostart would start a second gateway"; fi
+fi
+
+if it "aistack: the resume script brings up the compose stack instead of the native units"; then
+    ok=1
+    f="$ROOT/configuration/autostart/Start-AutoOSStack.sh"
+    grep -q 'configuration/docker/ai-stack/ai-stack.sh' "$f" || { ok=0; echo "stack script not referenced" >&2; }
+    grep -q '"$AI_STACK" is-active' "$f" || { ok=0; echo "no is-active branch" >&2; }
+    grep -q '"$AI_STACK" up' "$f" || { ok=0; echo "no compose resume" >&2; }
+    if (( ok )); then pass; else fail "Start-AutoOSStack.sh ignores the docker stack"; fi
+fi
+
+if it "aistack: apply.sh manages a containerised gateway with the manage key, never a host restart"; then
+    ok=1
+    f="$ROOT/configuration/omniroute/apply.sh"
+    grep -q 'manage.key' "$f" || { ok=0; echo "manage key not used" >&2; }
+    grep -q '"$AI_STACK" is-active' "$f" || { ok=0; echo "no stack detection" >&2; }
+    grep -q '"$AI_STACK" up omniroute' "$f" || { ok=0; echo "a down container gateway is not resumed" >&2; }
+    if (( ok )); then pass; else fail "apply.sh cannot manage the container"; fi
+fi
+
+# ─── Review findings 2026-09-25 (gemini-3.8-flash + deepseek-v4.1-flash) ────
+# migrate/rollback/up run for real here, against the stateful fakes above.
+
+if it "aistack: is-active needs the completed-migration marker, not a leftover container"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    : >"$d/compose-autoos-omniroute"; : >"$d/container-exists"
+    ok=1
+    _aistack "$d" is-active >/dev/null && { ok=0; echo "a stopped leftover container reads as active" >&2; }
+    : >"$d/run-autoos-omniroute"
+    _aistack "$d" is-active >/dev/null && { ok=0; echo "a running container without the marker reads as active" >&2; }
+    printf 'owner=docker by=migrate\n' >"$d/cfg/stack.active"
+    _aistack "$d" is-active >/dev/null || { ok=0; echo "the marker does not make the stack active" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "is-active trusts a container instead of the marker"; fi
+fi
+
+if it "aistack: a failed gateway move removes the container and hands :20128 back"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/unhealthy-omniroute"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    grep -q 'rm -s -f omniroute' "$d/docker.log" || { ok=0; echo "failed container not removed: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/compose-autoos-omniroute" || -e "$d/run-autoos-omniroute" ]] && { ok=0; echo "container left behind" >&2; }
+    [[ -e "$d/active-autoos-omniroute" && -e "$d/unit-autoos-omniroute" ]] || { ok=0; echo "native gateway not back" >&2; }
+    [[ -e "$d/active-autoos-opencode" ]] || { ok=0; echo "opencode was touched" >&2; }
+    grep -q 'up -d --no-deps opencode' "$d/docker.log" && { ok=0; echo "went on to opencode" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker written" >&2; }
+    _aistack "$d" is-active >/dev/null && { ok=0; echo "reads as active afterwards" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed migrate leaves a container that reads as active"; fi
+fi
+
+if it "aistack: rollback replaces ~/.omniroute with the container state, no stale WAL survives"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    mkdir -p "$d/home/.omniroute"
+    printf 'old-db\n' >"$d/home/.omniroute/storage.sqlite"
+    printf 'stale-wal\n' >"$d/home/.omniroute/storage.sqlite-wal"
+    printf 'stale-shm\n' >"$d/home/.omniroute/storage.sqlite-shm"
+    out="$(_aistack "$d" rollback --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rollback failed: $out" >&2; }
+    [[ "$(cat "$d/home/.omniroute/storage.sqlite" 2>/dev/null)" == container-db ]] || { ok=0; echo "DB not restored" >&2; }
+    [[ -e "$d/home/.omniroute/storage.sqlite-wal" || -e "$d/home/.omniroute/storage.sqlite-shm" ]] \
+        && { ok=0; echo "stale WAL/SHM kept next to the restored DB" >&2; }
+    backup="$(compgen -G "$d/data/backups/omniroute-native-*.tar.gz" | head -n1)"
+    [[ -n "$backup" ]] && tar -tzf "$backup" | grep -q 'storage.sqlite-wal' || { ok=0; echo "no full backup" >&2; }
+    aside="$(compgen -G "$d/home/.omniroute.autoos-backup-*" | head -n1)"
+    [[ -n "$aside" && -e "$aside/storage.sqlite-wal" ]] || { ok=0; echo "previous dir not kept aside" >&2; }
+    compgen -G "$d/home/.omniroute.autoos-staging-*" >/dev/null && { ok=0; echo "staging dir left" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker kept after rollback" >&2; }
+    grep -q -- '--only autoos-omniroute,autoos-opencode' "$d/register.log" || { ok=0; echo "units not re-registered" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rollback overlays the old gateway dir"; fi
+fi
+
+if it "aistack: migrate stops nothing when the manage key cannot be created"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/omni-key-fails"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "migrate went on without a manage key" >&2; }
+    [[ "$out" == *"manage.key"* ]] || { ok=0; echo "no hint: $out" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "stopped a unit" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "started a container" >&2; }
+    [[ -e "$d/active-autoos-omniroute" && -e "$d/active-autoos-opencode" ]] || { ok=0; echo "native service down" >&2; }
+    [[ -e "$d/cfg/manage.key" ]] && { ok=0; echo "empty key file written" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "migrate without a manage key"; fi
+fi
+
+if it "aistack: migrate refuses a second run once migrated and points at rollback"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    mkdir -p "$d/home/.omniroute"; printf 'stale-host-db\n' >"$d/home/.omniroute/storage.sqlite"
+    printf 'sk-manage\n' >"$d/cfg/manage.key"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    plan="$(_aistack "$d" migrate)"
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "second migrate ran" >&2; }
+    [[ "$out" == *"rollback --yes"* ]] || { ok=0; echo "no rollback hint: $out" >&2; }
+    [[ "$plan" == *"already migrated"* ]] || { ok=0; echo "plan does not say so" >&2; }
+    [[ "$(cat "$d/data/omniroute/storage.sqlite")" == container-db ]] || { ok=0; echo "container state overwritten" >&2; }
+    grep -qE 'compose .*(up|stop|rm)' "$d/docker.log" 2>/dev/null && { ok=0; echo "touched containers" >&2; }
+    [[ -e "$d/systemctl.log" ]] && grep -qE 'stop|start' "$d/systemctl.log" && { ok=0; echo "touched units" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "migrate would overwrite newer container state"; fi
+fi
+
+if it "aistack: migrate disables the native units only after all three services answered"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/exists-openhands-app"; : >"$d/run-openhands-app"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "migrate failed: $out" >&2; }
+    _aistack_seq "$d/events.log" "systemctl: --user stop autoos-omniroute.service" "docker: compose" "up -d --no-deps omniroute" \
+        "systemctl: --user stop autoos-opencode.service" "up -d --no-deps opencode" "docker: rm -f openhands-app" \
+        "start-stack: openhands" "register: --unregister --only autoos-omniroute,autoos-opencode" || ok=0
+    [[ "$(cat "$d/start-stack.log")" == *"migrating=1"* ]] || { ok=0; echo "openhands not started as the compose service" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] || { ok=0; echo "no marker after a completed migrate" >&2; }
+    [[ "$(cat "$d/data/omniroute/storage.sqlite")" == native-db ]] || { ok=0; echo "state not copied" >&2; }
+    [[ "$(stat -c %a "$(compgen -G "$d/data/backups/omniroute-*.tar.gz" | head -n1)")" == 600 ]] || { ok=0; echo "backup not 0600" >&2; }
+    _aistack "$d" is-active >/dev/null || { ok=0; echo "not active after migrate" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "migrate order is wrong"; fi
+fi
+
+if it "aistack: an opencode failure during migrate hands the gateway back too"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/fail-up-opencode"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    grep -q 'rm -s -f omniroute' "$d/docker.log" || { ok=0; echo "gateway container kept" >&2; }
+    grep -q 'rm -s -f opencode' "$d/docker.log" || { ok=0; echo "opencode container kept" >&2; }
+    for u in autoos-omniroute autoos-opencode; do
+        [[ -e "$d/active-$u" && -e "$d/unit-$u" ]] || { ok=0; echo "$u not handed back" >&2; }
+    done
+    grep -q -- '--unregister' "$d/register.log" 2>/dev/null && { ok=0; echo "a unit was unregistered" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker written" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a late failure leaves the gateway in docker"; fi
+fi
+
+if it "aistack: an openhands failure during migrate rolls the whole stack back to native"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/exists-openhands-app"; : >"$d/run-openhands-app"
+    : >"$d/fail-up-openhands"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    for s in omniroute opencode openhands; do
+        grep -q "rm -s -f $s" "$d/docker.log" || { ok=0; echo "$s container kept" >&2; }
+    done
+    for u in autoos-omniroute autoos-opencode; do
+        [[ -e "$d/active-$u" && -e "$d/unit-$u" ]] || { ok=0; echo "$u not handed back" >&2; }
+    done
+    # The docker run OpenHands it replaced is recreated (start-stack.sh, native mode).
+    _aistack_seq "$d/start-stack.log" "migrating=1" "migrating=0" || ok=0
+    [[ -e "$d/exists-openhands-app" ]] || { ok=0; echo "docker run openhands not recreated" >&2; }
+    grep -q -- '--unregister' "$d/register.log" 2>/dev/null && { ok=0; echo "a unit was unregistered" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker written" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an openhands failure leaves a half-migrated host"; fi
+fi
+
+if it "aistack: up and migrate refuse a LAN bind unless the firewall unit runs or LAN is allowed"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    _aistack_reset() { rm -f "$d"/run-* "$d"/compose-* "$d/docker.log" "$d/cfg/stack.active"; }
+    ok=1
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "LAN bind without firewall started" >&2; }
+    [[ "$out" == *"coding-agents-fw.service"* && "$out" == *"AUTOOS_STACK_ALLOW_LAN=1"* ]] || { ok=0; echo "refusal unexplained: $out" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "started containers" >&2; }
+    grep -q 'is-active coding-agents-fw.service' "$d/systemctl.log" || { ok=0; echo "firewall unit not checked" >&2; }
+    _aistack_reset
+    : >"$d/active-coding-agents-fw"
+    _aistack "$d" up >/dev/null || { ok=0; echo "refused although the firewall unit is active" >&2; }
+    grep -q 'up -d --no-deps omniroute opencode openhands' "$d/docker.log" || { ok=0; echo "not started with the firewall" >&2; }
+    _aistack_reset; rm -f "$d/active-coding-agents-fw"
+    printf 'AUTOOS_STACK_ALLOW_LAN=1\n' >>"$d/cfg/stack.env"
+    _aistack "$d" up >/dev/null || { ok=0; echo "explicit AUTOOS_STACK_ALLOW_LAN=1 refused" >&2; }
+    _aistack_reset
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    _aistack "$d" up >/dev/null || { ok=0; echo "loopback bind refused" >&2; }
+    rm -rf "$d"
+    # migrate: refused before anything stops.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    rm -f "$d/active-coding-agents-fw"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "migrate ran with an open LAN bind" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "migrate stopped a unit first" >&2; }
+    rm -rf "$d"
+    unset -f _aistack_reset
+    if (( ok )); then pass; else fail "the LAN bind is not guarded"; fi
+fi
+
+if it "aistack: the opencode image is rebuilt when its Dockerfile or base image changes"; then
+    d="$(_aistack_sandbox)"
+    t="$d/tree/configuration"
+    mkdir -p "$t/docker/ai-stack"
+    cp "$AISTACK/ai-stack.sh" "$AISTACK/compose.yml" "$AISTACK/opencode.Dockerfile" "$t/docker/ai-stack/"
+    cp "$ROOT/configuration/env-file.sh" "$t/"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    : >"$d/image-exists"; printf 'stale\n' >"$d/opencode-label"
+    ok=1
+    _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up opencode >/dev/null
+    first="$(cat "$d/opencode-label")"
+    grep -qE "^build --label org\.autoos\.opencode\.source=[0-9a-f]{64} -t autoos/opencode:" "$d/docker.log" \
+        || { ok=0; echo "stale image not rebuilt: $(cat "$d/docker.log")" >&2; }
+    rm -f "$d/docker.log" "$d/run-autoos-opencode"
+    _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up opencode >/dev/null
+    grep -q '^build' "$d/docker.log" && { ok=0; echo "rebuilt an up-to-date image" >&2; }
+    rm -f "$d/docker.log" "$d/run-autoos-opencode"
+    printf '# a changed layer\n' >>"$t/docker/ai-stack/opencode.Dockerfile"
+    _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up opencode >/dev/null
+    grep -q '^build' "$d/docker.log" || { ok=0; echo "a changed Dockerfile was not rebuilt" >&2; }
+    [[ "$(cat "$d/opencode-label")" != "$first" ]] || { ok=0; echo "label did not change" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the opencode image never rebuilds"; fi
+fi
+
+if it "aistack: init never writes a value with a line break into an env file"; then
+    d="$(_aistack_sandbox)"
+    out="$(_aistack "$d" AUTOOS_OMNIROUTE_KEY=$'sk-leak\nINJECTED=1' OMNIGRAPH_TOKEN=$'tok\rEVIL=1' init)"
+    ok=1
+    grep -qsE '^(INJECTED|EVIL)=' "$d/cfg/opencode.env" "$d/cfg/openhands.env" && { ok=0; echo "a line break injected a key" >&2; }
+    grep -qE '^(AUTOOS_OMNIROUTE_KEY|OMNIGRAPH_TOKEN)=' "$d/cfg/opencode.env" && { ok=0; echo "unsafe value written" >&2; }
+    grep -q '^LLM_API_KEY=' "$d/cfg/openhands.env" 2>/dev/null && { ok=0; echo "unsafe value written for openhands" >&2; }
+    grep -q $'\r' "$d/cfg/opencode.env" && { ok=0; echo "carriage return written" >&2; }
+    [[ "$out" == *"AUTOOS_OMNIROUTE_KEY"*"line break"* && "$out" == *"OMNIGRAPH_TOKEN"* ]] || { ok=0; echo "not warned: $out" >&2; }
+    [[ "$out" == *"sk-leak"* || "$out" == *"tok"$'\r'* ]] && { ok=0; echo "printed the value" >&2; }
+    grep -q '^OPENCODE_PASSWORD=' "$d/cfg/opencode.env" || { ok=0; echo "the safe keys were not written" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an env value with a line break reaches the file"; fi
+fi
+
+if it "aistack: apply.sh hands the manage key to the omniroute CLI only"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'sk-manage-secret\n' >"$d/cfg/manage.key"
+    out="$(env -u OMNIROUTE_API_KEY -u AUTOOS_OMNIROUTE_URL HOME="$d/home" PATH="$d/bin:$PATH" \
+        AUTOOS_AI_STACK_CONFIG="$d/cfg" AUTOOS_KEYS_FILE="$d/repo/api-keys.yml" \
+        bash "$ROOT/configuration/omniroute/apply.sh" --dry-run 2>&1)"
+    ok=1
+    [[ "$out" == *"manage-scoped key"* ]] || { ok=0; echo "docker mode not detected: $out" >&2; }
+    grep -qx omniroute "$d/saw-manage-key" 2>/dev/null || { ok=0; echo "the CLI did not get the key" >&2; }
+    grep -qx curl "$d/saw-manage-key" 2>/dev/null && { ok=0; echo "curl inherited the manage key" >&2; }
+    [[ "$out" == *"sk-manage-secret"* ]] && { ok=0; echo "printed the key" >&2; }
+    grep -qE '^[[:space:]]*export OMNIROUTE_API_KEY' "$ROOT/configuration/omniroute/apply.sh" && { ok=0; echo "exported script-wide" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the manage key leaks into every child process"; fi
+fi
+
+if it "aistack: init keeps the data dir and the opencode home private (0700)"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/data/opencode-home"; chmod 755 "$d/data" "$d/data/opencode-home"
+    _aistack "$d" init >/dev/null
+    got="$(stat -c %a "$d/data" "$d/data/opencode-home" "$d/data/omniroute" | tr '\n' ' ')"
+    rm -rf "$d"
+    assert_eq "$got" "700 700 700 "
+fi
+
+# Re-review 2026-09-25 (cross-company): marker order, recreate guard, the
+# effective bind, the pinned FROM the rebuild hash relies on.
+if it "aistack: migrate writes the marker before unregistering and drops it on a later failure"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    _aistack "$d" migrate --yes >/dev/null || { ok=0; echo "migrate failed" >&2; }
+    # The stand-in logs the call, then the marker state it saw during it.
+    grep -A1 -- '--unregister --only autoos-omniroute,autoos-opencode' "$d/register.log" | grep -qx 'marker=yes' \
+        || { ok=0; echo "unregistered before the marker existed (rollback would refuse): $(cat "$d/register.log")" >&2; }
+    rm -rf "$d"
+    # The unregister fails: marker removed again, everything back to native.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/fail-register"
+    _aistack "$d" migrate --yes >/dev/null && { ok=0; echo "migrate reported success" >&2; }
+    [[ -e "$d/cfg/stack.active" ]] && { ok=0; echo "marker left after the abort" >&2; }
+    for u in autoos-omniroute autoos-opencode; do
+        [[ -e "$d/active-$u" && -e "$d/unit-$u" ]] || { ok=0; echo "$u not handed back" >&2; }
+    done
+    for s in omniroute opencode openhands; do
+        grep -q "rm -s -f $s" "$d/docker.log" || { ok=0; echo "$s container kept" >&2; }
+    done
+    rm -rf "$d"
+    # The marker cannot be written: nothing is unregistered, all back to native.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    mkdir -p "$d/cfg/stack.active"
+    _aistack "$d" migrate --yes >/dev/null && { ok=0; echo "migrate reported success" >&2; }
+    grep -q -- '--unregister' "$d/register.log" 2>/dev/null && { ok=0; echo "unregistered without a marker" >&2; }
+    [[ -e "$d/active-autoos-omniroute" && -e "$d/active-autoos-opencode" ]] || { ok=0; echo "not handed back" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a marker failure can orphan the host"; fi
+fi
+
+if it "aistack: up guards the bind before recreating containers that already run"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/active-coding-agents-fw"
+    : >"$d/image-exists"
+    out="$(_aistack "$d" up)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "up ran compose up on a LAN bind without the firewall" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up reached: $(grep 'up -d' "$d/docker.log")" >&2; }
+    [[ "$out" == *"coding-agents-fw.service"* ]] || { ok=0; echo "refusal unexplained: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a running container can be recreated on an unguarded bind"; fi
+fi
+
+if it "aistack: the guard and compose agree on the bind when the shell exports AUTOOS_STACK_BIND"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    # compose would publish on the exported 0.0.0.0, not the file's loopback.
+    _aistack "$d" AUTOOS_STACK_BIND=0.0.0.0 up >/dev/null && { ok=0; echo "exported LAN bind not guarded" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "started containers" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='0.0.0.0'\n" >"$d/cfg/stack.env"
+    _aistack "$d" AUTOOS_STACK_BIND=127.0.0.1 up >/dev/null || { ok=0; echo "exported loopback refused" >&2; }
+    [[ "$(sort -u "$d/compose-bind.log")" == "bind=127.0.0.1" ]] \
+        || { ok=0; echo "compose saw another bind: $(sort -u "$d/compose-bind.log" | tr '\n' ' ')" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    _aistack "$d" up >/dev/null || { ok=0; echo "file loopback refused" >&2; }
+    [[ "$(sort -u "$d/compose-bind.log")" == "bind=127.0.0.1" ]] || { ok=0; echo "compose not given the file's bind" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the guarded bind and the published bind can differ"; fi
+fi
+
+if it "aistack: every FROM in opencode.Dockerfile and omniroute.Dockerfile is digest-pinned, or the rebuild hash is blind"; then
+    # The rebuild label hashes the Dockerfile text: a tag-only FROM could move
+    # underneath an unchanged text and the stale layer would never rebuild.
+    ok=1
+    for f in "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile"; do
+        froms="$(grep -ciE '^[[:space:]]*FROM[[:space:]]' "$f" 2>/dev/null || true)"
+        pinned="$(grep -cE '^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]{64}([[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+)?[[:space:]]*$' "$f" 2>/dev/null || true)"
+        # A multi-stage `FROM <stage>` is pinned through its stage: it counts only when an
+        # EARLIER line declared `... @sha256:<digest> AS <stage>` (the stage name is not a registry ref).
+        staged="$(awk 'BEGIN{IGNORECASE=1}
+            /^[[:space:]]*FROM[[:space:]]+[^[:space:]$]+@sha256:[0-9a-f]+[[:space:]]+AS[[:space:]]+[^[:space:]]+[[:space:]]*$/ { st[tolower($NF)]=1; next }
+            /^[[:space:]]*FROM[[:space:]]+[^[:space:]@:\/]+[[:space:]]*$/ { if (tolower($2) in st) n++ }
+            END{print n+0}' "$f" 2>/dev/null || echo 0)"
+        (( froms >= 1 && froms == pinned + staged )) || { ok=0; echo "${pinned:-0} pinned + ${staged:-0} pinned-stage of ${froms:-0} FROM lines in $f" >&2; }
+    done
+    if (( ok )); then pass; else fail "a FROM is not digest-pinned"; fi
+fi
+
+# ─── The gateway image: OmniRoute + qodercli (omniroute.Dockerfile) ─────────
+# The Qoder PAT login runs `qodercli` inside the gateway container. The
+# upstream image has none (`spawn qodercli ENOENT`), so a derived layer adds
+# it - built like the opencode one, from a digest-pinned base.
+
+if it "aistack: the omniroute layer adds qodercli at an exact version on a digest-pinned base, no vendor binary"; then
+    ok=1
+    f="$AISTACK/omniroute.Dockerfile"
+    [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
+    base="$(sed -n 's/^FROM diegosouzapw\/omniroute:\([0-9][0-9.]*\)@sha256:[0-9a-f]\{64\}\( AS [a-z][a-z0-9-]*\)\{0,1\}$/\1/p' "$f" 2>/dev/null)"
+    [[ -n "$base" ]] || { ok=0; echo "FROM is not diegosouzapw/omniroute:<version>@sha256:<digest>" >&2; }
+    # The local tag names the upstream version it is built on: bumped together.
+    grep -qxE "    image: autoos/omniroute:${base//./\\.}-autoos[0-9]+" "$AISTACK/compose.yml" \
+        || { ok=0; echo "compose.yml's image tag does not carry the FROM version [$base]" >&2; }
+    grep -qxE 'RUN npm install -g @qoder-ai/qodercli@[0-9]+\.[0-9]+\.[0-9]+ && npm cache clean --force' "$f" 2>/dev/null \
+        || { ok=0; echo "qodercli is not installed at an exact version, cache cleaned in the same layer" >&2; }
+    grep -qx 'USER root' "$f" 2>/dev/null || { ok=0; echo "no USER root for the install" >&2; }
+    [[ "$(grep -E '^USER ' "$f" 2>/dev/null | tail -n1)" == "USER node" ]] || { ok=0; echo "the image must end as USER node" >&2; }
+    # No file from the build context: the only COPYs allowed are between build stages
+    # (`--from=<stage declared earlier>`) and the reviewed patcher script from the `tools`
+    # named context (a .py from this repo, never a binary). ADD stays forbidden.
+    bad_copy="$(awk 'BEGIN{IGNORECASE=1}
+        /^[[:space:]]*FROM[[:space:]].*[[:space:]]AS[[:space:]]+[^[:space:]]+[[:space:]]*$/ { st[tolower($NF)]=1 }
+        /^[[:space:]]*ADD[[:space:]]/ { print; next }
+        /^[[:space:]]*COPY[[:space:]]/ {
+            if (match($0, /--from=[^[:space:]]+/)) {
+                src=tolower(substr($0, RSTART+7, RLENGTH-7))
+                if (src in st) next
+                if (src == "tools" && $(NF-1) ~ /^[A-Za-z0-9_.-]+\.py$/) next
+            }
+            print }' "$f" 2>/dev/null)"
+    [[ -z "$bad_copy" ]] || { ok=0; echo "COPY/ADD from the build context (vendor binary risk): $bad_copy" >&2; }
+    if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned qodercli"; fi
+fi
+
+if it "aistack: vertex the omniroute U2 stage patches at build time and hands the tree to vertex-patch-gate.py, which counts every chunk"; then
+    # autoos3 (D-626): the runtime rootfs is read-only and has no python, so the reviewed
+    # tools/apply-vertex-patch.py runs in a python build stage over a copy of the chunks. The
+    # stage must stop the build on a patcher error, must not pipe (no pipefail in /bin/sh), and
+    # must drop the backups. D-859 (lane VERTEX-GUARD): the counts alone cannot tell the guard
+    # from the v1 one it replaces - both install at the same anchors and both report the same
+    # numbers, so the stage also judges the guard's own bytes. D-908 (lane VERTEX-LIVE): the
+    # guard is v3, which splits a mixed tool/text user turn before the v2 pop/refill.
+    # gate 06c19a (lane VERTEX-GUARD): what it used to judge them over was the 6 chunk names
+    # the patcher's table carries, and that fails OPEN - a FROM bump adding a 13th call site in
+    # a new chunk, or renaming one of the 6, ships an unpatched gateway with every number
+    # still matching. The counting therefore moved into tools/vertex-patch-gate.py, which reads
+    # every *.js chunk it is given; this test asserts the recipe delegates to it and no longer
+    # knows any chunk name or any fixed site count.
+    ok=1
+    f="$AISTACK/omniroute.Dockerfile"
+    grep -qE '^FROM python:[0-9.]+-slim[a-z-]*@sha256:[0-9a-f]{64} AS vertex-patch$' "$f" || { ok=0; echo "no digest-pinned python stage named vertex-patch" >&2; }
+    grep -qx 'COPY --from=tools apply-vertex-patch.py /apply-vertex-patch.py' "$f" || { ok=0; echo "the patcher is not taken from the tools context" >&2; }
+    grep -qx 'COPY --from=tools vertex-patch-gate.py /vertex-patch-gate.py' "$f" || { ok=0; echo "the gate is not taken from the tools context" >&2; }
+    grep -qx 'RUN set -e; \\' "$f" || { ok=0; echo "the patch RUN does not start with set -e" >&2; }
+    grep -qF "python3 /apply-vertex-patch.py /chunks > /run1.txt || { cat /run1.txt; exit 1; }" "$f" || { ok=0; echo "run 1 is not captured with its exit code" >&2; }
+    grep -qF "python3 /apply-vertex-patch.py /chunks > /run2.txt || { cat /run2.txt; exit 1; }" "$f" || { ok=0; echo "run 2 is not captured with its exit code" >&2; }
+    grep -qF "python3 /vertex-patch-gate.py /chunks --min-sites 12 --run1 /run1.txt --run2 /run2.txt" "$f" || { ok=0; echo "the gate is not run over the whole chunk tree with the 12-site floor and both run summaries" >&2; }
+    # the fail-open this lane closed: names and fixed counts must not come back
+    names_check="$(grep -oE "_08_y1bx|_18ct13i|_1j_edf1|_1luyz1c|_15ose6x|_1xkpq2s" "$f" | sort -u | wc -l)"
+    [[ "$names_check" == "0" ]] || { ok=0; echo "the recipe names $names_check patched chunks; only the gate may know them" >&2; }
+    grep -qF "Done: 12 patched" "$f" && { ok=0; echo "a fixed patched-count is asserted in the recipe again" >&2; }
+    grep -qF "got==12" "$f" && { ok=0; echo "an inline byte count is back in the recipe instead of the gate" >&2; }
+    grep -qF 'rm -f /chunks/*.autoos-backup-*' "$f" || { ok=0; echo "patch backups are not removed" >&2; }
+    stage="$(sed -n '/^FROM python:.* AS vertex-patch$/,/^FROM /p' "$f")"
+    # a single `|` after the patcher call is a pipe; `||` (the error branch) is not
+    grep -qE 'apply-vertex-patch\.py[^|]*\|([^|]|$)' <<<"$stage" && { ok=0; echo "the patcher output is piped (exit code masked)" >&2; }
+    # the gate must sit between the second run and the cleanup: before the runs it would judge
+    # unpatched text, after the cleanup the backups it skips are gone
+    gate_line="$(grep -nF 'vertex-patch-gate.py /chunks' "$f" | cut -d: -f1)"
+    run2_line="$(grep -nF '/run2.txt || { cat /run2.txt; exit 1; }' "$f" | cut -d: -f1)"
+    rm_line="$(grep -nF 'rm -f /chunks/*.autoos-backup-*' "$f" | cut -d: -f1)"
+    (( ${gate_line:-0} > ${run2_line:-0} && ${gate_line:-0} < ${rm_line:-0} )) \
+        || { ok=0; echo "the gate does not run after run 2 and before the cleanup" >&2; }
+    [[ "$(grep -E '^FROM ' "$f" | tail -n1)" == "FROM base" ]] || { ok=0; echo "the final stage is not FROM base" >&2; }
+    grep -qx 'COPY --from=vertex-patch /chunks/ /app/.build/next/server/chunks/' "$f" || { ok=0; echo "the patched chunks are not copied back" >&2; }
+    grep -qE '^      additional_contexts:$' "$AISTACK/compose.yml" && grep -qE '^        tools: \.\./\.\./\.\./tools$' "$AISTACK/compose.yml" \
+        || { ok=0; echo "compose.yml does not pass the tools build context" >&2; }
+    if (( ok )); then pass; else fail "the omniroute U2 build stage contract is broken"; fi
+fi
+
+if it "vertex gate: counts every mergeConsecutiveSameRoleContents call site in the tree, so a 13th unpatched site or a renamed chunk fails the build (unit tests)"; then
+    # tests/test_vertex_patch_gate.py is hermetic (D-852): fixture chunk text in a temporary
+    # directory, the patcher and the gate as subprocesses. It proves the gate accepts a fully
+    # patched 12-site tree and refuses 12-of-13, a renamed chunk and a tree below the floor.
+    out="$(python3 tests/test_vertex_patch_gate.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "vertex guard: splits mixed tool/text user turns, pops the model tail, refills emptied contents, upgrades v1/v2 in place, fails loudly on anything else (unit tests)"; then
+    # tests/test_vertex_trailing_turn_patch.py is hermetic (D-852): fixture copies of the 6
+    # compiled chunks, node --check plus a shape harness over the patched handler bodies, and
+    # pwsh over a fake package tree where it is installed. It never builds or runs a container.
+    # D-908 (lane VERTEX-LIVE): v3 splits a user turn that mixes a functionResponse with text
+    # before the v2 pop/refill, covering the body that ends on user yet still 400s.
+    out="$(python3 tests/test_vertex_trailing_turn_patch.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "aistack: the omniroute layer adds bcryptjs for the reset-password CLI at an exact version, outside /app's npm tree"; then
+    # The base's standalone build prunes bcryptjs from /app/node_modules although
+    # package-lock pins it, so `node bin/reset-password.mjs` dies with
+    # ERR_MODULE_NOT_FOUND. Running npm with cwd /app would reconcile the whole
+    # package.json, so the package is fetched into a throw-away prefix and moved.
+    ok=1
+    f="$AISTACK/omniroute.Dockerfile"
+    [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
+    grep -qE '^RUN npm install --prefix /tmp/[a-z-]+ --ignore-scripts .* bcryptjs@[0-9]+\.[0-9]+\.[0-9]+ && (rm -rf .* && )?mv .* /app/node_modules/bcryptjs && rm -rf .* && npm cache clean --force$' "$f" 2>/dev/null \
+        || { ok=0; echo "bcryptjs is not pinned and added, moved into /app/node_modules and cleaned up in one layer" >&2; }
+    layer="$(grep -nE '^RUN npm install --prefix /tmp/[a-z-]+ .*bcryptjs@' "$f" 2>/dev/null | head -n1 | cut -d: -f1 || true)"
+    last="$(grep -nE '^USER node' "$f" 2>/dev/null | tail -n1 | cut -d: -f1 || true)"
+    [[ -n "$layer" && -n "$last" ]] || { ok=0; echo "no bcryptjs layer or no trailing USER node line" >&2; }
+    (( ${layer:-0} < ${last:-0} )) \
+        || { ok=0; echo "the bcryptjs layer (line ${layer:-0}) comes after the last USER node (line ${last:-0})" >&2; }
+    grep -qE 'cd /app' "$f" 2>/dev/null \
+        && { ok=0; echo "npm runs with cwd /app: it would reconcile the whole package.json" >&2; }
+    if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned bcryptjs outside /app's npm tree"; fi
+fi
+
+if it "aistack: keys_add_opencode_password backs up a 644 keys file at mode 600"; then
+    d="$(_aistack_sandbox)"
+    # A keys file the operator relaxed to 644 (a common mistake on shared
+    # checkouts): the migration backup must NOT inherit that mode.
+    printf 'omniroute: sk-test-client-key\n' >"$d/repo/api-keys.yml"
+    chmod 644 "$d/repo/api-keys.yml"
+    _aistack "$d" init >/dev/null
+    backup="$(ls "$d/repo/api-keys.yml.autoos-backup-"* 2>/dev/null | head -n1)"
+    ok=1
+    [[ -n "$backup" ]] || { ok=0; echo "no migration backup was made" >&2; }
+    if [[ -n "$backup" ]]; then
+        got="$(stat -c '%a' "$backup" 2>&1)"
+        [[ "$got" == "600" ]] || { ok=0; echo "backup mode is $got, expected 600" >&2; }
+    fi
+    if (( ok )); then pass; else fail "keys_add_opencode_password backup inherits source mode instead of 600"; fi
+fi
+
+if it "aistack: init creates the qoder home, private and the operator's, and leaves the gateway data alone"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    mkdir -p "$d/data/omniroute"
+    printf 'db\n' >"$d/data/omniroute/storage.sqlite"; printf 'k=v\n' >"$d/data/omniroute/.env"
+    before="$(cd "$d/data/omniroute" && cksum storage.sqlite .env)"
+    out="$(_aistack "$d" --dry-run init)"
+    [[ "$out" == *"would create $d/data/qoder-home"* ]] || { ok=0; echo "the dry run does not announce the qoder home" >&2; }
+    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "the dry run created it" >&2; }
+    _aistack "$d" init >/dev/null
+    got="$(stat -c '%a %U' "$d/data/qoder-home" 2>&1)"
+    [[ "$got" == "700 $(id -un)" ]] || { ok=0; echo "qoder home is not 700 and the operator's: $got" >&2; }
+    out="$(_aistack "$d" init)"
+    [[ "$out" == *qoder-home* ]] && { ok=0; echo "a second init touched it again: $out" >&2; }
+    [[ "$(cd "$d/data/omniroute" && cksum storage.sqlite .env)" == "$before" ]] || { ok=0; echo "the gateway data changed" >&2; }
+    [[ "$(LC_ALL=C ls -A "$d/data/omniroute" | tr '\n' ' ')" == ".env storage.sqlite " ]] || { ok=0; echo "files appeared in the gateway data dir" >&2; }
+    # One that already exists with looser rights (made by hand) is tightened.
+    chmod 755 "$d/data/qoder-home"
+    _aistack "$d" init >/dev/null
+    got="$(stat -c '%a' "$d/data/qoder-home" 2>&1)"
+    [[ "$got" == 700 ]] || { ok=0; echo "an existing qoder home stays $got" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the qoder home is not created private, or init touched the gateway data"; fi
+fi
+
+if it "aistack: up creates the qoder home before compose starts the gateway, on a host init ran on long ago"; then
+    ok=1
+    # init ran long ago (stack.env exists), so up does not run it again: docker
+    # would create the missing mount source as root and the gateway (host uid)
+    # could not write its HOME.
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/data/omniroute" "$d/data/opencode-home"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed" >&2; }
+    [[ "$(cat "$d/qoder-home-at-up.log" 2>/dev/null)" == present ]] || { ok=0; echo "compose up saw: [$(cat "$d/qoder-home-at-up.log" 2>&1)]" >&2; }
+    got="$(stat -c '%a %U' "$d/data/qoder-home" 2>&1)"
+    [[ "$got" == "700 $(id -un)" ]] || { ok=0; echo "qoder home: $got" >&2; }
+    rm -rf "$d"
+    # compose mounts AUTOOS_STACK_DATA from stack.env: that is where it is made.
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg" "$d/elsewhere/omniroute"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_STACK_DATA='%s'\n" "$d/elsewhere" >"$d/cfg/stack.env"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up (stack.env data dir) failed" >&2; }
+    [[ -d "$d/elsewhere/qoder-home" ]] || { ok=0; echo "not created under the AUTOOS_STACK_DATA of stack.env" >&2; }
+    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "created under the default data dir, which compose does not mount" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "compose can be the one to create the qoder home"; fi
+fi
+
+if it "aistack: the omniroute image is rebuilt when its label, base digest or Dockerfile changes, and only then"; then
+    d="$(_aistack_sandbox)"
+    t="$d/tree/configuration"
+    mkdir -p "$t/docker/ai-stack" "$d/cfg"
+    cp "$AISTACK/ai-stack.sh" "$AISTACK/compose.yml" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
+    cp "$ROOT/configuration/env-file.sh" "$t/"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    _omni_up() { rm -f "$d/docker.log" "$d/run-autoos-omniroute"; _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up omniroute >/dev/null; }
+    _omni_builds() { grep -c '^build' "$d/docker.log" 2>/dev/null || true; }
+    ok=1
+    : >"$d/image-exists"; printf 'stale\n' >"$d/omniroute-label"
+    _omni_up
+    grep -qE "^build --label org\.autoos\.omniroute\.source=[0-9a-f]{64} -t autoos/omniroute:[^ ]+ -f $t/docker/ai-stack/omniroute\.Dockerfile " "$d/docker.log" \
+        || { ok=0; echo "a stale label was not rebuilt: $(cat "$d/docker.log")" >&2; }
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "up omniroute built something else too" >&2; }
+    [[ -e "$d/opencode-label" ]] && { ok=0; echo "the omniroute build wrote the opencode label" >&2; }
+    first="$(cat "$d/omniroute-label")"
+    _omni_up
+    [[ "$(_omni_builds)" == 0 ]] || { ok=0; echo "rebuilt an up-to-date image" >&2; }
+    # A bumped base digest, the Dockerfile text unchanged otherwise.
+    sed -i -E "s/^(FROM [^ ]+@sha256:)[0-9a-f]{64}/\1$(printf '%064d' 0)/" "$t/docker/ai-stack/omniroute.Dockerfile"
+    _omni_up
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a bumped base digest was not rebuilt" >&2; }
+    second="$(cat "$d/omniroute-label")"
+    [[ "$second" != "$first" ]] || { ok=0; echo "label did not change with the digest" >&2; }
+    _omni_up
+    [[ "$(_omni_builds)" == 0 ]] || { ok=0; echo "rebuilt after the digest bump was built" >&2; }
+    printf '# a changed layer\n' >>"$t/docker/ai-stack/omniroute.Dockerfile"
+    _omni_up
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a changed Dockerfile was not rebuilt" >&2; }
+    [[ "$(cat "$d/omniroute-label")" != "$second" ]] || { ok=0; echo "label did not change with the text" >&2; }
+    # No local image at all: built, not pulled.
+    : >"$d/noimage-omniroute"
+    _omni_up
+    [[ "$(_omni_builds)" == 1 ]] || { ok=0; echo "a missing image was not built" >&2; }
+    grep -qE '(^| )pull( |$)' "$d/docker.log" && { ok=0; echo "the image was pulled: $(cat "$d/docker.log")" >&2; }
+    unset -f _omni_up _omni_builds
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the omniroute image does not track its Dockerfile and base"; fi
+fi
+
+if it "aistack: --dry-run up says would build or rebuild the omniroute image and builds nothing"; then
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    ok=1
+    out="$(_aistack "$d" --dry-run up omniroute)"
+    [[ "$out" == *"would build autoos/omniroute:"*" (omniroute.Dockerfile)"* ]] || { ok=0; echo "no image: $out" >&2; }
+    : >"$d/image-exists"; printf 'stale\n' >"$d/omniroute-label"
+    out="$(_aistack "$d" --dry-run up omniroute)"
+    [[ "$out" == *"would rebuild autoos/omniroute:"*" (omniroute.Dockerfile or its base image changed)"* ]] || { ok=0; echo "stale label: $out" >&2; }
+    grep -q '^build' "$d/docker.log" 2>/dev/null && { ok=0; echo "a dry run built: $(cat "$d/docker.log")" >&2; }
+    # Up to date (label from a real build): nothing to announce.
+    _aistack "$d" up omniroute >/dev/null
+    rm -f "$d/docker.log"
+    out="$(_aistack "$d" --dry-run up omniroute)"
+    [[ "$out" == *"would build"* || "$out" == *"would rebuild"* ]] && { ok=0; echo "an up-to-date image is announced: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the dry-run wording for the omniroute image is wrong"; fi
+fi
+
+if it "aistack: migrate builds the omniroute image before it stops anything, up before it starts the gateway"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    ok=1
+    _aistack "$d" migrate --yes >/dev/null || { ok=0; echo "migrate failed" >&2; }
+    _aistack_seq "$d/events.log" "docker: build --label org.autoos.omniroute.source=" "-t autoos/omniroute:" \
+        "systemctl: --user stop autoos-omniroute.service" "up -d --no-deps omniroute" \
+        || { ok=0; echo "the build did not come first: $(cat "$d/events.log")" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"; : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed" >&2; }
+    _aistack_seq "$d/events.log" "docker: build --label org.autoos.omniroute.source=" "up -d --no-deps omniroute" \
+        || { ok=0; echo "up started the gateway before building it: $(cat "$d/events.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the gateway can start from a stale or missing image"; fi
+fi
+
+if it "aistack: a failed omniroute build stops nothing and starts nothing"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    : >"$d/fail-build-omniroute"
+    ok=1
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "migrate stopped a unit before the image existed" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran" >&2; }
+    [[ "$out" == *"building autoos/omniroute:"*"failed"* ]] || { ok=0; echo "not explained: $out" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"; : >"$d/image-exists"; : >"$d/fail-build-omniroute"
+    _aistack "$d" up omniroute >/dev/null && { ok=0; echo "up reported success" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "up started the gateway from a failed build" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed image build does not stop the run"; fi
+fi
+
+if it "aistack: a failed backup leaves no partial archive and hands the service back"; then
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    # tar that writes half an archive, then fails (disk full).
+    cat >"$d/bin/tar" <<'STUB'
+#!/bin/sh
+prev=""
+for a in "$@"; do
+    case "$prev" in -czf|-f) printf 'partial' >"$a" ;; esac
+    prev="$a"
+done
+exit 2
+STUB
+    chmod +x "$d/bin/tar"
+    out="$(_aistack "$d" migrate --yes)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "migrate reported success" >&2; }
+    compgen -G "$d/data/backups/*.tar.gz" >/dev/null && { ok=0; echo "partial archive kept: $(ls "$d/data/backups")" >&2; }
+    [[ -e "$d/active-autoos-omniroute" ]] || { ok=0; echo "gateway not handed back" >&2; }
+    # rollback: the host dir is backed up before anything stops, so the same
+    # failure leaves the running stack alone.
+    d2="$(_aistack_sandbox)"
+    _aistack_migrated "$d2"
+    mkdir -p "$d2/home/.omniroute"; printf 'old-db\n' >"$d2/home/.omniroute/storage.sqlite"
+    cp "$d/bin/tar" "$d2/bin/tar"
+    out="$(_aistack "$d2" rollback --yes)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "rollback reported success" >&2; }
+    compgen -G "$d2/data/backups/*.tar.gz" >/dev/null && { ok=0; echo "partial rollback archive kept" >&2; }
+    [[ "$(cat "$d2/home/.omniroute/storage.sqlite")" == old-db ]] || { ok=0; echo "host state changed without a backup" >&2; }
+    grep -qE 'compose .*(down|stop|rm)' "$d2/docker.log" 2>/dev/null && { ok=0; echo "stopped the stack before the backup" >&2; }
+    [[ -e "$d2/run-autoos-omniroute" && -e "$d2/cfg/stack.active" ]] || { ok=0; echo "stack or marker gone" >&2; }
+    rm -rf "$d" "$d2"
+    if (( ok )); then pass; else fail "a failed backup leaves a partial archive"; fi
+fi
+
+# ─── The public URL (AUTOOS_OMNIROUTE_PUBLIC_URL) ───────────────────────────
+# stack.env's AUTOOS_OMNIROUTE_PUBLIC_URL reaches the gateway as
+# NEXT_PUBLIC_BASE_URL + OMNIROUTE_PUBLIC_BASE_URL (compose.yml). Unset must
+# change nothing - and image 3.8.50 exits at startup on a value that is not an
+# http(s) URL, so a bad one must not reach `compose up`.
+
+if it "aistack: stack.env.example documents the public URL as a commented placeholder, nothing real"; then
+    ok=1
+    f="$AISTACK/stack.env.example"
+    line="$(grep -nxF '# AUTOOS_OMNIROUTE_PUBLIC_URL=https://<your-omniroute-host>' "$f" | cut -d: -f1)"
+    [[ -n "$line" ]] || { ok=0; echo "the commented placeholder line is missing" >&2; }
+    if [[ -n "$line" ]]; then
+        sed -n "$((line - 1))p" "$f" | grep -q '^# .*[Pp]ublic' || { ok=0; echo "no one-line description directly above it" >&2; }
+    fi
+    grep -qE '^[[:space:]]*AUTOOS_OMNIROUTE_PUBLIC_URL=' "$f" && { ok=0; echo "an active AUTOOS_OMNIROUTE_PUBLIC_URL line: the example would turn it on" >&2; }
+    if (( ok )); then pass; else fail "the public URL is not a commented placeholder"; fi
+fi
+
+if it "aistack: init never invents the public URL and keeps the operator's value"; then
+    # A guard: green before the feature, it fails if init ever starts writing the key.
+    d="$(_aistack_sandbox)"
+    ok=1
+    _aistack "$d" init >/dev/null
+    grep -q 'AUTOOS_OMNIROUTE_PUBLIC_URL' "$d/cfg/stack.env" && { ok=0; echo "init wrote the key: $(grep AUTOOS_OMNIROUTE_PUBLIC_URL "$d/cfg/stack.env")" >&2; }
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL='https://gw.example.invalid/'\n" >>"$d/cfg/stack.env"
+    _aistack "$d" init >/dev/null
+    [[ "$(grep -c '^AUTOOS_OMNIROUTE_PUBLIC_URL=' "$d/cfg/stack.env")" == 1 ]] || { ok=0; echo "the key is not there exactly once" >&2; }
+    grep -qxF "AUTOOS_OMNIROUTE_PUBLIC_URL='https://gw.example.invalid/'" "$d/cfg/stack.env" || { ok=0; echo "the operator's value changed" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "init touches the public URL"; fi
+fi
+
+if it "aistack: up and migrate refuse an invalid public URL before anything starts or stops"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_OMNIROUTE_PUBLIC_URL='https://opuser:oppw-secret@gw.example.invalid'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up omniroute)" && rc=0 || rc=$?
+    (( rc != 0 )) || { ok=0; echo "up accepted a URL with credentials" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran" >&2; }
+    [[ "$out" == *AUTOOS_OMNIROUTE_PUBLIC_URL* ]] || { ok=0; echo "the refusal does not name the variable: $out" >&2; }
+    [[ "$out" == *oppw-secret* ]] && { ok=0; echo "the credentials were echoed" >&2; }
+    # A dry run explains and carries on, like the bind guard.
+    out="$(_aistack "$d" --dry-run up omniroute)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "dry run: exit $rc, not 0" >&2; }
+    [[ "$out" == *"refusing"*AUTOOS_OMNIROUTE_PUBLIC_URL* || "$out" == *AUTOOS_OMNIROUTE_PUBLIC_URL*"refusing"* ]] || { ok=0; echo "dry run does not explain: $out" >&2; }
+    rm -rf "$d"
+    for bad in 'gw.example.invalid' 'ftp://gw.example.invalid' 'https://gw example.invalid'; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"; : >"$d/image-exists"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL="$bad" up omniroute >/dev/null && { ok=0; echo "up accepted [$bad] from the environment" >&2; }
+        grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "compose up ran for [$bad]" >&2; }
+        rm -rf "$d"
+    done
+    # What the gateway accepts (and nothing at all) goes through.
+    for good in '' 'https://gw.example.invalid' 'https://gw.example.invalid/' 'http://gw.example.invalid:20128' 'https://gw.example.invalid/omniroute/'; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"; : >"$d/image-exists"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL="$good" up omniroute >/dev/null || { ok=0; echo "up refused [$good]" >&2; }
+        rm -rf "$d"
+    done
+    # migrate: refused before a native unit stops.
+    d="$(_aistack_sandbox)"
+    _aistack_native "$d"
+    _aistack "$d" AUTOOS_OMNIROUTE_PUBLIC_URL=gw.example.invalid migrate --yes >/dev/null && { ok=0; echo "migrate accepted an invalid URL" >&2; }
+    grep -q 'stop' "$d/systemctl.log" 2>/dev/null && { ok=0; echo "migrate stopped a unit first" >&2; }
+    [[ -e "$d/active-autoos-omniroute" ]] || { ok=0; echo "the native gateway is gone" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an invalid public URL reaches compose"; fi
+fi
+
+if it "aistack: the docs explain the loopback callback and what the public URL does and does not change"; then
+    ok=1
+    f="$ROOT/docs/web-services.md"
+    for needle in 'AUTOOS_OMNIROUTE_PUBLIC_URL' 'NEXT_PUBLIC_BASE_URL' 'OMNIROUTE_PUBLIC_BASE_URL' 'ANTIGRAVITY_OAUTH_CLIENT_ID' \
+                  'ssh -L 20128:127.0.0.1:20128' 'http://127.0.0.1:20128/callback' 'BASE_URL: http://localhost:20128' 'INVALID_ORIGIN'; do
+        grep -qF -- "$needle" "$f" || { ok=0; echo "docs/web-services.md does not mention: $needle" >&2; }
+    done
+    if (( ok )); then pass; else fail "the OAuth / public URL docs are incomplete"; fi
+fi
+
+# ─── ai-stack.sh verify ─────────────────────────────────────────────────────
+# The read-only end-to-end check. Docker is the usual stub; curl is a second
+# stand-in wired through AUTOOS_CURL that answers from a table and logs the
+# argv it received, so a test can prove what did (and did not) reach a curl
+# command line.
+_AISTACK_VERIFY_KEY="sk-verify-secret-0123456789abcdef"
+
+# _aistack_verify_sandbox <sandbox>: a migrated host (three healthy
+# containers, firewall unit up) plus what verify reads beyond the docker
+# stub: the OpenHands container's SANDBOX_VOLUMES and the curl stand-in with
+# an all-green route table.
+_aistack_verify_sandbox() {
+    local d="$1"
+    _aistack_migrated "$d"
+    printf 'SANDBOX_VOLUMES=%s:%s:rw\n' "$d/code" "$d/code" >"$d/env-openhands-app"
+    printf '%s' "$_AISTACK_VERIFY_KEY" >"$d/curl-key"
+    cat >"$d/bin/verify-curl" <<'STUB'
+#!/usr/bin/env bash
+# curl stand-in for `ai-stack.sh verify` (AUTOOS_CURL). Answers from
+# <state>/curl-table, one "URL AUTH BODY CODE" line per route: AUTH is none |
+# key | bad | any, BODY is - or a substring of the -d payload, the first match
+# wins and no match means nothing answered. CODE may be a comma list
+# ("503,200"): one code per call to that route, the last one repeats (a
+# gateway warming up). Logs its argv to curl-argv.log.
+# The Authorization header is read from `-H @-` (stdin) or an inline -H and
+# compared with <state>/curl-key; it is never logged, only the verdict is.
+S="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+printf '%s\n' "$*" >>"$S/curl-argv.log"
+args=("$@"); url=""; body=""; hdrs=""; want_code=0
+for ((i = 0; i < ${#args[@]}; i++)); do
+    case "${args[i]}" in
+        -w) want_code=1 ;;
+        -d) body="${args[i+1]:-}" ;;
+        -H) h="${args[i+1]:-}"
+            if [[ "$h" == "@-" ]]; then h="$(cat)"; fi
+            hdrs+="$h"$'\n' ;;
+        http://*|https://*) url="${args[i]}" ;;
+    esac
+done
+auth=none
+want="Authorization: Bearer $(cat "$S/curl-key" 2>/dev/null)"
+while IFS= read -r h; do
+    case "$h" in
+        "$want") auth=key ;;
+        Authorization:*) auth=bad ;;
+    esac
+done <<<"$hdrs"
+code=000
+while read -r t_url t_auth t_body t_code; do
+    [[ "$t_url" == "$url" ]] || continue
+    [[ "$t_auth" == any || "$t_auth" == "$auth" ]] || continue
+    [[ "$t_body" == - || "$body" == *"$t_body"* ]] || continue
+    code="$t_code"
+    if [[ "$code" == *,* ]]; then
+        n_file="$S/curl-count-$(printf '%s' "$t_url $t_auth $t_body" | cksum | cut -d' ' -f1)"
+        n="$(cat "$n_file" 2>/dev/null || echo 0)"; echo $((n + 1)) >"$n_file"
+        IFS=, read -ra seq <<<"$code"
+        (( n < ${#seq[@]} )) || n=$(( ${#seq[@]} - 1 ))
+        code="${seq[n]}"
+    fi
+    break
+done <"$S/curl-table"
+printf 'url=%s auth=%s code=%s\n' "$url" "$auth" "$code" >>"$S/curl-seen.log"
+if (( want_code )); then printf '%s' "$code"; fi
+if [[ "$code" == 000 ]]; then exit 7; fi
+exit 0
+STUB
+    chmod +x "$d/bin/verify-curl"
+    printf '%s\n' \
+        'http://127.0.0.1:20128/v1/models none - 401' \
+        'http://127.0.0.1:20128/v1/models key - 200' \
+        'http://127.0.0.1:20128/v1/chat/completions bad - 401' \
+        'http://127.0.0.1:20128/v1/chat/completions key l2-worker-free-only 200' \
+        'http://127.0.0.1:20128/v1/chat/completions key l2-worker-clean 200' \
+        'http://127.0.0.1:4096/api/session none - 401' >"$d/curl-table"
+}
+# _aistack_verify_route <sandbox> <url> <auth> <body> <code>: one more route,
+# ahead of the table (the first match wins).
+_aistack_verify_route() {
+    local d="$1"; shift
+    { printf '%s %s %s %s\n' "$@"; cat "$d/curl-table"; } >"$d/curl-table.new" && mv "$d/curl-table.new" "$d/curl-table"
+}
+# _aistack_verify <sandbox> [NAME=value...] verify: the curl stand-in wired in.
+_aistack_verify() {
+    local d="$1"
+    shift
+    _aistack "$d" AUTOOS_CURL="$d/bin/verify-curl" "$@"
+}
+# _aistack_snapshot <sandbox>: a checksum of every file the run could have
+# touched (the stubs' own logs and bin/ excluded).
+_aistack_snapshot() {
+    find "$1" \( -name bin -o -name '*.log' \) -prune -o -type f -print | sort | xargs -r cksum
+}
+
+if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '%s\n' 'http://127.0.0.1:18081/ none - 302' 'http://127.0.0.1:18082/ none - 302' >>"$d/curl-table"
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" \
+        AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0" >&2; }
+    grep -qx 'verify: 12 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
+    grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
+    for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
+                'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
+                'combo l2-worker-free-only' 'combo l2-worker-clean' 'omniroute has qodercli' \
+                'public URL http://127.0.0.1:18081/' 'public URL http://127.0.0.1:18082/'; do
+        grep -qx "  ok    $name" <<<"$out" || { ok=0; echo "no ok line for: $name" >&2; }
+    done
+    grep -qE '^  ok    code dir .* visible in autoos-opencode$' <<<"$out" || { ok=0; echo "no ok for the opencode code dir" >&2; }
+    grep -qE '^  ok    code dir .* in openhands-app SANDBOX_VOLUMES$' <<<"$out" || { ok=0; echo "no ok for the sandbox volumes" >&2; }
+    grep -q '^  skip  healthcheck - ' <<<"$out" || { ok=0; echo "the healthcheck skip is not reported" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify is not green on a healthy stack"; fi
+fi
+
+if it "aistack: verify FAILs a keyless request that is answered 200"; then
+    ok=1
+    for probe in "20128 /v1/models" "4096 /api/session"; do
+        d="$(_aistack_sandbox)"
+        _aistack_verify_sandbox "$d"
+        _aistack_verify_route "$d" "http://127.0.0.1:${probe%% *}${probe#* }" none - 200
+        out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "$probe: exit $rc, not 1" >&2; }
+        grep -qE "^  FAIL  keyless ${probe#* } refused on :${probe%% *} - HTTP 200" <<<"$out" || { ok=0; echo "$probe: no FAIL line" >&2; }
+        [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "$probe: not exactly one FAIL" >&2; }
+        grep -q '^verify: .* 1 failed' <<<"$out" || { ok=0; echo "$probe: summary does not say 1 failed" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "a keyless 200 is not a FAIL"; fi
+fi
+
+if it "aistack: verify FAILs a container that is not running or not healthy"; then
+    ok=1
+    for mode in stopped unhealthy missing; do
+        d="$(_aistack_sandbox)"
+        _aistack_verify_sandbox "$d"
+        case "$mode" in
+            stopped)   rm -f "$d/run-autoos-opencode"; want='container autoos-opencode - exited' ;;
+            unhealthy) : >"$d/unhealthy-omniroute"; want='container autoos-omniroute - running \(unhealthy\)' ;;
+            missing)   rm -f "$d/run-openhands-app" "$d/compose-openhands-app"; want='container openhands-app - no container' ;;
+        esac
+        out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "$mode: exit $rc, not 1" >&2; }
+        # Check 1 runs first, so its FAIL leads. Later checks of a container that
+        # is down may FAIL too (a stopped opencode cannot show its code dir).
+        grep -E '^  FAIL' <<<"$out" | head -n1 | grep -qE "^  FAIL  $want\$" || { ok=0; echo "$mode: the first FAIL is not the container: $(grep '^  FAIL' <<<"$out" | head -n1)" >&2; }
+        grep -qE '^verify: [0-9]+ ok, [1-9][0-9]* failed' <<<"$out" || { ok=0; echo "$mode: summary does not count a failure" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "a stopped, unhealthy or missing container is not a FAIL"; fi
+fi
+
+if it "aistack: verify skips the keyed combos without a key, and the key never reaches argv or the output"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    ok=1
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "no key: exit $rc, not 0" >&2; }
+    grep -q '^  skip  keyed combos - AUTOOS_OMNIROUTE_KEY is not set' <<<"$out" || { ok=0; echo "no key: no skip line" >&2; }
+    [[ "$(grep -c 'chat/completions' "$d/curl-argv.log")" == 0 ]] || { ok=0; echo "no key: a chat request was sent" >&2; }
+    rm -f "$d/curl-argv.log" "$d/curl-seen.log"
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "key set: exit $rc, not 0" >&2; }
+    [[ "$(grep -c 'chat/completions' "$d/curl-argv.log")" == 2 ]] || { ok=0; echo "key set: not two chat requests" >&2; }
+    # The stub compared the header it read from stdin: the key did arrive.
+    [[ "$(grep -c 'chat/completions auth=key code=200' "$d/curl-seen.log")" == 2 ]] || { ok=0; echo "key set: the key did not reach curl" >&2; }
+    [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "the key is on curl's command line" >&2; }
+    [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" "$d/docker.log" || true)" == 0 ]] || { ok=0; echo "the key reached docker" >&2; }
+    [[ "$(grep -c -F -e "$_AISTACK_VERIFY_KEY" <<<"$out" || true)" == 0 ]] || { ok=0; echo "the key is in the output" >&2; }
+    grep -q '^  ok    combo l2-worker-clean$' <<<"$out" || { ok=0; echo "key set: no ok for a combo" >&2; }
+    # A key the gateway rejects: FAIL for every combo, and still no key printed.
+    rm -f "$d/curl-argv.log" "$d/curl-seen.log"
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY=sk-verify-wrong-key-987654321 verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "wrong key: exit $rc, not 1" >&2; }
+    [[ "$(grep -c '^  FAIL  combo .* - HTTP 401' <<<"$out")" == 2 ]] || { ok=0; echo "wrong key: not two FAIL lines" >&2; }
+    [[ "$(grep -c -F -e 'sk-verify-wrong-key-987654321' "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "the wrong key is on curl's command line" >&2; }
+    [[ "$(grep -c -F -e 'sk-verify-wrong-key-987654321' <<<"$out" || true)" == 0 ]] || { ok=0; echo "the wrong key is in the output" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the gateway key leaks, or the keyless run is not a skip"; fi
+fi
+
+if it "aistack: verify retries a combo that answers 502/503 while the gateway warms up, never a 404"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key warm-combo 503,200
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key cold-combo 503,502
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key gone-combo 404,200
+    ok=1
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_RETRY_SLEEP=0 \
+        AUTOOS_VERIFY_COMBOS="warm-combo cold-combo gone-combo" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1" >&2; }
+    grep -qx '  ok    combo warm-combo' <<<"$out" || { ok=0; echo "warm-combo not ok after a 503: $(grep warm <<<"$out")" >&2; }
+    grep -qE '^  FAIL  combo cold-combo - HTTP 502' <<<"$out" || { ok=0; echo "cold-combo: not FAIL with the last code" >&2; }
+    grep -qE '^  FAIL  combo gone-combo - HTTP 404' <<<"$out" || { ok=0; echo "gone-combo: a 404 was retried" >&2; }
+    [[ "$(grep -c 'warm-combo' "$d/curl-argv.log")" == 2 ]] || { ok=0; echo "warm-combo: not 2 requests" >&2; }
+    [[ "$(grep -c 'cold-combo' "$d/curl-argv.log")" == 3 ]] || { ok=0; echo "cold-combo: not 3 attempts" >&2; }
+    [[ "$(grep -c 'gone-combo' "$d/curl-argv.log")" == 1 ]] || { ok=0; echo "gone-combo: not 1 request" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "combo warm-up retry"; fi
+fi
+
+# Final review 2026-09-27: "008" passed a digits-only guard and then
+# $(( wait_s * 2 )) died on "value too great for base", killing verify.
+if it "aistack: verify reads AUTOOS_VERIFY_RETRY_SLEEP as decimal, junk falls back to 10"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '#!/usr/bin/env bash\necho "$*" >>"%s/sleep.log"\n' "$d" >"$d/bin/sleep"; chmod +x "$d/bin/sleep"
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key cold-combo 503
+    ok=1
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_RETRY_SLEEP=008 \
+        AUTOOS_VERIFY_COMBOS="cold-combo" verify)" && rc=0 || rc=$?
+    grep -q '^verify: ' <<<"$out" || { ok=0; echo "008: verify died before its summary (rc=$rc)" >&2; }
+    [[ "$(tr '\n' ' ' <"$d/sleep.log" 2>/dev/null)" == "8 16 " ]] || { ok=0; echo "008: sleeps were '$(tr '\n' ' ' <"$d/sleep.log" 2>/dev/null)', not '8 16'" >&2; }
+    rm -f "$d/sleep.log" "$d"/curl-count-*
+    _aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_RETRY_SLEEP=abc \
+        AUTOOS_VERIFY_COMBOS="cold-combo" verify >/dev/null || true
+    [[ "$(tr '\n' ' ' <"$d/sleep.log" 2>/dev/null)" == "10 20 " ]] || { ok=0; echo "abc: sleeps not '10 20'" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "AUTOOS_VERIFY_RETRY_SLEEP parsing"; fi
+fi
+
+if it "aistack: verify AUTOOS_VERIFY_COMBOS replaces the combo list"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key alpha-combo 200
+    _aistack_verify_route "$d" http://127.0.0.1:20128/v1/chat/completions key beta-combo 404
+    ok=1
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_COMBOS="alpha-combo beta-combo" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1" >&2; }
+    grep -qx '  ok    combo alpha-combo' <<<"$out" || { ok=0; echo "alpha-combo not ok" >&2; }
+    grep -qE '^  FAIL  combo beta-combo - HTTP 404' <<<"$out" || { ok=0; echo "beta-combo not FAIL" >&2; }
+    [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "not exactly one FAIL" >&2; }
+    grep -q 'l2-worker-free-only' "$d/curl-argv.log" && { ok=0; echo "a default combo was still requested" >&2; }
+    # 256, not 16: a reasoning leg spent 18 of 20 tokens thinking and the
+    # gateway's quality check answered 502 (L0, live 2026-09-27).
+    grep -q '"max_tokens":256' "$d/curl-argv.log" || { ok=0; echo "max_tokens 256 not sent" >&2; }
+    # A name that could break out of the JSON body is refused, not sent.
+    rm -f "$d/curl-argv.log"
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_COMBOS='bad"name' verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "bad name: exit $rc, not 1" >&2; }
+    grep -q '^  FAIL  combo (invalid name)' <<<"$out" || { ok=0; echo "bad name: no FAIL" >&2; }
+    [[ "$(grep -c 'chat/completions' "$d/curl-argv.log" || true)" == 0 ]] || { ok=0; echo "bad name: a request was sent" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "AUTOOS_VERIFY_COMBOS is not honoured"; fi
+fi
+
+if it "aistack: verify public URLs: skipped when unset, FAIL only for the one that is not a 302"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    ok=1
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "unset: exit $rc, not 0" >&2; }
+    grep -q '^  skip  public URLs - AUTOOS_VERIFY_PUBLIC_URLS is not set' <<<"$out" || { ok=0; echo "unset: no skip line" >&2; }
+    printf '%s\n' 'http://127.0.0.1:18081/ none - 302' 'http://127.0.0.1:18082/ none - 200' >>"$d/curl-table"
+    out="$(_aistack_verify "$d" AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "one 200: exit $rc, not 1" >&2; }
+    grep -qx '  ok    public URL http://127.0.0.1:18081/' <<<"$out" || { ok=0; echo "the 302 URL is not ok" >&2; }
+    grep -qE '^  FAIL  public URL http://127.0.0.1:18082/ - HTTP 200' <<<"$out" || { ok=0; echo "the 200 URL is not FAIL" >&2; }
+    [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "not exactly one FAIL" >&2; }
+    # No credentials go out with a public probe, and none in the URL are echoed.
+    grep -qE '(^| )(-H|-u|--user|--header)( |$)' "$d/curl-argv.log" && { ok=0; echo "a public probe carried credentials" >&2; }
+    out="$(_aistack_verify "$d" AUTOOS_VERIFY_PUBLIC_URLS="http://probe-user:probe-pass@127.0.0.1:18081/" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "userinfo: exit $rc, not 1" >&2; }
+    grep -q '^  FAIL  public URL (rejected)' <<<"$out" || { ok=0; echo "userinfo: no FAIL" >&2; }
+    grep -q 'probe-pass' <<<"$out" && { ok=0; echo "userinfo: the password is echoed" >&2; }
+    grep -q 'probe-pass' "$d/curl-argv.log" && { ok=0; echo "userinfo: the URL was requested" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "public URL checks misbehave"; fi
+fi
+
+if it "aistack: verify checks the code dir in opencode and in the OpenHands sandbox volumes"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    : >"$d/nocode-autoos-opencode"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "opencode without the tree: exit $rc, not 1" >&2; }
+    grep -qE '^  FAIL  code dir .* visible in autoos-opencode - ' <<<"$out" || { ok=0; echo "opencode: no FAIL" >&2; }
+    grep -qE '^  ok    code dir .* in openhands-app SANDBOX_VOLUMES$' <<<"$out" || { ok=0; echo "opencode case: openhands should stay ok" >&2; }
+    rm -f "$d/nocode-autoos-opencode"
+    # A volume list where the tree is one of several entries passes ...
+    printf 'SANDBOX_VOLUMES=/elsewhere:/elsewhere:ro,%s:%s:rw\n' "$d/code" "$d/code" >"$d/env-openhands-app"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "several volumes: exit $rc, not 0" >&2; }
+    # ... one without it, or an unset value, does not.
+    for vols in 'SANDBOX_VOLUMES=/elsewhere:/elsewhere:rw' 'SANDBOX_VOLUMES=' 'LLM_MODEL=x'; do
+        printf '%s\n' "$vols" >"$d/env-openhands-app"
+        out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "$vols: exit $rc, not 1" >&2; }
+        grep -qE '^  FAIL  code dir .* in openhands-app SANDBOX_VOLUMES - ' <<<"$out" || { ok=0; echo "$vols: no FAIL" >&2; }
+    done
+    # The directory is AUTOOS_CODE_DIR - the variable compose reads - from the
+    # environment first, stack.env next; nothing is hard-coded.
+    printf 'SANDBOX_VOLUMES=%s:%s:rw\n' "$d/other" "$d/other" >"$d/env-openhands-app"
+    out="$(_aistack_verify "$d" AUTOOS_CODE_DIR="$d/other" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "env AUTOOS_CODE_DIR: exit $rc, not 0" >&2; }
+    grep -qF "exec autoos-opencode test -d $d/other" "$d/docker.log" || { ok=0; echo "env: the exec did not use AUTOOS_CODE_DIR" >&2; }
+    printf 'SANDBOX_VOLUMES=%s:%s:rw\n' "$d/fromfile" "$d/fromfile" >"$d/env-openhands-app"
+    printf "AUTOOS_CODE_DIR='%s'\n" "$d/fromfile" >>"$d/cfg/stack.env"
+    out="$(_aistack_verify "$d" AUTOOS_CODE_DIR= verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "stack.env AUTOOS_CODE_DIR: exit $rc, not 0" >&2; }
+    grep -qF "exec autoos-opencode test -d $d/fromfile" "$d/docker.log" || { ok=0; echo "stack.env: the exec did not use its AUTOOS_CODE_DIR" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the code dir check misbehaves"; fi
+fi
+
+if it "aistack: verify checks the gateway container has qodercli: ok, FAIL, or skip with a reason"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "healthy: exit $rc, not 0" >&2; }
+    grep -qx '  ok    omniroute has qodercli' <<<"$out" || { ok=0; echo "healthy: no ok line" >&2; }
+    grep -qx 'exec autoos-omniroute qodercli --version' "$d/docker.log" || { ok=0; echo "the check did not run qodercli --version in the gateway container" >&2; }
+    # The image without the layer: the exec cannot find the binary.
+    : >"$d/noqoder-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "no qodercli: exit $rc, not 1" >&2; }
+    grep -qE '^  FAIL  omniroute has qodercli - ' <<<"$out" || { ok=0; echo "no qodercli: no FAIL line: $out" >&2; }
+    [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "no qodercli: not exactly one FAIL" >&2; }
+    # A command that answers, but not with a version.
+    rm -f "$d/noqoder-autoos-omniroute"; printf 'not a version\n' >"$d/qoder-version-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 1 )) || { ok=0; echo "no version: exit $rc, not 1" >&2; }
+    grep -qE '^  FAIL  omniroute has qodercli - ' <<<"$out" || { ok=0; echo "no version: no FAIL line" >&2; }
+    rm -f "$d/qoder-version-autoos-omniroute"
+    # A stopped gateway is the container check's FAIL; this one skips, and does not exec.
+    rm -f "$d/run-autoos-omniroute" "$d/docker.log"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    grep -qx '  skip  omniroute has qodercli - autoos-omniroute is not running' <<<"$out" || { ok=0; echo "stopped: no skip line: $(grep qodercli <<<"$out")" >&2; }
+    grep -q 'qodercli' "$d/docker.log" 2>/dev/null && { ok=0; echo "stopped: docker was asked to exec qodercli" >&2; }
+    rm -rf "$d"
+    # The gateway service is not enabled: skipped, and docker is not asked.
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    t="$d/tree/configuration"
+    mkdir -p "$t/docker/ai-stack"
+    cp "$AISTACK/ai-stack.sh" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
+    cp "$ROOT/configuration/env-file.sh" "$t/"
+    sed 's/^    container_name: autoos-omniroute$/&\n    profiles: ["gateway"]/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
+    out="$(_AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack_verify "$d" verify)" && rc=0 || rc=$?
+    grep -qx '  skip  omniroute has qodercli - the omniroute service is not enabled' <<<"$out" || { ok=0; echo "profile off: no skip line: $(grep qodercli <<<"$out")" >&2; }
+    grep -q 'qodercli' "$d/docker.log" 2>/dev/null && { ok=0; echo "profile off: docker was asked about qodercli" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the qodercli check is not ok/FAIL/skip as specified"; fi
+fi
+
+if it "aistack: verify prints the public URL as the app normalizes it, skips it when unset or empty, FAILs one the gateway would refuse"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    skipline='  skip  omniroute public URL - AUTOOS_OMNIROUTE_PUBLIC_URL is not set'
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "unset: exit $rc, not 0" >&2; }
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "unset: no skip line: $(grep 'public URL' <<<"$out")" >&2; }
+    # Empty - in the environment, in stack.env, or blanks only - is the same as unset.
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_PUBLIC_URL= verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "empty env: no skip line" >&2; }
+    out="$(_aistack_verify "$d" 'AUTOOS_OMNIROUTE_PUBLIC_URL=   ' verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "blank env: no skip line" >&2; }
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL=''\n" >>"$d/cfg/stack.env"
+    out="$(_aistack_verify "$d" verify)" || true
+    grep -qxF "$skipline" <<<"$out" || { ok=0; echo "empty in stack.env: no skip line" >&2; }
+    # Printed the way the app normalizes it: trimmed, trailing slashes dropped, a path kept.
+    for pair in 'https://gw.example.invalid|https://gw.example.invalid' 'https://gw.example.invalid/|https://gw.example.invalid' \
+                'https://gw.example.invalid///|https://gw.example.invalid' '  https://gw.example.invalid/  |https://gw.example.invalid' \
+                'https://gw.example.invalid/omniroute/|https://gw.example.invalid/omniroute' 'http://gw.example.invalid:20128/|http://gw.example.invalid:20128'; do
+        out="$(_aistack_verify "$d" "AUTOOS_OMNIROUTE_PUBLIC_URL=${pair%%|*}" verify)" && rc=0 || rc=$?
+        (( rc == 0 )) || { ok=0; echo "[${pair%%|*}]: exit $rc, not 0" >&2; }
+        grep -qxF "  ok    omniroute public URL ${pair#*|}" <<<"$out" || { ok=0; echo "[${pair%%|*}]: no ok line for ${pair#*|}: $(grep 'public URL' <<<"$out")" >&2; }
+    done
+    # The environment beats stack.env, as it does in compose's interpolation.
+    printf "AUTOOS_OMNIROUTE_PUBLIC_URL='https://from-file.example.invalid/'\n" >>"$d/cfg/stack.env"
+    out="$(_aistack_verify "$d" verify)" || true
+    grep -qxF '  ok    omniroute public URL https://from-file.example.invalid' <<<"$out" || { ok=0; echo "stack.env value not shown" >&2; }
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_PUBLIC_URL=https://from-env.example.invalid verify)" || true
+    grep -qxF '  ok    omniroute public URL https://from-env.example.invalid' <<<"$out" || { ok=0; echo "the environment value does not win" >&2; }
+    # Printing is not probing: it may be a plain LAN address, not the proxy's 302.
+    grep -q 'example.invalid' "$d/curl-argv.log" 2>/dev/null && { ok=0; echo "verify requested the public URL" >&2; }
+    # What the gateway would refuse at startup: FAIL, and the value is not echoed.
+    for bad in 'gw.example.invalid' 'ftp://gw.example.invalid' 'https://opuser:oppw-secret@gw.example.invalid' 'https://gw example.invalid'; do
+        out="$(_aistack_verify "$d" "AUTOOS_OMNIROUTE_PUBLIC_URL=$bad" verify)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "[$bad]: exit $rc, not 1" >&2; }
+        grep -qE '^  FAIL  omniroute public URL - ' <<<"$out" || { ok=0; echo "[$bad]: no FAIL line" >&2; }
+        [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "[$bad]: not exactly one FAIL" >&2; }
+        [[ "$out" == *oppw-secret* || "$out" == *"gw example"* ]] && { ok=0; echo "[$bad]: the value is echoed" >&2; }
+    done
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the public URL line of verify misbehaves"; fi
+fi
+
+if it "aistack: verify follows the compose profiles: a disabled openhands is skipped, an enabled one is checked"; then
+    ok=1
+    for style in inline block; do
+        d="$(_aistack_sandbox)"
+        _aistack_verify_sandbox "$d"
+        t="$d/tree/configuration"
+        mkdir -p "$t/docker/ai-stack"
+        cp "$AISTACK/ai-stack.sh" "$AISTACK/opencode.Dockerfile" "$t/docker/ai-stack/"
+        cp "$ROOT/configuration/env-file.sh" "$t/"
+        if [[ "$style" == inline ]]; then
+            sed 's/^    container_name: openhands-app$/&\n    profiles: ["extras", "openhands"]/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
+        else
+            sed 's/^    container_name: openhands-app$/&\n    profiles:\n      - extras\n      - openhands/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
+        fi
+        grep -q 'profiles:' "$t/docker/ai-stack/compose.yml" || { ok=0; echo "$style: the fixture has no profiles" >&2; }
+        out="$(_AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack_verify "$d" verify)" && rc=0 || rc=$?
+        (( rc == 0 )) || { ok=0; echo "$style, profile off: exit $rc, not 0" >&2; }
+        grep -q 'container openhands-app' <<<"$out" && { ok=0; echo "$style, profile off: openhands-app is still checked" >&2; }
+        grep -q '^  skip  code dir .*openhands' <<<"$out" || { ok=0; echo "$style, profile off: no skip for the sandbox volumes" >&2; }
+        grep -q 'openhands-app' "$d/docker.log" && { ok=0; echo "$style, profile off: docker was asked about openhands-app" >&2; }
+        out="$(_AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack_verify "$d" COMPOSE_PROFILES=openhands verify)" && rc=0 || rc=$?
+        (( rc == 0 )) || { ok=0; echo "$style, profile on: exit $rc, not 0" >&2; }
+        grep -qx '  ok    container openhands-app' <<<"$out" || { ok=0; echo "$style, profile on: openhands-app not checked" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "compose profiles are not honoured"; fi
+fi
+
+if it "aistack: verify prints the admission gate values and heap MB from the running gateway process"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    # Stub /proc/1/environ: two --max-old-space-size flags; the last one wins
+    # (the image ENTRYPOINT appends OMNIROUTE_MEMORY_MB to NODE_OPTIONS).
+    printf 'OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=6\nOMNIROUTE_CHAT_ADMISSION_QUEUE_MS=60000\nNODE_OPTIONS=--max-old-space-size=1024 --max-old-space-size=1536\nHOME=/home/qoder\n' \
+        >"$d/proc1-environ-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    grep -q 'max_heavy=6' <<<"$out" || { ok=0; echo "max_heavy not printed: $(grep -i 'admission\|max_heavy' <<<"$out")" >&2; }
+    grep -q 'queue_ms=60000' <<<"$out" || { ok=0; echo "queue_ms not printed" >&2; }
+    grep -q 'heap MB=1536' <<<"$out" || { ok=0; echo "heap MB not the last --max-old-space-size: $(grep -i 'heap' <<<"$out")" >&2; }
+    # Informational, not a pass/fail check: no v_ok/v_fail line for it.
+    grep -qE '^  (ok|FAIL)  .*admission' <<<"$out" && { ok=0; echo "admission should be informational, not ok/FAIL" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify admission gate values"; fi
+fi
+
+if it "aistack: verify prints unset wording when admission gate vars are absent from the process"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    # Stub /proc/1/environ without the admission vars or NODE_OPTIONS.
+    printf 'HOME=/home/qoder\nPATH=/usr/bin\n' >"$d/proc1-environ-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    grep -q 'unset (image default 1 / 2000)' <<<"$out" \
+        || { ok=0; echo "unset wording missing: $(grep -i 'admission\|max_heavy\|queue' <<<"$out")" >&2; }
+    grep -q 'heap MB=unset' <<<"$out" \
+        || { ok=0; echo "heap MB unset missing: $(grep -i 'heap' <<<"$out")" >&2; }
+    # A stopped gateway: skipped, no exec.
+    rm -f "$d/run-autoos-omniroute" "$d/docker.log"
+    out="$(_aistack_verify "$d" verify)"
+    grep -q '^  skip  omniroute admission - ' <<<"$out" || { ok=0; echo "stopped gateway: no admission skip line" >&2; }
+    grep -q '/proc/1/environ' "$d/docker.log" 2>/dev/null && { ok=0; echo "stopped: docker was asked to read /proc/1/environ" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify admission gate unset wording"; fi
+fi
+
+if it "aistack: compose.yml caps the per-call log artifacts that feed page cache"; then
+    f="$AISTACK/compose.yml"
+    # The omniroute block: from its service header to the next service.
+    omni="$(sed -n '/^  omniroute:/,/^  [a-z]/p' "$f" | sed '$d')"
+    ok=1
+    grep -q 'CHAT_LOG_MAX_BODY_KB: ${CHAT_LOG_MAX_BODY_KB:-64}' <<<"$omni" \
+        || { ok=0; echo "CHAT_LOG_MAX_BODY_KB not capped at default 64" >&2; }
+    grep -q 'CHAT_LOG_TEXT_LIMIT: ${CHAT_LOG_TEXT_LIMIT:-16384}' <<<"$omni" \
+        || { ok=0; echo "CHAT_LOG_TEXT_LIMIT not capped at default 16384" >&2; }
+    grep -q 'CALL_LOG_RETENTION_DAYS: ${CALL_LOG_RETENTION_DAYS:-3}' <<<"$omni" \
+        || { ok=0; echo "CALL_LOG_RETENTION_DAYS not capped at default 3" >&2; }
+    if (( ok )); then pass; else fail "compose.yml per-call log caps"; fi
+fi
+
+if it "aistack: stack.env.example documents the per-call log caps as commented defaults"; then
+    f="$AISTACK/stack.env.example"
+    ok=1
+    grep -q '^# CHAT_LOG_MAX_BODY_KB=64' "$f" \
+        || { ok=0; echo "CHAT_LOG_MAX_BODY_KB default not documented" >&2; }
+    grep -q '^# CHAT_LOG_TEXT_LIMIT=16384' "$f" \
+        || { ok=0; echo "CHAT_LOG_TEXT_LIMIT default not documented" >&2; }
+    grep -q '^# CALL_LOG_RETENTION_DAYS=3' "$f" \
+        || { ok=0; echo "CALL_LOG_RETENTION_DAYS default not documented" >&2; }
+    if (( ok )); then pass; else fail "stack.env.example per-call log caps"; fi
+fi
+
+if it "aistack: verify prints the omniroute memory split with no warning under no pressure"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '1048576000\n2684354560\nanon 838860800\nfile 104857600\n' \
+        >"$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    grep -q 'omniroute memory: current 1000 MB of 2560 MB (39%), anon 800 MB, reclaimable cache 100 MB' <<<"$out" \
+        || { ok=0; echo "memory split not printed: $(grep -i 'omniroute memory' <<<"$out")" >&2; }
+    grep -q 'page cache holds the pressure guard' <<<"$out" \
+        && { ok=0; echo "a pressure warning on a healthy split" >&2; }
+    # Informational, not a pass/fail check: no v_ok/v_fail line for it.
+    grep -qE '^  (ok|FAIL)  .*omniroute memory' <<<"$out" && { ok=0; echo "memory should be informational, not ok/FAIL" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify omniroute memory split"; fi
+fi
+
+if it "aistack: verify warns when page cache holds the pressure guard at 503"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    # Measured 2026-09-27: current 2.62G of max 2.68G, anon 0.83G,
+    # file 1.65G - the guard answers 503 above 92%.
+    printf '2616913920\n2684354560\nanon 827203584\nfile 1650200576\n' \
+        >"$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    grep -q 'omniroute memory: current 2496 MB of 2560 MB (97%), anon 789 MB, reclaimable cache 1574 MB' <<<"$out" \
+        || { ok=0; echo "memory split not printed: $(grep -i 'omniroute memory' <<<"$out")" >&2; }
+    grep -q "page cache holds the pressure guard at 97% (it answers 503 above 92%); relief: ai-stack.sh restart omniroute" <<<"$out" \
+        || { ok=0; echo "no restart relief: $(grep -i 'pressure guard' <<<"$out")" >&2; }
+    grep -q 'memory.reclaim' <<<"$out" && { ok=0; echo "the sudo cgroup relief is still there" >&2; }
+    grep -q 'sudo' <<<"$(grep -i 'omniroute memory' <<<"$out")" && { ok=0; echo "the relief needs root" >&2; }
+    grep -q '{{.Id}}' "$d/docker.log" 2>/dev/null && { ok=0; echo "verify still inspects the container id: $(grep '{{.Id}}' "$d/docker.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify page-cache pressure warning"; fi
+fi
+
+if it "aistack: verify prints no ratio when the omniroute cgroup has no limit"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '1048576000\nmax\nanon 838860800\nfile 104857600\n' \
+        >"$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)"
+    ok=1
+    memline="$(grep -i 'omniroute memory' <<<"$out")"
+    grep -q 'no limit' <<<"$memline" \
+        || { ok=0; echo "unlimited max not reported: [$memline]" >&2; }
+    grep -q '%' <<<"$memline" \
+        && { ok=0; echo "a ratio on an unlimited cgroup: [$memline]" >&2; }
+    grep -q 'page cache holds the pressure guard' <<<"$out" \
+        && { ok=0; echo "a pressure warning with no limit to press against" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify omniroute memory without a limit"; fi
+fi
+
+if it "aistack: verify without cgroup counters says so and keeps its exit status"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '1048576000\n2684354560\nanon 838860800\nfile 104857600\n' \
+        >"$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)" && rc_with=0 || rc_with=$?
+    rm -f "$d/cgroup-autoos-omniroute"
+    out="$(_aistack_verify "$d" verify)" && rc_without=0 || rc_without=$?
+    ok=1
+    grep -q 'could not read the cgroup counters' <<<"$out" \
+        || { ok=0; echo "no unreadable-counters line: $(grep -i 'omniroute memory' <<<"$out")" >&2; }
+    [[ "$rc_without" == "$rc_with" ]] \
+        || { ok=0; echo "exit $rc_without without counters, $rc_with with them" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify without cgroup counters"; fi
+fi
+
+if it "aistack: verify is read-only: only inspect and exec reach docker, nothing on disk changes"; then
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    printf '%s\n' 'http://127.0.0.1:18081/ none - 302' >>"$d/curl-table"
+    ok=1
+    before="$(_aistack_snapshot "$d")"
+    out="$(_aistack_verify "$d" AUTOOS_OMNIROUTE_KEY="$_AISTACK_VERIFY_KEY" AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    after="$(_aistack_snapshot "$d")"
+    [[ "$before" == "$after" ]] || { ok=0; echo "a file changed: $(diff <(printf '%s' "$before") <(printf '%s' "$after") | head -5)" >&2; }
+    [[ -s "$d/docker.log" ]] || { ok=0; echo "docker was never asked anything (a vacuous run)" >&2; }
+    [[ "$(grep -cE '^(start|stop|restart|rm|up|down|run|create|compose|build|pull|network|kill|pause|unpause|cp|update)( |$)' "$d/docker.log" || true)" == 0 ]] \
+        || { ok=0; echo "a mutating docker verb: $(grep -E '^(start|stop|restart|rm|up|down|run|create|compose)' "$d/docker.log" | head -3)" >&2; }
+    grep -vE '^(inspect|exec) ' "$d/docker.log" | grep -q . && { ok=0; echo "docker verbs beyond inspect/exec: $(grep -vE '^(inspect|exec) ' "$d/docker.log" | head -3)" >&2; }
+    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |qodercli --version$|sh -c cat /sys/fs/cgroup/memory\.current /sys/fs/cgroup/memory\.max; sed -n "s/\^\\\(anon\\\|file\\\) /&/p" /sys/fs/cgroup/memory\.stat$|sh -c tr "\\0" "\\n" </proc/1/environ$)' | grep -q . && { ok=0; echo "an exec that is neither test -d, qodercli --version nor a cgroup//proc/1/environ read" >&2; }
+    # Nothing but docker inspect/exec: not systemctl, not ss, not the plain curl on PATH.
+    grep -vE '^docker: (inspect|exec) ' "$d/events.log" | grep -q . && { ok=0; echo "another tool was called: $(grep -vE '^docker: (inspect|exec) ' "$d/events.log" | head -3)" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify changed something or ran a docker verb it must not"; fi
+fi
+
+if it "aistack: verify is listed in the unknown-command message and in --help"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    out="$(_aistack "$d" bogus)" && rc=0 || rc=$?
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2" >&2; }
+    grep -qE '^Unknown command: bogus \(.*\bverify\b.*\)' <<<"$out" || { ok=0; echo "not in the message: $out" >&2; }
+    out="$(_aistack "$d" --help)"
+    grep -q 'ai-stack.sh verify' <<<"$out" || { ok=0; echo "not in --help" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify is not advertised"; fi
+fi
+
+if it "aistack: restart omniroute issues exactly one compose restart and no backup"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" restart omniroute)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ "$(grep -c 'compose.*restart' "$d/docker.log" 2>/dev/null || true)" == 1 ]] \
+        || { ok=0; echo "not exactly one compose restart: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    grep -q 'restart omniroute' "$d/docker.log" \
+        || { ok=0; echo "no restart of omniroute: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    grep -qE '(^| )up( |$)' "$d/docker.log" && { ok=0; echo "restart ran up: $(cat "$d/docker.log")" >&2; }
+    compgen -G "$d/cfg/*.autoos-backup-*" >/dev/null && { ok=0; echo "restart took a backup" >&2; }
+    [[ "$out" == *"omniroute"* ]] || { ok=0; echo "no one-line report: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "restart omniroute is not one compose restart with no backup"; fi
+fi
+
+if it "aistack: restart with one unknown name restarts nothing (validate all first)"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" restart omniroute bogus)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2: $out" >&2; }
+    grep -q 'restart' "$d/docker.log" 2>/dev/null && { ok=0; echo "restarted before the usage error: $(cat "$d/docker.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "restart omniroute bogus mutated before failing"; fi
+fi
+
+if it "aistack: --dry-run restart calls no compose"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" --dry-run restart omniroute)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc: $out" >&2; }
+    grep -q 'restart' "$d/docker.log" 2>/dev/null && { ok=0; echo "dry run restarted: $(cat "$d/docker.log")" >&2; }
+    [[ "$out" == *"would run"*"restart omniroute"* ]] || { ok=0; echo "no would-run line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "--dry-run restart is not side-effect free"; fi
+fi
+
+if it "aistack: restart with an unknown service exits 2 without calling compose"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" restart bogus)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2: $out" >&2; }
+    [[ -s "$d/docker.log" ]] && { ok=0; echo "compose was called: $(cat "$d/docker.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "restart of an unknown service is not a usage error"; fi
+fi
+
+if it "aistack: restart is listed in the unknown-command message and in --help"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    out="$(_aistack "$d" bogus)" && rc=0 || rc=$?
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2" >&2; }
+    grep -qE '^Unknown command: bogus \(.*\brestart\b.*\)' <<<"$out" || { ok=0; echo "not in the message: $out" >&2; }
+    out="$(_aistack "$d" --help)"
+    grep -q 'ai-stack.sh restart' <<<"$out" || { ok=0; echo "not in --help" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "restart is not advertised"; fi
+fi
+
+# ─── ai-stack.sh failover: the LiteLLM standby router ─────────────────────
+# One command moves the gateway PORT between the omniroute container and a
+# LiteLLM standby (same port, same client key, same combo ids), and back.
+# The always-on :4000 unit is never touched: the standby gets its own state
+# dir. start-litellm.sh is the fake above (AUTOOS_START_LITELLM); the gateway
+# port in the sandbox is 20128, the client key sk-test-client-key.
+
+# _aistack_failover_on <sandbox>: migrated host with the standby up.
+_aistack_failover_on() {
+    _aistack_migrated "$1"
+    _aistack "$1" failover on >/dev/null
+}
+
+# _aistack_standby_pid <sandbox>: the live standby's pid, as fake_ss reports it.
+_aistack_standby_pid() {
+    tr -d '\r[:space:]' <"$1/standby-pid"
+}
+
+# _aistack_standby_pids <sandbox>: every pid the fake starter spawned, newest
+# last. A standby is recorded as "<pid> <port>" in <sandbox>/standbys because
+# more than one can run at once (the gateway-port one plus the always-on :4000
+# unit, or two sharing the gateway port).
+_aistack_standby_pids() {
+    [[ -s "$1/standbys" ]] || return 0
+    cut -d' ' -f1 "$1/standbys"
+}
+
+# _aistack_standby <sandbox> <port>: run the fake starter DIRECTLY, the way
+# ai-stack.sh runs it (same AUTOOS_START_LITELLM, same argv shape), so a
+# standby exists on <port> without a failover having happened. 4000 is the
+# always-on fallback unit, 20128 the gateway port.
+_aistack_standby() {
+    env -u AUTOOS_LITELLM_MASTER_KEY_FILE \
+        HOME="$1/home" PATH="$1/bin:$PATH" \
+        AUTOOS_LITELLM_HOST=127.0.0.1 AUTOOS_LITELLM_PORT="$2" \
+        AUTOOS_LITELLM_STATE_DIR="$1/cfg/failover" \
+        "$1/bin/start-litellm" >/dev/null
+}
+
+# _aistack_process_alive <pid>: is it a live process (not a leftover zombie)?
+_aistack_process_alive() {
+    local p="$1" st
+    [[ "$p" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$p" 2>/dev/null || return 1
+    [[ -r "/proc/$p/stat" ]] || return 0
+    st="$(sed -n 's/^.*) \([A-Za-z]\).*/\1/p' "/proc/$p/stat" 2>/dev/null)" || return 0
+    [[ "$st" != Z ]]
+}
+
+# _aistack_wait_gone <pid>: a stop is asynchronous - the process can still be
+# there, or a zombie waiting to be reaped, the moment the command returns - so
+# give it up to 2 s instead of asserting on an immediate kill -0 (review
+# lstby2c). 0 = gone, 1 = still alive after 2 s.
+_aistack_wait_gone() {
+    local i
+    for i in $(seq 1 20); do
+        _aistack_process_alive "$1" || return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+# _aistack_kill_standby <sandbox>: reap every real standby the fake starter
+# spawned (a standby that shrugs off TERM needs the KILL too). Every failover
+# test that turns the standby on calls this before removing the sandbox -
+# rm -rf alone would leave the process behind.
+_aistack_kill_standby() {
+    local p i
+    while read -r p; do
+        [[ "$p" =~ ^[0-9]+$ ]] || continue
+        kill "$p" 2>/dev/null || true
+        for i in $(seq 1 20); do _aistack_process_alive "$p" || break; sleep 0.1; done
+        _aistack_process_alive "$p" && kill -KILL "$p" 2>/dev/null || true
+    done < <(_aistack_standby_pids "$1")
+    rm -f "$1/standby-pid" "$1/standbys"
+}
+
+if it "aistack: failover is listed in the unknown-command message and in --help"; then
+    d="$(_aistack_sandbox)"
+    ok=1
+    out="$(_aistack "$d" bogus)" && rc=0 || rc=$?
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2: $out" >&2; }
+    grep -qE '^Unknown command: bogus \(.*\bfailover\b.*\)' <<<"$out" || { ok=0; echo "not in the message: $out" >&2; }
+    out="$(_aistack "$d" --help)"
+    grep -q 'ai-stack.sh failover' <<<"$out" || { ok=0; echo "not in --help" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover is not advertised"; fi
+fi
+
+if it "aistack: failover on stops omniroute then starts litellm with the four env names"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_seq "$d/events.log" "docker: compose" "stop omniroute" "start-litellm: " || ok=0
+    for v in AUTOOS_LITELLM_HOST AUTOOS_LITELLM_PORT AUTOOS_LITELLM_MASTER_KEY_FILE AUTOOS_LITELLM_STATE_DIR; do
+        grep -qx "env:$v" "$d/start-litellm-env.log" 2>/dev/null || { ok=0; echo "$v not passed to start-litellm" >&2; }
+    done
+    grep -qx 'master-key-file=ok' "$d/start-litellm-env.log" 2>/dev/null || { ok=0; echo "the key file was not readable: $(cat "$d/start-litellm-env.log" 2>/dev/null)" >&2; }
+    grep -q 'http://127.0.0.1:20128/health/liveliness' "$d/curl.log" 2>/dev/null || { ok=0; echo "liveliness not probed on :20128" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] && { ok=0; echo "the gateway container still runs" >&2; }
+    # The standby pid is discovered live (ss + cmdline), never from a pid
+    # file: the real starter writes none, and neither may the fake.
+    pid="$(_aistack_standby_pid "$d")"
+    [[ "$pid" =~ ^[0-9]+$ ]] || { ok=0; echo "no live standby pid" >&2; }
+    kill -0 "$pid" 2>/dev/null || { ok=0; echo "the standby pid $pid is not alive" >&2; }
+    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q litellm || { ok=0; echo "the standby pid $pid is not litellm" >&2; }
+    grep -qx "pid=$pid" "$d/cfg/failover.state" 2>/dev/null || { ok=0; echo "no state file with the live standby pid" >&2; }
+    grep -q '^since=' "$d/cfg/failover.state" 2>/dev/null || { ok=0; echo "no start time in the state file" >&2; }
+    if [[ -e "$d/cfg/failover/litellm.pid" ]]; then ok=0; echo "a pid file was written (the real starter writes none)" >&2; fi
+    if grep -rF -- 'sk-test-client-key' "$d/events.log" "$d/docker.log" "$d/curl.log" "$d/start-litellm.log" "$d/start-litellm-env.log" "$d/systemctl.log" 2>/dev/null; then
+        ok=0; echo "the client key reached a log" >&2
+    fi
+    [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover on does not hand the port to litellm"; fi
+fi
+
+if it "aistack: failover on uses the gateway bind as host and the gateway port, and --dry-run changes nothing"; then
+    ok=1
+    for bind in 127.0.0.1 0.0.0.0; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"
+        printf "AUTOOS_STACK_BIND='%s'\n" "$bind" >"$d/cfg/stack.env"
+        out="$(_aistack "$d" --dry-run failover on)" && rc=0 || rc=$?
+        (( rc == 0 )) || { ok=0; echo "[$bind]: exit $rc, not 0: $out" >&2; }
+        [[ "$out" == *"AUTOOS_LITELLM_HOST=$bind"* ]] || { ok=0; echo "[$bind]: host not in the plan: $out" >&2; }
+        [[ "$out" == *"AUTOOS_LITELLM_PORT=20128"* ]] || { ok=0; echo "[$bind]: port not in the plan" >&2; }
+        [[ "$out" == *"AUTOOS_LITELLM_MASTER_KEY_FILE=$d/cfg/client.key"* ]] || { ok=0; echo "[$bind]: key file not in the plan" >&2; }
+        [[ "$out" == *"AUTOOS_LITELLM_STATE_DIR=$d/cfg/failover"* ]] || { ok=0; echo "[$bind]: state dir not in the plan" >&2; }
+        [[ "$out" == *"stop omniroute"* ]] || { ok=0; echo "[$bind]: no stop step" >&2; }
+        [[ -e "$d/cfg/client.key" || -e "$d/cfg/failover.state" || -e "$d/cfg/failover" ]] && { ok=0; echo "[$bind]: the dry run wrote state" >&2; }
+        [[ -e "$d/docker.log" || -e "$d/start-litellm.log" ]] && { ok=0; echo "[$bind]: the dry run drove something" >&2; }
+        [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "[$bind]: the key is in the dry-run output" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "failover dry run is wrong or has side effects"; fi
+fi
+
+if it "aistack: a second failover on refuses with rc 2 and changes nothing"; then
+    d="$(_aistack_sandbox)"
+    _aistack_failover_on "$d"
+    before="$(cat "$d/cfg/failover.state")"
+    rm -f "$d/docker.log" "$d/events.log" "$d/start-litellm.log" "$d/start-litellm-env.log" "$d/curl.log"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 2 )) || { ok=0; echo "exit $rc, not 2: $out" >&2; }
+    [[ "$out" == *"already on"* ]] || { ok=0; echo "no refusal: $out" >&2; }
+    [[ -e "$d/docker.log" || -e "$d/start-litellm.log" ]] && { ok=0; echo "the refused run drove something" >&2; }
+    [[ "$(cat "$d/cfg/failover.state")" == "$before" ]] || { ok=0; echo "the state file changed" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a second failover on is not a refusal"; fi
+fi
+
+if it "aistack: failover with failed liveliness recreates omniroute, rc 1, no state file"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    : >"$d/failover-liveliness-fail"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    # The rollback recreates the gateway (up -d --no-deps), never a bare
+    # start: a stopped container without published ports stays port-less.
+    _aistack_seq "$d/docker.log" "stop omniroute" "up -d --no-deps omniroute" || ok=0
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the rollback used start instead of a recreate: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was written for a dead standby" >&2; }
+    [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed standby leaves the port empty"; fi
+fi
+
+if it "aistack: failover on with a failing starter recreates omniroute, rc 1, no state file"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    : >"$d/fail-start-litellm"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    _aistack_seq "$d/docker.log" "stop omniroute" "up -d --no-deps omniroute" || ok=0
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the rollback used start instead of a recreate: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was written for a standby that never started" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed starter leaves the port empty"; fi
+fi
+
+if it "aistack: failover off kills the litellm listener, recreates omniroute, and a second off is a no-op"; then
+    d="$(_aistack_sandbox)"
+    _aistack_failover_on "$d"
+    standby="$(_aistack_standby_pid "$d")"
+    rm -f "$d/docker.log" "$d/events.log" "$d/curl.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    # A recreate, never a start: only `up -d` republishes the gateway port.
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was started instead of recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the standby listener (pid $standby) survived" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not running again" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "the state file survived" >&2; }
+    [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "second: exit $rc, not 0: $out" >&2; }
+    [[ "$out" == *"failover is off"* ]] || { ok=0; echo "second: no off line: $out" >&2; }
+    [[ -e "$d/docker.log" || -e "$d/events.log" ]] && { ok=0; echo "second: the no-op drove something" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover off does not restore the gateway"; fi
+fi
+
+if it "aistack: failover off when the port stays busy starts nothing, rc 1, and names the holder"; then
+    # Live 2026-09-27 13:28-13:33Z: the standby was never stopped, so the port
+    # stayed busy and the gateway never came back. After the standby kill a
+    # foreign program still holds :20128 here: off must kill the standby, then
+    # refuse to recreate the gateway and say who holds the port.
+    d="$(_aistack_sandbox)"
+    _aistack_failover_on "$d"
+    standby="$(_aistack_standby_pid "$d")"
+    sleep 300 >/dev/null 2>&1 &
+    other=$!
+    printf 'LISTEN 0 511 0.0.0.0:20128 0.0.0.0:* users:(("busy-holder",pid=%s,fd=3))\n' "$other" >"$d/ss-hold-20128"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the standby listener (pid $standby) survived" >&2; }
+    kill -0 "$other" 2>/dev/null || { ok=0; echo "the foreign holder (pid $other) was killed" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was recreated onto a busy port" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was started onto a busy port" >&2; }
+    [[ "$out" == *"$other"* && "$out" == *'busy-holder'* ]] || { ok=0; echo "the holder is not named: $out" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] || { ok=0; echo "the state file was removed while the gateway is not serving" >&2; }
+    kill "$other" 2>/dev/null || true; wait "$other" 2>/dev/null || true
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover off hides a busy gateway port"; fi
+fi
+
+if it "aistack: failover status says off and on"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    ok=1
+    out="$(_aistack "$d" failover status)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "off: exit $rc: $out" >&2; }
+    [[ "$out" == *"failover off"* ]] || { ok=0; echo "off: [$out]" >&2; }
+    _aistack "$d" failover on >/dev/null || { ok=0; echo "on failed" >&2; }
+    out="$(_aistack "$d" failover status)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "on: exit $rc: $out" >&2; }
+    [[ "$out" == *"failover on since "*"(litellm pid $(_aistack_standby_pid "$d"))"* ]] || { ok=0; echo "on: [$out]" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover status is wrong"; fi
+fi
+
+if it "aistack: verify prints the failover line when on and never FAILs it"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    ok=1
+    out="$(_aistack "$d" verify)" && rc=0 || rc=$?
+    [[ "$out" != *"failover ON"* ]] || { ok=0; echo "off: a failover line without a failover" >&2; }
+    _aistack "$d" failover on >/dev/null || { ok=0; echo "on failed" >&2; }
+    out="$(_aistack "$d" verify)" && rc=0 || rc=$?
+    grep -q 'failover ON: LiteLLM serves the gateway port' <<<"$out" || { ok=0; echo "on: no failover line" >&2; }
+    grep -q '^  FAIL.*ailover' <<<"$out" && { ok=0; echo "on: failover FAILs: $(grep '^  FAIL.*ailover' <<<"$out")" >&2; }
+    [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify does not report the standby"; fi
+fi
+
+if it "aistack: failover off never kills a foreign listener on the gateway port"; then
+    # The port is held by a program that is not litellm (a stale state file
+    # points at it too): off must leave it alive, start nothing, and exit 1
+    # naming the holder.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"   # the gateway is down; something else holds its port
+    sleep 300 >/dev/null 2>&1 &
+    other=$!
+    mkdir -p "$d/cfg/failover"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$other" >"$d/cfg/failover.state"
+    printf '%s\n' "$other" >"$d/cfg/failover/litellm.pid"   # stale pid file: cleaned, never signalled
+    printf 'LISTEN 0 511 0.0.0.0:20128 0.0.0.0:* users:(("foreign-prog",pid=%s,fd=3))\n' "$other" >"$d/ss-hold-20128"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    kill -0 "$other" 2>/dev/null || { ok=0; echo "failover off killed an unrelated process (pid $other)" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was recreated onto a busy port" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was started onto a busy port" >&2; }
+    [[ "$out" == *"$other"* && "$out" == *'foreign-prog'* ]] || { ok=0; echo "the holder is not named: $out" >&2; }
+    kill "$other" 2>/dev/null || true; wait "$other" 2>/dev/null || true
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover off killed a pid that is not the standby"; fi
+fi
+
+if it "aistack: failover on interrupted after the gateway stop hands the port back"; then
+    # A TERM (or ctrl-C) during the liveliness wait must not leave the gateway
+    # stopped with a stateless standby on its port (qoder review lstby).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    touch "$d/failover-liveliness-fail" "$d/slow-sleep"   # the wait window is real (12 x 0.5 s)
+    ( _aistack "$d" failover on >"$d/out.txt" 2>&1 ) &
+    bg=$!
+    p=""
+    for _ in $(seq 1 50); do
+        grep -q 'stop omniroute' "$d/docker.log" 2>/dev/null && p="$(pgrep -n -f "ai-stack.sh failover on" || true)" && [[ -n "$p" ]] && break
+        sleep 0.1
+    done
+    ok=1
+    if [[ -z "$p" ]]; then ok=0; echo "failover on never reached the gateway stop" >&2; else
+        sleep 1; kill -TERM "$p" 2>/dev/null || true
+    fi
+    wait "$bg" 2>/dev/null || true
+    _aistack_seq "$d/events.log" "stop omniroute" "up -d --no-deps omniroute" || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log")" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the rollback used start instead of a recreate: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was left behind" >&2; }
+    [[ -s "$d/cfg/failover/litellm.pid" ]] && { ok=0; echo "the standby pid file was left behind" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an interrupted failover on left the gateway down"; fi
+fi
+
+if it "aistack: an interrupted failover on waits a short health window, not the full timeout"; then
+    # Same hand-back, but the gateway never becomes healthy afterwards. The
+    # interrupted command must report, not sit on the terminal for the full
+    # 180 s a normal recreate allows: the trap path passes a bounded wait, so
+    # the health probe runs a handful of times instead of 37 (review lstby2c).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    touch "$d/failover-liveliness-fail" "$d/slow-sleep" "$d/unhealthy-omniroute"
+    ( _aistack "$d" failover on >"$d/out.txt" 2>&1 ) &
+    bg=$!
+    p=""
+    for _ in $(seq 1 50); do
+        grep -q 'stop omniroute' "$d/docker.log" 2>/dev/null && p="$(pgrep -n -f "ai-stack.sh failover on" || true)" && [[ -n "$p" ]] && break
+        sleep 0.1
+    done
+    ok=1
+    if [[ -z "$p" ]]; then ok=0; echo "failover on never reached the gateway stop" >&2; else
+        sleep 1; kill -TERM "$p" 2>/dev/null || true
+    fi
+    wait "$bg" 2>/dev/null || true
+    out="$(cat "$d/out.txt" 2>/dev/null)"
+    _aistack_seq "$d/events.log" "stop omniroute" "up -d --no-deps omniroute" || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    n="$(grep -c '/api/health' "$d/curl.log" 2>/dev/null)" || n=0
+    # The recreate polls /api/health until it answers; the trap's bounded wait
+    # is 6 tries plus the one that ends it.
+    (( n > 0 )) || { ok=0; echo "the recreated gateway was never probed" >&2; }
+    (( n <= 8 )) || { ok=0; echo "the hand-back waited the full timeout: $n health probes" >&2; }
+    [[ "$out" == *'interrupted'* ]] || { ok=0; echo "no interrupt line: $out" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was left behind" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "an interrupted hand-back waits the full gateway timeout"; fi
+fi
+
+if it "aistack: failover on refreshes a stale client.key from the current gateway key"; then
+    # A rotated client key must not leave the standby router serving the old
+    # one: every failover on rewrites client.key when it differs (0600 kept).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    ( umask 077; printf 'sk-stale-old-key\n' >"$d/cfg/client.key" )
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc: $out" >&2; }
+    grep -q 'sk-stale-old-key' "$d/cfg/client.key" && { ok=0; echo "client.key still holds the stale key" >&2; }
+    grep -q 'sk-test-client-key' "$d/cfg/client.key" || { ok=0; echo "client.key does not hold the current key" >&2; }
+    [[ "$(stat -c %a "$d/cfg/client.key")" == 600 ]] || { ok=0; echo "client.key mode is not 600" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover on kept a stale client key"; fi
+fi
+
+if it "aistack: failover on without a client key refuses before stopping anything"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'mistral: not-a-real-key-123\n' >"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "ran without a key: $out" >&2; }
+    [[ "$out" == *"client key"* ]] || { ok=0; echo "no key hint: $out" >&2; }
+    grep -q 'stop' "$d/docker.log" 2>/dev/null && { ok=0; echo "stopped the gateway without a key" >&2; }
+    [[ -e "$d/start-litellm.log" ]] && { ok=0; echo "started litellm without a key" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is down" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file was written without a key" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover on stops the gateway with no key to serve"; fi
+fi
+
+# ─── What counts as the standby (review lstby2c) ───────────────────────────
+# The standby and the always-on :4000 fallback unit are the SAME program
+# started by the SAME script with the SAME argv shape, so "it is litellm"
+# cannot be the whole test. Every case below plants the confusion the review
+# found - a reused pid, a second listener, a state file that vanished - and
+# asserts who gets a signal.
+
+if it "aistack: failover off never signals the always-on :4000 proxy a stale state pid now belongs to"; then
+    # The state file's pid outlived its standby and the kernel handed it to the
+    # fallback unit on :4000. Off must name it, leave it alone, and still hand
+    # the free gateway port back (failover off killed the :4000 proxy).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"      # the gateway is down: a failover ran here
+    _aistack_standby "$d" 4000
+    other="$(_aistack_standby_pid "$d")"
+    mkdir -p "$d/cfg/failover"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$other" >"$d/cfg/failover.state"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_process_alive "$other" \
+        || { ok=0; echo "the :4000 fallback proxy (pid $other) was signalled" >&2; }
+    [[ "$out" == *'leaving it alone'* ]] || { ok=0; echo "the refused pid is not named: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "the state file survived" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover off signalled the :4000 fallback proxy"; fi
+fi
+
+if it "aistack: failover off without a state file stops every standby sharing the gateway port"; then
+    # Two things: the state file is gone (a shell killed between the standby's
+    # start and the write), and ss names TWO holders of :20128 - its own IPv4
+    # and IPv6 lines, or programs sharing the socket. Probing only the first
+    # pid, or trusting only the state file, leaves one running on the port.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"
+    mkdir -p "$d/cfg/failover"           # the trace the real starter leaves: its state dir
+    _aistack_standby "$d" 20128
+    first="$(_aistack_standby_pid "$d")"
+    _aistack_standby "$d" 20128
+    second="$(_aistack_standby_pid "$d")"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    [[ "$first" =~ ^[0-9]+$ && "$second" =~ ^[0-9]+$ && "$first" != "$second" ]] \
+        || { ok=0; echo "the fake did not spawn two standbys: [$first] [$second]" >&2; }
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_wait_gone "$first"  || { ok=0; echo "the first standby (pid $first) survived" >&2; }
+    _aistack_wait_gone "$second" || { ok=0; echo "the second standby (pid $second) survived" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "a state file appeared" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a stateless failover left a standby on the gateway port"; fi
+fi
+
+if it "aistack: failover off with no state file and nothing listening is still a no-op"; then
+    # The other half: a leftover state dir with NO listener is not a failover.
+    # Nothing may be stopped, started or recreated.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    mkdir -p "$d/cfg/failover"
+    rm -f "$d/docker.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ "$out" == *'failover is off'* ]] || { ok=0; echo "no off line: $out" >&2; }
+    [[ -e "$d/docker.log" ]] && { ok=0; echo "the no-op drove docker: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway container is gone" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a stateless, listenerless off is not a no-op"; fi
+fi
+
+if it "aistack: failover off waits its TERM grace only on pids it accepted"; then
+    # A stale pid it refuses to signal is not something to wait for: waiting on
+    # it costs the full 10 s + 5 s grace for nothing. The fake `sleep` is a
+    # no-op, so the call count is what the grace costs (15 calls = both loops).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"
+    sleep 300 >/dev/null 2>&1 &
+    other=$!
+    mkdir -p "$d/cfg/failover"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$other" >"$d/cfg/failover.state"
+    _aistack_standby "$d" 20128          # the real standby, found through ss
+    standby="$(_aistack_standby_pid "$d")"
+    rm -f "$d/sleep.log" "$d/docker.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the standby (pid $standby) survived" >&2; }
+    _aistack_process_alive "$other" || { ok=0; echo "the stale pid (pid $other) was killed" >&2; }
+    n=0
+    # Read only when the fake `sleep` actually ran: a bare `<` on a missing path
+    # fails the redirection before any `2>/dev/null` applies and writes to the
+    # suite's stderr (assertion still passes, but a red line per run - review
+    # lstby2d).
+    [[ -e "$d/sleep.log" ]] && n="$(wc -l <"$d/sleep.log")" || n=0
+    (( n <= 5 )) || { ok=0; echo "the grace waited on the refused pid: $n sleep calls" >&2; }
+    kill "$other" 2>/dev/null || true; wait "$other" 2>/dev/null || true
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "failover off waited its grace on a pid it left alone"; fi
+fi
+
+if it "aistack: failover off KILLs a standby that ignores SIGTERM after the grace"; then
+    # The escalation branch, untested until the fake could be made stubborn:
+    # TERM is trapped and discarded, so only the KILL after the 10 s grace
+    # stops it. All 10 grace calls are spent (the fake sleep is a no-op), then
+    # the port is free again.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    : >"$d/standby-ignore-term"
+    ok=1
+    _aistack "$d" failover on >/dev/null || { ok=0; echo "failover on failed" >&2; }
+    standby="$(_aistack_standby_pid "$d")"
+    _aistack_process_alive "$standby" || { ok=0; echo "the stubborn standby (pid $standby) never started" >&2; }
+    rm -f "$d/sleep.log" "$d/docker.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the stubborn standby (pid $standby) survived the KILL" >&2; }
+    n="$(wc -l <"$d/sleep.log" 2>/dev/null)" || n=0
+    (( n >= 10 )) || { ok=0; echo "the TERM grace was never waited out: $n sleep calls" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "the state file survived" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a standby that ignores TERM is never escalated to KILL"; fi
+fi
+
+if it "aistack: failover off refuses when the recreated gateway publishes nothing, {} or null"; then
+    # `{"20128/tcp":null}` is docker's own "key exists, nothing bound": as
+    # broken for a client as `{}` - the gateway answers inside its own network
+    # while the host port stays closed. Both shapes must land on the manual fix.
+    ok=1
+    for marker in noports nullports; do
+        d="$(_aistack_sandbox)"
+        _aistack_failover_on "$d"
+        : >"$d/$marker-autoos-omniroute"
+        out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+        (( rc == 1 )) || { ok=0; echo "[$marker]: exit $rc, not 1: $out" >&2; }
+        [[ "$out" == *'publishes no port'* ]] || { ok=0; echo "[$marker]: no port complaint: $out" >&2; }
+        [[ "$out" == *'fix by hand:'*'up omniroute'* ]] || { ok=0; echo "[$marker]: no manual fix: $out" >&2; }
+        grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+            || { ok=0; echo "[$marker]: the gateway was never recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+        [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "[$marker]: the client key is in the output" >&2; }
+        _aistack_kill_standby "$d"
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "a port-less gateway passes as restored"; fi
+fi
+
+if it "aistack: failover off recreates the gateway through the preflight guards"; then
+    # Handing the port back is a `compose up` like any other: a LAN bind with
+    # the firewall unit down must refuse BEFORE docker is asked for anything,
+    # and say the manual fix. A raw `docker compose up` here would publish the
+    # stack past the guard.
+    d="$(_aistack_sandbox)"
+    _aistack_failover_on "$d"
+    rm -f "$d/active-coding-agents-fw" "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    [[ "$out" == *'refusing to publish'* ]] || { ok=0; echo "the bind guard did not refuse: $out" >&2; }
+    [[ "$out" == *'fix by hand:'*'up omniroute'* ]] || { ok=0; echo "no manual fix: $out" >&2; }
+    [[ -e "$d/docker.log" ]] && { ok=0; echo "compose ran past the guard: $(cat "$d/docker.log")" >&2; }
+    grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the gateway was started, not recreated" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the failover hand-back bypasses the publish guards"; fi
+fi
+
+if it "aistack: failover on whose state write failed leaves no state path and the gateway back"; then
+    # The standby is live but the state file cannot be written. Whatever
+    # survived of the write must be removed - a truncated file reads as a live
+    # failover with a pid of its own - and the port handed back.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    mkdir -p "$d/cfg"
+    ln -s "$d/cfg/nowhere/failover.state" "$d/cfg/failover.state"   # unresolvable target
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "exit $rc, not 1: $out" >&2; }
+    [[ "$out" == *'could not record the failover state'* ]] || { ok=0; echo "no complaint: $out" >&2; }
+    [[ -e "$d/cfg/failover.state" || -L "$d/cfg/failover.state" ]] && { ok=0; echo "the state path survived" >&2; }
+    _aistack_process_alive "$(_aistack_standby_pid "$d")" \
+        && { ok=0; echo "the standby survived the rollback" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ "$out" == *'sk-test-client-key'* ]] && { ok=0; echo "the client key is in the output" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a failed state write leaves a phantom failover"; fi
+fi
+
+if it "aistack: failover on records the standby argv the real proxy carries"; then
+    # Item 10 is about the fake: a standby identified by its argv must look
+    # like the real thing, or every argv-based test proves nothing. The real
+    # starter runs `litellm --config config.yaml --host <bind> --port <port>`.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" failover on)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    pid="$(_aistack_standby_pid "$d")"
+    argv="$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null)"
+    [[ "$argv" == *litellm* ]] || { ok=0; echo "argv is not litellm: [$argv]" >&2; }
+    [[ "$argv" == *'--config config.yaml'* ]] || { ok=0; echo "no --config in the argv: [$argv]" >&2; }
+    [[ "$argv" == *'--host 127.0.0.1 --port 20128'* ]] || { ok=0; echo "no --host/--port 20128: [$argv]" >&2; }
+    [[ "$argv" != *'sk-test-client-key'* ]] || { ok=0; echo "the client key is in the argv" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "the fake standby does not look like a real proxy"; fi
+fi
+
+if it "aistack: failover off accepts a gateway already serving the port and clears the stale state"; then
+    # omniroute already owns :20128 (recreated by hand, or a standby exited and
+    # the gateway bound again) while the state file still says a failover is on.
+    # Proving the holder is the gateway - the container running, its port
+    # published, /api/health 200 - must let off clear the record instead of
+    # refusing for ever on a busy port (review lstby2d). A foreign holder still
+    # goes to the refusal (the next test).
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    # A pid that is real (was a genuine process, so /proc once had it) but
+    # provably gone by the time `off` reads it: fork a subshell that exits on
+    # its own and `wait` for that exit (a signal is never in the loop) -
+    # `sleep 300 & ...; kill; wait` used to do this by racing a TERM against
+    # the sleep's own timeout. That race intermittently lost deep in this
+    # suite's long-lived shell (kill reported success, wait still blocked for
+    # the sleep's full 300 s - reproduced twice; a fresh, otherwise-idle shell
+    # never lost it in 260+ tries), which is exactly the 5+ minute stall this
+    # file used to add to `--filter=failover` (lstby2e). Waiting on a job that
+    # dies by itself needs no signal to land in time, so the race cannot recur.
+    ( : ) &
+    dead=$!
+    wait "$dead" 2>/dev/null || true
+    mkdir -p "$d/cfg"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$dead" >"$d/cfg/failover.state"
+    rm -f "$d/docker.log" "$d/events.log" "$d/curl.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ -e "$d/cfg/failover.state" ]] && { ok=0; echo "the stale state file survived" >&2; }
+    [[ "$out" == *'failover is off'* ]] || { ok=0; echo "no off line: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        && { ok=0; echo "the serving gateway was recreated: $(cat "$d/docker.log")" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway container was stopped" >&2; }
+    out="$(_aistack "$d" failover status)"
+    [[ "$out" == *'failover off'* ]] || { ok=0; echo "status still on: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "off refuses on a gateway that already serves the port"; fi
+fi
+
+if it "aistack: failover off stops a standby holding the gateway port with no state dir"; then
+    # The state dir the real starter creates can be gone (cleared by hand) while
+    # the standby still serves :20128. The listener is the proof, so off must
+    # stop it and hand the port back rather than treat it as a no-op (review
+    # lstby2d). The dir is only a hint, never a gate.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"          # the gateway is down: a failover ran here
+    _aistack_standby "$d" 20128              # the fake starter creates no state dir
+    standby="$(_aistack_standby_pid "$d")"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    [[ -d "$d/cfg/failover" ]] && { ok=0; echo "the test left a state dir behind" >&2; }
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    _aistack_wait_gone "$standby" || { ok=0; echo "the standby (pid $standby) survived" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
+    _aistack_kill_standby "$d"
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "off missed a standby with no state dir"; fi
+fi
+
+if it "aistack: failover off names a stale state pid as already gone, not as a foreign program"; then
+    # A pid the state file names that is simply gone is not "a foreign program
+    # now": the operator needs the distinction (review lstby2d). off still hands
+    # the free port back to the gateway.
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    rm -f "$d/run-autoos-omniroute"          # the gateway is down: a failover ran here
+    # See the sibling "already serving the port" case above for why this is a
+    # self-exiting subshell rather than a killed `sleep 300` (lstby2e).
+    ( : ) &
+    dead=$!
+    wait "$dead" 2>/dev/null || true
+    mkdir -p "$d/cfg"
+    printf 'since=2026-09-27T00:00:00+0000\npid=%s\n' "$dead" >"$d/cfg/failover.state"
+    rm -f "$d/docker.log" "$d/events.log"
+    out="$(_aistack "$d" failover off)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    [[ "$out" == *"pid $dead is already gone"* ]] || { ok=0; echo "the gone pid is not named: $out" >&2; }
+    [[ "$out" != *'not litellm any more'* ]] || { ok=0; echo "a gone pid was called foreign: $out" >&2; }
+    grep -q 'up -d --no-deps omniroute' "$d/docker.log" 2>/dev/null \
+        || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
+    [[ -e "$d/run-autoos-omniroute" ]] || { ok=0; echo "the gateway is not back" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "a gone state pid is not distinguished from a foreign one"; fi
+fi
+
+
+# ─── opencode-rotate (edge secret refresh) ────────────────────────────────────
+# Each test name carries "rotate" so `--filter rotate` reaches all of them.
+
+if it "aistack rotate: webhook not configured -> skipped rc0, no POST"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    # api-keys.yml has no semaphore_edge_webhook_url/_header/_token
+    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"webhook not configured"* ]] || { ok=0; echo "no skip message: $out" >&2; }
+    [[ ! -e "$d/edge-webhook-call.log" ]] || { ok=0; echo "POST was made: $(cat "$d/edge-webhook-call.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate skips when webhook not configured"; fi
+fi
+
+if it "aistack rotate: REPLACE_WITH_ placeholder = not configured"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: REPLACE_WITH_URL\nsemaphore_edge_webhook_header: REPLACE_WITH_HEADER\nsemaphore_edge_webhook_token: REPLACE_WITH_TOKEN\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"webhook not configured"* ]] || { ok=0; echo "no skip message: $out" >&2; }
+    [[ ! -e "$d/edge-webhook-call.log" ]] || { ok=0; echo "POST was made: $(cat "$d/edge-webhook-call.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate treats REPLACE_WITH_ as not configured"; fi
+fi
+
+if it "aistack rotate: non-http URL -> rc1 without echoing it"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: not-a-url\nsemaphore_edge_webhook_header: X-Test\nsemaphore_edge_webhook_token: value\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"not an http(s) URL"* ]] || { ok=0; echo "no error message: $out" >&2; }
+    [[ "$out" != *"not-a-url"* ]] || { ok=0; echo "URL was echoed: $out" >&2; }
+    [[ ! -e "$d/edge-webhook-call.log" ]] || { ok=0; echo "POST was made: $(cat "$d/edge-webhook-call.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate rejects non-http URL without echoing it"; fi
+fi
+
+if it "aistack rotate: happy path - init + up opencode happen, POST once, 2xx line, state 0600"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\nopencode_password: "rotate-new-pass"\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"webhook accepted (HTTP 200) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"* ]] || { ok=0; echo "no success message: $out" >&2; }
+    # Step 1 ran: init wrote the new password from api-keys.yml into opencode.env
+    grep -q 'rotate-new-pass' "$d/cfg/opencode.env" 2>/dev/null || { ok=0; echo "init did not write the new password to opencode.env: $(grep -c . "$d/cfg/opencode.env" 2>/dev/null || echo missing)" >&2; }
+    # Step 2 ran: compose up was invoked for the running opencode container
+    # (cmd_up appends it to start; compose recreates it on the changed env_file)
+    grep -q 'up -d --no-deps opencode' "$d/docker.log" 2>/dev/null || { ok=0; echo "opencode was not recreated: $(grep -c . "$d/docker.log" 2>/dev/null || echo no docker calls)" >&2; }
+    [[ -e "$d/cfg/edge-webhook.state" ]] || { ok=0; echo "state file not created: $(ls -la "$d/cfg/")" >&2; }
+    [[ "$(stat -c %a "$d/cfg/edge-webhook.state")" == 600 ]] || { ok=0; echo "state not 0600: $(stat -c %a "$d/cfg/edge-webhook.state")" >&2; }
+    # Verify the call was made
+    [[ -e "$d/edge-webhook-call.log" ]] || { ok=0; echo "no call logged: $(cat "$d/edge-webhook-call.log" 2>/dev/null || echo missing)" >&2; }
+    # Verify the call used -H @file (header not in argv)
+    # curl.log has the argv, edge-webhook-call.log has the header file content
+    curl_log="$(cat "$d/curl.log" 2>/dev/null || echo "")"
+    [[ "$curl_log" != *"mysecret"* ]] || { ok=0; echo "header value in curl argv: $curl_log" >&2; }
+    [[ "$curl_log" != *"rotate-new-pass"* ]] || { ok=0; echo "password in curl argv: $curl_log" >&2; }
+    [[ "$curl_log" != *"X-AutoOS-Token"* ]] || { ok=0; echo "header name in curl argv: $curl_log" >&2; }
+    # Verify the header file content equals "X-AutoOS-Token: mysecret" in edge-webhook-call.log
+    call_log="$(cat "$d/edge-webhook-call.log")"
+    [[ "$call_log" == *"X-AutoOS-Token: mysecret"* ]] || { ok=0; echo "header file content not recorded correctly: $call_log" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate happy path failed"; fi
+fi
+
+if it "aistack rotate: http URL warns cleartext (rc 0), https URL does not warn"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"! edge: webhook URL is not https - the token crosses the network in cleartext"* ]] || { ok=0; echo "no cleartext warning: $out" >&2; }
+    # The https variant: the URL joins the hash, so the POST fires again, without the warning
+    sed -i 's#http://edge.example#https://edge.example#' "$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=https://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "rc=$rc on https: $out" >&2; }
+    [[ "$out" == *"webhook accepted (HTTP 200)"* ]] || { ok=0; echo "https run did not POST: $out" >&2; }
+    [[ "$out" != *"not https"* ]] || { ok=0; echo "https run warned about cleartext: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate http/https cleartext warning failed"; fi
+fi
+
+if it "aistack rotate: second run -> skipped, no POST"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    # First run
+    _aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate >/dev/null
+    # Second run
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"password unchanged since the last webhook - skipped"* ]] || { ok=0; echo "no skip message: $out" >&2; }
+    # Call log should only have one entry (from first run)
+    call_count="$(grep -c '^url=' "$d/edge-webhook-call.log" 2>/dev/null || echo 0)"
+    [[ "$call_count" == 1 ]] || { ok=0; echo "call count=$call_count (expected 1): $(cat "$d/edge-webhook-call.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate second run not skipped"; fi
+fi
+
+if it "aistack rotate: password changed in api-keys.yml -> POST again"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\nopencode_password: "first-pass"\n' >>"$d/repo/api-keys.yml"
+    # First run with first-pass
+    _aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate >/dev/null
+    # Change the password
+    sed -i 's/opencode_password: "first-pass"/opencode_password: "second-pass"/' "$d/repo/api-keys.yml"
+    # Second run
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"webhook accepted (HTTP 200) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"* ]] || { ok=0; echo "no success message on changed password: $out" >&2; }
+    # Call log should have two entries
+    call_count="$(grep -c '^url=' "$d/edge-webhook-call.log" 2>/dev/null || echo 0)"
+    [[ "$call_count" == 2 ]] || { ok=0; echo "call count=$call_count (expected 2): $(cat "$d/edge-webhook-call.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate does not POST when password changes"; fi
+fi
+
+if it "aistack rotate: --force re-POSTs"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    # First run
+    _aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate >/dev/null
+    # Second run with --force
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 --force opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"webhook accepted (HTTP 200) - the Semaphore template refreshes the edge secret; its task result is the check (a wrong token also gets 2xx)"* ]] || { ok=0; echo "no success message on --force: $out" >&2; }
+    # Call log should have two entries
+    call_count="$(grep -c '^url=' "$d/edge-webhook-call.log" 2>/dev/null || echo 0)"
+    [[ "$call_count" == 2 ]] || { ok=0; echo "call count=$call_count (expected 2): $(cat "$d/edge-webhook-call.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate --force does not re-POST"; fi
+fi
+
+if it "aistack rotate: 302 -> rc1 'redirected', state not written"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=302 opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"webhook redirected (HTTP 302) - not followed"* ]] || { ok=0; echo "no redirect message: $out" >&2; }
+    [[ ! -e "$d/cfg/edge-webhook.state" ]] || { ok=0; echo "state file was written on redirect: $(cat "$d/cfg/edge-webhook.state")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate 302 handling failed"; fi
+fi
+
+if it "aistack rotate: 500 -> rc1"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=500 opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"webhook failed (HTTP 500)"* ]] || { ok=0; echo "no 500 message: $out" >&2; }
+    [[ ! -e "$d/cfg/edge-webhook.state" ]] || { ok=0; echo "state file was written on 500" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate 500 handling failed"; fi
+fi
+
+if it "aistack rotate: 000 -> 'unreachable'"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=000 opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"webhook unreachable"* ]] || { ok=0; echo "no unreachable message: $out" >&2; }
+    [[ ! -e "$d/cfg/edge-webhook.state" ]] || { ok=0; echo "state file was written on 000" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate 000 handling failed"; fi
+fi
+
+if it "aistack rotate: fake curl's recorded argv contains neither the header value nor the password (header via -H @file)"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\nopencode_password: "pinned-pass"\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)"
+    ok=1
+    # Check curl.log for the actual argv - header value, password, and header name
+    # should NOT be in the argv (header is passed via -H @file)
+    curl_log="$(cat "$d/curl.log" 2>/dev/null || echo "")"
+    [[ "$curl_log" != *"mysecret"* ]] || { ok=0; echo "header value in curl argv: $curl_log" >&2; }
+    [[ "$curl_log" != *"pinned-pass"* ]] || { ok=0; echo "password in curl argv: $curl_log" >&2; }
+    [[ "$curl_log" != *"X-AutoOS-Token"* ]] || { ok=0; echo "header name in curl argv: $curl_log" >&2; }
+    # Check that no output line (script's stdout/stderr) contains url/header/password
+    [[ "$out" != *"http://edge.example"* ]] || { ok=0; echo "URL in output: $out" >&2; }
+    [[ "$out" != *"mysecret"* ]] || { ok=0; echo "header value in output: $out" >&2; }
+    [[ "$out" != *"pinned-pass"* ]] || { ok=0; echo "password in output: $out" >&2; }
+    [[ "$out" != *"X-AutoOS-Token"* ]] || { ok=0; echo "header name in output: $out" >&2; }
+    # Check that the recorded call log (not argv) has the header file content
+    call_log="$(cat "$d/edge-webhook-call.log" 2>/dev/null || echo "")"
+    [[ "$call_log" == *"X-AutoOS-Token: mysecret"* ]] || { ok=0; echo "header file content not in call log: $call_log" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "secrets leaked in curl argv or output"; fi
+fi
+
+if it "aistack rotate: --dry-run -> no POST, no state"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 --dry-run opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"would POST the edge webhook"* ]] || { ok=0; echo "no dry-run message: $out" >&2; }
+    [[ ! -e "$d/edge-webhook-call.log" ]] || { ok=0; echo "POST was made in dry-run: $(cat "$d/edge-webhook-call.log")" >&2; }
+    [[ ! -e "$d/cfg/edge-webhook.state" ]] || { ok=0; echo "state file was written in dry-run" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate --dry-run made a POST or wrote state"; fi
+fi
+
+if it "aistack rotate: header temp file cleaned up after success"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=200 opencode-rotate)"
+    ok=1
+    # Check that no .edge-webhook-header-* files remain in CONFIG_DIR
+    header_files="$(ls "$d/cfg"/.edge-webhook-header-* 2>/dev/null | wc -l)"
+    [[ "$header_files" == 0 ]] || { ok=0; echo "header temp files remain: $(ls "$d/cfg"/.edge-webhook-header-* 2>/dev/null)" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate leaves header temp file on success"; fi
+fi
+
+if it "aistack rotate: header temp file cleaned up after failure"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: X-AutoOS-Token\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" AISTACK_EDGE_WEBHOOK_URL=http://edge.example/refresh AISTACK_FAKE_WEBHOOK_CODE=500 opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    # Even on failure, the header temp file should be cleaned up
+    header_files="$(ls "$d/cfg"/.edge-webhook-header-* 2>/dev/null | wc -l)"
+    [[ "$header_files" == 0 ]] || { ok=0; echo "header temp files remain on failure: $(ls "$d/cfg"/.edge-webhook-header-* 2>/dev/null)" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate leaves header temp file on failure"; fi
+fi
+
+if it "aistack rotate: invalid header name -> rc1 not a header name"; then
+    d="$(_aistack_sandbox)"
+    _aistack_migrated "$d"
+    printf 'semaphore_edge_webhook_url: http://edge.example/refresh\nsemaphore_edge_webhook_header: Invalid Header!\nsemaphore_edge_webhook_token: mysecret\n' >>"$d/repo/api-keys.yml"
+    out="$(_aistack "$d" opencode-rotate)" && rc=0 || rc=$?
+    ok=1
+    (( rc == 1 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"not a header name"* ]] || { ok=0; echo "no error message: $out" >&2; }
+    [[ ! -e "$d/edge-webhook-call.log" ]] || { ok=0; echo "POST was made: $(cat "$d/edge-webhook-call.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "rotate rejects invalid header name"; fi
+fi
+
+# ─── WS-OMNIREMOTE gateway keys (gwkey) ───────────────────────────────────────
+# The client key field is named by gateway: omniroute_server for a non-local
+# gateway, omniroute_<host> for the local one. Fixtures only (sk-test-*):
+# the resolved VALUE is asserted, while notices/deprecations/errors must name
+# the FIELD and never a value or the URL.
+
+if it "gwkey: python unit tests for tools/autoos_gateway_key.py"; then
+    out="$(python3 tests/test_autoos_gateway_key.py 2>&1)" && pass || fail "$(printf '%s
+' "$out" | tail -n 20)"
+fi
+
+if it "gwkey: new local field omniroute_<host> resolves"; then
+    d="$(mktemp -d)"
+    printf 'omniroute_testhost: sk-test-local\n' >"$d/keys.yml"
+    field="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        unset AUTOOS_OMNIROUTE_URL AUTOOS_OMNIROUTE_KEY
+        autoos_client_key_field ) 2>"$d/err" )"; rc=$?
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        unset AUTOOS_OMNIROUTE_URL AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>>"$d/err" )" || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$field" == "omniroute_testhost" ]] || { ok=0; echo "field=$field" >&2; }
+    [[ "$key" == "sk-test-local" ]] || { ok=0; echo "key=$key" >&2; }
+    [[ -s "$d/err" ]] && { ok=0; echo "stderr not empty: $(cat "$d/err")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "local gateway does not resolve omniroute_<host>"; fi
+fi
+
+if it "gwkey: new server field omniroute_server resolves"; then
+    d="$(mktemp -d)"
+    printf 'omniroute_server: sk-test-server\n' >"$d/keys.yml"
+    field="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="https://gw.example.com"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_client_key_field ) 2>"$d/err" )"; rc=$?
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="https://gw.example.com"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>>"$d/err" )" || rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$field" == "omniroute_server" ]] || { ok=0; echo "field=$field" >&2; }
+    [[ "$key" == "sk-test-server" ]] || { ok=0; echo "key=$key" >&2; }
+    [[ -s "$d/err" ]] && { ok=0; echo "stderr not empty: $(cat "$d/err")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "non-local gateway does not resolve omniroute_server"; fi
+fi
+
+if it "gwkey: legacy local omniroute warns once and resolves"; then
+    d="$(mktemp -d)"
+    printf 'omniroute: sk-test-legacy\n' >"$d/keys.yml"
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>"$d/err" )"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$key" == "sk-test-legacy" ]] || { ok=0; echo "key=$key" >&2; }
+    [[ "$(grep -c . "$d/err")" == 1 ]] || { ok=0; echo "not one line: $(cat "$d/err")" >&2; }
+    [[ "$(cat "$d/err")" == *"'omniroute'"*"'omniroute_testhost'"* ]] \
+        || { ok=0; echo "no old+new field: $(cat "$d/err")" >&2; }
+    [[ "$(cat "$d/err")" == *"sk-test-legacy"* ]] && { ok=0; echo "value leaked" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "legacy local field does not warn once and resolve"; fi
+fi
+
+if it "gwkey: legacy server omniroute_client_<host> warns once and resolves"; then
+    d="$(mktemp -d)"
+    printf 'omniroute_client_testhost: sk-test-legacy\n' >"$d/keys.yml"
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="https://gw.example.com"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>"$d/err" )"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$key" == "sk-test-legacy" ]] || { ok=0; echo "key=$key" >&2; }
+    [[ "$(grep -c . "$d/err")" == 1 ]] || { ok=0; echo "not one line: $(cat "$d/err")" >&2; }
+    [[ "$(cat "$d/err")" == *"'omniroute_client_testhost'"*"'omniroute_server'"* ]] \
+        || { ok=0; echo "no old+new field: $(cat "$d/err")" >&2; }
+    [[ "$(cat "$d/err")" == *"sk-test-legacy"* ]] && { ok=0; echo "value leaked" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "legacy server field does not warn once and resolve"; fi
+fi
+
+if it "gwkey: missing key names the expected field, never the value or URL"; then
+    d="$(mktemp -d)"
+    printf 'unrelated: sk-test-decoy\n' >"$d/keys.yml"
+    ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="https://gw.example.com"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" >/dev/null 2>"$d/server-err" ) && rc=0 || rc=$?
+    ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" >/dev/null 2>"$d/local-err" ) && rc2=0 || rc2=$?
+    ok=1
+    (( rc != 0 )) || { ok=0; echo "server case did not fail" >&2; }
+    (( rc2 != 0 )) || { ok=0; echo "local case did not fail" >&2; }
+    [[ "$(cat "$d/server-err")" == *"'omniroute_server'"* ]] \
+        || { ok=0; echo "server message: $(cat "$d/server-err")" >&2; }
+    [[ "$(cat "$d/server-err")" == *"non-local"* ]] \
+        || { ok=0; echo "server message: $(cat "$d/server-err")" >&2; }
+    [[ "$(cat "$d/local-err")" == *"'omniroute_testhost'"* ]] \
+        || { ok=0; echo "local message: $(cat "$d/local-err")" >&2; }
+    [[ "$(cat "$d/local-err")" == *"a local gateway"* ]] \
+        || { ok=0; echo "local message: $(cat "$d/local-err")" >&2; }
+    [[ "$(cat "$d/server-err")" == *"gw.example.com"* ]] && { ok=0; echo "URL leaked (server)" >&2; }
+    [[ "$(cat "$d/local-err")" == *"127.0.0.1"* ]] && { ok=0; echo "URL leaked (local)" >&2; }
+    grep -q "sk-test-decoy" "$d/server-err" "$d/local-err" && { ok=0; echo "value leaked" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "missing key does not name the expected field"; fi
+fi
+
+if it "gwkey: loopback spellings are local, bare names are not"; then
+    out="$( ( . "$ROOT/lib/linux/install.sh"
+        # Local URLs (should all return 'local')
+        for u in \
+            "" \
+            "http://127.0.0.1:20128" \
+            "http://localhost:20128" \
+            "https://localhost" \
+            "http://[::1]:20128" \
+            "http://LOCALHOST:20128/" \
+            "http://user:pass@127.0.0.1:8080" \
+            "http://user@127.0.0.1:8080" \
+            "http://user:pass@localhost:8080" \
+            "http://user:pass@[::1]:8080"; do
+            if is_local_gateway "$u"; then printf 'local\n'; else printf 'remote\n'; fi
+        done
+        # Non-local URLs (should all return 'remote')
+        for u in \
+            "not-a-url" \
+            "https://gw.example.com" \
+            "http://server:20128" \
+            "http://[::2]:20128"; do
+            if is_local_gateway "$u"; then printf 'local\n'; else printf 'remote\n'; fi
+        done ) 2>/dev/null )"
+    # 10 local + 4 remote = 14 lines
+    expected="$(printf 'local\nlocal\nlocal\nlocal\nlocal\nlocal\nlocal\nlocal\nlocal\nlocal\nremote\nremote\nremote\nremote')"
+    if [[ "$out" == "$expected" ]]; then
+        pass
+    else
+        fail "loopback classification wrong: [$out]"
+    fi
+fi
+
+if it "gwkey: setup --host-name writes host.yml when missing"; then
+    d="$(mktemp -d)"
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name testhost 2>&1)"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ -f "$d/host.yml" ]] || { ok=0; echo "not written: $out" >&2; }
+    [[ "$(cat "$d/host.yml" 2>/dev/null)" == "host_name: testhost" ]] \
+        || { ok=0; echo "content: $(cat "$d/host.yml" 2>/dev/null)" >&2; }
+    [[ "$out" == *"$d/host.yml"* ]] || { ok=0; echo "path not announced: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "setup --host-name does not write a missing host.yml"; fi
+fi
+
+if it "gwkey: setup --host-name never overwrites an existing host.yml"; then
+    d="$(mktemp -d)"
+    printf 'host_name: original\n' >"$d/host.yml"
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name other 2>&1)"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$(cat "$d/host.yml")" == "host_name: original" ]] || { ok=0; echo "overwritten: $(cat "$d/host.yml")" >&2; }
+    [[ "$out" == *"skipped"* ]] || { ok=0; echo "no skipped line: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "setup --host-name overwrote host.yml"; fi
+fi
+
+if it "gwkey: setup --host-name defaults to the short hostname"; then
+    d="$(mktemp -d)"
+    expected="$( ( . "$ROOT/lib/linux/install.sh"
+        _normalize_hostname "$(hostname -s 2>/dev/null || hostname 2>/dev/null || echo localhost)" ) 2>/dev/null )"
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name 2>&1)"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$(cat "$d/host.yml" 2>/dev/null)" == "host_name: $expected" ]] \
+        || { ok=0; echo "content: $(cat "$d/host.yml" 2>/dev/null) expected host_name: $expected" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "setup --host-name has no hostname default"; fi
+fi
+
+if it "gwkey: python gateway-key suite passes"; then
+    out="$(cd "$ROOT" && python3 -m unittest discover -s tests -p "test_autoos_gateway_key.py" 2>&1)"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc: $out" >&2; }
+    [[ "$out" == *"OK"* ]] || { ok=0; echo "no OK: $out" >&2; }
+    if (( ok )); then pass; else fail "test_autoos_gateway_key.py fails"; fi
+fi
+
+# F1: both key-file shapes (name=value AND name: value) x four field names
+# new local (omniroute_<host>), new server (omniroute_server),
+# legacy local (omniroute), legacy server (omniroute_client_<host>)
+if it "gwkey: F1 both key-file shapes x four field names"; then
+    d="$(mktemp -d)"
+    ok=1
+    # Test each shape with each field name
+    for shape in 'colon' 'equals'; do
+        for field_case in 'new_local' 'new_server' 'legacy_local' 'legacy_server'; do
+            case $field_case in
+                new_local)
+                    field="omniroute_testhost"
+                    url="http://127.0.0.1:20128"
+                    ;;
+                new_server)
+                    field="omniroute_server"
+                    url="https://gw.example.com"
+                    ;;
+                legacy_local)
+                    field="omniroute"
+                    url="http://127.0.0.1:20128"
+                    ;;
+                legacy_server)
+                    field="omniroute_client_testhost"
+                    url="https://gw.example.com"
+                    ;;
+            esac
+            
+            if [[ $shape == 'colon' ]]; then
+                printf '%s: sk-test-%s\n' "$field" "$field_case" >"$d/keys.yml"
+            else
+                printf '%s=sk-test-%s\n' "$field" "$field_case" >"$d/keys.yml"
+            fi
+            
+            key="$( ( . "$ROOT/lib/linux/install.sh"
+                export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+                export AUTOOS_OMNIROUTE_URL="$url"
+                unset AUTOOS_OMNIROUTE_KEY
+                autoos_resolve_client_key "$d/keys.yml" ) 2>"$d/err" )"; rc=$?
+            
+            if (( rc != 0 )) || [[ "$key" != "sk-test-$field_case" ]]; then
+                ok=0
+                echo "shape=$shape field=$field_case: rc=$rc key=$key" >&2
+            fi
+            
+            # Check deprecation warning for legacy fields
+            if [[ $field_case == legacy_* ]]; then
+                warns="$(grep -c 'deprecated' "$d/err" 2>/dev/null)"
+                warns="${warns:-0}"
+                if [[ $warns != 1 ]]; then
+                    ok=0
+                    echo "shape=$shape field=$field_case: expected 1 deprecation warning, got $warns" >&2
+                fi
+            else
+                warns="$(grep -c 'deprecated' "$d/err" 2>/dev/null)"
+                warns="${warns:-0}"
+                if [[ $warns != 0 ]]; then
+                    ok=0
+                    echo "shape=$shape field=$field_case: expected 0 deprecation warnings, got $warns" >&2
+                fi
+            fi
+            
+            # Check value never leaked
+            if grep -q "sk-test-$field_case" "$d/err" 2>/dev/null; then
+                ok=0
+                echo "shape=$shape field=$field_case: value leaked" >&2
+            fi
+        done
+    done
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "F1: key-file shapes x field names failed"; fi
+fi
+
+# F2: a host.yml with a UTF-8 BOM is read
+if it "gwkey: F2 host.yml with UTF-8 BOM is read"; then
+    d="$(mktemp -d)"
+    # Write host.yml with BOM
+    printf '\xEF\xBB\xBFhost_name: bomhost\n' >"$d/host.yml"
+    # Test that host name from host.yml is used (BOM not in value)
+    # Do NOT set AUTOOS_HOST_NAME so host.yml is used
+    key="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_CONFIG="$d/host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        printf 'omniroute_bomhost: sk-test-bom\n' >"$d/keys.yml"
+        autoos_resolve_client_key "$d/keys.yml" ) 2>&1 )"; rc=$?
+    ok=1
+    (( rc == 0 )) || { ok=0; echo "rc=$rc" >&2; }
+    [[ "$key" == "sk-test-bom" ]] || { ok=0; echo "key=$key" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "F2: host.yml with BOM not read correctly"; fi
+fi
+
+# One table, three implementations: the same rows are read by the Python and PowerShell tests
+if it "gwkey: the shared URL table classifies every row the same way"; then
+    table="$ROOT/tests/fixtures/gateway-url-classification.json"
+    bad=""; n=0
+    while IFS= read -r -d '' want && IFS= read -r -d '' u; do
+        n=$((n+1))
+        got=remote; ( . "$ROOT/lib/linux/install.sh"; is_local_gateway "$u" ) 2>/dev/null && got=local
+        [[ "$got" == "$want" ]] || bad="$bad [$want!=$got:$(printf '%q' "$u")]"
+    done < <(python3 -c '
+import json, sys
+for r in json.load(open(sys.argv[1], encoding="utf-8")):
+    sys.stdout.write(("local" if r["local"] else "remote") + chr(0) + r["url"] + chr(0))
+' "$table")
+    if (( n > 60 )) && [[ -z "$bad" ]]; then pass; else fail "table rows=$n wrong:$bad"; fi
+fi
+
+# Authority parsing: path, query and fragment never contribute userinfo or a host
+if it "gwkey: an @ or ? or # after the authority does not change the host"; then
+    out="$( ( . "$ROOT/lib/linux/install.sh"
+        for u in             "http://evil.example/x@127.0.0.1"             "http://evil.example#@127.0.0.1"             "http://evil.example?x=@127.0.0.1"             "http://localhost."             "http://127.0.0.2"             "http://0.0.0.0"             "http://127.0.0.1/x@y"             "http://localhost?x=1"             "http://127.0.0.1#frag"             "http://127.0.0.1:20128/v1?k=a@b"; do
+            if is_local_gateway "$u"; then printf 'local
+'; else printf 'remote
+'; fi
+        done ) 2>/dev/null )"
+    expected="$(printf 'remote
+remote
+remote
+remote
+remote
+remote
+local
+local
+local
+local')"
+    if [[ "$out" == "$expected" ]]; then pass; else fail "authority parsing wrong: [$out]"; fi
+fi
+
+# F4: URL classification tests
+if it "gwkey: F4 URL classification (userinfo, spaces, tilde expansion)"; then
+    d="$(mktemp -d)"
+    ok=1
+    # Test is_local_gateway with various URLs
+    # Loopback addresses: 127.0.0.1, localhost, [::1] -> local
+    # Non-loopback: gw.example.com -> remote
+    # Userinfo (user:p@ss@) and whitespace should be handled correctly
+    out="$( ( . "$ROOT/lib/linux/install.sh"
+        for u in \
+            "http://user:p@ss@127.0.0.1:20128" \
+            "http://a@b@gw.example.com" \
+            "  http://127.0.0.1:20128  " \
+            "http://user:p@ss@localhost:20128" \
+            "http://user:p@ss@[::1]:20128"; do
+            if is_local_gateway "$u"; then printf 'local\n'; else printf 'remote\n'; fi
+        done ) 2>/dev/null )"
+    # Correct: 127.0.0.1=local, gw.example.com=remote, 127.0.0.1(ws)=local, localhost=local, [::1]=local
+    expected="$(printf 'local\nremote\nlocal\nlocal\nlocal')"
+    if [[ "$out" != "$expected" ]]; then
+        ok=0
+        echo "URL classification failed: got [$out], expected [$expected]" >&2
+    fi
+    
+    # Test tilde expansion in AUTOOS_HOST_CONFIG
+    fakehome="$(mktemp -d)"
+    mkdir -p "$fakehome/x"
+    printf 'host_name: tildehost\n' >"$fakehome/x/host.yml"
+    key="$( ( export HOME="$fakehome"; . "$ROOT/lib/linux/install.sh"
+        # shellcheck disable=SC2088  # the literal ~ is the point: the resolver expands it itself
+        export AUTOOS_HOST_CONFIG="~/x/host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        printf 'omniroute_tildehost: sk-test-tilde\n' >"$d/keys.yml"
+        autoos_resolve_client_key "$d/keys.yml" ) 2>&1 )"; rc=$?
+    if (( rc != 0 )) || [[ "$key" != "sk-test-tilde" ]]; then
+        ok=0
+        echo "tilde expansion failed: rc=$rc key=$key" >&2
+    fi
+    rm -rf "$fakehome" "$d"
+    if (( ok )); then pass; else fail "F4: URL classification/tilde expansion failed"; fi
+fi
+
+# F5: setup.sh --host-name x --dry-run writes nothing and prints "would write";
+# a real run writes; a second real run reports skipped
+if it "gwkey: F5 setup.sh --host-name --dry-run writes nothing"; then
+    d="$(mktemp -d)"
+    ok=1
+    # Dry run
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name testhost --dry-run 2>&1)"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "dry run rc=$rc: $out" >&2; }
+    [[ -f "$d/host.yml" ]] && { ok=0; echo "dry run wrote file" >&2; }
+    [[ "$out" == *"would write"* ]] || { ok=0; echo "dry run no 'would write': $out" >&2; }
+    
+    # Real run
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name testhost 2>&1)"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "real run rc=$rc: $out" >&2; }
+    [[ -f "$d/host.yml" ]] || { ok=0; echo "real run did not write file" >&2; }
+    [[ "$(cat "$d/host.yml" 2>/dev/null)" == "host_name: testhost" ]] || { ok=0; echo "content wrong: $(cat "$d/host.yml" 2>/dev/null)" >&2; }
+    [[ "$out" == *"Created"* ]] || { ok=0; echo "real run no 'Created': $out" >&2; }
+    
+    # Second real run - should report skipped
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name other 2>&1)"; rc=$?
+    (( rc == 0 )) || { ok=0; echo "second run rc=$rc: $out" >&2; }
+    [[ "$(cat "$d/host.yml" 2>/dev/null)" == "host_name: testhost" ]] || { ok=0; echo "second run overwrote: $(cat "$d/host.yml" 2>/dev/null)" >&2; }
+    [[ "$out" == *"skipped"* ]] || { ok=0; echo "second run no 'skipped': $out" >&2; }
+    
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "F5: setup --host-name --dry-run/skip failed"; fi
+fi
+
+if it "gwkey: setup.sh --host-name refuses a value that is not a plain host name (nothing is written)"; then
+    d="$(mktemp -d)"
+    ok=1
+    for bad in $'a\nb' $'ok\n' ".hidden" "has space" "semi;colon" "tab$(printf '\t')x"; do
+        rm -f "$d/host.yml"
+        out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name "$bad" 2>&1)"; rc=$?
+        (( rc == 2 )) || { ok=0; echo "rc=$rc for $(printf '%q' "$bad"): $out" >&2; }
+        [[ -e "$d/host.yml" ]] && { ok=0; echo "wrote host.yml for $(printf '%q' "$bad")" >&2; }
+    done
+    out="$(AUTOOS_HOST_CONFIG="$d/host2.yml" bash "$ROOT/setup.sh" --host-name --dry-run 2>&1)"; rc=$?
+    [[ "$out" == *"would write"* && "$out" != *"host_name: --dry-run"* && ! -e "$d/host2.yml" ]] || { ok=0; echo "a flag was taken as the name or the dry run wrote: rc=$rc $out" >&2; }
+    out="$(AUTOOS_HOST_CONFIG="$d/host3.yml" bash "$ROOT/setup.sh" --host-name _under 2>&1)"; rc=$?
+    [[ $rc -eq 0 && "$(cat "$d/host3.yml")" == "host_name: _under" ]] || { ok=0; echo "leading underscore refused: rc=$rc $out" >&2; }
+    out="$(AUTOOS_HOST_CONFIG="$d/host4.yml" bash "$ROOT/setup.sh" --host-name ".x" 2>&1)"; rc=$?
+    [[ "$out" == *"may not start with"* ]] || { ok=0; echo "the refusal is not shown through the ui layer: $out" >&2; }
+    out="$(AUTOOS_HOST_CONFIG="$d/host.yml" bash "$ROOT/setup.sh" --host-name my-host.lan_1 2>&1)"; rc=$?
+    (( rc == 0 )) && [[ "$(cat "$d/host.yml")" == "host_name: my-host.lan_1" ]] || { ok=0; echo "valid name refused: rc=$rc $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "setup.sh --host-name validation"; fi
+fi
+
+if it "gwkey: host.yml 'host_name :' (space before the colon) is read like 'host_name:' in bash and Python"; then
+    d="$(mktemp -d)"
+    printf 'host_name :   spacey  \n' >"$d/host.yml"
+    b="$( ( . "$ROOT/lib/linux/install.sh"; unset AUTOOS_HOST_NAME; AUTOOS_HOST_CONFIG="$d/host.yml" autoos_host_name ) 2>/dev/null )"
+    p="$(AUTOOS_HOST_CONFIG="$d/host.yml" python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import autoos_gateway_key as k; print(k.host_name())' "$ROOT/tools" 2>/dev/null)"
+    rm -rf "$d"
+    if [[ "$b" == "spacey" && "$p" == "spacey" ]]; then pass; else fail "bash=[$b] python=[$p]"; fi
+fi
+
+# F6: apply/start-stack show the deprecation line (not swallowed)
+# The helper-only F6 below calls the resolver by itself; THESE run the real scripts.
+if it "gwkey: apply.sh --probe prints the legacy-field deprecation line exactly once"; then
+    d="$(_prune_sandbox)"
+    printf 'omniroute: sk-test-legacy\n' >"$d/keys.yml"
+    out="$( ( export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+              unset AUTOOS_OMNIROUTE_KEY
+              _prune_apply "$d" --probe ) )"
+    n="$(printf '%s\n' "$out" | grep -c "is deprecated")"
+    ok=1
+    (( n == 1 )) || { ok=0; echo "deprecation lines: $n" >&2; printf '%s\n' "$out" | head -20 >&2; }
+    [[ "$out" == *"'omniroute_testhost'"* ]] || { ok=0; echo "new field not named" >&2; }
+    [[ "$out" == *"sk-test-legacy"* ]] && { ok=0; echo "the key value leaked" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "apply.sh --probe resolve/notice count wrong"; fi
+fi
+
+if it "gwkey: start-stack.sh resolves the client key once, and refuses to start without one naming the field"; then
+    ok=1
+    n="$(grep -c 'autoos_resolve_client_key "' "$ROOT/configuration/start-stack.sh")"
+    (( n == 1 )) || { ok=0; echo "start-stack.sh resolve calls: $n" >&2; }
+    d="$(mktemp -d)"
+    out="$( ( unset AUTOOS_OMNIROUTE_KEY; export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml" \
+              AUTOOS_KEYS_FILE="$d/none.yml" AUTOOS_OMNIROUTE_URL=http://127.0.0.1:1
+              bash "$ROOT/configuration/start-stack.sh" none 2>&1; echo "rc=$?" ) )"
+    [[ "$out" == *"rc=1"* ]] || { ok=0; echo "start-stack.sh did not refuse: $out" >&2; }
+    [[ "$out" == *"'omniroute_testhost'"* ]] || { ok=0; echo "expected field not named: $out" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-stack.sh key resolution"; fi
+fi
+
+# The key block of start-stack.sh, run on its own (the rest starts services). A NON-local URL is left in the
+# environment: the script talks to $GATEWAY (loopback), so the LOCAL field must be used, and the keys file
+# comes from AUTOOS_KEYS_FILE (the checkout has none). Either regression flips the answer.
+if it "gwkey: start-stack.sh takes the key field from its own gateway and honours AUTOOS_KEYS_FILE"; then
+    d="$(mktemp -d)"
+    printf 'omniroute_server: sk-wrong-server-key\nomniroute_testhost: sk-right-local-key\n' >"$d/keys.yml"
+    script="$ROOT/configuration/start-stack.sh"
+    { sed -n '1,/^gateway_ok()/p' "$script" | sed '$d' | sed "s#\${BASH_SOURCE\[0\]}#$script#g"
+      printf 'printf "%%s\\n" "$AUTOOS_OMNIROUTE_KEY"\n'; } >"$d/head.sh"
+    out="$( ( unset AUTOOS_OMNIROUTE_KEY; export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml" \
+              AUTOOS_KEYS_FILE="$d/keys.yml" AUTOOS_OMNIROUTE_URL=http://gw.example.com
+              bash "$d/head.sh" 2>/dev/null ) )"
+    ok=1
+    [[ "$out" == "sk-right-local-key" ]] || { ok=0; echo "got [$out]" >&2; }
+    # a whitespace-only key in the environment is no key: the file is read
+    out="$( ( export AUTOOS_OMNIROUTE_KEY="   " AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml" \
+              AUTOOS_KEYS_FILE="$d/keys.yml"
+              bash "$d/head.sh" 2>/dev/null ) )"
+    [[ "$out" == "sk-right-local-key" ]] || { ok=0; echo "whitespace-only env key: got [$out]" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "start-stack.sh field/keys-file"; fi
+fi
+
+if it "gwkey: without python3 the classifier says so and is non-local; AUTOOS_ROOT cannot redirect the resolver"; then
+    ok=1
+    out="$( ( . "$ROOT/lib/linux/install.sh"; PATH="$(mktemp -d)"; is_local_gateway http://localhost:20128; echo "rc=$?" ) 2>&1 )"
+    [[ "$out" == *"python3 is required"* && "$out" == *"rc=1"* ]] || { ok=0; echo "no python3: [$out]" >&2; }
+    out="$( ( export AUTOOS_ROOT=/nonexistent/elsewhere; . "$ROOT/lib/linux/install.sh"
+              is_local_gateway http://localhost:20128 && echo local || echo remote ) 2>&1 )"
+    [[ "$out" == "local" ]] || { ok=0; echo "AUTOOS_ROOT redirected the CLI: [$out]" >&2; }
+    if (( ok )); then pass; else fail "python3-missing / AUTOOS_ROOT"; fi
+fi
+
+if it "gwkey: F6 the resolver shows the deprecation line naming old and new field"; then
+    d="$(mktemp -d)"
+    ok=1
+    # Test apply.ps1 shows deprecation warning
+    printf 'omniroute: sk-test-legacy\n' >"$d/keys.yml"
+    out="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>&1 )"
+    [[ "$out" == *"deprecated"* ]] || { ok=0; echo "apply no deprecation: $out" >&2; }
+    [[ "$out" == *"'omniroute'"* ]] || { ok=0; echo "apply no old field: $out" >&2; }
+    [[ "$out" == *"'omniroute_testhost'"* ]] || { ok=0; echo "apply no new field: $out" >&2; }
+    
+    # Test start-stack.sh shows deprecation warning (via its copy of the function)
+    # We test the bash version here since we're in bash test suite
+    # Source install.sh directly since start-stack.sh exits on missing key at top level
+    out="$( ( . "$ROOT/lib/linux/install.sh"
+        export AUTOOS_HOST_NAME=testhost AUTOOS_HOST_CONFIG="$d/no-host.yml"
+        export AUTOOS_OMNIROUTE_URL="http://127.0.0.1:20128"
+        unset AUTOOS_OMNIROUTE_KEY
+        autoos_resolve_client_key "$d/keys.yml" ) 2>&1 )"
+    [[ "$out" == *"deprecated"* ]] || { ok=0; echo "start-stack no deprecation: $out" >&2; }
+    [[ "$out" == *"'omniroute'"* ]] || { ok=0; echo "start-stack no old field: $out" >&2; }
+    [[ "$out" == *"'omniroute_testhost'"* ]] || { ok=0; echo "start-stack no new field: $out" >&2; }
+    
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "F6: apply/start-stack deprecation not shown"; fi
+fi
+

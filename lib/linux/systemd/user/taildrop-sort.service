@@ -1,0 +1,19 @@
+# The host's ONLY Taildrop fetcher (D-410): drains the shared inbox and files
+# each file under the owner its name declares. Driven by the timer next to this
+# file, so it has no [Install] section of its own - the same shape as
+# claude-sessions-snapshot.service.
+#
+# ExecStart names the copy the INSTALLER owns (%h is this user's home), not the
+# checkout it may have come from: the unit keeps working when the repo is moved
+# or removed, and install_taildrop_sort is what updates that copy.
+#
+# StandardOutput/StandardError: without these the script's one-line fetch
+# errors reach neither the journal nor `journalctl --user -u taildrop-sort`.
+[Unit]
+Description=Fetch and sort the shared Taildrop inbox by owner prefix
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/autoos/taildrop-sort.sh
+StandardOutput=journal
+StandardError=journal

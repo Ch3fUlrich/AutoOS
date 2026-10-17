@@ -1,0 +1,21 @@
+{
+  "schema_version": 2,
+  "id": "c8e10d29-4567-4f11-9a9a-qwen38flash001",
+  "name": "qwen-3.8-flash",
+  "revision": 0,
+  "mcp_server_refs": null,
+  "agent_kind": "acp",
+  "acp_server": "custom",
+  "acp_model": "qwen-3.8-flash",
+  "acp_session_mode": null,
+  "acp_prompt_timeout": 1800.0,
+  "acp_startup_timeout": 90.0,
+  "acp_command": "C:/Users/mauls/AppData/Roaming/npm/qwen.cmd",
+  "acp_args": [
+    "--acp",
+    "--approval-mode",
+    "yolo",
+    "-m",
+    "qwen-3.8-flash"
+  ]
+}
