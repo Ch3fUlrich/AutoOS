@@ -36,9 +36,12 @@ class OcFallbackTests(unittest.TestCase):
             oc_fallback.opencode_url({"AUTOOS_OPENCODE_URL": "ftp://127.0.0.1:4096"})
 
     def test_opencode_healthy(self):
-        opener_ok = mock.Mock(return_value=mock.Mock(status=200))
+        resp_ok = mock.Mock(status=200)
+        opener_ok = mock.Mock(return_value=resp_ok)
         ok, msg = oc_fallback.opencode_healthy("http://127.0.0.1:4096", opener=opener_ok)
         assert ok is True
+        resp_ok.close.assert_called_once()
+        opener_ok.assert_called_once_with("http://127.0.0.1:4096/global/health", timeout=3.0)
 
         opener_err = mock.Mock(side_effect=urllib.error.URLError("connection refused"))
         ok, msg = oc_fallback.opencode_healthy("http://127.0.0.1:4096", opener=opener_err)
@@ -53,11 +56,20 @@ class OcFallbackTests(unittest.TestCase):
         ok, _ = oc_fallback.opencode_healthy("http://127.0.0.1:4096", opener=opener_503)
         assert ok is False
 
+    def test_opencode_healthy_type_error(self):
+        opener_type_err = mock.Mock(side_effect=TypeError("transport failure"))
+        ok, msg = oc_fallback.opencode_healthy("http://127.0.0.1:4096", opener=opener_type_err)
+        assert ok is False
+        assert "transport failure" in msg
+        assert opener_type_err.call_count == 1
+
     def test_fallback_decision(self):
         assert oc_fallback.fallback_decision("opencode", "usage limit reached") == {"switch": False}
-        opener_ok = mock.Mock(return_value=mock.Mock(status=200))
+        resp_ok = mock.Mock(status=200)
+        opener_ok = mock.Mock(return_value=resp_ok)
         dec = oc_fallback.fallback_decision("claude", "usage limit reached", env={}, opener=opener_ok)
         assert dec == {"switch": True, "client": "opencode", "model": "muse-spark-1.3", "url": "http://127.0.0.1:4096"}
+        resp_ok.close.assert_called_once()
 
         opener_down = mock.Mock(side_effect=urllib.error.URLError("connection refused"))
         dec_down = oc_fallback.fallback_decision("claude", "usage limit reached", env={}, opener=opener_down)

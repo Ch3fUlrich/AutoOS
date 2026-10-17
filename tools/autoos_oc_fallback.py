@@ -39,11 +39,11 @@ def opencode_healthy(url: str, timeout: float = 3.0, opener=None) -> tuple[bool,
     target = f"{url.rstrip('/')}/global/health"
     call = opener if opener is not None else urllib.request.urlopen
     try:
-        try:
-            resp = call(target, timeout=timeout)
-        except TypeError:
-            resp = call(target)
+        resp = call(target, timeout=timeout)
         status = getattr(resp, "status", getattr(resp, "code", 200))
+        close = getattr(resp, "close", None)
+        if close:
+            close()
         return (True, "ok") if 200 <= status < 300 else (False, f"{url}: HTTP {status}")
     except urllib.error.HTTPError as exc:
         return False, f"{url}: HTTP {exc.code}"
