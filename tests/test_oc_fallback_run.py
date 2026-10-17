@@ -1,6 +1,5 @@
 """tests/test_oc_fallback_run.py - end-to-end tests for Claude limit to OpenCode fallback."""
 
-import atexit
 import http.server
 import os
 from pathlib import Path
@@ -22,11 +21,9 @@ import autoos_oc_fallback as oc_fallback
 
 if not os.path.exists(sys.executable):
     sys.executable = shutil.which("python3") or shutil.which("python") or sys.executable
-os.environ["AUTOOS_SPAWNER_ISOLATED"] = "1"
 LIMIT = "You've hit your limit · resets 3pm"
 
-_WORKERS = tempfile.mkdtemp(prefix="oc-fallback-workers-")
-atexit.register(shutil.rmtree, _WORKERS, True)
+_WORKERS = None  # set per class in setUpClass, removed in tearDownClass (never at import time)
 
 
 def _run(cli_dir, url, *extra, root=None, env_extra=None):
@@ -35,6 +32,7 @@ def _run(cli_dir, url, *extra, root=None, env_extra=None):
     env["GIT_CONFIG_PARAMETERS"] = "'core.longpaths=true'"
     # run-tests.sh points AUTOOS_WORKERS_DIR at a TRACKED fixture tree; a run that records there trips the --isolate LEAK check (rc 7)
     env["AUTOOS_WORKERS_DIR"] = _WORKERS
+    env["AUTOOS_SPAWNER_ISOLATED"] = "1"  # per-run env, not os.environ: an import-time set leaked into the whole pytest session
     if env_extra:
         env.update(env_extra)
     return run_agent("run", "--client", "claude", "--tier", "1", "--isolate", *extra, "task", env=env, root=root)
@@ -43,6 +41,8 @@ def _run(cli_dir, url, *extra, root=None, env_extra=None):
 class OcFallbackRunTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        global _WORKERS
+        _WORKERS = tempfile.mkdtemp(prefix="oc-fallback-workers-")
         class H(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(200 if self.path == "/global/health" else 404)
@@ -59,6 +59,7 @@ class OcFallbackRunTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.srv.shutdown()
         cls.srv.server_close()
+        shutil.rmtree(_WORKERS, ignore_errors=True)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
