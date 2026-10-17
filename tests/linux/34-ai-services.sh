@@ -2064,6 +2064,13 @@ if it "apply drift: --dry-run on a drifted combo prints would refuse and an in-s
     rm -rf "$d"; if (( ok )); then pass; else fail "dry-run on drifted combo failed: rc=$rc $out"; fi
 fi
 
+if it "apply drift: mutating run with an unreadable snapshot refuses (fail closed)"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"; printf 'not json
+' >"$d/snap.json"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --go D-825 --go-sha "$(git -C "$ROOT" rev-parse HEAD)" --go-offline)"; rc=$?
+    ok=1; [[ $rc -eq 3 && "$out" == *"server snapshot unreadable"* ]] || ok=0; grep -qE 'combo (create|delete)' "$d/calls.log" && ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "unreadable snapshot did not refuse: rc=$rc $out"; fi
+fi
 if it "apply drift: no /dev/fd remains in apply.sh"; then
     hits="$(grep -n '/dev/fd' "$ROOT/configuration/omniroute/apply.sh" || true)"
     [[ -z "$hits" ]] && pass || fail "apply.sh still uses /dev/fd: $hits"

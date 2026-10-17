@@ -1346,6 +1346,9 @@ except Exception: sys.exit(1)' "$SNAPSHOT_FILE" 2>/dev/null)"; then
     while IFS=$'\t' read -r snap_name snap_refs; do
         [[ -n "$snap_name" ]] && { SNAPSHOT_COMBOS["$snap_name"]="$snap_refs"; SNAPSHOT_HELD["$snap_name"]=1; }
     done <<<"$snapshot_rows"
+elif [[ -f "$SNAPSHOT_FILE" ]]; then
+    echo "  ! server snapshot unreadable: $SNAPSHOT_FILE - refusing; fix or re-export it"
+    [[ $DRY -eq 1 ]] || exit 3
 fi
 
 combo_is_drifted() {
