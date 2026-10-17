@@ -87,7 +87,7 @@ def parse_verdict(text):
     Exactly ONE line, decoration normalised, must be `VERDICT: ACCEPT|REJECT|HOLD` — one
     colon, the bare word, trailing punctuation tolerated — wherever it stands (D-1515: a
     seat that reviews first and concludes last was logged as no verdict); a line inside a
-    markdown fence is quoted material and never counts. No verdict line,
+    markdown fence or a `>` blockquote is quoted material and never counts. No verdict line,
     a second verdict, an unknown word (`SHIP`, `LGTM`), or the reviewer talking after the
     word on that line is invalid and says which. A seat that says IT could not see the change has voided its
     ACCEPT (P2/G2); a REJECT stands — losing a blocking finding is the worse failure — and
@@ -106,8 +106,10 @@ def parse_verdict(text):
     # (a sample from the diff), never the seat's own: the one fence rule every reader
     # shares (_Fences), so an unclosed fence swallows the rest.
     fences = _Fences()
-    found = [ln for ln in map(_normalise, (ln for ln in lines if not fences.feed(ln)))
-             if _VERDICT_RE.match(ln)]
+    # A `>` blockquote is quoted material the same way (seat qwen d15v r3).
+    own = [ln for ln in lines
+           if not fences.feed(ln) and not _fold_invisible(ln).lstrip().startswith(">")]
+    found = [ln for ln in map(_normalise, own) if _VERDICT_RE.match(ln)]
     if not found:
         return invalid("no verdict line in the answer: %s" % _normalise(lines[0])[:60])
     if len(found) > 1:

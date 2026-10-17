@@ -44,9 +44,9 @@ class VerdictGrammarTests(unittest.TestCase):
     def test_markdown_on_the_first_line_is_normalised_and_countable(self):
         for text, want in (("VERDICT: ACCEPT", "ACCEPT"), ("**VERDICT:** ACCEPT", "ACCEPT"),
                            ("**VERDICT: ACCEPT**", "ACCEPT"), ("`VERDICT: accept`", "ACCEPT"),
-                           ("# VERDICT: REJECT", "REJECT"), ("> VERDICT: reject", "REJECT"),
+                           ("# VERDICT: REJECT", "REJECT"),
                            ("- VERDICT: HOLD", "HOLD"), ("VERDICT: ACCEPT.", "ACCEPT"),
-                           ("VERDICT: ACCEPT!", "ACCEPT"), ("> # VERDICT: ACCEPT", "ACCEPT"),
+                           ("VERDICT: ACCEPT!", "ACCEPT"),
                            ("1. VERDICT: ACCEPT", "ACCEPT"), ("1) VERDICT: REJECT", "REJECT"),
                            ("2. **VERDICT:** HOLD", "HOLD"), ("**VERDICT: ACCEPT.**", "ACCEPT")):
             got = v.parse_verdict(text + "\nfindings underneath it\n")
@@ -62,7 +62,8 @@ class VerdictGrammarTests(unittest.TestCase):
                            ("**Review**\n\n- (1) fine\n\n**VERDICT: REJECT**\n", "REJECT"),
                            ("notes\n- VERDICT: HOLD\ntrailing prose\n", "HOLD"),
                            # a fenced sample is quoted material, never the seat's own line
-                           ("quoted:\n```\nVERDICT: REJECT\n```\nVERDICT: ACCEPT\n", "ACCEPT")):
+                           ("quoted:\n```\nVERDICT: REJECT\n```\nVERDICT: ACCEPT\n", "ACCEPT"),
+                           ("> VERDICT: ACCEPT\nmine:\nVERDICT: REJECT\n", "REJECT")):
             got = v.parse_verdict(text)
             self.assertTrue(got["valid"], (text, got["reason"]))
             self.assertEqual(want, got["verdict"], text)
@@ -75,7 +76,11 @@ class VerdictGrammarTests(unittest.TestCase):
                           # swallows the rest, as in every other fenced reader (_Fences)
                           ("the diff says:\n```text\nVERDICT: ACCEPT\n```\nthat is all\n",
                            "no verdict line"),
-                          ("~~~\nVERDICT: ACCEPT\n", "no verdict line")):
+                          ("~~~\nVERDICT: ACCEPT\n", "no verdict line"),
+                          # seat qwen d15v r3: a blockquote is quoted material too (the spawner's
+                          # own verdict reader already ignores `> VERDICT:` echoes)
+                          ("> VERDICT: ACCEPT\nthe diff says so\n", "no verdict line"),
+                          ("> # VERDICT: ACCEPT\n", "no verdict line")):
             got = v.parse_verdict(text)
             self.assertFalse(got["valid"], text)
             self.assertIn(why, got["reason"], text)
@@ -121,7 +126,7 @@ class VerdictGrammarTests(unittest.TestCase):
                 ("- ACCEPT", "- VERDICT: ACCEPT", "ACCEPT"),
                 ("1. ACCEPT", "1. VERDICT: ACCEPT", "ACCEPT"),
                 ("1) accept", "1) VERDICT: accept", "ACCEPT"),
-                ("> # ACCEPT", "> # VERDICT: ACCEPT", "ACCEPT"),
+                ("> # ACCEPT", "# VERDICT: ACCEPT", "ACCEPT"),
                 ("REJECT.", "VERDICT: REJECT.", "REJECT"),
                 ("**REJECT**", "**VERDICT: REJECT**", "REJECT"),
                 ("HOLD.", "VERDICT: HOLD", "HOLD")):
