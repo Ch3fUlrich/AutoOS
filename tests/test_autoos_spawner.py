@@ -11065,7 +11065,7 @@ class LedgerWriteTests(unittest.TestCase):
 
     def test_a_hold_an_invalid_and_a_blind_answer_write_no_row(self):
         # D-1515: a verdict below prose is valid now; the invalid case is an answer with none.
-        for text in (self.HOLD, "I looked at it.\nno verdict here\n",
+        for text in (self.HOLD, "I looked at it.\nnote: no verdict here\n",
                      self.ACCEPT + "I could not see the diff.\n"):
             with self.subTest(text=text[-32:]):
                 self.status(text)
