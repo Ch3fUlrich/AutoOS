@@ -2071,6 +2071,37 @@ if it "apply drift: mutating run with an unreadable snapshot refuses (fail close
     ok=1; [[ $rc -eq 3 && "$out" == *"server snapshot unreadable"* ]] || ok=0; grep -qE 'combo (create|delete)' "$d/calls.log" && ok=0
     rm -rf "$d"; if (( ok )); then pass; else fail "unreadable snapshot did not refuse: rc=$rc $out"; fi
 fi
+
+if it "apply drift: --drift-against without --drift, or with another value -> exit 2"; then
+    out1="$(bash "$ROOT/configuration/omniroute/apply.sh" --drift-against registry 2>&1)"; rc1=$?
+    out2="$(bash "$ROOT/configuration/omniroute/apply.sh" --drift --drift-against bogus 2>&1)"; rc2=$?
+    ok=1; [[ $rc1 -eq 2 && $rc2 -eq 2 ]] || ok=0
+    if (( ok )); then pass; else fail "rc1=$rc1 rc2=$rc2"; fi
+fi
+
+if it "apply drift: snapshot mode reports missing and extra"; then
+    d="$(_drift_sandbox)"
+    printf '{"combos": {"t1": ["p/m1"], "t2": ["p/m2"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "t2", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m2"}]}, {"name": "t3", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m3"}]}]}\n' >"$d/drift.json"
+    out="$(AUTOOS_DRIFT_SNAPSHOT="$d/snap.json" _drift_apply "$d")"; rc=$?
+    ok=1
+    [[ $rc -eq 1 && "$out" == *"missing t1"* && "$out" == *"extra t3"* && "$out" != *"omitted"* && ! -s "$d/calls.log" ]] || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "rc=$rc $out"; fi
+fi
+
+if it "apply drift: --allow-drift is repeatable"; then
+    d="$(_prune_sandbox)"; _prune_list "$d"
+    printf '{"combos": {"l1-orchestrator": ["p/m-snap"], "l2-orchestrator": ["p/m-snap"]}}\n' >"$d/snap.json"
+    printf '{"combos": [{"name": "l1-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}, {"name": "l2-orchestrator", "strategy": "priority", "models": [{"kind": "model", "providerId": "p", "model": "p/m-live"}]}]}\n' >"$d/live.json"
+    sha="$(git -C "$ROOT" rev-parse HEAD)"
+    out="$(_gate_ref_run "$d" "AUTOOS_DRIFT_SNAPSHOT=$d/snap.json" -- --go D-825 --go-sha "$sha" --go-offline --allow-drift l1-orchestrator --allow-drift l2-orchestrator)"; rc=$?
+    ok=1
+    [[ $rc -eq 0 && "$out" != *"live differs from the server snapshot - refused"* ]] || ok=0
+    grep -qE 'combo (create|delete) l1-orchestrator ' "$d/calls.log" || ok=0
+    grep -qE 'combo (create|delete) l2-orchestrator ' "$d/calls.log" || ok=0
+    rm -rf "$d"; if (( ok )); then pass; else fail "repeatable --allow-drift failed: rc=$rc $out"; fi
+fi
+
 if it "apply drift: no /dev/fd remains in apply.sh"; then
     hits="$(grep -n '/dev/fd' "$ROOT/configuration/omniroute/apply.sh" || true)"
     [[ -z "$hits" ]] && pass || fail "apply.sh still uses /dev/fd: $hits"
