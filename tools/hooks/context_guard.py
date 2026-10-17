@@ -19,8 +19,8 @@ unwritable state dir exits 0 with no output, because a PostToolUse hook must
 never break the agent that called it. The `ready` and `status` sub-commands are
 the exception: those report errors on stderr and exit non-zero.
 
-Thresholds come from the environment: `AUTOOS_CTX_HANDOFF` (default 230000) and
-`AUTOOS_CTX_HARD` (default 250000); a non-integer or empty value falls back.
+Thresholds come from the environment: `AUTOOS_CTX_HANDOFF` (default 270000) and
+`AUTOOS_CTX_HARD` (default 300000); a non-integer or empty value falls back.
 State lives under `$XDG_STATE_HOME/autoos/ctx-guard/`, else
 `~/.local/state/autoos/ctx-guard/`.
 """
@@ -41,8 +41,8 @@ TAIL_BYTES = 256 * 1024
 _USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens",
                  "cache_creation_input_tokens")
 
-DEFAULT_HANDOFF = 230000
-DEFAULT_HARD = 250000
+DEFAULT_HANDOFF = 270000
+DEFAULT_HARD = 300000
 
 # Re-announce only once the fill has grown this much past the last emitted one,
 # unless the level itself escalates.
