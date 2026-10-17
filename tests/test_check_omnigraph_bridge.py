@@ -387,7 +387,7 @@ class BridgeConfigTests(unittest.TestCase):
         cfg = module.read_bridge_config(ROOT)
         self.assertTrue(any("omnigraph-mcp" in a for a in cfg["cmd"]), cfg["cmd"])
         self.assertEqual(cfg["graph_id"], "autoos")
-        self.assertTrue(cfg["base_url"], "a base url must resolve")
+        self.assertEqual(cfg["base_url"], "")
 
     def test_the_base_url_default_is_read_from_the_env_reference(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -31,8 +31,7 @@ Usage:
 
 The token comes from $OMNIGRAPH_TOKEN, else from the per-user env file
 (~/.autoos-omnigraph.env, override with $AUTOOS_OMNIGRAPH_ENV_FILE). The base
-URL comes from --base-url, $OMNIGRAPH_BASE_URL, that file, then
-http://localhost:8080.
+URL comes from --base-url, $OMNIGRAPH_BASE_URL, or that file.
 
 Exit codes:
     0   every check passed
@@ -55,7 +54,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TOKEN_REF = "${OMNIGRAPH_TOKEN}"
-DEFAULT_BASE = "http://localhost:8080"
 CONTRACT_VERSION = "0.13"
 CONTRACT_HEADER = "omnigraph-http-api"
 
@@ -258,7 +256,7 @@ def main(argv=None) -> int:
     ap.add_argument("--offline", action="store_true", help="config checks only; skip the network")
     ap.add_argument("--json", action="store_true", help="machine-readable report")
     ap.add_argument("--root", default=str(ROOT), help="repository root to check (default: this repo)")
-    ap.add_argument("--base-url", default="", help="server URL (default: env, env file, localhost:8080)")
+    ap.add_argument("--base-url", default="", help="server URL (default: env, env file)")
     ap.add_argument("--graph", default="", help="graph id (default: the one .mcp.json pins)")
     args = ap.parse_args(argv)
 
@@ -279,7 +277,11 @@ def main(argv=None) -> int:
             token = file_values["OMNIGRAPH_TOKEN"]
             source = f"from {env_file_path()}"
         base = (args.base_url or os.environ.get("OMNIGRAPH_BASE_URL")
-                or file_values.get("OMNIGRAPH_BASE_URL") or DEFAULT_BASE).rstrip("/")
+                or file_values.get("OMNIGRAPH_BASE_URL") or "").rstrip("/")
+        if not base:
+            print("check-omnigraph: OMNIGRAPH_BASE_URL is not set - export it or put "
+                  "OMNIGRAPH_BASE_URL=<url> in %s (--offline skips this check)" % env_file_path(), file=sys.stderr)
+            return 2
         live_problems, facts = check_live(base, graph or "autoos", token or None, source or "missing")
         problems.extend(live_problems)
 
