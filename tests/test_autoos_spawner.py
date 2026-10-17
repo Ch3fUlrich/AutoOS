@@ -22841,7 +22841,6 @@ class CliScopeLaunchTests(unittest.TestCase):
         agent = self.agent
         if not agent.scope_supported():
             self.skipTest("systemd-run --user is not available on this host")
-        unit = agent.scope_unit_name("cli-pid%d-a1" % os.getpid())
         code = "print(open('/proc/self/cgroup').read())"
         err = io.StringIO()
 
@@ -22856,6 +22855,7 @@ class CliScopeLaunchTests(unittest.TestCase):
                 rc = run()
         else:
             rc = run()
+        unit = rc.scope["unit"]
         self.assertEqual(int(rc), 0, rc.tail + err.getvalue())
         self.assertIn(unit, rc.tail,
                      "the client's own cgroup is not the scope it was told about: "
@@ -23839,6 +23839,39 @@ class WinshimClientResolutionTests(unittest.TestCase):
         self.assertIn("PATH", printed)
         run_client.assert_not_called()
         self.assertNotIn("Traceback", printed)
+
+
+class CliScopeUnitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.agent = load_agent()
+
+    def test_no_run_id_consecutive_calls_return_distinct_names(self):
+        u1 = self.agent.cli_scope_unit(None, 1)
+        u2 = self.agent.cli_scope_unit(None, 1)
+        self.assertNotEqual(u1, u2)
+        for u in (u1, u2):
+            self.assertTrue(u.startswith("autoos-worker-cli-pid"))
+            self.assertTrue(u.endswith(".scope"))
+            self.assertRegex(u, r"^[A-Za-z0-9_.-]+$")
+
+    def test_run_id_names_unchanged_and_attempt_differs(self):
+        u1 = self.agent.cli_scope_unit("20261017-120000-x-abc123", 1)
+        self.assertEqual(u1, "autoos-worker-cli-20261017-120000-x-abc123-a1.scope")
+        u2 = self.agent.cli_scope_unit("20261017-120000-x-abc123", 2)
+        self.assertNotEqual(u1, u2)
+        self.assertEqual(u2, "autoos-worker-cli-20261017-120000-x-abc123-a2.scope")
+
+    @unittest.skipUnless(shutil.which("systemd-run") and load_agent().scope_supported(),
+                         "needs a systemd user manager")
+    def test_run_client_twice_in_one_process_succeeds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc1 = self.agent.run_client([sys.executable, "-c", "raise SystemExit(0)"],
+                                        tmp, dict(os.environ))
+            rc2 = self.agent.run_client([sys.executable, "-c", "raise SystemExit(0)"],
+                                        tmp, dict(os.environ))
+        self.assertEqual(int(rc1), 0)
+        self.assertEqual(int(rc2), 0)
 
 
 class WinshimMcpJobTests(unittest.TestCase):

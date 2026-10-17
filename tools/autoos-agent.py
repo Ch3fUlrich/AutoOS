@@ -280,6 +280,7 @@ import errno
 import hashlib
 import importlib.util
 import io
+import itertools
 import json
 import os
 import posixpath
@@ -12842,6 +12843,9 @@ def parse_shim_target(path: str) -> tuple[str, list[str]] | None:
     return None
 
 
+_CLI_SCOPE_SEQ = itertools.count(1)
+
+
 def cli_scope_unit(run_id, attempt) -> str:
     """The transient scope unit a `run` started from a shell launches its client in.
 
@@ -12850,10 +12854,14 @@ def cli_scope_unit(run_id, attempt) -> str:
     `autoos-worker-<run-id>.scope`, and the attempt number matters because the
     fallthrough loop re-starts the client in a new scope each time — a reused unit
     name is a `systemd-run` failure, not a no-op. A run with no id (a plain
-    `run …` from a terminal) is named by its own pid, which is unique per process.
+    `run …` from a terminal) is named by its own pid and a sequence counter,
+    which is unique per call, not only per process.
     """
-    return scope_unit_name("cli-%s-a%s" % (run_id or "pid%d" % os.getpid(),
-                                           attempt or 1))
+    if run_id:
+        stem = "cli-%s-a%s" % (run_id, attempt or 1)
+    else:
+        stem = "cli-pid%d-n%d-a%s" % (os.getpid(), next(_CLI_SCOPE_SEQ), attempt or 1)
+    return scope_unit_name(stem)
 
 
 def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False,
