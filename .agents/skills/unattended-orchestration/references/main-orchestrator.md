@@ -206,14 +206,14 @@ L2 alike.
   in the brief, and tell them the same token rules.
 - The resolver picks the writer (`route --explain`, R-coord-03); save Opus for judgement.
 
-## 6a. Context cap: automatic recycle at 250k (P1.1)
+## 6a. Context cap: automatic recycle at 300k (P1.1)
 
 - A `PostToolUse` hook, `tools/hooks/context_guard.py`, reads the last assistant turn's usage (input + cache read + cache
   creation) from the tail of the transcript and tells the session itself:
-  - at `AUTOOS_CTX_HANDOFF` (230000): `HANDOFF-NOW` -- finish the step, write the handoff, commit + push, then
+  - at `AUTOOS_CTX_HANDOFF` (270000): `HANDOFF-NOW` -- finish the step, write the handoff, commit + push, then
     `python3 tools/hooks/context_guard.py ready <handoff-path>` (and `SendMessage RECYCLE-READY <path>` to your parent if
     your brief says so);
-  - at `AUTOOS_CTX_HARD` (250000): `HARD-CAP` -- no new work, handoff now.
+  - at `AUTOOS_CTX_HARD` (300000): `HARD-CAP` -- no new work, handoff now.
   - It re-emits at most once per +10k of growth; any error is silent (exit 0). `context_guard.py status` lists the state
     files (`~/.local/state/autoos/ctx-guard/`, or under `$XDG_STATE_HOME`).
 - Install, once per host, in `~/.claude/settings.json`:
