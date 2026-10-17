@@ -2265,10 +2265,17 @@ class GatewayOrderTests(unittest.TestCase):
         free = [i for i, t in enumerate(tiers) if t == "free"]
         priced = [i for i, t in enumerate(tiers) if t != "free"]
         self.assertTrue(free, legs)
-        self.assertEqual([legs[i] for i in priced],
-                         ["ovhcloud/Qwen3.5-397B-A17B", "vertex/gemini-3.8-flash"],
-                         "l3-driver must keep exactly two credit legs, the OVH "
-                         "grant ahead of the probe-confirmed vertex tail")
+        # OVH-REMOVE (D-1816(12)): OVH was only one of the two credit legs in
+        # this tail, never the fact the gate reads. What holds in either state:
+        # the chain closes on the probe-confirmed vertex credit leg, and every
+        # non-free leg is a credit leg of a provider the registry still answers.
+        self.assertEqual(legs[priced[-1]], "vertex/gemini-3.8-flash",
+                         "l3-driver must close on the probe-confirmed vertex "
+                         "credit leg")
+        for i in priced:
+            pid, _mid = cc.resolve_leg(legs[i], registry)
+            self.assertEqual(tiers[i], "credit", legs[i])
+            self.assertIn(pid, registry["providers"], legs[i])
         self.assertEqual(priced[-1], len(legs) - 1,
                          "%s: a priced leg anywhere but last breaks the "
                          "trial->free->credits->paid order" % tiers)
@@ -2779,7 +2786,7 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # credit providers, so the cooled set names the providers that hold a
         # leg today -- bazaarlink, openrouter, vertex_ai, groq, cohere -- and
         # keeps the ones that still carry a gated or pinned-single leg
-        # (antigravity, google_ai_studio, meta_api, ovhcloud, deepseek). The
+        # (antigravity, google_ai_studio, meta_api, deepseek). The
         # vertex provider key is `vertex_ai` (its omniroute_id is `vertex`),
         # which is the name the reason prints. Earliest return: bazaarlink.
         "bazaarlink": "2026-09-28T12:10:00Z",
@@ -2791,7 +2798,6 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         "google_ai_studio": "2026-09-28T13:00:00Z",
         "meta_api": "2026-09-28T14:00:00Z",
         "hugging_face": "2026-09-28T15:00:00Z",
-        "ovhcloud": "2026-09-28T20:00:00Z",
         "deepseek": "2026-09-28T21:00:00Z",
     }
 

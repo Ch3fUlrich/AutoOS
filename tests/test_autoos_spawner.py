@@ -25335,19 +25335,22 @@ class HandEntryPricingTests(unittest.TestCase):
                                               source, cfg or self.cfg)
 
     def test_a_hand_entry_is_priced_through_its_modelid_leg(self):
-        # OVHCODER-DROP 2026-10-08: ovh-direct-qwen3-coder-30b left the list
-        # with the model (OVH answers 404 for Qwen3-Coder-30B-A3B-Instruct).
-        for name in ("omniroute/vertex-3.8-flash", "omniroute/ovh-direct-gpt-oss-120b",
-                     "omniroute/ovh-direct-qwen3.8-27b"):
+        # OVH-REMOVE (D-1816(12)): the ovh-direct ids were only examples of a
+        # hand entry the gate can price; the vertex passthroughs carry the same
+        # fact (a `<gateway provider>/<model>` leg the budget gate reads).
+        for name in ("omniroute/vertex-3.8-flash", "omniroute/vertex-3.7-flash",
+                     "omniroute/vertex-3.6-flash"):
             self.assertIs(self.spends(name), False, name)
 
     def test_hand_entry_leg_is_the_registry_spelling_of_the_modelid(self):
-        # The gateway spells OVH's ids `ovh/*`; the registry keys the provider
-        # `ovhcloud` and declares model_prefix 'ovh', so the leg only resolves
-        # through registry_ref — the one inverse of gateway_ref.
-        self.assertEqual(self.agent.hand_entry_leg("omniroute/ovh-direct-gpt-oss-120b",
+        # The gateway spells antigravity's ids `agy/*`; the registry keys the
+        # provider `antigravity` and declares model_prefix 'agy', so the leg only
+        # resolves through registry_ref — the one inverse of gateway_ref.
+        # OVH-REMOVE (D-1816(12)): this used the `ovh/*` -> `ovhcloud` pair,
+        # which tests the same prefix inversion agy does here.
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/agy-gemini-3.8-flash",
                                                    SHIPPED_REGISTRY, self.cfg),
-                         "ovhcloud/gpt-oss-120b")
+                         "antigravity/gemini-3.8-flash-high")
         self.assertEqual(self.agent.hand_entry_leg("omniroute/vertex-3.8-flash",
                                                    SHIPPED_REGISTRY, self.cfg),
                          "vertex/gemini-3.8-flash")
@@ -25409,15 +25412,17 @@ class HandEntryPricingTests(unittest.TestCase):
     def test_run_dry_named_hand_entry_is_not_benched_as_unpriceable(self):
         # The budget is on in the shipped registry, so before D5 this exact
         # command refused with "cannot be priced"; now it reaches the gate that
-        # is actually about the run (tier-2 isolation).
-        r = run_agent("run", "--model", "omniroute/ovh-direct-gpt-oss-120b",
+        # is actually about the run (tier-2 isolation). OVH-REMOVE (D-1816(12)):
+        # the ovh-direct id was only the example hand entry; vertex-3.8-flash is
+        # the passthrough that carries the same door.
+        r = run_agent("run", "--model", "omniroute/vertex-3.8-flash",
                       "--dry-run", "--card", "role=implement", "reply with exactly: ack")
         self.assertNotIn("cannot be priced", r.stderr, r.stderr)
         # G4 (RWP3): the absence of one phrase was the whole assertion, so a mutant
         # that benched the run for another reason — or answered that the hand entry
         # spends Claude — still passed. The door stays open and the spend stays False.
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIs(self.spends("omniroute/ovh-direct-gpt-oss-120b"), False)
+        self.assertIs(self.spends("omniroute/vertex-3.8-flash"), False)
 
     def test_run_dry_named_vertex_3_6_hand_entry_is_not_benched_as_unpriceable(self):
         # The same door, on the id whose registry row RWP1 adds.
@@ -25712,26 +25717,22 @@ class GeminiAllowListTests(unittest.TestCase):
 
 
 class SensitiveHandEntryPrivacyTests(unittest.TestCase):
-    """D3: ovhcloud's `trains_on_prompts` is verified false on main (CIGREEN:
-    587f465e) -- so a privacy=sensitive card may land on an `ovh-direct-*`
-    hand entry only through that cited verification. The existing PRIV3 door
-    already covers a name that is no registry route: nothing proves it
-    private-safe. This pins that the door holds for the ovh-direct ids too,
-    against the real opencode.jsonc rather than a synthetic one."""
+    """D3: the door these tests pin is provider-level registry data (does a cited
+    `trains_on_prompts: false` privacy block admit a sensitive card?). OVH-REMOVE
+    (D-1816(12)) retires the `ovhcloud` provider, so the mechanism is now
+    illustrated on `vertex_ai` — a credit provider carrying its own cited privacy
+    block — over the durable `l2-worker-clean` route (vertex-only legs). The
+    existing PRIV3 door already covers a name that is no registry route: nothing
+    proves it private-safe, which is why the `ovh-direct-*` hand-entry refusal
+    below still holds while OVH is present.
+
+    The run needs *a* routable name for the door: `l2-worker-clean` declares the
+    vertex credit leg the D-657 probes confirmed. It claims nothing about vertex
+    serving today -- `tools/combo-contract.py --strict-d657` says that, and says no."""
 
     def setUp(self):
         self.agent = load_agent()
         self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
-        # D657-D2 (AO-DENYLEGS D2, 2026-10-08) gated every ovhcloud leg out of
-        # the judged chains: probe-d657 answers HTTP 404 for all of them, so §8
-        # omits the route until a re-probe and the rendered config no longer
-        # declares `ovh-gpt-oss-120b`. The door these tests pin is provider-level
-        # registry data (does a cited `trains_on_prompts: false` admit a sensitive
-        # card?), so the run needs *a* routable name for it: this adds back the
-        # one declaration the render dropped. It claims nothing about OVH serving
-        # today -- `tools/combo-contract.py --strict-d657` says that, and says no.
-        self.cfg["providers"]["omniroute"]["models"]["ovh-gpt-oss-120b"] = {
-            "modelID": "ovh-gpt-oss-120b"}
 
     def run_cmd(self, model):
         ns = argparse.Namespace(
@@ -25751,20 +25752,17 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
             self.assertEqual(rc, 2, name + out + err)
             self.assertIn("privacy", err, name)
 
-    def test_the_ovh_provider_is_still_unverified(self):
-        # CIGREEN: expectation moved by 35148c5c (L1-CLEAN D1+D2, part of the
-        # fcecae85 CLEAN merge; comment rework 587f465e): ovhcloud's
-        # trains_on_prompts went null -> false with a 3-citation privacy block
-        # (OVH AI Endpoints terms, docs and contract quotes, accessed
-        # 2026-10-01). The name above is kept for continuity but the intent is
-        # inverted: a sensitive hand entry reaches ovh ONLY through that cited
-        # verification -- private_safe is True, and the privacy block carries
-        # evidence with a url and a quote, as the registry validator
-        # (_privacy_block_problems) requires. The still-unverified half moved
-        # to test_a_null_trains_provider_is_still_refused below.
-        provider = SHIPPED_REGISTRY["providers"]["ovhcloud"]
+    def test_a_credit_provider_with_a_cited_block_admits_sensitive(self):
+        # OVH-REMOVE (D-1816(12)): the ovh provider this was named for is gone,
+        # but the gate is not ovh-specific -- it reads a credit provider with a
+        # CITED privacy block. vertex_ai is that provider: `trains_on_prompts`
+        # false with an evidence block carrying a url and a quote, as the registry
+        # validator (_privacy_block_problems) requires. private_safe is True, so a
+        # sensitive run aimed at a vertex-only route is admitted. The still-
+        # unverified half moved to test_a_null_trains_provider_is_still_refused.
+        provider = SHIPPED_REGISTRY["providers"]["vertex_ai"]
         self.assertIs(provider["trains_on_prompts"], False)
-        safe, why = registry_tool.private_safe("ovhcloud", "gpt-oss-120b",
+        safe, why = registry_tool.private_safe("vertex_ai", "gemini-3.8-flash",
                                                SHIPPED_REGISTRY)
         self.assertTrue(safe, why)
         block = provider.get("privacy") or {}
@@ -25775,31 +25773,31 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
         for row in evidence:
             self.assertTrue(str(row.get("url") or "").startswith("https://"), row)
             self.assertTrue(str(row.get("quote") or "").strip(), row)
-        rc, out, err = self.run_cmd("omniroute/ovh-gpt-oss-120b")
+        rc, out, err = self.run_cmd("omniroute/l2-worker-clean")
         self.assertEqual(rc, 0, out + err)
 
     def test_a_null_trains_provider_is_still_refused(self):
-        # CIGREEN companion to the test above (same 35148c5c/587f465e move):
-        # the fail-closed half. A registry copy with ovhcloud's own
-        # verification stripped (flag back to null, privacy block removed) is
-        # refused by private_safe AND by a sensitive run aimed at its route
-        # (rc 2) -- unknown is unsafe, and removing the citation closes the
-        # door the citation opened. api_airforce ships in exactly that
+        # Companion to the test above: the fail-closed half. A registry copy with
+        # vertex_ai's own verification stripped (flag back to null, privacy block
+        # removed) is refused by private_safe AND by a sensitive run aimed at a
+        # vertex leg (rc 2) -- unknown is unsafe, and removing the citation closes
+        # the door the citation opened. api_airforce ships in exactly that
         # unverified state (trains_on_prompts null), pinned here as the live
-        # example.
+        # example. OVH-REMOVE (D-1816(12)): vertex_ai stands in for the retired
+        # ovh provider as the cited block being neutered.
         import copy
         self.assertIsNone(
             SHIPPED_REGISTRY["providers"]["api_airforce"].get("trains_on_prompts"))
         neutered = copy.deepcopy(SHIPPED_REGISTRY)
-        neutered["providers"]["ovhcloud"]["trains_on_prompts"] = None
-        neutered["providers"]["ovhcloud"].pop("privacy", None)
-        safe, why = registry_tool.private_safe("ovhcloud", "gpt-oss-120b", neutered)
+        neutered["providers"]["vertex_ai"]["trains_on_prompts"] = None
+        neutered["providers"]["vertex_ai"].pop("privacy", None)
+        safe, why = registry_tool.private_safe("vertex_ai", "gemini-3.8-flash", neutered)
         self.assertFalse(safe, why)
         self.assertIn("trains on prompts", why)
         agent = self.agent
         with mock.patch.object(agent, "load_registry", lambda path: neutered), \
                 mock.patch.object(agent, "load_live_registry", lambda *a, **k: neutered):
-            rc, out, err = self.run_cmd("omniroute/ovh-gpt-oss-120b")
+            rc, out, err = self.run_cmd("omniroute/l2-worker-clean")
         self.assertEqual(rc, 2, out + err)
         self.assertIn("privacy", err)
 
