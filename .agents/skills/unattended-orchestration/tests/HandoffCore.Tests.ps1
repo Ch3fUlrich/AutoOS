@@ -157,6 +157,56 @@ It "does not fire on a prompt without the countdown, or on prose about auto-deny
     Assert-True (-not (Test-HandoffAutoDenyPrompt ""))
 }
 
+Write-Host "`nGet-HandoffAutoDenyDecision"
+# The decision Wait-Bg makes on every poll, pure so it can be tested (seat r2):
+# wait -> resolve, grace expiry, reset on ANY non-blocked state, and a failed
+# `logs` read that must not stop the lane on the spot.
+$t0 = [datetime]"2026-10-16T17:02:00Z"
+It "waits on the countdown and starts the grace clock once" {
+    $d = Get-HandoffAutoDenyDecision -State "blocked" -Screen $autoDenyScreen -Since $null -Now $t0 -GraceMinutes 5
+    Assert-Equal "wait" $d.action "first poll"
+    Assert-Equal $t0 $d.since "clock starts now"
+    Assert-True $d.started "started flag"
+    $d2 = Get-HandoffAutoDenyDecision -State "blocked" -Screen $autoDenyScreen -Since $d.since -Now $t0.AddMinutes(2) -GraceMinutes 5
+    Assert-Equal "wait" $d2.action "inside grace"
+    Assert-Equal $t0 $d2.since "clock keeps its start"
+    Assert-True (-not $d2.started) "not started twice"
+}
+It "stops once the grace has run out" {
+    $d = Get-HandoffAutoDenyDecision -State "blocked" -Screen $autoDenyScreen -Since $t0 -Now $t0.AddMinutes(5) -GraceMinutes 5
+    Assert-Equal "stop" $d.action "grace expired"
+    Assert-True $d.expired "expired flag"
+}
+It "stops at once on a prompt without the countdown" {
+    $d = Get-HandoffAutoDenyDecision -State "blocked" -Screen "Do you want to proceed?`n 1. Yes`n 2. No" -Since $null -Now $t0 -GraceMinutes 5
+    Assert-Equal "stop" $d.action "real prompt"
+    Assert-True (-not $d.expired) "not a grace expiry"
+}
+It "passes and resets the clock on any state other than blocked, not only working" {
+    foreach ($s in @("working", "idle", "done", "")) {
+        $d = Get-HandoffAutoDenyDecision -State $s -Screen "" -Since $t0 -LastScreen $autoDenyScreen -ReadFailures 1 -Now $t0.AddMinutes(1) -GraceMinutes 5
+        Assert-Equal "pass" $d.action "state '$s'"
+        Assert-True ($null -eq $d.since) "clock reset on '$s'"
+        Assert-Equal "" $d.lastScreen "last screen dropped on '$s'"
+        Assert-Equal 0 $d.readFailures "read failures reset on '$s'"
+    }
+    # a fresh countdown after the reset gets a fresh grace
+    $d = Get-HandoffAutoDenyDecision -State "blocked" -Screen $autoDenyScreen -Since $null -Now $t0.AddMinutes(9) -GraceMinutes 5
+    Assert-Equal "wait" $d.action "new prompt, new grace"
+}
+It "a failed logs read keeps the last good screen, and retries once without one" {
+    $d = Get-HandoffAutoDenyDecision -State "blocked" -Screen "" -LastScreen $autoDenyScreen -Since $t0 -Now $t0.AddMinutes(1) -GraceMinutes 5
+    Assert-Equal "wait" $d.action "last good screen still shows the countdown"
+    Assert-Equal $autoDenyScreen $d.lastScreen "last good screen kept"
+    $r1 = Get-HandoffAutoDenyDecision -State "blocked" -Screen "" -Since $null -Now $t0 -GraceMinutes 5
+    Assert-Equal "wait" $r1.action "first failed read with no screen yet: retry"
+    Assert-Equal 1 $r1.readFailures "failure counted"
+    $r2 = Get-HandoffAutoDenyDecision -State "blocked" -Screen "" -Since $null -ReadFailures $r1.readFailures -Now $t0.AddSeconds(30) -GraceMinutes 5
+    Assert-Equal "stop" $r2.action "second failed read: fall back to blocked"
+    $ok = Get-HandoffAutoDenyDecision -State "blocked" -Screen $autoDenyScreen -Since $null -ReadFailures 1 -Now $t0 -GraceMinutes 5
+    Assert-Equal 0 $ok.readFailures "a good read clears the failure count"
+}
+
 Write-Host "`nExpand-HandoffTemplate"
 It "substitutes {{placeholders}} from a hashtable" {
     Assert-Equal "run in C:\wt on b1" (Expand-HandoffTemplate "run in {{worktree}} on {{branch}}" @{ worktree = "C:\wt"; branch = "b1" })

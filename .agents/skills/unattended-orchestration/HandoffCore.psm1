@@ -376,6 +376,36 @@ function Test-HandoffAutoDenyPrompt {
     return [bool]($plain -match "(?i)will automatically deny this request in \d+:\d\d")
 }
 
+function Get-HandoffAutoDenyDecision {
+    <#  What Wait-Bg does about one poll's agents-view state, pure so it is
+        testable. action: "pass" (not blocked: the caller's normal state logic
+        runs), "wait" (sleep and poll again) or "stop" (treat as blocked).
+        Any state other than blocked resets the grace clock, not only working.
+        A failed or empty `logs` read falls back to the last good screen, and
+        with none yet it is retried once before the lane is stopped: one bad
+        read is not evidence of a real prompt. The returned since, lastScreen
+        and readFailures are fed back in on the next poll.  #>
+    param([string]$State, [string]$Screen, [string]$LastScreen = "", $Since = $null,
+        [int]$ReadFailures = 0, [datetime]$Now, [double]$GraceMinutes, [string]$BlockedState = "blocked")
+    $d = @{ action = "pass"; since = $null; lastScreen = ""; readFailures = 0; started = $false; expired = $false }
+    if ($State -ne $BlockedState) { return $d }
+    if ($Screen) { $d.lastScreen = $Screen } else { $d.lastScreen = $LastScreen; $d.readFailures = $ReadFailures + 1 }
+    $text = $d.lastScreen
+    if (-not $text) {
+        $d.since = $Since
+        $d.action = if ($d.readFailures -le 1) { "wait" } else { "stop" }
+        return $d
+    }
+    if (-not (Test-HandoffAutoDenyPrompt $text.Substring([math]::Max(0, $text.Length - 4000)))) {
+        $d.action = "stop"
+        return $d
+    }
+    if ($null -eq $Since) { $d.since = $Now; $d.started = $true } else { $d.since = $Since }
+    if (($Now - $d.since).TotalMinutes -lt $GraceMinutes) { $d.action = "wait" }
+    else { $d.action = "stop"; $d.expired = $true }
+    return $d
+}
+
 function Read-HandoffState {
     param([string]$Path)
     if (-not (Test-Path $Path)) { return @{} }
@@ -1573,7 +1603,7 @@ function Read-HandoffConfig {
 }
 
 Export-ModuleMember -Function ConvertTo-HandoffHash, Expand-HandoffTemplate, Classify-HandoffFailure,
-Test-HandoffPermissionPrompt, Test-HandoffAutoDenyPrompt, Read-HandoffState, Write-HandoffState, Resolve-HandoffBrief,
+Test-HandoffPermissionPrompt, Test-HandoffAutoDenyPrompt, Get-HandoffAutoDenyDecision, Read-HandoffState, Write-HandoffState, Resolve-HandoffBrief,
 Build-HandoffGuardCommand, Read-HandoffConfig, Build-HandoffSubagentPolicy, Build-HandoffMcpPolicy,
 Get-HandoffSessionVars, Build-HandoffBrief, Export-HandoffBriefs,
 Get-HandoffLinkType, Resolve-HandoffRepoRoot, Build-HandoffLaunchArgs, Resolve-HandoffSessionLauncher,
