@@ -61,8 +61,8 @@ def fallback_decision(client_name: str, stop: str | None, env=None,
     try:
         url, model = opencode_url(src), pick_fallback_model(src)
     except ValueError as exc:
-        msg = ("opencode fallback refused: %s; Claude is rate-limited "
-               "and the fallback server is down - not retrying Claude" % exc)
+        msg = ("opencode fallback refused: bad fallback config (%s); "
+               "Claude is rate-limited - not retrying Claude" % exc)
         return {"switch": False, "refused": True, "rc": EXIT_OC_FALLBACK_DOWN, "message": msg}
     healthy, reason = opencode_healthy(url, opener=opener)
     if healthy:

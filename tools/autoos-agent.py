@@ -14499,11 +14499,11 @@ def cmd_run(args, cfg: dict) -> int:
         # test's own exit object) passes None and keeps the old merged scan.
         stop = provider_stop(check_tail, getattr(run_rc, "raw_err", None))
         rate_limited = stop is not None and rate_limit_stop(stop)
-        if client.name == "claude" and not getattr(args, "no_fallthrough", False) and not oc_fallbacks:
+        if client.name == "claude" and rc != 0 and not getattr(args, "no_fallthrough", False) and not oc_fallbacks:
             # Claude prints its limit as a bare last line (no "Error:" prefix), so provider_stop
             # misses it: look at the last 3 non-empty lines of the tail directly.
             last = " ".join([ln for ln in (check_tail or "").splitlines() if ln.strip()][-3:])
-            decision = oc_fallback.fallback_decision(client.name, stop or last, os.environ, rate_limit_stop)
+            decision = oc_fallback.fallback_decision(client.name, "%s %s" % (stop or "", last), os.environ, rate_limit_stop)
             if decision.get("refused"):
                 print(decision["message"], file=sys.stderr)
                 rc = decision["rc"]
