@@ -164,10 +164,31 @@ The last two rows measure the 2026-09-27 gateway, and both combos render nothing
 today: D-657 omits every route whose legs no probe-d657 gateway acked, so
 `deepseek/deepseek-flash` and `meta_api/muse-spark-1.3-contributor` are gated and
 `policy.reviewers` no longer names the Muse head. The measurements stand; the
-model names are not selectable. See `docs/models.md` for what serves now.
+gateway spellings in those two rows are not selectable (this is about those routes, not about D-1504 below). See `docs/models.md` for what serves now.
 | qoder (`--permission-mode dont_ask`, no shell) | no | printed the stdout QUESTION + REPORT `input_required` |
 | qoder writer (`--permission-mode bypass_permissions`, Qwen3.8-Flash, sandbox forced) | not measured | shell + write work headless (2026-09-27, scratch repo); ask-back not yet measured |
 | agy (default model) | not measured | Gemini quota 429 before the task ran |
+
+### Model access paths (D-1504)
+
+A brief or seat request that names a model gets that model over its own path and
+no other (operator rule D-1504, 2026-10-16). No substitution of model or route:
+when the path is down or rate-limited, back off or report `BLOCKED`.
+
+| model | the only path |
+|---|---|
+| `qwen3.8-flash` | qodercli ACP, called with `-m Qwen3.8-Flash` exactly (see warning below) |
+| `gemini-3.8-flash` | antigravity (agy) ACP, or Google AI Studio; both rate-limited: back off or `BLOCKED`, never swap |
+| `muse-spark-1.3` | opencode ACP |
+| `mimo-v2.6-flash`, `mimo-v2.6-pro` | the mimo provider |
+
+Warning, not an exception: qodercli does not refuse an unknown model name. Measured
+2026-10-16, `-m qwen-3.8-flash` was silently served by its "efficient" model, which is
+a substitution this rule forbids. Use the exact spelling above and treat a run whose
+served model is not Qwen3.8-Flash as void.
+
+The ask-back rows above that name gateway routes (`omniroute/...`) record what
+was measured then; they are not paths for these models.
 
 ### Stdout channel
 
