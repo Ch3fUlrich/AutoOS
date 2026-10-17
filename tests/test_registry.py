@@ -2064,6 +2064,14 @@ class ReviewerPolicyTests(unittest.TestCase):
         # before any paid one (pinned in tests/test_autoos_resolver.py), so the
         # first paid entry is not the head. Naming `reviewers[0]` made this a
         # test of which provider happened to be listed first.
+        #
+        # T1c checked whether `reviewers[0]` may be pinned free again: it may
+        # not. The shipped list's head row is the google `gemini` seat, and in
+        # the D-1626 state its model leaves the registry with the Vertex grant
+        # (its only priced provider), so the surviving head of the list is the
+        # paid deepseek row -- the FIRST row is data, only "a free row exists
+        # and the walk reaches it first" is a rule. The two-pass order the cost
+        # rule really guards is what the assertions below read.
         free = [e for e in self.reviewers if e["paid"] is False]
         self.assertTrue(free, "no free reviewer row: every review starts on money")
         self.assertIsNot(free[0].get("first_pass_only"), True, free[0]["model"])
@@ -2446,7 +2454,20 @@ class DeepSeekBackTests(unittest.TestCase):
         # closes the chain is read off the render rather than pinned.
         rendered = {c["name"]: c for c in
                     registry.render_omniroute(self.reg)["combos"]}
-        for name in sorted(n for n in rendered if n.endswith("-clean")):
+        shipped = sorted(n for n in rendered if n.endswith("-clean"))
+        # Anchor the SHIPPED sweep (T1c): render_omniroute projects exactly the
+        # routes with a non-empty gateway_legs(), so the rendered -clean set must
+        # equal the -clean routes the registry still has a servable leg for. A
+        # non-empty sweep is thereby proven to run on real routes; an empty one
+        # is asserted to be empty BECAUSE no -clean route has a servable leg --
+        # derived from the routes here, not skipped over.
+        servable = sorted(rid for rid, route in self.reg["routes"].items()
+                          if rid.endswith("-clean")
+                          and registry.gateway_legs(route, self.reg))
+        self.assertEqual(shipped, servable,
+                         "the rendered -clean combos are not the -clean routes "
+                         "the registry still carries a servable leg for")
+        for name in shipped:
             models = rendered[name]["models"]
             self.assertTrue(models, name)
             for leg in models:
@@ -2456,8 +2477,8 @@ class DeepSeekBackTests(unittest.TestCase):
         served = [model for combo in rendered.values()
                   for model in combo["models"]]
         self.assertNotIn("deepseek/deepseek-flash", served)
-        # Control: the sweep is not vacuous -- a -clean route that does have a leg
-        # renders it, and the fixture's is the private-safe credit leg.
+        # Control: the sweep's SHAPE is not vacuous -- a -clean route that does
+        # have a leg renders it, and the fixture's is the private-safe credit leg.
         fixture = {c["name"]: c for c in registry.render_omniroute(
             with_synth_credit(keep_legs=False))["combos"]}
         self.assertEqual(fixture["l2-worker-clean"]["models"], [SYNTH_LEG])
@@ -2597,36 +2618,20 @@ class DeepSeekNativeIdAndProDenialTests(unittest.TestCase):
         file a render does not own (the hand-curated LiteLLM groups, the
         vendored OpenHands profiles, the agent harness) is caught too.
 
-        A render that refuses because a hand-maintained ORDER constant in
-        tools/registry.py no longer matches the registry is recorded and reads as
-        empty, not raised: the constant is the or-reconcile lane's to re-cut, the
-        check here is about DeepSeek ids, and the committed file the render would
-        have been compared against is still scanned. `unrenderable` names the
-        substitution so it is never silent."""
+        A render that raises fails the test: an out-of-sync hand-maintained
+        ORDER constant in tools/registry.py is a defect in a shipped surface and
+        the DeepSeek-id assertions on it must not run blind (OVH-REMOVE T1c --
+        the VERTEX=1 state check keeps IDE_MODEL_ORDER and OPENHANDS_TIER_ORDER
+        in sync, so no state needs a blinded surface any more)."""
         reg = self.reg
-        self.unrenderable = []
-        self.unrenderable_names = []
-
-        def render(name, thunk):
-            # Serialised inside the guard: a blinded surface must read as empty,
-            # not as the two characters of a dumped empty value.
-            try:
-                return json.dumps(thunk(), sort_keys=True)
-            except ValueError as exc:
-                if "ORDER is out of sync with the registry" not in str(exc):
-                    raise
-                self.unrenderable.append("%s: %s" % (name, exc))
-                self.unrenderable_names.append(name)
-                return ""
-
         combo = registry.render_omniroute(reg)
         surfaces = {
             "render omniroute": json.dumps(combo, sort_keys=True),
             "render litellm": "\n".join(
                 registry.render_litellm_blocks(reg, self._litellm_text()).values()),
-            "render ide": render("render ide", lambda: registry.render_ide(reg)),
-            "render openhands": render("render openhands",
-                                       lambda: registry.render_openhands(reg)),
+            "render ide": json.dumps(registry.render_ide(reg), sort_keys=True),
+            "render openhands": json.dumps(registry.render_openhands(reg),
+                                           sort_keys=True),
             "render models-doc": registry.render_models_doc(reg),
             "configuration/omniroute/combos.json": self._read(
                 ROOT / "configuration" / "omniroute" / "combos.json"),
@@ -2642,12 +2647,10 @@ class DeepSeekNativeIdAndProDenialTests(unittest.TestCase):
         }
         for path in sorted((ROOT / "openhands").glob("*/*.json")):
             surfaces[str(path.relative_to(ROOT))] = path.read_text(encoding="utf-8")
-        # The scan is worth something only if the surfaces were really read: an
-        # empty one is either a blind render, recorded by name above, or a bug.
+        # The scan is worth something only if the surfaces were really read:
+        # with no blinded render any more, an empty surface is a bug.
         blanked = sorted(k for k, v in surfaces.items() if not v)
-        self.assertEqual(blanked, sorted(self.unrenderable_names),
-                         "a surface is empty without being blinded by an "
-                         "out-of-sync order constant")
+        self.assertEqual(blanked, [], "a surface was read empty")
         return surfaces
 
     def _read(self, path) -> str:
@@ -4175,12 +4178,14 @@ class ComboContractTests(unittest.TestCase):
         # OVH-REMOVE (D-1816(12)) and D-1626 delete whole providers, and rule (e)
         # then correctly reports a combo left with one servable provider -- a true
         # finding about data this lane may not edit. So a non-zero exit is
-        # tolerated exactly as far as the registry explains it: the failure is
-        # rule (e), the named combo is a declared route, and that route's own legs
-        # resolve to one provider. Anything else -- a crash, another rule, a combo
-        # the registry does not back -- still fails.
+        # tolerated exactly as far as the registry explains it: there IS a named
+        # failure, every failure is rule (e), the named combo is a declared route,
+        # and that route's own legs resolve to exactly one provider. Zero
+        # providers is a worse failure than one and still fails. Anything else --
+        # a crash, another rule, a combo the registry does not back -- fails too.
         reg = load_registry()
         self.assertIn("FAILURES:", report)
+        self.assertTrue(failures, report)
         for line in failures:
             rid, detail = line.split(":", 1)
             self.assertTrue(detail.startswith(" (e) single servable provider"), line)
@@ -4191,9 +4196,9 @@ class ComboContractTests(unittest.TestCase):
                     providers.add(registry.resolve_leg(leg, reg)[0])
                 except ValueError:
                     pass
-            self.assertLessEqual(len(providers), 1,
-                                 "%s carries %d providers, so rule (e) is not the "
-                                 "registry's doing: %s" % (rid, len(providers), line))
+            self.assertEqual(len(providers), 1,
+                             "%s carries %d providers, so rule (e) is not the "
+                             "registry's doing: %s" % (rid, len(providers), line))
 
 
 class CleanTierEvidenceTests(unittest.TestCase):
@@ -4763,6 +4768,26 @@ class CleanCreditHeadPricedTests(unittest.TestCase):
             provider_id, model_id = registry.resolve_leg(leg, reg)
             self.assertEqual(reg["providers"][provider_id]["tier"], "credit", leg)
             self.assertFalse(resolver.credit_leg_priced(model_id, reg), leg)
+        # Anchor (T1c, holds in every state): the swept heads equal the credit
+        # legs re-derived straight from the rows -- the model-level `tier`
+        # override else the provider `tier`, leg_tier's own recipe recomputed
+        # rather than re-called. So a non-empty sweep ran on real rows, and an
+        # empty one is legitimate only as the registry's fact -- no clean route
+        # declares a credit leg any more -- not a leg that stopped resolving or
+        # a tier the sweep could not see.
+        derived = []
+        for rid, route in reg["routes"].items():
+            if not rid.endswith("-clean"):
+                continue
+            for leg in (route.get("legs") or []):
+                provider_id, model_id = registry.resolve_leg(leg, reg)
+                tier = ((reg["models"].get(model_id) or {}).get("tier")
+                        or (reg["providers"].get(provider_id) or {}).get("tier"))
+                if tier == "credit":
+                    derived.append(leg)
+        self.assertEqual(heads, derived,
+                         "the swept credit heads disagree with the tiers read "
+                         "straight off the provider/model rows")
         # WHICH clean route carries a credit head is chain data that moved with
         # every re-cut and disappears with the grants, so the head list above is
         # swept, not pinned. What the pin is really for is the reader: an
