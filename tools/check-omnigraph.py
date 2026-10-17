@@ -280,7 +280,7 @@ def main(argv=None) -> int:
                 or file_values.get("OMNIGRAPH_BASE_URL") or "").rstrip("/")
         if not base:
             print("check-omnigraph: OMNIGRAPH_BASE_URL is not set - export it or put "
-                  "OMNIGRAPH_BASE_URL=<url> in ~/.autoos-omnigraph.env", file=sys.stderr)
+                  "OMNIGRAPH_BASE_URL=<url> in %s (--offline skips this check)" % env_file_path(), file=sys.stderr)
             return 2
         live_problems, facts = check_live(base, graph or "autoos", token or None, source or "missing")
         problems.extend(live_problems)

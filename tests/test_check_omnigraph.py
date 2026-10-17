@@ -185,9 +185,10 @@ class BaseUrlPrecedenceTests(unittest.TestCase):
             self.assertEqual(rc, 2)
             self.assertIn(
                 "check-omnigraph: OMNIGRAPH_BASE_URL is not set - export it or put "
-                "OMNIGRAPH_BASE_URL=<url> in ~/.autoos-omnigraph.env",
+                "OMNIGRAPH_BASE_URL=<url> in ",
                 err.getvalue(),
             )
+            self.assertIn(str(empty_env_file), err.getvalue())  # names the file actually consulted, overrides included
 
     def test_base_url_cli_flag_wins(self):
         with tempfile.TemporaryDirectory() as tmp:
