@@ -48,6 +48,8 @@ def opencode_healthy(url: str, timeout: float = 3.0, opener=None) -> tuple[bool,
             close()
         return (True, "ok") if 200 <= status < 300 else (False, f"{url}: HTTP {status}")
     except urllib.error.HTTPError as exc:
+        if exc.code in (401, 403):  # a password-protected `opencode serve` answers 401 when alive (measured 2026-10-17)
+            return True, "ok (auth required)"
         return False, f"{url}: HTTP {exc.code}"
     except urllib.error.URLError as exc:
         return False, f"{url}: {getattr(exc, 'reason', exc)}"

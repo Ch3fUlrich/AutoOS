@@ -56,6 +56,12 @@ class OcFallbackTests(unittest.TestCase):
         ok, _ = oc_fallback.opencode_healthy("http://127.0.0.1:4096", opener=opener_503)
         assert ok is False
 
+        err_401 = urllib.error.HTTPError(
+            "http://127.0.0.1:4096/global/health", 401, "Unauthorized", {}, None
+        )
+        ok, _ = oc_fallback.opencode_healthy("http://127.0.0.1:4096", opener=mock.Mock(side_effect=err_401))
+        assert ok is True
+
     def test_opencode_healthy_type_error(self):
         opener_type_err = mock.Mock(side_effect=TypeError("transport failure"))
         ok, msg = oc_fallback.opencode_healthy("http://127.0.0.1:4096", opener=opener_type_err)
