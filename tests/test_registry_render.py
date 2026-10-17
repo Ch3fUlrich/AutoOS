@@ -281,26 +281,37 @@ class GatewayRefTests(unittest.TestCase):
         # The mechanism AGYID added (and this AGYCANON change must not break): a
         # provider whose catalog id differs from its registry id renders under the
         # declared model_prefix. SCWREMOVAL 2026-10-06 retired the scaleway example
-        # with the provider and D657-CHAIN 2026-10-08 gated ovhcloud
-        # (available: false, six spellings x both gateways answered 404), so the
-        # live example was bazaarlink -> bzl, which now heads l1-orchestrator.
-        # OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1) puts ovhcloud back on
-        # the live side of that example — 200 on re-probe, an L3 leg only — so the
-        # render carries BOTH prefix spellings, and the re-spelling is pinned in
-        # the render instead of only as a provider fact.
-        self.assertEqual(registry.gateway_ref("ovhcloud/Qwen3.8-27B", real_registry()),
-                         "ovh/Qwen3.8-27B")
-        self.assertIs(real_registry()["providers"]["ovhcloud"].get("available"), True)
+        # with the provider and OVH-REMOVE retires ovhcloud, so the live registry
+        # example is bazaarlink -> bzl, which heads l1-orchestrator. The re-spelling
+        # is pinned both as a provider fact (gateway_ref) and in the render, then
+        # re-proven on an inline provider so the mechanism never rests on whichever
+        # live provider happens to declare a prefix today. (The old OVH leg was also
+        # an L3-only placement example; that policy belonged to ovhcloud itself, so
+        # it is not reproduced here.)
+        self.assertEqual(
+            registry.gateway_ref("bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+                                 real_registry()),
+            "bzl/deepseek/deepseek-v4-flash-0731free:free")
+        self.assertIs(real_registry()["providers"]["bazaarlink"].get("available"), True)
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
         self.assertEqual(by_name["l1-orchestrator"]["models"][0],
                          "bzl/deepseek/deepseek-v4-flash-0731free:free")
-        self.assertIn("ovh/Qwen3.8-27B", by_name["l3-implementer"]["models"])
-        # and no orchestrator layer renders it (OVH documents no prompt cache)
-        for name, combo in by_name.items():
-            if name.startswith(("l0-", "l1-", "l2-")):
-                for model in combo["models"]:
-                    self.assertFalse(model.startswith("ovh/"), (name, model))
+        # Mechanism, provider-independent: an inline provider whose registry id is
+        # "prefprov" and catalog prefix is "ppfx" renders under the declared prefix,
+        # and the registry spelling never reaches the combo.
+        inline = {
+            "providers": {"prefprov": {"id": "prefprov", "model_prefix": "ppfx"}},
+            "models": {"m": {"id": "m"}},
+            "routes": {"prefixed": {
+                "id": "prefixed", "class": "cheap", "strategy": "priority",
+                "legs": ["prefprov/m"],
+                "surfaces": {"omniroute": {"context_declared": "8k"}}}},
+        }
+        inline_render = registry.render_omniroute(inline)
+        inline_combo = {c["name"]: c for c in inline_render["combos"]}["prefixed"]
+        self.assertEqual(inline_combo["models"], ["ppfx/m"])
+        self.assertNotIn("prefprov/", json.dumps(inline_render))
 
     def test_render_omniroute_leaves_other_providers_unchanged(self):
         # Providers without a model_prefix keep their registry spelling in
@@ -456,27 +467,23 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         # l1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
         # servable leg. l3-driver-free-only left this set when FREEAI gave it
         # a servable free_ai/qwen7b leg.
-        # D657-CHAIN 2026-10-08 adds the clean band and two omitted singles: every
-        # *-clean route now serves only vertex/gemini-3.8-flash (litellm_auth, no
-        # api_key -> stripped), and providers.ovhcloud.available: false empties the
-        # three ovh-* routes, so they render nothing here and sit in combos.json's
-        # `omitted` there. OVH-REPROBE 2026-10-08 restores the provider, so
-        # ovh-qwen3.8-27b renders its block again (it carries an OVH api_key);
-        # ovh-gpt-oss-120b stays in this set because its leg is gated per-leg as
-        # unpriced — which is the shape this test exists to pin: an all-gated
-        # route renders nothing. ovh-qwen3-coder-30b left with OVHCODER-DROP
-        # 2026-10-08, and not as an example of that shape: OVH withdrew the id
-        # upstream, so the route was deleted and its id retired rather than
-        # declared-and-gated. A deleted route is not a declaration that renders
-        # nothing, so it belongs to no set here (pinned in
-        # test_ovh_coder_leg_is_retired_not_merged).
+        # D657-CHAIN 2026-10-08 adds the clean band: every *-clean route now
+        # serves only vertex/gemini-3.8-flash (litellm_auth, no api_key ->
+        # stripped), so it renders nothing here. That is the shape this test
+        # exists to pin - an all-gated route renders no block. (ovh-gpt-oss-120b
+        # was a second example of that shape; OVH-REMOVE takes the whole ovhcloud
+        # provider and its routes out, so the positive half - "a route that carries
+        # a live provider api_key DOES render a block" - is now pinned on l2-worker,
+        # whose bazaarlink leg carries os.environ/BAZAARLINK_API_KEY. A deleted
+        # route is not a declaration that renders nothing, so it belongs to no set
+        # here - pinned in test_ovh_coder_leg_is_retired_not_merged, in
+        # tests/test_registry.py.)
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
         for gone in ("opus-5-5", "samba/gpt-oss-120b", "samba/MiniMax-M3",
-                     "l2-worker-clean", "l3-driver-clean", "l1-orchestrator-clean",
-                     "ovh-gpt-oss-120b"):
+                     "l2-worker-clean", "l3-driver-clean", "l1-orchestrator-clean"):
             self.assertNotIn(gone, rendered)
-        self.assertIn("ovh-qwen3.8-27b", rendered)
-        self.assertIn("os.environ/OVHCLOUD_API_KEY", rendered["ovh-qwen3.8-27b"])
+        self.assertIn("l2-worker", rendered)
+        self.assertIn("os.environ/BAZAARLINK_API_KEY", rendered["l2-worker"])
 
     def test_a_legless_hand_group_is_never_rendered(self):
         # l2-worker-paid/l3-driver-paid declare no legs; they are hand-curated
@@ -1193,19 +1200,24 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
     def test_context_column_falls_back_to_the_surfaces_numeric_context(self):
         reg = copy.deepcopy(real_registry())
         del reg["routes"]["l3-driver"]["surfaces"]["omniroute"]["context_declared"]
-        rendered = registry.render_models_doc(reg)
         # FREEKEYS-2c: the numeric fallback is clamped like every other context
-        # cell (clamp_route_context narrows a numeric surface context too).
-        # D657-CHAIN 2026-10-08 moved the clamped number from 128,000 to 131,072:
-        # the scaleway/nebius 128k legs left the chain and the smallest window a
-        # serving leg now advertises is the groq/cohere 131072 band, which equals
-        # the surface promise - so the cell follows the numeric field rather than
-        # the deleted "128k" label. OVH-REPROBE 2026-10-08 puts a 128,000 leg back
-        # in the chain, and the clamp follows it: the cell narrows under the
-        # smallest serving leg, which is the mechanism this test owns. The
-        # comma-spelled number is the fallback's signature either way.
-        self.assertIn("128,000", row_for(rendered, "l3-driver"))
-        self.assertNotIn("128k", row_for(rendered, "l3-driver"))
+        # cell (clamp_route_context narrows a numeric surface context too), and the
+        # comma-spelled number - never a "k" label - is the fallback's signature.
+        # The ovhcloud/Qwen3.5-397B-A17B leg (128,000) used to be the smallest
+        # serving window here and pinned "128,000"; OVH-REMOVE retires that leg, so
+        # drop it from the copy (present before removal, absent after) to make the
+        # clamp follow the surviving cohere 131,072 band identically in both states,
+        # then raise the surface promise above it so the clamp visibly narrows it -
+        # exactly what D657-CHAIN pinned when the scaleway/nebius 128k legs left.
+        route = reg["routes"]["l3-driver"]
+        route["legs"] = [l for l in route["legs"] if not l.startswith("ovhcloud/")]
+        route["surfaces"]["omniroute"]["context"] = 262144
+        rendered = registry.render_models_doc(reg)
+        row = row_for(rendered, "l3-driver")
+        self.assertIn("131,072", row)
+        self.assertNotIn("262,144", row)  # narrowed by the clamp, not echoed
+        self.assertNotIn("128,000", row)
+        self.assertNotIn("128k", row)
 
     def test_context_column_falls_back_to_a_legs_model_when_no_surface_carries_one(self):
         reg = copy.deepcopy(real_registry())
@@ -1498,25 +1510,18 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # samba/SambaNova is available: false, so every one of its legs goes -
         # including the pinned one-leg routes, and with them spark-1.3-contributor,
         # whose only legs are the SS8-banned contributor copies (OR1d: declared
-        # legs, none servable -> no declaration). OVH-REPROBE 2026-10-08 moved
-        # ovh-qwen3.8-27b out of this set (the provider is live and priced again,
-        # so the seat renders); ovh-gpt-oss-120b stays omitted because its leg is
-        # gated for want of a price. OVHCODER-DROP 2026-10-08 took ovh-qwen3-coder-30b
-        # out of the omitted set by deleting the route: an omitted route is still a
-        # declaration, and a model OVH no longer serves is not one - it sits in the
-        # render's `retired` list instead, which is what makes apply prune the live
-        # combo (pinned in test_ovh_coder_leg_is_retired_not_merged).
+        # legs, none servable -> no declaration). The ovh-* seats this set used to
+        # pin (ovh-gpt-oss-120b omitted for want of a price, ovh-qwen3.8-27b live,
+        # ovh-qwen3-coder-30b deleted-and-retired) all belonged to the ovhcloud
+        # provider itself; OVH-REMOVE takes them out, so none is a declaration of
+        # any kind here. That retired-vs-omitted mechanism stays pinned in
+        # test_ovh_coder_leg_is_retired_not_merged, in tests/test_registry.py.
         rendered = registry.render_omniroute(real_registry())
         combos = {c["name"]: c for c in rendered["combos"]}
         for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3", "spark-1.3-contributor",
-                     "ovh-gpt-oss-120b",
                      "deepseek-v4.1-flash"):
             self.assertNotIn(gone, combos)
             self.assertIn(gone, rendered["omitted"])
-        self.assertNotIn("ovh-qwen3-coder-30b", combos)
-        self.assertNotIn("ovh-qwen3-coder-30b", rendered["omitted"])
-        self.assertIn("ovh-qwen3-coder-30b", rendered["retired"])
-        self.assertEqual(combos["ovh-qwen3.8-27b"]["models"], ["ovh/Qwen3.8-27B"])
 
 
     def test_real_litellm_drops_gated_legs(self):
@@ -1676,13 +1681,15 @@ class UnavailableUntilRenderIndependenceTests(unittest.TestCase):
         reg["routes"]["spark-1.3-contributor"]["unavailable_legs"][
             "meta_api/muse-spark-1.3-contributor"]["unavailable_until"] = (
                 "2026-10-01T09:05:00Z")
-        # One leg with an until but no available:false at all - inert because its
-        # PROVIDER is the gate (ovhcloud is off, so the route already renders
-        # nothing either way). CLAUDE55 2026-10-05 moved this from opus-4-6 (now
-        # opus-5-5); D657-CHAIN moved it again because every leg that still has a
-        # route-level gate also has available:false now.
-        reg["routes"]["ovh-qwen3.8-27b"]["unavailable_legs"] = {
-            "ovhcloud/Qwen3.8-27B": {
+        # A live route (it renders a combo) carrying an unavailable_legs gate whose
+        # ONLY field is unavailable_until and no available:false at all - the leg
+        # stays servable, so adding the until changes no render. OVH-REMOVE retires
+        # the ovhcloud/ leg this used to ride on (a provider-gated route that
+        # rendered nothing either way, so it proved the point while the provider was
+        # live); l2-worker-clean is the independent example - a single vertex leg
+        # that serves in both states.
+        reg["routes"]["l2-worker-clean"]["unavailable_legs"] = {
+            "vertex/gemini-3.8-flash": {
                 "unavailable_until": "2026-10-01T09:05:00Z"},
         }
         reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
