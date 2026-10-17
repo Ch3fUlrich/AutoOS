@@ -11,11 +11,17 @@ Run from the repo root:
     python3 -m pytest -q tests/test_check_omnigraph.py
     python3 tests/test_check_omnigraph.py
 """
+import contextlib
 import http.server
 import importlib.util
+import io
 import json
+import os
+import tempfile
 import threading
 import unittest
+import unittest.mock
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -156,6 +162,107 @@ class OmittedColumnTests(unittest.TestCase):
         self.assertEqual(problems, [])
         self.assertIn("project a", facts)
         self.assertNotIn("None", " ".join(facts))
+
+
+class BaseUrlPrecedenceTests(unittest.TestCase):
+    def test_no_base_url_anywhere_fails_loudly_without_network_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty_env_file = Path(tmp) / ".autoos-omnigraph.env"
+            empty_env_file.write_text("", encoding="utf-8")
+            clean_env = {k: v for k, v in os.environ.items() if k != "OMNIGRAPH_BASE_URL"}
+            clean_env["AUTOOS_OMNIGRAPH_ENV_FILE"] = str(empty_env_file)
+
+            def fail_urlopen(*args, **kwargs):
+                raise AssertionError("network call attempted when no base URL was set")
+
+            out, err = io.StringIO(), io.StringIO()
+            with unittest.mock.patch.dict(os.environ, clean_env, clear=True), \
+                 unittest.mock.patch("urllib.request.urlopen", side_effect=fail_urlopen), \
+                 contextlib.redirect_stdout(out), \
+                 contextlib.redirect_stderr(err):
+                rc = module.main([])
+
+            self.assertEqual(rc, 2)
+            self.assertIn(
+                "check-omnigraph: OMNIGRAPH_BASE_URL is not set - export it or put "
+                "OMNIGRAPH_BASE_URL=<url> in ~/.autoos-omnigraph.env",
+                err.getvalue(),
+            )
+
+    def test_base_url_cli_flag_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".autoos-omnigraph.env"
+            env_file.write_text("OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080/file\n", encoding="utf-8")
+            env = dict(os.environ)
+            env["OMNIGRAPH_BASE_URL"] = "http://omnigraph.test.invalid:8080/env"
+            env["AUTOOS_OMNIGRAPH_ENV_FILE"] = str(env_file)
+            captured = []
+
+            def spy_live(base, graph, token, source):
+                captured.append(base)
+                return [], ["ok"]
+
+            with unittest.mock.patch.dict(os.environ, env, clear=True), \
+                 unittest.mock.patch.object(module, "check_live", side_effect=spy_live):
+                rc = module.main(["--base-url", "http://omnigraph.test.invalid:8080/cli"])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured, ["http://omnigraph.test.invalid:8080/cli"])
+
+    def test_env_var_wins_over_env_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".autoos-omnigraph.env"
+            env_file.write_text("OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080/file\n", encoding="utf-8")
+            env = dict(os.environ)
+            env["OMNIGRAPH_BASE_URL"] = "http://omnigraph.test.invalid:8080/env"
+            env["AUTOOS_OMNIGRAPH_ENV_FILE"] = str(env_file)
+            captured = []
+
+            def spy_live(base, graph, token, source):
+                captured.append(base)
+                return [], ["ok"]
+
+            with unittest.mock.patch.dict(os.environ, env, clear=True), \
+                 unittest.mock.patch.object(module, "check_live", side_effect=spy_live):
+                rc = module.main([])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured, ["http://omnigraph.test.invalid:8080/env"])
+
+    def test_env_file_used_last(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / ".autoos-omnigraph.env"
+            env_file.write_text("OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080/file\n", encoding="utf-8")
+            env = dict(os.environ)
+            env.pop("OMNIGRAPH_BASE_URL", None)
+            env["AUTOOS_OMNIGRAPH_ENV_FILE"] = str(env_file)
+            captured = []
+
+            def spy_live(base, graph, token, source):
+                captured.append(base)
+                return [], ["ok"]
+
+            with unittest.mock.patch.dict(os.environ, env, clear=True), \
+                 unittest.mock.patch.object(module, "check_live", side_effect=spy_live):
+                rc = module.main([])
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured, ["http://omnigraph.test.invalid:8080/file"])
+
+
+class RepoMcpJsonTests(unittest.TestCase):
+    def test_repo_mcp_json_base_url_has_no_default_and_no_localhost(self):
+        mcp_path = ROOT / ".mcp.json"
+        doc = json.loads(mcp_path.read_text(encoding="utf-8"))
+        base_url_val = (
+            doc.get("mcpServers", {})
+            .get("omnigraph", {})
+            .get("env", {})
+            .get("OMNIGRAPH_BASE_URL", "")
+        )
+        self.assertNotIn(":-", base_url_val)
+        self.assertNotIn("localhost", base_url_val)
+        self.assertEqual(base_url_val, "${OMNIGRAPH_BASE_URL}")
 
 
 if __name__ == "__main__":
