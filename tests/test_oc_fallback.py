@@ -24,8 +24,8 @@ class OcFallbackTests(unittest.TestCase):
         assert oc_fallback.claude_limit_stop("claude", "normal error", is_rate_limit=lambda s: False) is False
 
     def test_pick_fallback_model(self):
-        assert oc_fallback.pick_fallback_model({}) == "muse-spark-1.3"
-        assert oc_fallback.pick_fallback_model({"AUTOOS_OPENCODE_FALLBACK_MODEL": "mimo-v2.6-flash"}) == "mimo-v2.6-flash"
+        assert oc_fallback.pick_fallback_model({}) == "mimo-v2.6-flash"
+        assert oc_fallback.pick_fallback_model({"AUTOOS_OPENCODE_FALLBACK_MODEL": "muse-spark-1.3"}) == "muse-spark-1.3"
         with self.assertRaises(ValueError):
             oc_fallback.pick_fallback_model({"AUTOOS_OPENCODE_FALLBACK_MODEL": "gpt-4"})
 
@@ -68,7 +68,14 @@ class OcFallbackTests(unittest.TestCase):
         resp_ok = mock.Mock(status=200)
         opener_ok = mock.Mock(return_value=resp_ok)
         dec = oc_fallback.fallback_decision("claude", "usage limit reached", env={}, opener=opener_ok)
-        assert dec == {"switch": True, "client": "opencode", "model": "muse-spark-1.3", "url": "http://127.0.0.1:4096"}
+        assert dec == {
+            "switch": True,
+            "client": "opencode",
+            "model": "mimo-v2.6-flash",
+            "opencode_model": "omniroute/mimo-v2.6-flash",
+            "free": False,
+            "url": "http://127.0.0.1:4096",
+        }
         resp_ok.close.assert_called_once()
 
         opener_down = mock.Mock(side_effect=urllib.error.URLError("connection refused"))

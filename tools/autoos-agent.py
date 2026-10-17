@@ -14500,7 +14500,7 @@ def cmd_run(args, cfg: dict) -> int:
         stop = provider_stop(check_tail, getattr(run_rc, "raw_err", None))
         rate_limited = stop is not None and rate_limit_stop(stop)
         oc_switch = None
-        if client.name == "claude" and rc != 0 and not getattr(args, "no_fallthrough", False) and not oc_fallbacks:
+        if client.name == "claude" and rc != 0 and not args.joinable and not getattr(args, "no_fallthrough", False) and not oc_fallbacks:
             # Claude prints its limit as a bare last line (no "Error:" prefix), so provider_stop
             # misses it: look at the last 3 non-empty lines of the tail directly.
             last = " ".join([ln for ln in (check_tail or "").splitlines() if ln.strip()][-3:])
@@ -14598,13 +14598,14 @@ def cmd_run(args, cfg: dict) -> int:
                 if oc_switch:
                     oc_fallbacks += 1
                     args.client = "opencode"
-                    args.model = oc_switch["model"]
+                    args.free = oc_switch["free"]
+                    args.model = oc_switch["opencode_model"]
                     client = clients.CLIENTS["opencode"]
                     uses_key = client.gateway and not args.free
                     if uses_key and key is None:
                         key = client_key(ROOT)
                     capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
-                    print("autoos-agent: claude limit - switching to opencode %s" % args.model, file=sys.stderr)
+                    print("autoos-agent: claude limit - switching to opencode %s" % oc_switch["model"], file=sys.stderr)
                     next_plan = build_plan(args, cfg, sandbox=plan["sandbox"], fence=fence)
                     fell_from = plan["route"].get("combo")
                     fell_to = (next_plan["route"].get("combo") or args.model)

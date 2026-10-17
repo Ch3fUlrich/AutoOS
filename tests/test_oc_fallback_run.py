@@ -8,12 +8,16 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
 
 from tests.test_autoos_spawner import run_agent, claude_env
+import autoos_oc_fallback as oc_fallback
 
 if not os.path.exists(sys.executable):
     sys.executable = shutil.which("python3") or shutil.which("python") or sys.executable
@@ -25,8 +29,7 @@ def _run(cli_dir, url, *extra, root=None):
     env = claude_env(PATH=cli_dir + os.pathsep + os.environ.get("PATH", ""), AUTOOS_OPENCODE_URL=url)
     env = {k: v for k, v in env.items() if not k.startswith("GIT_CONFIG_")}
     env["GIT_CONFIG_PARAMETERS"] = "'core.longpaths=true'"
-    test_root = root or getattr(OcFallbackRunTests, "test_root", None)
-    return run_agent("run", "--client", "claude", "--tier", "1", "--isolate", *extra, "task", env=env, root=test_root)
+    return run_agent("run", "--client", "claude", "--tier", "1", "--isolate", *extra, "task", env=env, root=root)
 
 
 class OcFallbackRunTests(unittest.TestCase):
@@ -44,26 +47,10 @@ class OcFallbackRunTests(unittest.TestCase):
         threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
         cls.health_server = f"http://127.0.0.1:{cls.srv.server_port}"
 
-        cls.test_root = tempfile.mkdtemp(prefix="autoos-ocfb-root-")
-        for entry in os.scandir(str(ROOT)):
-            if entry.name in ("opencode.jsonc", ".git"):
-                continue
-            try:
-                os.symlink(entry.path, os.path.join(cls.test_root, entry.name))
-            except OSError:
-                pass
-        text = (ROOT / "opencode.jsonc").read_text(encoding="utf-8")
-        idx = text.find('"models": {')
-        if idx != -1:
-            pos = idx + len('"models": {')
-            text = text[:pos] + '\n        "muse-spark-1.3": {},\n' + text[pos:]
-        (Path(cls.test_root) / "opencode.jsonc").write_text(text, encoding="utf-8")
-
     @classmethod
     def tearDownClass(cls):
         cls.srv.shutdown()
         cls.srv.server_close()
-        shutil.rmtree(cls.test_root, ignore_errors=True)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -110,7 +97,7 @@ class OcFallbackRunTests(unittest.TestCase):
     def test_up(self):
         d, cnt = self.fake_claude(LIMIT, 1)
         r = _run(d, self.health_server)
-        assert "switching to opencode muse-spark-1.3" in r.stderr
+        assert "switching to opencode mimo-v2.6-flash" in r.stderr
         with open(cnt) as f:
             assert len(f.readlines()) == 1
         oc_cnt = Path(d) / "oc_cnt.txt"
@@ -120,7 +107,20 @@ class OcFallbackRunTests(unittest.TestCase):
         oc_args = Path(d) / "oc_args.txt"
         assert oc_args.exists()
         with open(oc_args) as f:
-            assert "muse-spark-1.3" in f.read()
+            assert "omniroute/mimo-v2.6-flash" in f.read()
+
+    def test_fallback_decision_muse_spark_env(self):
+        resp_ok = mock.Mock(status=200)
+        opener_ok = mock.Mock(return_value=resp_ok)
+        dec = oc_fallback.fallback_decision(
+            "claude", "usage limit reached",
+            env={"AUTOOS_OPENCODE_FALLBACK_MODEL": "muse-spark-1.3"},
+            opener=opener_ok,
+        )
+        assert dec["switch"] is True
+        assert dec["model"] == "muse-spark-1.3"
+        assert dec["opencode_model"] is None
+        assert dec["free"] is True
 
     def test_not_a_limit(self):
         d, _ = self.fake_claude("all done", 0)

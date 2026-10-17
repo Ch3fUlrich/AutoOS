@@ -8,7 +8,9 @@ CLAUDE_LIMIT_MARKERS = (
     "usage limit reached", "you've hit your limit", "you have hit your limit",
     "claude usage limit", "5-hour limit reached", "weekly limit reached",
 )
-FALLBACK_MODELS = ("muse-spark-1.3", "mimo-v2.6-flash")
+FALLBACK_MODELS = ("mimo-v2.6-flash", "muse-spark-1.3")
+OPENCODE_IDS = {"mimo-v2.6-flash": "omniroute/mimo-v2.6-flash", "muse-spark-1.3": None}
+FREE_MODELS = {"muse-spark-1.3"}
 
 
 def claude_limit_stop(client_name: str, stop: str | None, is_rate_limit=None) -> bool:
@@ -66,7 +68,14 @@ def fallback_decision(client_name: str, stop: str | None, env=None,
         return {"switch": False, "refused": True, "rc": EXIT_OC_FALLBACK_DOWN, "message": msg}
     healthy, reason = opencode_healthy(url, opener=opener)
     if healthy:
-        return {"switch": True, "client": "opencode", "model": model, "url": url}
+        return {
+            "switch": True,
+            "client": "opencode",
+            "model": model,
+            "opencode_model": OPENCODE_IDS[model],
+            "free": model in FREE_MODELS,
+            "url": url,
+        }
     msg = ("opencode fallback refused: %s; Claude is rate-limited "
            "and the fallback server is down - not retrying Claude" % reason)
     return {"switch": False, "refused": True, "rc": EXIT_OC_FALLBACK_DOWN, "message": msg}
