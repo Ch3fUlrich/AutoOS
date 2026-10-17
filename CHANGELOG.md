@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- SPAWNER-PREPUSH-FLAKE (2026-10-17, spawner flake): cli_scope_unit sequence-numbers no-run-id units (cli-pid<pid>-n<seq>-a<attempt>) so repeated in-process client launches get distinct transient scope units.
 - context_guard: defaults raised 230000/250000 -> 270000/300000 (operator D-1708)
 - CATALOG-LIVE-FORK-GUARD (2026-10-17, routing D-1721): `catalog-live-check.yml` `runs-on` carries ci.yml's same-repo guard (fork pull_request -> ubuntu-latest). Defence in depth only: the workflow triggers on schedule/workflow_dispatch today, so no fork PR could reach the fleet runner; the guard keeps it that way if a pull_request trigger is ever added.
 - OR-DRIFT-CHECK (2026-10-17, RT-P0-OR-DRIFT, D-1621/D-1624): `configuration/omniroute/apply.sh` `--drift` compares the live store with the server snapshot (`$HERE/live/server-combos.json` or `AUTOOS_DRIFT_SNAPSHOT`) instead of `combos.json`; `--drift-against registry` preserves the previous registry comparison. Mutating runs add an `--allow-drift <name>` guard that refuses changes to combos differing from the snapshot without an explicit `--go` and allowlist. Replaced `/dev/fd/3` reads in `live_combo_norm` and drift comparison with environment variables for Windows portability.

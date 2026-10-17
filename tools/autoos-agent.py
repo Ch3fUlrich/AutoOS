@@ -12850,10 +12850,15 @@ def cli_scope_unit(run_id, attempt) -> str:
     `autoos-worker-<run-id>.scope`, and the attempt number matters because the
     fallthrough loop re-starts the client in a new scope each time — a reused unit
     name is a `systemd-run` failure, not a no-op. A run with no id (a plain
-    `run …` from a terminal) is named by its own pid, which is unique per process.
+    `run …` from a terminal) is named by its own pid and a random suffix,
+    which is unique per call, not only per process (and across module copies).
     """
-    return scope_unit_name("cli-%s-a%s" % (run_id or "pid%d" % os.getpid(),
-                                           attempt or 1))
+    if run_id:
+        stem = "cli-%s-a%s" % (run_id, attempt or 1)
+    else:
+        # random, not a counter: the tests (and any caller) load this module more than once per process, and each copy would restart a counter at 1
+        stem = "cli-pid%d-%s-a%s" % (os.getpid(), uuid.uuid4().hex[:8], attempt or 1)
+    return scope_unit_name(stem)
 
 
 def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False,
