@@ -67,7 +67,7 @@ Binding on every level below; each line links its source — read the source, ne
 2. Evidence kinds: commit+ci (commit on main with Plan-Item trailer, newest CI run per check suite + name green), run-record, semaphore-task, decision. Done = merged to main + evidence attached + reviews passed; a claim is not evidence.
 3. Defining items: done_criteria max 600 chars, overflow goes in the description [routing docs/LESSONS.md D-1424]; a lone lane needs a path to a goal (unblocks/goal link) or define refuses "unreachable_goal".
 4. Planning method: plangraph repo skills/plangraph-planning/SKILL.md (layers, task contract, report schemas).
-5. L2 launch contract: L1 asks routing `"L2-LAUNCH <name> <brief path> <cwd>"`; router launches Sonnet, effort medium, slim MCP (routing ops/mcp-l2-slim.json); L2 never merges or pushes to main, runs no crons, keeps a status card <= 40 lines, and sends `"RECYCLE-READY <card path>"` before 230k context [routing ops/l2-rule.txt, D-716].
+5. L2 launch contract: L1 asks routing `"L2-LAUNCH <name> <brief path> <cwd>"`; router launches Sonnet, effort medium, slim MCP (routing ops/mcp-l2-slim.json); L2 never merges or pushes to main, runs no crons, keeps a status card <= 40 lines, and sends `"RECYCLE-READY <card path>"` before 270k context [routing ops/l2-rule.txt, D-716].
 6. Quiet fleet: messages only for BLOCKED/decision, DONE or MERGE-READY with sha, GO requests, incidents, launch/recycle; no acks, no ALIVE; no recurring crons, wait with one background command that exits [D-1364, D-1377; build-L1 beat exception D-1436].
 7. L1 and L2 Claude sessions run at effort medium [D-1390].
 8. CI runs only on the workstation or ci.vm; no GitHub billing [D-1436].
