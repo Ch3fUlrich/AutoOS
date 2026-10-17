@@ -22855,8 +22855,8 @@ class CliScopeLaunchTests(unittest.TestCase):
                 rc = run()
         else:
             rc = run()
-        unit = rc.scope["unit"]
         self.assertEqual(int(rc), 0, rc.tail + err.getvalue())
+        unit = rc.scope["unit"]
         self.assertIn(unit, rc.tail,
                      "the client's own cgroup is not the scope it was told about: "
                      "%s / cgroup said %r" % (err.getvalue(), rc.tail))
@@ -23854,6 +23854,11 @@ class CliScopeUnitTests(unittest.TestCase):
             self.assertTrue(u.startswith("autoos-worker-cli-pid"))
             self.assertTrue(u.endswith(".scope"))
             self.assertRegex(u, r"^[A-Za-z0-9_.-]+$")
+
+    def test_two_loaded_copies_of_the_module_do_not_collide(self):
+        # load_agent() builds a fresh module object per call; a per-module counter would restart at 1 in each
+        other = load_agent()
+        self.assertNotEqual(self.agent.cli_scope_unit(None, 1), other.cli_scope_unit(None, 1))
 
     def test_run_id_names_unchanged_and_attempt_differs(self):
         u1 = self.agent.cli_scope_unit("20261017-120000-x-abc123", 1)
