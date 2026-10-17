@@ -9321,12 +9321,17 @@ class GatewayCooldownStopTests(unittest.TestCase):
     # omits it until a re-probe), which made the SCW_* lines name a model the
     # route no longer holds and bench the wrong provider. The line below names
     # the model the D2 chain still serves from exactly ONE provider on
-    # l2-worker-free-only; the gemini line above names the vertex tail that
-    # l2-worker serves from one provider.
+    # l2-worker-free-only; the tail that l2-worker itself serves from one
+    # provider is read off the loaded chain (named_tail_leg), not named here.
     NEMOTRON_RETRY = ("Error: [429]: You exceeded your current quota. Quota "
                       "exceeded for metric: generate_content_free_tier_requests, "
                       "limit: 20, model: nvidia/nemotron-3-super-120b-a12b:free "
                       "Please retry in 59.250991496s.")
+    # The gateway's own cooldown line, with the model the recorder has to place
+    # filled in. OVH-REMOVE / D-1626 retire the vertex tail that was the shipped
+    # example, so the tests below read the name off the loaded registry.
+    COOLDOWN = ("Error: [429] All credentials for model %s are cooling down "
+                "(reset after 37s)")
 
     def setUp(self):
         self.agent = load_agent()
@@ -9338,6 +9343,76 @@ class GatewayCooldownStopTests(unittest.TestCase):
     def state(self):
         with io.open(self.state_path, encoding="utf-8") as fh:
             return json.load(fh)
+
+    def alias_leg(self, prefer=None):
+        """(`leg`, `provider_id`) for a leg of a LIVE provider whose prefix is a
+        provider's `omniroute_id` rather than its registry key — the spelling
+        R6STOP measured the attributer failing on, since a raw prefix lookup
+        finds neither. `prefer` names a spelling the test still wants to read by
+        name; without one the first hit is taken. Read off the loaded registry
+        (OVH-REMOVE / D-1626 retire the `vertex/*` example), so the gate is the
+        alias, not one vendor's name. A provider that is down at `NOW`
+        attributes to nobody (FREEWIRE), so those legs are skipped rather than
+        answered with None."""
+        fallback = None
+        for route in self.registry["routes"].values():
+            for leg in route.get("legs") or []:
+                prefix = leg.split("/", 1)[0]
+                if prefix in self.registry["providers"]:
+                    continue
+                provider_id, _model_id = registry_tool.resolve_leg(leg, self.registry)
+                if provider_id == prefix:
+                    continue
+                if self.agent.unavailable_now(
+                        self.registry["providers"][provider_id], self.NOW):
+                    continue
+                if prefer and prefix == prefer:
+                    return leg, provider_id
+                if fallback is None:
+                    fallback = (leg, provider_id)
+        if fallback is None:
+            raise AssertionError("no live omniroute_id-spelled leg in the registry")
+        return fallback
+
+    def named_tail_leg(self, route_id="l2-worker"):
+        """(`model_id`, `provider_id`, `head_provider`) for a model exactly one
+        leg of `route_id` serves, from a leg that is NOT the route's head. The
+        head is another provider, so the measured wrong answer — guess the first
+        live leg — cannot pass. Read off the loaded registry, so the tail is
+        whatever the chain holds in each state of the removal lane."""
+        legs = self.registry["routes"][route_id]["legs"]
+        head = registry_tool.resolve_leg(legs[0], self.registry)[0]
+        served = [registry_tool.resolve_leg(l, self.registry)[1] for l in legs]
+        for leg in legs[1:]:
+            provider_id, model_id = registry_tool.resolve_leg(leg, self.registry)
+            if served.count(model_id) != 1 or provider_id == head:
+                continue
+            return model_id, provider_id, head
+        raise AssertionError("no single-served non-head leg on %s: %s"
+                             % (route_id, legs))
+
+    def registry_with_a_twice_served_model(self):
+        """This registry plus one route whose single model two providers serve,
+        each leg spelled by its `omniroute_id`. D657-D2 recorded that the
+        ambiguity lives where the registry still declares it — the
+        `gemini-3.8-flash` route google_ai_studio AND vertex_ai both serve — and
+        a removal lane retires exactly that pair, so the shape is declared
+        inline. The ids are registry keys, the spelling every other read of this
+        registry keys on, so the message still names the registry's own."""
+        import copy
+        reg = copy.deepcopy(self.registry)
+        for provider_id, alias in (("testserverone", "tso"),
+                                   ("testservertwo", "tst")):
+            reg["providers"][provider_id] = {
+                "id": provider_id, "tier": "free", "omniroute_id": alias,
+                "$comment": "test fixture: one model, two servers"}
+        reg["models"]["test-dup-model"] = {
+            "id": "test-dup-model", "family": "test",
+            "context_usable": {"tokens": 1048576, "source": "default"}}
+        reg["routes"]["test-dup-route"] = {
+            "id": "test-dup-route", "class": "cheap", "strategy": "priority",
+            "legs": ["tso/test-dup-model", "tst/test-dup-model"]}
+        return reg
 
     # --- 1: the cooldown line IS a provider stop -----------------------------
 
@@ -9393,34 +9468,40 @@ class GatewayCooldownStopTests(unittest.TestCase):
     # --- 3: the provider benched is the provider that served ------------------
 
     def test_a_leg_spelled_with_a_gateway_alias_resolves_to_its_provider(self):
-        # 'vertex' is vertex_ai's omniroute_id and how a route declares the leg;
-        # 'opencode-zen' is zen's. A raw prefix lookup finds neither. FREEWIRE
-        # 2026-09-30: the gemini/google_ai_studio example was replaced because
-        # google_ai_studio is now provider-unavailable (so its leg attributes to
-        # no live provider at all).
+        # An `omniroute_id` is how a route declares the leg while `providers`
+        # keys the provider by its own id, so a raw prefix lookup finds neither.
+        # FREEWIRE 2026-09-30: the gemini/google_ai_studio example was replaced
+        # because google_ai_studio is now provider-unavailable (so its leg
+        # attributes to no live provider at all). OVH-REMOVE / D-1626: the alias
+        # is now read off the registry instead of naming `vertex/*` — every alias
+        # is the same defect — with zen's `opencode-zen/*` the named spelling it
+        # prefers to answer on.
+        leg, provider_id = self.alias_leg(prefer="opencode-zen")
+        self.assertNotEqual(leg.split("/", 1)[0], provider_id, leg)
         self.assertEqual(
             self.agent.stop_provider_id(
                 "Error: 429 rate limit exceeded, resets in ~5m",
-                self.registry, ["vertex/gemini-3.8-flash"]),
-            "vertex_ai")
-        self.assertEqual(
-            self.agent.stop_provider_id(
-                "Error: 429 rate limit exceeded, resets in ~5m",
-                self.registry, ["opencode-zen/deepseek-v4.1-flash"]),
-            "zen")
+                self.registry, [leg]),
+            provider_id, leg)
 
     def test_a_t2_worker_model_named_cooldown_benches_its_provider(self):
-        # D657-D2: the model l2-worker names from exactly one provider is the
-        # vertex tail (the chain's head is bazaarlink's deepseek, so a guess at
-        # the first live leg would bench the wrong provider). The measured wrong
-        # answer was antigravity (the next live leg of l2-worker).
+        # D657-D2: the model l2-worker names from exactly one provider is its
+        # tail leg, not the bazaarlink head — so a guess at the first live leg
+        # would bench the wrong provider. The measured wrong answer was
+        # antigravity (the next live leg of l2-worker). OVH-REMOVE / D-1626:
+        # which leg is that tail is read off the loaded chain, so the gate is
+        # the attribution rule and not one provider's survival.
+        model_id, provider_id, head = self.named_tail_leg()
         recorded = self.agent.record_reset_stop(
-            self.GEMINI_COOLDOWN, "l2-worker", self.registry,
+            self.COOLDOWN % model_id, "l2-worker", self.registry,
             now=self.NOW, path=self.state_path)
-        self.assertEqual(recorded, ("vertex_ai", "2026-09-28T12:00:37Z"))
-        self.assertEqual(list(self.state()["providers"]), ["vertex_ai"],
+        self.assertEqual(recorded, (provider_id, "2026-09-28T12:00:37Z"))
+        self.assertEqual(list(self.state()["providers"]), [provider_id],
                          "the cooldown benches the provider that served the model "
                          "the line names, and nobody else")
+        self.assertNotIn(head, self.state()["providers"],
+                         "the head leg's provider is a different provider — it "
+                         "did not serve the named model")
         self.assertNotIn("antigravity", self.state()["providers"])
         self.assertNotIn("bazaarlink", self.state()["providers"])
 
@@ -9434,17 +9515,15 @@ class GatewayCooldownStopTests(unittest.TestCase):
 
     def test_a_model_named_by_a_leg_that_does_not_serve_it_benches_nothing_wrong(self):
         # CIGREEN: expectation moved by 35148c5c (CLEAN added the vertex leg to
-        # the trial-first clean routes): l2-worker-clean HAS a gemini leg now,
-        # vertex/gemini-3.8-flash serves gemini-3.8-flash alone, and naming it
-        # correctly benches vertex_ai. The intent stands -- naming a model the
+        # the trial-first clean routes). The intent stands -- naming a model the
         # route does not serve falls back to the first live leg, as an unnamed
-        # stop does -- pinned here on gemini-3.7-flash-high, which no clean leg
-        # serves. The fallback leg is registry data, so the expectation is read
-        # from it rather than pinned to one provider's name (DSBACK 2026-09-28
-        # moved it from opencode-zen/… to deepseek/deepseek-flash; CLEAN moves
-        # it to the ovhcloud head leg; D657-D2 leaves the clean chain a single
-        # vertex leg, so the head leg IS the answer and stays derived).
-        legs = self.registry["routes"]["l2-worker-clean"]["legs"]
+        # stop does -- pinned here on gemini-3.7-flash-high, which no leg of the
+        # chain serves in any state. The fallback leg is registry data, so the
+        # expectation is read from it rather than pinned to one provider's name
+        # (DSBACK 2026-09-28 moved it from opencode-zen/… to deepseek/deepseek-
+        # flash; CLEAN moves it to the ovhcloud head leg; OVH-REMOVE / D-1626
+        # reads it off l2-worker, whose head survives every state).
+        legs = self.registry["routes"]["l2-worker"]["legs"]
         named = self.agent.stop_provider_id(
             "Error: [429] All credentials for model gemini-3.7-flash-high are "
             "cooling down (reset after 37s)", self.registry, legs)
@@ -9467,11 +9546,12 @@ class GatewayCooldownStopTests(unittest.TestCase):
 
     # --- 4 (SPAWNFIX3 item 7): a model more than one provider serves ----------
 
-    def stop(self, line, route):
+    def stop(self, line, route, registry=None):
+        reg = registry or self.registry
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            pid = self.agent.stop_provider_id(line, self.registry,
-                                              self.registry["routes"][route]["legs"])
+            pid = self.agent.stop_provider_id(line, reg,
+                                              reg["routes"][route]["legs"])
         return pid, out.getvalue()
 
     def test_a_model_id_does_not_match_inside_a_longer_id(self):
@@ -9501,24 +9581,27 @@ class GatewayCooldownStopTests(unittest.TestCase):
 
     def test_a_model_two_providers_of_the_route_serve_benches_neither(self):
         # D657-D2: no judged chain route holds one model twice any more (§8 makes
-        # consecutive legs change provider), so the ambiguity lives where the
-        # registry still declares it — the `gemini-3.8-flash` route, which
-        # google_ai_studio AND vertex_ai both serve. The verdict holds: the stop
-        # line names the model, not the provider, so NOBODY may be benched on a
-        # two-way guess (and picking one silently starves it).
-        pid, printed = self.stop(self.GEMINI_COOLDOWN, "gemini-3.8-flash")
+        # consecutive legs change provider), so the ambiguity has to be declared
+        # — one model, two servers — where OVH-REMOVE / D-1626 cannot retire the
+        # pair. The verdict holds: the stop line names the model, not the
+        # provider, so NOBODY may be benched on a two-way guess (and picking one
+        # silently starves it).
+        reg = self.registry_with_a_twice_served_model()
+        pid, printed = self.stop(self.COOLDOWN % "test-dup-model",
+                                 "test-dup-route", reg)
         self.assertIsNone(pid)
         # The names are the registry's own provider ids — the spelling every
         # other read of this registry keys on, so a message is never the only
         # place a made-up lowercase name appears.
         self.assertEqual(printed.strip(),
-                         "ambiguous stop: gemini-3.8-flash served by "
-                         "google_ai_studio, vertex_ai - not benched")
+                         "ambiguous stop: test-dup-model served by "
+                         "testserverone, testservertwo - not benched")
 
     def test_an_ambiguous_cooldown_records_no_bench_at_all(self):
+        reg = self.registry_with_a_twice_served_model()
         with contextlib.redirect_stdout(io.StringIO()):
             recorded = self.agent.record_reset_stop(
-                self.GEMINI_COOLDOWN, "gemini-3.8-flash", self.registry,
+                self.COOLDOWN % "test-dup-model", "test-dup-route", reg,
                 now=self.NOW, path=self.state_path)
         self.assertIsNone(recorded)
         self.assertFalse(os.path.exists(self.state_path),
@@ -9541,14 +9624,16 @@ class GatewayCooldownStopTests(unittest.TestCase):
     def test_the_recorded_cooldown_takes_the_provider_out_for_the_resolver(self):
         # The whole point of the recorder: the next `route`/`run` read merges
         # this file in and skips the leg. D657-D2: the recorded line names the
-        # vertex tail of l2-worker (the free-ai qwen7b grant is gated out).
-        self.agent.record_reset_stop(self.GEMINI_COOLDOWN, "l2-worker",
+        # tail of l2-worker (the free-ai qwen7b grant is gated out); OVH-REMOVE /
+        # D-1626 read that tail off the loaded chain rather than naming vertex.
+        model_id, provider_id, _head = self.named_tail_leg()
+        self.agent.record_reset_stop(self.COOLDOWN % model_id, "l2-worker",
                                      self.registry, now=self.NOW,
                                      path=self.state_path)
         merged = self.agent.apply_provider_state(
             self.registry, self.agent.load_provider_state(self.state_path),
             now=self.NOW + datetime.timedelta(seconds=1))
-        cooled = merged["providers"]["vertex_ai"]
+        cooled = merged["providers"][provider_id]
         self.assertIs(cooled["available"], False)
         self.assertEqual(cooled["unavailable_until"], "2026-09-28T12:00:37Z")
         self.assertTrue(self.agent.unavailable_now(cooled,
@@ -9557,7 +9642,7 @@ class GatewayCooldownStopTests(unittest.TestCase):
             self.registry, self.agent.load_provider_state(self.state_path),
             now=self.NOW + datetime.timedelta(seconds=60))
         self.assertFalse(
-            self.agent.unavailable_now(expired["providers"]["vertex_ai"],
+            self.agent.unavailable_now(expired["providers"][provider_id],
                                        self.NOW + datetime.timedelta(seconds=60)),
             "a 37s cooldown self-heals when the 37s are up (registry.unavailable_now)")
 
@@ -9711,7 +9796,18 @@ class TierSeatContextTests(unittest.TestCase):
         self.assertIn(clean, self.agent.declared_models(self.cfg),
                       "the -clean twin of the tier-2 seat is not declared")
         self.assertEqual(self.agent.resolve_model(self.cfg, 2, True, None), clean)
-        self.assertGreaterEqual(self.cap_of(route + "-clean"), self.L2_MIN_CTX)
+        cap = self.cap_of(route + "-clean")
+        if cap is None:
+            # OVH-REMOVE (D-1816(12)) / D-1626: with the credit providers gone a
+            # clean chain can lose every leg, and an empty route has no window to
+            # compare. That is the render half of the removal lane, not a floor
+            # this test can still measure — but legs WITHOUT a window are a
+            # registry defect, so only the genuinely empty route is skipped.
+            self.assertEqual(self.registry["routes"][route + "-clean"].get("legs")
+                             or [], [],
+                             "%s-clean still has legs but no servable window" % route)
+            self.skipTest("%s serves no leg: the floor has nothing to bind" % clean)
+        self.assertGreaterEqual(cap, self.L2_MIN_CTX)
 
     def test_the_tier_2_seat_is_not_a_route_the_contract_clamps(self):
         # Why the seat moved instead of the combo: rule (d) pins the t2/t3
@@ -9800,11 +9896,25 @@ class ReviewStatusTests(unittest.TestCase):
         self.addCleanup(os.unlink, path)
         return path
 
+    # The google reviewer these records name. Its model row and its
+    # `policy.reviewers` head sit on a credit provider's leg, so OVH-REMOVE
+    # (D-1816(12)) / D-1626 retire both together and the gate would answer "not a
+    # known reviewer" for a family the chains still route. Re-declared inline
+    # when the loaded registry carries none, so every assertion below reads a
+    # real family table rather than whatever the removal left behind.
+    GOOGLE_REVIEWER_ROW = {"id": "gemini-3.8-flash", "family": "google",
+                           "context_usable": {"tokens": 1048576,
+                                              "source": "default"},
+                           "tool_calls": "proven"}
+
     def real_registry(self):
         repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with io.open(os.path.join(repo, "catalog", "ai-registry.json"),
                      encoding="utf-8") as fh:
-            return json.load(fh)
+            registry = json.load(fh)
+        if "gemini-3.8-flash" not in registry["models"]:
+            registry["models"]["gemini-3.8-flash"] = dict(self.GOOGLE_REVIEWER_ROW)
+        return registry
 
     # --- what counts -------------------------------------------------------
 
@@ -12112,6 +12222,15 @@ class LedgerReadyPathTests(ReadyCommandTests):
         self.assertIn("run run-1", err)
 
 
+# The writer model of a ledger row must name a family the registry can place in
+# EVERY state of the catalog: `record()` refuses a rejection whose two families
+# do not resolve (see `_stamp_families`). It used to be a vertex leg; vertex is
+# leaving the registry, and this google-family head is served by antigravity,
+# which stays. The canonical rollup key is its model id.
+LEDGER_WRITER_MODEL = "agy/gemini-3.8-flash-high"
+LEDGER_WRITER_ROLLUP_KEY = "gemini-3.8-flash-high"
+
+
 class LedgerJsonlShapeTests(unittest.TestCase):
     """P6c (B) and (C): the ledger is strict JSONL and a production seat row names
     its lane and sha. `record()` used to write `b"\\n"+json+b"\\n"`, so every file it
@@ -12120,7 +12239,7 @@ class LedgerJsonlShapeTests(unittest.TestCase):
 
     def row(self, run_id):
         return {"run_id": run_id, "verdict": "rejected", "failure_class": "syntax",
-                "writer_client": "opencode", "writer_model_served": "vertex/gemini-3.8-flash",
+                "writer_client": "opencode", "writer_model_served": LEDGER_WRITER_MODEL,
                 "task_type": "code", "reviewer": "qwen3.8-flash"}
 
     def target(self):
@@ -12200,15 +12319,15 @@ class LedgerJsonlShapeTests(unittest.TestCase):
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
         rows, skipped = writer_ledger.load(target)
         self.assertEqual((len(rows), skipped), (2, 0), rows)
-        self.assertFalse(writer_ledger.demoted("vertex/gemini-3.8-flash", "code", path=target),
+        self.assertFalse(writer_ledger.demoted(LEDGER_WRITER_MODEL, "code", path=target),
                          "a row naming no families is not evidence about a family")
         self.assertEqual(writer_ledger.rollup(path=target), {})
         writer_ledger.record(self.row("r1"), path=target)
         writer_ledger.record(self.row("r2"), path=target)
         self.assertEqual(len(writer_ledger.load(target)[0]), 4)
-        self.assertTrue(writer_ledger.demoted("vertex/gemini-3.8-flash", "code", path=target))
+        self.assertTrue(writer_ledger.demoted(LEDGER_WRITER_MODEL, "code", path=target))
         self.assertEqual(writer_ledger.rollup(path=target)
-                         ["gemini-3.8-flash"]["code"]["rejected"], 2)
+                         [LEDGER_WRITER_ROLLUP_KEY]["code"]["rejected"], 2)
 
 
 class FleetLedgerPathTests(unittest.TestCase):
@@ -12227,13 +12346,13 @@ class FleetLedgerPathTests(unittest.TestCase):
         "if what == 'record':\n"
         "    wl.record_seat({'run_id': 'fr-1', 'verdict': 'rejected',\n"
         "                    'failure_class': 'tests-missing', 'writer_client': 'opencode',\n"
-        "                    'writer_model_served': 'vertex/gemini-3.8-flash',\n"
+        "                    'writer_model_served': '" + LEDGER_WRITER_MODEL + "',\n"
         "                    'task_type': 'code', 'reviewer': 'qwen3.8-flash', 'ref': 'b' * 40,\n"
         "                    'lane': sys.argv[3], 'sha': 'a' * 40})\n"
         "    print(wl.default_path())\n"
         "elif what == 'demoted':\n"
         "    print(wl.default_path())\n"
-        "    print(wl.demoted('vertex/gemini-3.8-flash', 'code', threshold=1))\n"
+        "    print(wl.demoted('" + LEDGER_WRITER_MODEL + "', 'code', threshold=1))\n"
         "else:\n"
         "    print(wl.fleet_state_dir())\n")
 
@@ -25330,27 +25449,70 @@ class HandEntryPricingTests(unittest.TestCase):
         self.agent = load_agent()
         self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
 
-    def spends(self, model, cfg=None, source="--model"):
-        return self.agent.spawn_spends_claude("opencode", model, SHIPPED_REGISTRY,
+    # A trial-credit pool declared inline (OVH-REMOVE / D-1626): the shipped
+    # `vertex-3.6/3.7-flash` entries were the example of a hand entry whose leg
+    # is billed by a provider grant rather than a per-token figure, and a
+    # removal lane retires the provider, the rows and the entries together. The
+    # gateway spells it `tcr/*`, the registry keys it `testcredit`, so the leg
+    # still has to be inverted by registry_ref before it can be priced.
+    CREDIT_HAND_CFG = {"providers": {"omniroute": {"models": {
+        "testcredit-flash": {"modelID": "tcr/test-flash"}}}}}
+
+    @staticmethod
+    def registry_with_credit_hand_entry():
+        import copy
+        reg = copy.deepcopy(SHIPPED_REGISTRY)
+        reg["providers"]["testcredit"] = {
+            "id": "testcredit", "tier": "credit", "credit_usd": 100,
+            "omniroute_id": "tcr", "model_prefix": "tcr",
+            "trains_on_prompts": False,
+            "$comment": "test fixture: a trial-credit pool, no real vendor"}
+        reg["models"]["test-flash"] = {
+            "id": "test-flash", "family": "test",
+            "context_usable": {"tokens": 1048576, "source": "default"},
+            "tool_calls": "proven",
+            "provider_prices": {"testcredit": {"price_in": 1.5e-06,
+                                               "price_out": 7.5e-06}}}
+        return reg
+
+    def spends(self, model, cfg=None, source="--model", registry=None):
+        return self.agent.spawn_spends_claude("opencode", model,
+                                              registry or SHIPPED_REGISTRY,
                                               source, cfg or self.cfg)
 
     def test_a_hand_entry_is_priced_through_its_modelid_leg(self):
-        # OVHCODER-DROP 2026-10-08: ovh-direct-qwen3-coder-30b left the list
-        # with the model (OVH answers 404 for Qwen3-Coder-30B-A3B-Instruct).
-        for name in ("omniroute/vertex-3.8-flash", "omniroute/ovh-direct-gpt-oss-120b",
-                     "omniroute/ovh-direct-qwen3.8-27b"):
+        # OVH-REMOVE (D-1816(12)) / D-1626: the ovh-direct and vertex ids were
+        # only examples of a hand entry the gate can price. These shipped
+        # entries carry the same fact in every registry state, and the first two
+        # restore the shape this test lost with `ovh/*` — a modelID whose
+        # GATEWAY prefix is not the registry provider key, so the leg exists
+        # only once registry_ref has inverted it (agy -> antigravity,
+        # meta-api -> meta_api). deepseek names itself, the plain case.
+        for name, leg in (("omniroute/agy-gemini-3.8-flash",
+                           "antigravity/gemini-3.8-flash-high"),
+                          ("omniroute/meta-direct-muse-spark-1.3-contributor",
+                           "meta_api/muse-spark-1.3-contributor"),
+                          ("omniroute/deepseek-direct-flash",
+                           "deepseek/deepseek-flash")):
+            self.assertEqual(self.agent.hand_entry_leg(name, SHIPPED_REGISTRY,
+                                                       self.cfg), leg, name)
             self.assertIs(self.spends(name), False, name)
 
     def test_hand_entry_leg_is_the_registry_spelling_of_the_modelid(self):
-        # The gateway spells OVH's ids `ovh/*`; the registry keys the provider
-        # `ovhcloud` and declares model_prefix 'ovh', so the leg only resolves
-        # through registry_ref — the one inverse of gateway_ref.
-        self.assertEqual(self.agent.hand_entry_leg("omniroute/ovh-direct-gpt-oss-120b",
+        # The gateway spells antigravity's ids `agy/*` and Meta's `meta-api/*`;
+        # the registry keys the providers `antigravity` and `meta_api` and
+        # declares those prefixes, so each leg only resolves through
+        # registry_ref — the one inverse of gateway_ref.
+        # OVH-REMOVE (D-1816(12)): this used the `ovh/*` -> `ovhcloud` pair,
+        # which tests the same prefix inversion; both entries below survive
+        # every state of the removal lane.
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/agy-gemini-3.8-flash",
                                                    SHIPPED_REGISTRY, self.cfg),
-                         "ovhcloud/gpt-oss-120b")
-        self.assertEqual(self.agent.hand_entry_leg("omniroute/vertex-3.8-flash",
-                                                   SHIPPED_REGISTRY, self.cfg),
-                         "vertex/gemini-3.8-flash")
+                         "antigravity/gemini-3.8-flash-high")
+        self.assertEqual(self.agent.hand_entry_leg(
+            "omniroute/meta-direct-muse-spark-1.3-contributor",
+            SHIPPED_REGISTRY, self.cfg),
+            "meta_api/muse-spark-1.3-contributor")
 
     def test_a_managed_region_entry_is_not_read_as_a_hand_entry(self):
         # Its modelID is the route id itself, so the passthrough shape is absent
@@ -25372,29 +25534,31 @@ class HandEntryPricingTests(unittest.TestCase):
                                                    SHIPPED_REGISTRY, cfg), "")
         self.assertIsNone(self.spends("omniroute/vertex-9.9-flash", cfg))
 
-    def test_the_3_6_and_3_7_hand_ids_resolve_to_their_vertex_leg(self):
+    def test_a_hand_entry_on_a_credit_pool_is_priced_and_not_claude(self):
         # RWP1: the hand entries shipped in 48f0ac21 could not be priced because
-        # no `models.gemini-3.6-flash` / `models.gemini-3.7-flash` row existed for
-        # the modelID to resolve against. The leg spelling is the provider's
-        # omniroute_id plus the model key.
-        for name, leg in (("omniroute/vertex-3.6-flash", "vertex/gemini-3.6-flash"),
-                          ("omniroute/vertex-3.7-flash", "vertex/gemini-3.7-flash")):
-            self.assertEqual(self.agent.hand_entry_leg(name, SHIPPED_REGISTRY, self.cfg),
-                             leg, name)
+        # no registry row described their modelID. What they showed was a rule
+        # about rows, not about one vendor's ids, so the case is built inline
+        # here — the leg spelling is the provider's declared prefix plus the
+        # model key, and the row is what makes the name priceable.
+        reg = self.registry_with_credit_hand_entry()
+        self.assertEqual(self.agent.hand_entry_leg("omniroute/testcredit-flash",
+                                                   reg, self.CREDIT_HAND_CFG),
+                         "testcredit/test-flash")
+        self.assertIs(self.spends("omniroute/testcredit-flash",
+                                  self.CREDIT_HAND_CFG, registry=reg), False)
 
-    def test_the_3_6_and_3_7_hand_ids_are_priced_and_not_claude(self):
-        for name in ("omniroute/vertex-3.6-flash", "omniroute/vertex-3.7-flash"):
-            self.assertIs(self.spends(name), False, name)
-
-    def test_the_3_6_and_3_7_hand_legs_are_credit_tier_legs(self):
-        # The price the gate reads them at is the provider's trial credit, not a
-        # per-token figure — providers.vertex_ai.tier says which.
-        for leg in ("vertex/gemini-3.6-flash", "vertex/gemini-3.7-flash"):
-            provider_id, model_id = self.agent.resolve_leg(leg, SHIPPED_REGISTRY)
-            self.assertEqual(provider_id, "vertex_ai", leg)
-            self.assertEqual(SHIPPED_REGISTRY["providers"][provider_id]["tier"],
-                             "credit", leg)
-            self.assertIn(model_id, SHIPPED_REGISTRY["models"], leg)
+    def test_a_credit_hand_leg_is_tiered_by_its_provider_grant(self):
+        # The price the gate reads a credit leg at is the provider's trial
+        # credit, not a per-token figure — providers.<id>.tier says which.
+        # OVH-REMOVE (D-1626): providers.vertex_ai was the example, and a
+        # removal lane retires the row with the provider, so the pool is the
+        # inline one.
+        reg = self.registry_with_credit_hand_entry()
+        provider_id, model_id = self.agent.resolve_leg("tcr/test-flash", reg)
+        self.assertEqual(provider_id, "testcredit")
+        self.assertEqual(reg["providers"][provider_id]["tier"], "credit")
+        self.assertIn(model_id, reg["models"])
+        self.assertEqual(reg["providers"][provider_id]["credit_usd"], 100)
 
     def test_a_hand_entry_on_an_anthropic_leg_is_claude(self):
         cfg = {"providers": {"omniroute": {"models": {
@@ -25409,21 +25573,26 @@ class HandEntryPricingTests(unittest.TestCase):
     def test_run_dry_named_hand_entry_is_not_benched_as_unpriceable(self):
         # The budget is on in the shipped registry, so before D5 this exact
         # command refused with "cannot be priced"; now it reaches the gate that
-        # is actually about the run (tier-2 isolation).
-        r = run_agent("run", "--model", "omniroute/ovh-direct-gpt-oss-120b",
+        # is actually about the run (tier-2 isolation). OVH-REMOVE (D-1816(12)) /
+        # D-1626: the ovh-direct and vertex ids were only the example hand
+        # entry; agy-gemini-3.8-flash is the passthrough that carries the same
+        # door in every state of the lane.
+        r = run_agent("run", "--model", "omniroute/agy-gemini-3.8-flash",
                       "--dry-run", "--card", "role=implement", "reply with exactly: ack")
         self.assertNotIn("cannot be priced", r.stderr, r.stderr)
         # G4 (RWP3): the absence of one phrase was the whole assertion, so a mutant
         # that benched the run for another reason — or answered that the hand entry
         # spends Claude — still passed. The door stays open and the spend stays False.
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIs(self.spends("omniroute/ovh-direct-gpt-oss-120b"), False)
+        self.assertIs(self.spends("omniroute/agy-gemini-3.8-flash"), False)
 
-    def test_run_dry_named_vertex_3_6_hand_entry_is_not_benched_as_unpriceable(self):
-        # The same door, on the id whose registry row RWP1 adds.
-        r = run_agent("run", "--model", "omniroute/vertex-3.6-flash",
+    def test_run_dry_named_credit_hand_entry_is_not_benched_as_unpriceable(self):
+        # The same door, on a second shipped passthrough whose leg resolves
+        # through the provider key rather than a declared prefix.
+        r = run_agent("run", "--model", "omniroute/deepseek-direct-flash",
                       "--dry-run", "--card", "role=implement", "reply with exactly: ack")
         self.assertNotIn("cannot be priced", r.stderr, r.stderr)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 class DirectSeatHandEntriesTests(unittest.TestCase):
@@ -25502,62 +25671,15 @@ class DirectSeatHandEntriesTests(unittest.TestCase):
         self.assertEqual(rows["gemini-3.8-flash-high"]["effort_ladder"], ["high"])
 
 
-class VertexFlashRegistryRowsTests(unittest.TestCase):
-    """RWP1 (lane trial-direct, 2026-10-01): `models.gemini-3.6-flash` and
-    `models.gemini-3.7-flash` are the registry half of the `vertex-3.6-flash` /
-    `vertex-3.7-flash` hand entries shipped in 48f0ac21. A hand entry passes its
-    modelID to the gateway verbatim, so with no row for the model behind
-    `vertex/gemini-3.<6,7>-flash` the spawn gate could say nothing about what
-    answers and refused the run. The rows are shaped like the `gemini-3.8-flash`
-    head they sit beside. RWP1 left their price unpriced (no source reachable from
-    that lane); the 2026-10-02 pass cites the Vertex list price per each row's
-    `price_source`, and `tool_calls` stays unproven — no leg probe was run."""
+class ShippedRegistryValidationTests(unittest.TestCase):
+    """The catalog gate that used to sit in `VertexFlashRegistryRowsTests`.
 
-    FLASH = ("gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash")
-
-    def setUp(self):
-        self.agent = load_agent()
-        self.models = SHIPPED_REGISTRY["models"]
-
-    def test_exactly_the_three_flash_vertex_ids_are_in_the_registry(self):
-        for model_id in self.FLASH:
-            self.assertIn(model_id, self.models, model_id)
-
-    def test_the_three_flash_vertex_ids_pass_gemini_model_allowed(self):
-        # D-255 allows 3.6 / 3.7 / 3.8 Flash; the row's existence must not read as
-        # a ban, in either the leg or the bare-model spelling.
-        for model_id in self.FLASH:
-            for ref in (model_id, "vertex/" + model_id, "vertex-gemini"
-                        + model_id[len("gemini"):]):
-                self.assertTrue(self.agent.gemini_model_allowed(ref), ref)
-
-    def test_the_two_new_rows_are_shaped_like_the_3_8_head(self):
-        head = self.models["gemini-3.8-flash"]
-        for model_id in ("gemini-3.6-flash", "gemini-3.7-flash"):
-            row = self.models[model_id]
-            self.assertEqual(row["id"], model_id)
-            self.assertEqual(row["family"], "google", model_id)
-            self.assertEqual(row["tool_calls"], "unproven", model_id)
-            self.assertTrue(row["reasoning"], model_id)
-            self.assertEqual(row["effort_ladder"], head["effort_ladder"], model_id)
-            # Never larger than the 3.8 head they were copied from.
-            self.assertLessEqual(row["context_advertised"],
-                                 head["context_advertised"], model_id)
-            self.assertLessEqual(row["output_max"], head["output_max"], model_id)
-
-    def test_the_two_new_rows_carry_the_cited_vertex_list_price(self):
-        # TRIAL-DIRECT final docs pass (2026-10-02): the Vertex price was sourced,
-        # so the 0.0 unpriced form RWP1 left here is gone. Pinned to the cited
-        # list price and its dated price_source, never to a guessed figure.
-        for model_id in ("gemini-3.6-flash", "gemini-3.7-flash"):
-            row = self.models[model_id]
-            self.assertEqual((row["price_in"], row["price_out"], row["price_cache_read"]),
-                             (1.5e-06, 7.5e-06, 1.5e-07), model_id)
-            self.assertIn("vertex-ai/generative-ai/pricing", row["price_source"], model_id)
-            self.assertIn("accessed 2026-10-02", row["price_source"], model_id)
-            comment = row["$comment"].lower()
-            self.assertNotIn("price not sourced", comment, model_id)
-            self.assertIn("tool_calls stay unproven", comment, model_id)
+    OVH-REMOVE (D-1816(12)) / D-1626: that class's subject was the registry rows
+    for the models Vertex served — their shape, their cited Vertex list price and
+    the fact that exactly those three ids existed. A removal lane deletes those
+    rows along with the provider, so nothing here can assert them without naming
+    a provider the catalog may no longer carry. The validation check is about the
+    file, not the vendor, so it stays."""
 
     def test_the_shipped_registry_still_validates(self):
         self.assertEqual(registry_tool.check_registry(SHIPPED_REGISTRY), [])
@@ -25655,9 +25777,14 @@ class GeminiAllowListTests(unittest.TestCase):
                                                         "vertex-2.5", cfg))
 
     def test_an_allowed_hand_entry_is_not_refused(self):
-        self.assertEqual(self.refusal("omniroute/vertex-3.8-flash", "vertex-3.8-flash"), "")
-        self.assertEqual(self.refusal("omniroute/ovh-direct-gpt-oss-120b",
-                                      "ovh-direct-gpt-oss-120b"), "")
+        # OVH-REMOVE (D-1816(12)) / D-1626: this named the `vertex-3.8-flash` and
+        # `ovh-direct-*` entries, whose modelID legs are exactly what the removal
+        # lane retires. The gemini-allowed entry below answers on antigravity and
+        # the non-gemini one on deepseek, so both stay priced in every state.
+        self.assertEqual(self.refusal("omniroute/agy-gemini-3.8-flash",
+                                      "agy-gemini-3.8-flash"), "")
+        self.assertEqual(self.refusal("omniroute/deepseek-direct-flash",
+                                      "deepseek-direct-flash"), "")
 
     def test_an_explicit_combo_with_some_off_list_legs_is_allowed(self):
         # RWP2 S1 regression: `--model omniroute/l2-worker` is the same route a
@@ -25712,60 +25839,103 @@ class GeminiAllowListTests(unittest.TestCase):
 
 
 class SensitiveHandEntryPrivacyTests(unittest.TestCase):
-    """D3: ovhcloud's `trains_on_prompts` is verified false on main (CIGREEN:
-    587f465e) -- so a privacy=sensitive card may land on an `ovh-direct-*`
-    hand entry only through that cited verification. The existing PRIV3 door
-    already covers a name that is no registry route: nothing proves it
-    private-safe. This pins that the door holds for the ovh-direct ids too,
-    against the real opencode.jsonc rather than a synthetic one."""
+    """D3: the door these tests pin is provider-level registry data (does a cited
+    `trains_on_prompts: false` privacy block admit a sensitive card?). OVH-REMOVE
+    (D-1816(12)) retires the `ovhcloud` provider and D-1626 the `vertex_ai` one
+    with the cited block that illustrated the rule, so the pool is declared
+    inline over the durable `l2-worker-clean` route: the gate reads the shape
+    (credit tier + explicit `trains_on_prompts: false` + an evidence block with a
+    url and a quote), not one vendor's row. The existing PRIV3 door already
+    covers a name that is no registry route: nothing proves it private-safe,
+    which is why the `ovh-direct-*` hand-entry refusal below still holds whether
+    or not OVH is present.
+
+    The run needs *a* routable name for the door, so the inline leg heads the
+    clean route in a copy of the registry — what the run reads is the copy, and
+    what it refuses is the copy with the citation stripped."""
+
+    # A trial-credit pool that cites its own terms, and its model row. Not a
+    # vendor: the fields are exactly the ones private_safe() reads.
+    CITED_CREDIT_PROVIDER = {
+        "id": "testcited", "tier": "credit", "credit_usd": 100,
+        "omniroute_id": "tct",
+        "trains_on_prompts": False,
+        "privacy": {"trains_on_prompts": False,
+                    "evidence": [{"url": "https://example.invalid/terms",
+                                  "quote": "Customer prompts are not used to "
+                                           "train or fine-tune any model.",
+                                  "accessed": "2026-10-17"}]},
+        "$comment": "test fixture: a cited credit pool, no real vendor",
+    }
+    CITED_CREDIT_MODEL = {
+        "id": "test-flash", "family": "test",
+        "context_advertised": 1048576,
+        "context_usable": {"tokens": 1048576, "source": "default"},
+        "output_max": 65536, "reasoning": True, "tool_calls": "proven",
+        "provider_prices": {"testcited": {"price_in": 1.5e-06, "price_out": 7.5e-06}},
+    }
+    CITED_CREDIT_LEG = "testcited/test-flash"
+
+    @classmethod
+    def registry_with_cited_credit(cls, neuter=False):
+        """A copy of the shipped registry whose `l2-worker-clean` is headed by
+        the inline cited credit leg — or by that leg with its citation stripped."""
+        import copy
+        reg = copy.deepcopy(SHIPPED_REGISTRY)
+        reg["providers"]["testcited"] = copy.deepcopy(cls.CITED_CREDIT_PROVIDER)
+        reg["models"]["test-flash"] = copy.deepcopy(cls.CITED_CREDIT_MODEL)
+        if neuter:
+            reg["providers"]["testcited"]["trains_on_prompts"] = None
+            reg["providers"]["testcited"].pop("privacy", None)
+        for route_id in ("l2-worker-clean",):
+            if "legs" in reg["routes"][route_id]:
+                reg["routes"][route_id]["legs"] = [cls.CITED_CREDIT_LEG]
+        return reg
 
     def setUp(self):
         self.agent = load_agent()
         self.cfg = self.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
-        # D657-D2 (AO-DENYLEGS D2, 2026-10-08) gated every ovhcloud leg out of
-        # the judged chains: probe-d657 answers HTTP 404 for all of them, so §8
-        # omits the route until a re-probe and the rendered config no longer
-        # declares `ovh-gpt-oss-120b`. The door these tests pin is provider-level
-        # registry data (does a cited `trains_on_prompts: false` admit a sensitive
-        # card?), so the run needs *a* routable name for it: this adds back the
-        # one declaration the render dropped. It claims nothing about OVH serving
-        # today -- `tools/combo-contract.py --strict-d657` says that, and says no.
-        self.cfg["providers"]["omniroute"]["models"]["ovh-gpt-oss-120b"] = {
-            "modelID": "ovh-gpt-oss-120b"}
 
-    def run_cmd(self, model):
+    def run_cmd(self, model, registry=None):
         ns = argparse.Namespace(
             tier=None, card="privacy=sensitive", allow_training=False,
             client="opencode", joinable=False, max_depth=None, clean=False, model=model,
             free=False, free_model=self.agent.DEFAULT_FREE_MODEL, isolate=False, auto=True,
             lean=False, title=None, dry_run=True, task="x", no_defer=False)
         out, err = io.StringIO(), io.StringIO()
-        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = self.agent.cmd_run(ns, self.cfg)
+        reg = registry or SHIPPED_REGISTRY
+        agent = self.agent
+        with mock.patch.object(agent, "load_registry", lambda path: reg), \
+                mock.patch.object(agent, "load_live_registry", lambda *a, **k: reg):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = self.agent.cmd_run(ns, self.cfg)
         return rc, out.getvalue(), err.getvalue()
 
-    def test_sensitive_card_on_an_ovh_direct_hand_entry_is_refused(self):
-        for name in ("omniroute/ovh-direct-gpt-oss-120b",
-                     "omniroute/ovh-direct-qwen3.8-27b"):
+    def test_sensitive_card_on_a_hand_entry_nothing_proves_private_is_refused(self):
+        # The refusal needs no provider: a passthrough whose modelID is not a
+        # registry route is a modelID nothing can certify trains_on_prompts:
+        # false, so the sensitive card is refused in every state of the removal
+        # lane. `agy-gemini-3.8-flash` is the durable spelling; the ovh-direct
+        # one is the case the rule was measured on.
+        for name in ("omniroute/agy-gemini-3.8-flash",
+                     "omniroute/ovh-direct-gpt-oss-120b"):
             rc, out, err = self.run_cmd(name)
             self.assertEqual(rc, 2, name + out + err)
             self.assertIn("privacy", err, name)
 
-    def test_the_ovh_provider_is_still_unverified(self):
-        # CIGREEN: expectation moved by 35148c5c (L1-CLEAN D1+D2, part of the
-        # fcecae85 CLEAN merge; comment rework 587f465e): ovhcloud's
-        # trains_on_prompts went null -> false with a 3-citation privacy block
-        # (OVH AI Endpoints terms, docs and contract quotes, accessed
-        # 2026-10-01). The name above is kept for continuity but the intent is
-        # inverted: a sensitive hand entry reaches ovh ONLY through that cited
-        # verification -- private_safe is True, and the privacy block carries
-        # evidence with a url and a quote, as the registry validator
-        # (_privacy_block_problems) requires. The still-unverified half moved
-        # to test_a_null_trains_provider_is_still_refused below.
-        provider = SHIPPED_REGISTRY["providers"]["ovhcloud"]
+    def test_a_credit_provider_with_a_cited_block_admits_sensitive(self):
+        # OVH-REMOVE (D-1816(12)) / D-1626: the ovh and vertex providers this was
+        # named for are gone in a removal state, but the gate is not
+        # provider-specific — it reads a credit provider with a CITED privacy
+        # block: `trains_on_prompts` false plus an evidence row carrying a url
+        # and a quote, as the registry validator (_privacy_block_problems)
+        # requires. private_safe is True, so a sensitive run aimed at the route
+        # that leg heads is admitted. The still-unverified half moved to
+        # test_a_null_trains_provider_is_still_refused.
+        reg = self.registry_with_cited_credit()
+        provider = reg["providers"]["testcited"]
         self.assertIs(provider["trains_on_prompts"], False)
-        safe, why = registry_tool.private_safe("ovhcloud", "gpt-oss-120b",
-                                               SHIPPED_REGISTRY)
+        safe, why = registry_tool.private_safe("testcited", "test-flash", reg)
         self.assertTrue(safe, why)
         block = provider.get("privacy") or {}
         self.assertIs(block.get("trains_on_prompts"), False)
@@ -25775,31 +25945,33 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
         for row in evidence:
             self.assertTrue(str(row.get("url") or "").startswith("https://"), row)
             self.assertTrue(str(row.get("quote") or "").strip(), row)
-        rc, out, err = self.run_cmd("omniroute/ovh-gpt-oss-120b")
+        rc, out, err = self.run_cmd("omniroute/l2-worker-clean", reg)
         self.assertEqual(rc, 0, out + err)
+        # The negative control, same route and same run: the same pool with its
+        # citation stripped is refused, so the admission above is the citation's
+        # doing and not the route name's.
+        rc, out, err = self.run_cmd("omniroute/l2-worker-clean",
+                                    self.registry_with_cited_credit(neuter=True))
+        self.assertEqual(rc, 2, out + err)
+        self.assertIn("privacy", err)
 
     def test_a_null_trains_provider_is_still_refused(self):
-        # CIGREEN companion to the test above (same 35148c5c/587f465e move):
-        # the fail-closed half. A registry copy with ovhcloud's own
-        # verification stripped (flag back to null, privacy block removed) is
-        # refused by private_safe AND by a sensitive run aimed at its route
-        # (rc 2) -- unknown is unsafe, and removing the citation closes the
-        # door the citation opened. api_airforce ships in exactly that
+        # Companion to the test above: the fail-closed half. A registry copy with
+        # the cited pool's own verification stripped (flag back to null, privacy
+        # block removed) is refused by private_safe AND by a sensitive run aimed
+        # at its leg (rc 2) -- unknown is unsafe, and removing the citation
+        # closes the door the citation opened. api_airforce ships in exactly that
         # unverified state (trains_on_prompts null), pinned here as the live
         # example.
-        import copy
         self.assertIsNone(
             SHIPPED_REGISTRY["providers"]["api_airforce"].get("trains_on_prompts"))
-        neutered = copy.deepcopy(SHIPPED_REGISTRY)
-        neutered["providers"]["ovhcloud"]["trains_on_prompts"] = None
-        neutered["providers"]["ovhcloud"].pop("privacy", None)
-        safe, why = registry_tool.private_safe("ovhcloud", "gpt-oss-120b", neutered)
+        neutered = self.registry_with_cited_credit(neuter=True)
+        self.assertIsNone(neutered["providers"]["testcited"]["trains_on_prompts"])
+        self.assertNotIn("privacy", neutered["providers"]["testcited"])
+        safe, why = registry_tool.private_safe("testcited", "test-flash", neutered)
         self.assertFalse(safe, why)
         self.assertIn("trains on prompts", why)
-        agent = self.agent
-        with mock.patch.object(agent, "load_registry", lambda path: neutered), \
-                mock.patch.object(agent, "load_live_registry", lambda *a, **k: neutered):
-            rc, out, err = self.run_cmd("omniroute/ovh-gpt-oss-120b")
+        rc, out, err = self.run_cmd("omniroute/l2-worker-clean", neutered)
         self.assertEqual(rc, 2, out + err)
         self.assertIn("privacy", err)
 
@@ -26762,14 +26934,17 @@ class P1PinnedWriterFamilyTests(unittest.TestCase):
         plan.update(extra)
         with mock.patch.object(agent, "manage_key", lambda env=None: None):
             return agent.resolved_writer(plan, True, registry={"models": {
-                "gemini-3.8-flash": {"family": "google"}}})
+                "gemini-3.8-flash-high": {"family": "google"}}})
 
     def test_a_pinned_model_keeps_its_family_when_the_log_names_nothing(self):
         agent = load_agent()
-        writer = self._log_named_nothing(agent, model="vertex/gemini-3.8-flash",
+        # OVH-REMOVE / D-1626: the pin was spelled `vertex/…`. The provider half of
+        # a pin is recorded verbatim and the family comes from the row this test
+        # hands the resolver, so the spelling is the gateway's antigravity one now.
+        writer = self._log_named_nothing(agent, model="agy/gemini-3.8-flash-high",
                                          model_source=agent.WRITER_SOURCE_PIN)
         self.assertEqual((writer["provider"], writer["model"]),
-                         ("vertex", "gemini-3.8-flash"))
+                         ("agy", "gemini-3.8-flash-high"))
         self.assertEqual(writer["family"], "google")
         self.assertEqual(writer["source"], agent.WRITER_SOURCE_PIN)
         self.assertEqual(writer["family_source"], agent.FAMILY_SOURCE_PLANNED)
@@ -26785,10 +26960,10 @@ class P1PinnedWriterFamilyTests(unittest.TestCase):
         # G4: free_provider("gemini-3.8-flash") returned the whole id as provider;
         # a native pin's provider half is the client name (as the :6529 branch).
         agent = load_agent()
-        writer = self._log_named_nothing(agent, model="gemini-3.8-flash",
+        writer = self._log_named_nothing(agent, model="gemini-3.8-flash-high",
                                          model_source=agent.WRITER_SOURCE_PIN)
         self.assertEqual(writer["provider"], "opencode")
-        self.assertEqual(writer["model"], "gemini-3.8-flash")
+        self.assertEqual(writer["model"], "gemini-3.8-flash-high")
 
 
 def seat_run_args(**kw):
@@ -28760,7 +28935,10 @@ class ZenKeySpawnTests(unittest.TestCase):
         # The refusal reads the pin as TYPED: a bare id the pin settlement below
         # qualifies onto omniroute/* is the caller's provider choice, not this
         # mistake (test_t2_record_pin owns that behaviour).
-        r = self._dry("--free", "--model", "ovh-direct-qwen3.8-27b", "--isolate")
+        # OVH-REMOVE (D-1816(12)): the pin was `ovh-direct-qwen3.8-27b`, one
+        # declared hand entry among several — any of them makes the same point,
+        # so this uses the deepseek-direct one, which the removal lane keeps.
+        r = self._dry("--free", "--model", "deepseek-direct-flash", "--isolate")
         self.assertNotIn("drop --free", r.stderr)
 
 
