@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- OMNIGRAPH-URL-LOUD B2 (2026-10-17, routing D-1781): Windows installer — `Install-AutoOSAgentSkills` and `Set-AutoOSAntigravityMcp` resolve the omnigraph base URL through `Get-AutoOSOmnigraphBaseUrl` too; with nothing configured they warn and skip the omnigraph env write and the Antigravity omnigraph entry (a user's own entry is left exactly as it is) instead of defaulting it to localhost:8080, and still do everything else they did.
 - OMNIGRAPH-URL-LOUD B (2026-10-17, routing D-1781): Windows installer — `Get-AutoOSOmnigraphBaseUrl` resolves the omnigraph base URL from the `omnigraph_url` answer, `OMNIGRAPH_BASE_URL` or `%USERPROFILE%\.autoos-omnigraph.env` and warns, naming the variable, when none is configured; the OpenCode and Zed writers write that resolved value, or skip their omnigraph entry (keeping a user's own) instead of defaulting it to localhost:8080.
 - OMNIGRAPH-URL-LOUD (2026-10-17, routing D-1781): fail loudly when OMNIGRAPH_BASE_URL is not set instead of silently falling back to localhost:8080 in check-omnigraph and .mcp.json.
 - OMNIGRAPH-URL-LOUD D (2026-10-17, routing D-1781): document that OMNIGRAPH_BASE_URL resolution fails loudly without defaulting to localhost:8080, update client table for Claude Code, opencode, and Zed, and document resolution order and check-omnigraph.py exit behavior.

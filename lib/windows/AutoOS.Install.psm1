@@ -1497,10 +1497,16 @@ function Install-AutoOSAgentSkills {
         tree the caller is in. A machine that ran this installer before keeps its
         old Documents\code\agent-skills untouched - this never deletes it.
     #>
-    $omniUrl = Get-AutoOSAnswer 'omnigraph_url' ''
-    $baseUrl = if ([string]::IsNullOrWhiteSpace($omniUrl)) { 'http://localhost:8080' } else { $omniUrl.TrimEnd('/') }
-    Write-AutoOSLine "Omnigraph base URL: $baseUrl" -Level info
-    Set-AutoOSOmnigraphEnv -BaseUrl $baseUrl
+    # Written to the env file as a value, never defaulted: nothing resolved
+    # leaves the file alone (a user's own line included) and the rest of this
+    # function still runs - the servers it wires do not need the graph.
+    $baseUrl = Get-AutoOSOmnigraphBaseUrl
+    if ($null -eq $baseUrl) {
+        Write-AutoOSLine 'agent skills: OMNIGRAPH_BASE_URL is not set - skipping the omnigraph part' -Level warn
+    } else {
+        Write-AutoOSLine "Omnigraph base URL: $baseUrl" -Level info
+        Set-AutoOSOmnigraphEnv -BaseUrl $baseUrl
+    }
 
     # ── MCP stack: wire user-scope servers across Claude Code and Antigravity ──
     Install-AutoOSMcpGraphify
@@ -1591,8 +1597,14 @@ function Set-AutoOSAntigravityMcp {
         fallback graph any more and exits at start-up without one (measured
         2026-09-24), which the client only reports as "Connection closed".
     #>
-    $omniUrl = Get-AutoOSAnswer 'omnigraph_url' ''
-    $baseUrl = if ([string]::IsNullOrWhiteSpace($omniUrl)) { 'http://localhost:8080' } else { $omniUrl.TrimEnd('/') }
+    # The entry spells the URL out (Antigravity gives a server no environment of
+    # its own), so an unresolved one cannot be written into it: the whole merge
+    # is skipped, which leaves an entry the user wrote exactly as it is.
+    $baseUrl = Get-AutoOSOmnigraphBaseUrl
+    if ($null -eq $baseUrl) {
+        Write-AutoOSLine 'Antigravity MCP: OMNIGRAPH_BASE_URL is not set - skipping the omnigraph part' -Level warn
+        return
+    }
     $cfgDir  = Join-Path $env:APPDATA 'Antigravity'
     $cfgPath = Join-Path $cfgDir 'mcp_config.json'
 

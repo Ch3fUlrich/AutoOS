@@ -4131,10 +4131,12 @@ Test-Case 'the omnigraph user variable is set by name only, never PATH-style who
 Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)" {
     $realAppData = $env:APPDATA
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-agy-" + [Guid]::NewGuid().ToString('N'))
     try {
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
         Set-AutoOSAntigravityMcp 6>$null | Out-Null
         $cfg = Get-Content (Join-Path $scratch 'Antigravity\mcp_config.json') -Raw | ConvertFrom-Json
@@ -4142,6 +4144,7 @@ Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to 
     } finally {
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -4155,6 +4158,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
     $file = Join-Path $cfgDir 'mcp_config.json'
@@ -4173,6 +4177,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_TOKEN = $null
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         $null = & $run $log1
         $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
@@ -4197,6 +4202,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_TOKEN = $realToken
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $log1, $log2 -Force -ErrorAction SilentlyContinue
     }
@@ -4357,6 +4363,7 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
     $file = Join-Path $cfgDir 'mcp_config.json'
@@ -4368,6 +4375,7 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_TOKEN = $null
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         Initialize-AutoOSLog -Path $log
         while ((Get-Date).Millisecond -gt 250) { Start-Sleep -Milliseconds 20 }
@@ -4392,6 +4400,7 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_TOKEN = $realToken
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     }
@@ -4405,6 +4414,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs 
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
     $file = Join-Path $cfgDir 'mcp_config.json'
@@ -4414,13 +4424,14 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs 
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_TOKEN = $null
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         Initialize-AutoOSLog -Path $log
         # The entry the writer produces, except that the command is in capitals.
         $seedEntry = [ordered]@{
             command = 'NPX'
             args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
-            env     = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://localhost:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
+            env     = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
         }
         [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ omnigraph = $seedEntry } } | ConvertTo-Json -Depth 12))
         $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
@@ -4436,6 +4447,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs 
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_TOKEN = $realToken
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     }
@@ -4512,13 +4524,17 @@ function Invoke-OmnigraphBaseScratch {
         [Parameter(Mandatory)][scriptblock]$Body,
         [hashtable]$Answers = @{},
         [string]$EnvUrl = '',
-        [string]$EnvFile = ''
+        [string]$EnvFile = '',
+        # A writer that touches the checkout (project .claude\settings.local.json,
+        # the skill links) runs against a scratch tree, never this one.
+        [switch]$ScratchRepo
     )
     $names = @('USERPROFILE', 'HOME', 'APPDATA', 'OMNIGRAPH_BASE_URL')
     $saved = @{}
     foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
     $savedHome = $HOME
     $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-obase-$([Guid]::NewGuid().ToString('N'))"
+    $repo = if ($ScratchRepo) { (New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'repo')).FullName } else { $Root }
     $result = $null
     try {
         $null = New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'AppData\Zed')
@@ -4530,8 +4546,8 @@ function Invoke-OmnigraphBaseScratch {
         if ($EnvUrl) { $env:OMNIGRAPH_BASE_URL = $EnvUrl } else { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
         # The resolver runs in the module, which reads $HOME, not the test's.
         if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
-        Initialize-AutoOSInstaller -DryRun:$false -Answers $Answers -RepoRoot $Root
-        $result = & $Body $scratch
+        Initialize-AutoOSInstaller -DryRun:$false -Answers $Answers -RepoRoot $repo
+        $result = & $Body $scratch $repo
     } finally {
         Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
         foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
@@ -4590,6 +4606,100 @@ Test-Case 'omnigraph base URL: Zed with none configured writes no entry and keep
         $s = & $run
         Assert-Equal $s.context_servers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
     }
+}
+
+Test-Case 'omnigraph base URL: Antigravity with none configured writes no entry and keeps the user''s own, then the resolved value' {
+    $keepers = '{"mcpServers":{"other":{"command":"node","args":["srv.js"]},"omnigraph":{"command":"npx","args":["-y","user-pin"],"env":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}},"theme":"mine"}'
+    Invoke-OmnigraphBaseScratch -Body {
+        param($scratch)
+        $dir = Join-Path $scratch 'AppData\Antigravity'
+        $cfg = Join-Path $dir 'mcp_config.json'
+        $run = {
+            $log = Get-AutoOSConsoleCapture { Set-AutoOSAntigravityMcp 3>$null }
+            $s = $null
+            if (Test-Path -LiteralPath $cfg) { $s = Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 | ConvertFrom-Json }
+            @{ Log = $log; Cfg = $s }
+        }
+        $r = & $run
+        Assert-True ($null -eq $r.Cfg -or $null -eq $r.Cfg.mcpServers.PSObject.Properties['omnigraph']) 'an omnigraph entry was written with no base URL'
+        Assert-True ($r.Log -match 'OMNIGRAPH_BASE_URL is not set - skipping the omnigraph part') "the writer never said why it skipped: [$($r.Log)]"
+        Assert-True ($r.Log -notmatch 'localhost:8080') "a defaulted localhost:8080 was announced: [$($r.Log)]"
+        $null = New-Item -ItemType Directory -Force -Path $dir
+        [IO.File]::WriteAllText($cfg, $keepers)
+        $r = & $run
+        Assert-Equal $r.Cfg.mcpServers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://keep.invalid' "the user's omnigraph entry was rewritten"
+        Assert-Equal $r.Cfg.mcpServers.other.command 'node' 'the user''s other server was dropped'
+        Assert-True ($r.Cfg.theme -eq 'mine') "the user's own top-level key was dropped"
+        Assert-True ((Get-Content -LiteralPath $cfg -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in the Antigravity config'
+        # The URL resolves from the env file while the variable stays absent:
+        # what lands in mcp_config.json has to be the value, not a reference.
+        [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
+        $r = & $run
+        Assert-Equal $r.Cfg.mcpServers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
+        Assert-Equal $r.Cfg.mcpServers.omnigraph.env.OMNIGRAPH_GRAPH_ID 'autoos' 'the entry lost the graph id the bridge requires'
+        Assert-True ($r.Log -notmatch 'skipping the omnigraph part') "a configured URL still skipped: [$($r.Log)]"
+    }
+}
+
+function Invoke-WithModuleStub {
+    # Swap module-scope functions for the duration of one body and put the real
+    # ones back, so a test can run a whole installer function without its side
+    # effects. No test installs anything: the body of Install-AutoOSAgentSkills
+    # drives the claude CLI, docker and the user's skill links, while the part
+    # under test is only which base URL it hands to the omnigraph env writer -
+    # and whether it hands one over at all.
+    param(
+        [Parameter(Mandatory)][hashtable]$Stubs,
+        [Parameter(Mandatory)][scriptblock]$Body
+    )
+    $mod = Get-Module AutoOS.Install
+    $real = @{}
+    # Unqualified, from inside the module: a module's own functions are found
+    # there, while "function:script:<name>" resolves to nothing at all.
+    foreach ($n in $Stubs.Keys) { $real[$n] = & $mod { param($name) (Get-Item "function:$name").ScriptBlock } $n }
+    try {
+        foreach ($n in $Stubs.Keys) { $null = & $mod { param($name, $f) Set-Item "function:$name" $f } $n $Stubs[$n] }
+        & $Body
+    } finally {
+        foreach ($n in $Stubs.Keys) { $null = & $mod { param($name, $f) Set-Item "function:$name" $f } $n $real[$n] }
+    }
+}
+
+Test-Case 'omnigraph base URL: agent skills with none configured writes no omnigraph env, then the resolved value' {
+    $run = {
+        param($scratch, $repo)
+        $envCalls = New-Object System.Collections.ArrayList
+        $otherCalls = New-Object System.Collections.ArrayList
+        # The links, the pinned project server and the skills source are part of
+        # the rest of the function, so the scratch checkout has to carry the two
+        # files that make them happen.
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $repo '.agents\skills\alpha')
+        [IO.File]::WriteAllText((Join-Path $repo '.mcp.json'), '{"mcpServers":{"omnigraph":{"command":"npx"}}}')
+        $stubs = @{
+            'Set-AutoOSOmnigraphEnv'       = { param([string]$BaseUrl, [string]$EnvFile, [switch]$NoUserVariable) $null = $envCalls.Add($BaseUrl) }
+            'Install-AutoOSMcpGraphify'    = { $null = $otherCalls.Add('graphify') }
+            'Install-AutoOSMcpSerena'      = { $null = $otherCalls.Add('serena') }
+            'Install-AutoOSMcpPlaywright'  = { $null = $otherCalls.Add('playwright') }
+            'Install-AutoOSMcpContext7'    = { $null = $otherCalls.Add('context7') }
+            'Get-AutoOSMcpServerNames'     = { , @() }
+            'Enable-AutoOSProjectMcpServer'= { param($RepoPath, $Name) $null = $otherCalls.Add($Name) }
+            'Set-AutoOSAntigravityMcp'     = { $null = $otherCalls.Add('antigravity') }
+            'Sync-AutoOSAgentSkillTargets' = { param($Source) $null = $otherCalls.Add('skills') }
+            'Write-AutoOSOmnigraphReadiness' = { param($RepoRoot) $false }
+        }
+        $log = Invoke-WithModuleStub -Stubs $stubs -Body { Get-AutoOSConsoleCapture { Install-AutoOSAgentSkills 3>$null } }
+        @{ Log = "$log"; Env = @($envCalls); Other = @($otherCalls) }
+    }
+    $r1 = Invoke-OmnigraphBaseScratch -ScratchRepo -Body $run
+    Assert-Equal $r1.Env.Count 0 "an omnigraph env was written with no base URL: [$($r1.Env -join ', ')]"
+    Assert-True ($r1.Log -match 'OMNIGRAPH_BASE_URL is not set - skipping the omnigraph part') "the writer never said why it skipped: [$($r1.Log)]"
+    Assert-True ($r1.Log -notmatch 'localhost:8080') "a defaulted localhost:8080 was announced: [$($r1.Log)]"
+    foreach ($n in @('graphify', 'serena', 'playwright', 'context7', 'antigravity', 'skills', 'omnigraph')) {
+        Assert-True ($n -in $r1.Other) "skipping the omnigraph part also skipped $n"
+    }
+    $r2 = Invoke-OmnigraphBaseScratch -ScratchRepo -Answers @{ omnigraph_url = 'http://omnigraph.test.invalid:8080/' } -Body $run
+    Assert-Equal ($r2.Env -join ',') 'http://omnigraph.test.invalid:8080' 'the resolved URL did not reach the omnigraph env writer'
+    Assert-True ($r2.Log -notmatch 'skipping the omnigraph part') "a configured URL still skipped: [$($r2.Log)]"
 }
 
 # tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
