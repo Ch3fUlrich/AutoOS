@@ -1,5 +1,6 @@
 """tests/test_oc_fallback_run.py - end-to-end tests for Claude limit to OpenCode fallback."""
 
+import atexit
 import http.server
 import os
 from pathlib import Path
@@ -24,11 +25,16 @@ if not os.path.exists(sys.executable):
 os.environ["AUTOOS_SPAWNER_ISOLATED"] = "1"
 LIMIT = "You've hit your limit · resets 3pm"
 
+_WORKERS = tempfile.mkdtemp(prefix="oc-fallback-workers-")
+atexit.register(shutil.rmtree, _WORKERS, True)
+
 
 def _run(cli_dir, url, *extra, root=None):
     env = claude_env(PATH=cli_dir + os.pathsep + os.environ.get("PATH", ""), AUTOOS_OPENCODE_URL=url)
     env = {k: v for k, v in env.items() if not k.startswith("GIT_CONFIG_")}
     env["GIT_CONFIG_PARAMETERS"] = "'core.longpaths=true'"
+    # run-tests.sh points AUTOOS_WORKERS_DIR at a TRACKED fixture tree; a run that records there trips the --isolate LEAK check (rc 7)
+    env["AUTOOS_WORKERS_DIR"] = _WORKERS
     return run_agent("run", "--client", "claude", "--tier", "1", "--isolate", *extra, "task", env=env, root=root)
 
 
