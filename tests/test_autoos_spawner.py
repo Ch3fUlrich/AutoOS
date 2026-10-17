@@ -10715,7 +10715,8 @@ class EvidenceGateTests(unittest.TestCase):
         self.assertIn("evidence verdict REJECT != entry READY", report["final"]["detail"])
 
     def test_an_evidence_file_the_grammar_or_the_disk_refuses_is_no_seat(self):
-        for kwargs, why in (({"text": "I looked at it.\nVERDICT: ACCEPT\n"},
+        # D-1515: a verdict below prose is read now; an answer with NO verdict line is not.
+        for kwargs, why in (({"text": "I looked at it.\nlooks fine to me\n"},
                              "evidence invalid:"),
                             ({"rel": "evidence/gone.md", "write": False},
                              "evidence file missing")):

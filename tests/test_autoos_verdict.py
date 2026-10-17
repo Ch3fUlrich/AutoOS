@@ -54,9 +54,26 @@ class VerdictGrammarTests(unittest.TestCase):
             self.assertEqual(want, got["verdict"], text)
             self.assertEqual(want != "HOLD", got["countable"], text)  # a HOLD is no seat
 
-    def test_anything_but_one_bare_word_on_line_one_is_invalid(self):
-        for text, why in (("I looked at the diff.\nVERDICT: ACCEPT\n", "first"),
-                          ("VERDICT: SHIP", "SHIP"), ("VERDICT: LGTM", "LGTM"),
+    def test_the_one_verdict_line_may_stand_anywhere(self):
+        # D-1515 (measured: qoder run eeaf50 l45, opencode muse run 403995 l55): seats that
+        # reviewed first and ended with `VERDICT: ACCEPT` were logged as no verdict. The
+        # line is read wherever it stands; zero or two of them stay invalid (fail closed).
+        for text, want in (("I looked at the diff.\nVERDICT: ACCEPT\n", "ACCEPT"),
+                           ("**Review**\n\n- (1) fine\n\n**VERDICT: REJECT**\n", "REJECT"),
+                           ("notes\n> VERDICT: HOLD\ntrailing prose\n", "HOLD")):
+            got = v.parse_verdict(text)
+            self.assertTrue(got["valid"], (text, got["reason"]))
+            self.assertEqual(want, got["verdict"], text)
+        for text, why in (("prose\nVERDICT: ACCEPT\nmore\nVERDICT: ACCEPT\n", "two"),
+                          ("prose only, the word verdict: accept inside a sentence\n",
+                           "no verdict line"),
+                          ("I reviewed it.\nVERDICT: SHIP\n", "SHIP")):
+            got = v.parse_verdict(text)
+            self.assertFalse(got["valid"], text)
+            self.assertIn(why, got["reason"], text)
+
+    def test_anything_but_one_bare_word_on_the_verdict_line_is_invalid(self):
+        for text, why in (("VERDICT: SHIP", "SHIP"), ("VERDICT: LGTM", "LGTM"),
                           ("VERDICT: ACCEPT but the ref is unread", "words after"),
                           ("VERDICT: ACCEPT\nVERDICT: REJECT\n", "two"),
                           ("VERDICT: ACCEPT: sure", "colon"), ("", "no non-empty line")):
