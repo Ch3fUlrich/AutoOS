@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- SPAWN-OPENCODE-FALLBACK A5 (2026-10-17, lane/oc-fallback-a5): fold Claude-limit switch into existing fallthrough block and guard test shell shims against POSIX lint.
 - SPAWN-OPENCODE-FALLBACK A4 (2026-10-17, lane/oc-fallback-a4): close health-check response, fail fast on transport TypeError without retry, and verify fallback execution in UP scenario with fake opencode executable.
 - SPAWN-OPENCODE-FALLBACK A3 (2026-10-17, lane/oc-fallback-a3): convert test_oc_fallback.py and test_oc_fallback_run.py to unittest.TestCase, wire both into 33-documentation.sh.
 - SPAWN-OPENCODE-FALLBACK A2 (2026-10-17, lane/oc-fallback-a2): end-to-end tests for Claude-limit to opencode switch (tests/test_oc_fallback_run.py: down, up, not-a-limit, and pinned).

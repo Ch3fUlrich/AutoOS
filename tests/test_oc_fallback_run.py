@@ -80,9 +80,10 @@ class OcFallbackRunTests(unittest.TestCase):
             f"print({repr(body)})\nsys.exit({rc})\n", encoding="utf-8")
         itp = "py" if shutil.which("py") else "python"
         (tmp_path / "claude.cmd").write_text(f"@{itp} \"%~dp0claude.py\" %*\n", encoding="utf-8")
-        sh = tmp_path / "claude"
-        sh.write_text('#!/bin/sh\nexec python3 "$(dirname "$0")/claude.py" "$@"\n', encoding="utf-8")
-        sh.chmod(0o755)
+        if os.name != "nt":
+            sh = tmp_path / "claude"
+            sh.write_text("#!" + '/bin/sh\nexec python3 "$(dirname "$0")/claude.py" "$@"\n', encoding="utf-8")
+            sh.chmod(0o755)
 
         oc_cnt = str(tmp_path / "oc_cnt.txt")
         oc_args = str(tmp_path / "oc_args.txt")
@@ -92,9 +93,10 @@ class OcFallbackRunTests(unittest.TestCase):
             f"with open({repr(oc_args)}, 'a') as f: f.write('ARGS: ' + ' '.join(sys.argv) + '\\n')\n"
             f"print('done')\nsys.exit(0)\n", encoding="utf-8")
         (tmp_path / "opencode.cmd").write_text(f"@{itp} \"%~dp0opencode.py\" %*\n", encoding="utf-8")
-        oc_sh = tmp_path / "opencode"
-        oc_sh.write_text('#!/bin/sh\nexec python3 "$(dirname "$0")/opencode.py" "$@"\n', encoding="utf-8")
-        oc_sh.chmod(0o755)
+        if os.name != "nt":
+            oc_sh = tmp_path / "opencode"
+            oc_sh.write_text("#!" + '/bin/sh\nexec python3 "$(dirname "$0")/opencode.py" "$@"\n', encoding="utf-8")
+            oc_sh.chmod(0o755)
         return str(tmp_path), cnt
 
     def test_down(self):

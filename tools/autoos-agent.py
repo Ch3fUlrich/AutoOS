@@ -14499,6 +14499,7 @@ def cmd_run(args, cfg: dict) -> int:
         # test's own exit object) passes None and keeps the old merged scan.
         stop = provider_stop(check_tail, getattr(run_rc, "raw_err", None))
         rate_limited = stop is not None and rate_limit_stop(stop)
+        oc_switch = None
         if client.name == "claude" and rc != 0 and not getattr(args, "no_fallthrough", False) and not oc_fallbacks:
             # Claude prints its limit as a bare last line (no "Error:" prefix), so provider_stop
             # misses it: look at the last 3 non-empty lines of the tail directly.
@@ -14509,23 +14510,7 @@ def cmd_run(args, cfg: dict) -> int:
                 rc = decision["rc"]
                 break
             if decision.get("switch"):
-                oc_fallbacks += 1
-                args.client = "opencode"
-                args.model = decision["model"]
-                print("autoos-agent: claude limit - switching to opencode %s" % args.model, file=sys.stderr)
-                client = clients.CLIENTS["opencode"]
-                uses_key = client.gateway and not args.free
-                if uses_key and key is None:
-                    key = client_key(ROOT)
-                plan = build_plan(args, cfg, sandbox=plan.get("sandbox"), fence=fence)
-                capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
-                zen = plan_zen_key(client.name, plan["model"], ROOT, warn=False)
-                env = worker_env(plan, key if uses_key else None, zen_key=zen)
-                if not provision_worker_dirs(env):
-                    rc = 2
-                    break
-                register_secret_env(env)
-                continue
+                oc_switch = decision
         # AO-SPAWN-COOLDOWN-RETRY: its own class of stop, decided from the line
         # and not from the window it stated — a cooldown that states nothing is
         # still a cooldown, and still exits the run on the stop's rc.
@@ -14605,12 +14590,25 @@ def cmd_run(args, cfg: dict) -> int:
             print("autoos-agent: --no-fallthrough: the run ends on its pinned model "
                   "(%s), no re-plan" % (plan["model"] or plan["route"].get("combo")),
                   file=sys.stderr)
-        if (stop is not None and not args.joinable and not args.no_fallthrough
+        if ((stop is not None or oc_switch) and not args.joinable and not args.no_fallthrough
                 and fallthroughs < MAX_FALLTHROUGH):
             next_plan = None
             fell_from = fell_to = None
             try:
-                if args.free:
+                if oc_switch:
+                    oc_fallbacks += 1
+                    args.client = "opencode"
+                    args.model = oc_switch["model"]
+                    client = clients.CLIENTS["opencode"]
+                    uses_key = client.gateway and not args.free
+                    if uses_key and key is None:
+                        key = client_key(ROOT)
+                    capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
+                    print("autoos-agent: claude limit - switching to opencode %s" % args.model, file=sys.stderr)
+                    next_plan = build_plan(args, cfg, sandbox=plan["sandbox"], fence=fence)
+                    fell_from = plan["route"].get("combo")
+                    fell_to = (next_plan["route"].get("combo") or args.model)
+                elif args.free:
                     next_plan, fell_from, fell_to = _free_fallthrough_plan(
                         args, cfg, plan, free_chain, excluded_free_models,
                         benched=set(provider_cooldown), fence=fence,
