@@ -10214,6 +10214,21 @@ class ReviewStatusTests(unittest.TestCase):
                 family, why_not = self.agent.resolver.author_family(author, real)
                 self.assertEqual(family, "anthropic", why_not)
 
+    # D-1515 (2026-10-17): the pinned Muse seat (D-1504: muse-spark-1.3 over opencode)
+    # reported its model as one of these, and the gate read the family as 'unresolved'.
+    MUSE_SPELLINGS = ("muse-spark-1.3", "meta/muse-spark-1.3", "opencode/muse-spark-1.3",
+                      "muse-spark-1.3-free", "opencode/muse-spark-1.3-free",
+                      "opencode-free/muse-spark-1.3-free", "Muse-Spark-1.3")
+
+    def test_the_real_registry_reads_every_pinned_muse_spelling_as_meta(self):
+        real = self.real_registry()
+        for name in self.MUSE_SPELLINGS:
+            with self.subTest(name=name):
+                family, why_not = self.agent.resolver.author_family(name, real)
+                self.assertEqual(family, "meta", why_not)
+        # still fail closed on a spelling nobody registered
+        self.assertIsNone(self.agent.resolver.author_family("muse-spark-9.9", real)[0])
+
     def test_an_orchestrator_author_is_ready_on_two_evidenced_non_claude_seats(self):
         # The point of the four ids above: a lane an Opus 5.5 session wrote is
         # reviewable without anyone editing the author field to a lie. D657-D2: the
@@ -11049,7 +11064,8 @@ class LedgerWriteTests(unittest.TestCase):
         self.assertEqual(len(self.rows()), 2)
 
     def test_a_hold_an_invalid_and_a_blind_answer_write_no_row(self):
-        for text in (self.HOLD, "I looked at it.\nVERDICT: ACCEPT\n",
+        # D-1515: a verdict below prose is valid now; the invalid case is an answer with none.
+        for text in (self.HOLD, "I looked at it.\nno verdict here\n",
                      self.ACCEPT + "I could not see the diff.\n"):
             with self.subTest(text=text[-32:]):
                 self.status(text)
