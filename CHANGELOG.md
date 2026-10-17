@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- OVH-REMOVE T1 (2026-10-17, operator D-1816(12)): `tests/test_registry.py` credit/privacy/trial-band gates now read the registry instead of naming `ovhcloud` — `vertex_ai` is the cited-credit example, the shipped-grant sweep and the trial band are data-derived, and the two OVH-only tests (`test_ovhcloud_declares_no_training`, `test_ovh_legs_ride_l3_chains_only_after_the_reprobe`) are dropped — so the suite is green both before and after the provider is removed.
 - OMNIGRAPH-URL-LOUD (2026-10-17, routing D-1781): fail loudly when OMNIGRAPH_BASE_URL is not set instead of silently falling back to localhost:8080 in check-omnigraph and .mcp.json.
 - OMNIGRAPH-URL-LOUD D (2026-10-17, routing D-1781): document that OMNIGRAPH_BASE_URL resolution fails loudly without defaulting to localhost:8080, update client table for Claude Code, opencode, and Zed, and document resolution order and check-omnigraph.py exit behavior.
 - SPAWN-OPENCODE-FALLBACK A7 (2026-10-17, lane/oc-fallback-a7): uncouple Claude-limit switch from fallthrough cap, guard half-switched state during plan build, and verify free Muse path and build-plan refusal.
