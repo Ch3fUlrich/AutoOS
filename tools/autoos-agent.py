@@ -309,6 +309,8 @@ import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
 import autoos_overlay as overlay_mod  # noqa: E402
+import autoos_oc_fallback as oc_fallback  # noqa: E402
+from autoos_oc_fallback import EXIT_OC_FALLBACK_DOWN  # noqa: E402
 import autoos_inbox as inbox  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
 import autoos_redact as redact  # noqa: E402
@@ -12915,10 +12917,15 @@ def cli_scope_unit(run_id, attempt) -> str:
     `autoos-worker-<run-id>.scope`, and the attempt number matters because the
     fallthrough loop re-starts the client in a new scope each time — a reused unit
     name is a `systemd-run` failure, not a no-op. A run with no id (a plain
-    `run …` from a terminal) is named by its own pid, which is unique per process.
+    `run …` from a terminal) is named by its own pid and a random suffix,
+    which is unique per call, not only per process (and across module copies).
     """
-    return scope_unit_name("cli-%s-a%s" % (run_id or "pid%d" % os.getpid(),
-                                           attempt or 1))
+    if run_id:
+        stem = "cli-%s-a%s" % (run_id, attempt or 1)
+    else:
+        # random, not a counter: the tests (and any caller) load this module more than once per process, and each copy would restart a counter at 1
+        stem = "cli-pid%d-%s-a%s" % (os.getpid(), uuid.uuid4().hex[:8], attempt or 1)
+    return scope_unit_name(stem)
 
 
 def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False,
@@ -14294,6 +14301,7 @@ def cmd_run(args, cfg: dict) -> int:
     # the run's re-plan budget — but counted with it when a launch is numbered
     # below, because the kill store and the scope unit key on the attempt.
     cooldown_retries = 0
+    oc_fallbacks = 0
     # `free_policy` / `free_chain` were settled above, before the plan: FAMILYFENCE
     # trims the chain before the first model is picked, so a second copy of that
     # read here would be a fence applied too late to bind.
@@ -14561,6 +14569,18 @@ def cmd_run(args, cfg: dict) -> int:
         # test's own exit object) passes None and keeps the old merged scan.
         stop = provider_stop(check_tail, getattr(run_rc, "raw_err", None))
         rate_limited = stop is not None and rate_limit_stop(stop)
+        oc_switch = None
+        if client.name == "claude" and rc != 0 and not args.joinable and not getattr(args, "no_fallthrough", False) and not oc_fallbacks:
+            # Claude prints its limit as a bare last line (no "Error:" prefix), so provider_stop
+            # misses it: look at the last 3 non-empty lines of the tail directly.
+            last = " ".join([ln for ln in (check_tail or "").splitlines() if ln.strip()][-3:])
+            decision = oc_fallback.fallback_decision(client.name, "%s %s" % (stop or "", last), os.environ, rate_limit_stop)
+            if decision.get("refused"):
+                print(decision["message"], file=sys.stderr)
+                rc = decision["rc"]
+                break
+            if decision.get("switch"):
+                oc_switch = decision
         # AO-SPAWN-COOLDOWN-RETRY: its own class of stop, decided from the line
         # and not from the window it stated — a cooldown that states nothing is
         # still a cooldown, and still exits the run on the stop's rc.
@@ -14640,12 +14660,39 @@ def cmd_run(args, cfg: dict) -> int:
             print("autoos-agent: --no-fallthrough: the run ends on its pinned model "
                   "(%s), no re-plan" % (plan["model"] or plan["route"].get("combo")),
                   file=sys.stderr)
-        if (stop is not None and not args.joinable and not args.no_fallthrough
-                and fallthroughs < MAX_FALLTHROUGH):
+        if (((stop is not None and fallthroughs < MAX_FALLTHROUGH) or oc_switch)
+                and not args.joinable and not args.no_fallthrough):
             next_plan = None
             fell_from = fell_to = None
+            oc_refused = False
             try:
-                if args.free:
+                if oc_switch:
+                    saved_state = (args.client, args.free, args.model, client, uses_key, key, capture)
+                    try:
+                        args.client = "opencode"
+                        args.free = oc_switch["free"]
+                        args.model = oc_switch["opencode_model"]
+                        client = clients.CLIENTS["opencode"]
+                        uses_key = client.gateway and not args.free
+                        if uses_key and key is None:
+                            key = client_key(ROOT)
+                        capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
+                        print("autoos-agent: claude limit - switching to opencode %s" % oc_switch["model"], file=sys.stderr)
+                        next_plan = build_plan(args, cfg, sandbox=plan["sandbox"], fence=fence)
+                        if next_plan is None:
+                            raise RuntimeError("build_plan returned None")
+                        oc_fallbacks += 1
+                        fell_from = plan["route"].get("combo")
+                        fell_to = (next_plan["route"].get("combo") or args.model)
+                    except Exception as exc:
+                        args.client, args.free, args.model, client, uses_key, key, capture = saved_state
+                        reason = redact_output(str(exc) or type(exc).__name__)
+                        print("autoos-agent: opencode fallback refused: %s; Claude is rate-limited - not retrying Claude"
+                              % reason, file=sys.stderr)
+                        rc = EXIT_OC_FALLBACK_DOWN
+                        oc_refused = True
+                        next_plan = None
+                elif args.free:
                     next_plan, fell_from, fell_to = _free_fallthrough_plan(
                         args, cfg, plan, free_chain, excluded_free_models,
                         benched=set(provider_cooldown), fence=fence,
@@ -14687,6 +14734,8 @@ def cmd_run(args, cfg: dict) -> int:
             except FamilyFenceRefused as exc:
                 fence_refused = exc
                 next_plan = None
+            if oc_refused:
+                break
             if next_plan is not None:
                 fell_through = True
                 fallthroughs += 1

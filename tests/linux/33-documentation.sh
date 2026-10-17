@@ -968,9 +968,9 @@ if it "autoos-agent token-rate: orchestrator tokens per merge (unit tests)"; the
     out="$(python3 tests/test_autoos_tokenrate.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
-# tools/hooks/context_guard.py (P1.1): the PostToolUse hook that tells a session to hand off at 230k and
-# stop at 250k - fixture transcripts and a throwaway XDG state dir, never the live ones.
-if it "context_guard hook: 230k handoff / 250k hard cap, ready marker, tail read (unit tests)"; then
+# tools/hooks/context_guard.py (P1.1): the PostToolUse hook that tells a session to hand off at 270k and
+# stop at 300k - fixture transcripts and a throwaway XDG state dir, never the live ones.
+if it "context_guard hook: 270k handoff / 300k hard cap, ready marker, tail read (unit tests)"; then
     out="$(python3 tests/test_context_guard.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
@@ -992,6 +992,12 @@ fi
 # unpushed/dirty branches, context fill - read-only, plus the run/spawn PAUSE refusal.
 if it "autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)"; then
     out="$(python3 tests/test_autoos_heartbeat.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+if it "autoos_oc_fallback: limit detection, fallback model, opencode health (unit tests)"; then
+    out="$(python3 tests/test_oc_fallback.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+if it "autoos_oc_fallback_run: Claude limit switches to OpenCode fallback (integration tests)"; then
+    out="$(python3 tests/test_oc_fallback_run.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # OVERLAYHOME: the machine-wide tool_calls overlay (path resolution, legacy

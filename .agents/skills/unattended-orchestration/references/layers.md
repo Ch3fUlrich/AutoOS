@@ -63,7 +63,7 @@ the same line to the parent's inbox instead — never a dialog, never a silent w
 inbox/L1-routing.md 2026-09-28T05:47:28Z, work/L1-routing/FOLD4.common.md "Questions").
 
 **How a child reports to its parent (fleet, 2026-10-16).** Not by a status-file beat: only
-`DONE` or `MERGE-READY` with the sha, `RECYCLE-READY <card path>` before 230k context, or
+`DONE` or `MERGE-READY` with the sha, `RECYCLE-READY <card path>` before 270k context, or
 `BLOCKED` naming the decision needed (a refusal goes to the router verbatim, never worked
 around) — SKILL.md "Fleet rules in force" items 5, 6 and 10.
 
