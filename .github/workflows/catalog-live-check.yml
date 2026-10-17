@@ -13,7 +13,8 @@ permissions:
 jobs:
   live-check:
     name: Live-resolve the image catalog
-    runs-on: [self-hosted, fleet-ci]
+    # Same fork guard as ci.yml: a pull_request from a fork never lands on the fleet runner.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
