@@ -893,7 +893,9 @@
           "@modernrelay/omnigraph-mcp@0.13.0"
         ],
         "environment": {
-          "OMNIGRAPH_BASE_URL": "http://localhost:8080",
+          // The server is site data, so this public file can only name the
+          // variable: ~/.autoos-omnigraph.env exports it (docs/omnigraph.md).
+          "OMNIGRAPH_BASE_URL": "{env:OMNIGRAPH_BASE_URL}",
           "OMNIGRAPH_GRAPH_ID": "autoos"
         }
       },

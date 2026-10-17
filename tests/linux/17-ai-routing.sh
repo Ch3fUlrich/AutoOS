@@ -2218,8 +2218,10 @@ if it "zed routing merges one provider and keeps the rest"; then
     mkdir -p "$scratch/.config/zed"
     printf '{"theme":"mine"}' >"$scratch/.config/zed/settings.json"
     ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      OMNIGRAPH_BASE_URL="http://omnigraph.test.invalid:8080" \
       AUTOOS_OMNIROUTE_API_KEY="test-omni-key" AUTOOS_LITELLM_API_KEY="test-lit-key" route_zed_to_proxy >/dev/null 2>&1 )
     ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
+      OMNIGRAPH_BASE_URL="http://omnigraph.test.invalid:8080" \
       AUTOOS_OMNIROUTE_API_KEY="test-omni-key" AUTOOS_LITELLM_API_KEY="test-lit-key" route_zed_to_proxy >/dev/null 2>&1 )
     report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
 import json, sys

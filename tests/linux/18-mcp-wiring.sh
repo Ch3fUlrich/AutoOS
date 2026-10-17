@@ -204,7 +204,8 @@ fi
 
 if it "zed's omnigraph context server carries the base URL and graph id the bridge requires"; then
     scratch="$(mktemp -d)"
-    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 route_zed_to_proxy >/dev/null 2>&1 )
+    ( SYS_HOME="$scratch" HOME="$scratch" AUTOOS_DRY_RUN=0
+      OMNIGRAPH_BASE_URL="http://omnigraph.test.invalid:8080" route_zed_to_proxy >/dev/null 2>&1 )
     got="$(python3 -c "
 import json,sys
 e=json.load(open(sys.argv[1],encoding='utf-8'))['context_servers']['omnigraph'].get('env',{})
@@ -214,44 +215,182 @@ print(bool(e.get('OMNIGRAPH_BASE_URL')), e.get('OMNIGRAPH_GRAPH_ID'), 'OMNIGRAPH
     assert_eq "$got" "True autoos False"
 fi
 
-# The omnigraph_url answer decides where every client's bridge points.
-# The omnigraph step honoured it; the Zed writer hardcoded localhost:8080, so
-# a machine with a remote omnigraph got Zed pointed at nothing. One helper,
-# omnigraph_base_url, now derives it for both (SPEC-OMNI A7b: the omnigraph half
-# of the retired agent-skills step is install_omnigraph_client's).
-# zed_omni_url <answer or empty>: the OMNIGRAPH_BASE_URL route_zed_to_proxy writes.
+# ─── Where OMNIGRAPH_BASE_URL comes from ────────────────────────────────────
+# The bridge needs a base URL and a graph id, and nothing listens on
+# localhost:8080 on the server any more (D-1398): an entry that defaults there
+# shows "connected" in every panel while every read fails, which is worse than
+# the missing entry a user can actually see. So the resolver takes, in order,
+#
+#   1. the omnigraph_url answer,
+#   2. the OMNIGRAPH_BASE_URL environment variable,
+#   3. the OMNIGRAPH_BASE_URL= line of ${SYS_HOME:-$HOME}/.autoos-omnigraph.env,
+#      parsed and never sourced,
+#
+# Every trailing slash comes off the result (consumers append /paths), and a run
+# that resolves nothing is a failure that names the variable and all three
+# places on stderr and returns 1. ONE home: SYS_HOME is the target user's home
+# (detect.sh) and wins, HOME is only the fallback — reading both would make the
+# result depend on the machine running the suite. Every fixture below
+# therefore pins HOME and SYS_HOME to its own scratch dir and unsets
+# OMNIGRAPH_BASE_URL first, so a real ~/.autoos-omnigraph.env cannot decide a
+# result.
+#
+# omnigraph_resolve <home> [answer] [env var] [env-file body]: the resolver on
+# its own; prints its output (stdout and stderr) then "rc=<n>".
+omnigraph_resolve() {
+    local home="$1" answer="${2:-}" envval="${3:-}" body="${4:-}"
+    mkdir -p "$home"
+    [[ -z "$body" ]] || printf '%s' "$body" >"$home/.autoos-omnigraph.env"
+    (
+        HOME="$home" SYS_HOME="$home"
+        AUTOOS_ANSWERS=()
+        [[ -z "$answer" ]] || AUTOOS_ANSWERS[omnigraph_url]="$answer"
+        unset OMNIGRAPH_BASE_URL OMNIGRAPH_GRAPH_ID FORCE_COLOR
+        [[ -z "$envval" ]] || export OMNIGRAPH_BASE_URL="$envval"
+        omnigraph_base_url
+        printf 'rc=%s\n' "$?"
+    ) 2>&1
+}
+
+# zed_omni_run <home> [answer] [env var] [env-file body]: route_zed_to_proxy with
+# the same isolation, the two gateway keys deliberately unset — a writer that
+# skips the omnigraph entry still has to finish the rest of its job. Prints the
+# writer's output, leaves <home> for the caller, returns the writer's rc.
+zed_omni_run() {
+    local home="$1" answer="${2:-}" envval="${3:-}" body="${4:-}"
+    mkdir -p "$home/.config/zed"
+    [[ -z "$body" ]] || printf '%s' "$body" >"$home/.autoos-omnigraph.env"
+    (
+        HOME="$home" SYS_HOME="$home" AUTOOS_DRY_RUN=0
+        AUTOOS_ANSWERS=()
+        [[ -z "$answer" ]] || AUTOOS_ANSWERS[omnigraph_url]="$answer"
+        unset OMNIGRAPH_BASE_URL OMNIGRAPH_GRAPH_ID FORCE_COLOR \
+              AUTOOS_OMNIROUTE_API_KEY AUTOOS_LITELLM_API_KEY
+        [[ -z "$envval" ]] || export OMNIGRAPH_BASE_URL="$envval"
+        route_zed_to_proxy
+    ) 2>&1
+}
+
+# zed_omni_entry <home>: the OMNIGRAPH_BASE_URL held by the Zed omnigraph entry,
+# NOENTRY when the writer wrote none, NOURL when it wrote one without a URL.
+zed_omni_entry() {
+    python3 - "$1/.config/zed/settings.json" <<'PY' 2>&1
+import json, sys
+try:
+    ctx = json.load(open(sys.argv[1], encoding='utf-8')).get('context_servers', {})
+except Exception:
+    print('NOWRITE'); sys.exit(0)
+entry = ctx.get('omnigraph')
+print('NOENTRY' if not isinstance(entry, dict)
+      else entry.get('env', {}).get('OMNIGRAPH_BASE_URL', 'NOURL'))
+PY
+}
+
+# zed_omni_url <answer>: the URL the Zed writer resolved for that answer.
 zed_omni_url() {
     local scratch out
     scratch="$(mktemp -d)"
-    (
-        AUTOOS_ANSWERS=()
-        [[ -z "$1" ]] || AUTOOS_ANSWERS[omnigraph_url]="$1"
-        SYS_HOME="$scratch" AUTOOS_DRY_RUN=0 route_zed_to_proxy >/dev/null 2>&1
-    )
-    out="$(python3 -c "
-import json, sys
-print(json.load(open(sys.argv[1], encoding='utf-8'))['context_servers']['omnigraph']['env']['OMNIGRAPH_BASE_URL'])
-" "$scratch/.config/zed/settings.json" 2>&1)"
+    zed_omni_run "$scratch" "$1" >/dev/null 2>&1
+    out="$(zed_omni_entry "$scratch")"
     rm -rf "$scratch"
     printf '%s' "$out"
 }
 
-if it "zed: the omnigraph entry uses the omnigraph_url answer"; then
+if it "omnigraph: the resolver prefers the answer, then the environment, then the env file"; then
+    tmp="$(mktemp -d)"; ok=1
+    file=$'OMNIGRAPH_BASE_URL=http://file.test.invalid:8080\n'
+    got="$(omnigraph_resolve "$tmp/a" 'http://answer.test.invalid:9000/' '' "$file")"
+    [[ "$got" == $'http://answer.test.invalid:9000\nrc=0' ]] \
+        || { ok=0; echo "with an answer: [$got]" >&2; }
+    got="$(omnigraph_resolve "$tmp/b" '' 'http://env.test.invalid:9000/' "$file")"
+    [[ "$got" == $'http://env.test.invalid:9000\nrc=0' ]] \
+        || { ok=0; echo "with only the environment: [$got]" >&2; }
+    got="$(omnigraph_resolve "$tmp/c" '' '' "$file")"
+    [[ "$got" == $'http://file.test.invalid:8080\nrc=0' ]] \
+        || { ok=0; echo "with only the env file: [$got]" >&2; }
+    # An answer that strips to nothing is not an answer.
+    got="$(omnigraph_resolve "$tmp/d" '///' 'http://env.test.invalid:9000/' '')"
+    [[ "$got" == $'http://env.test.invalid:9000\nrc=0' ]] \
+        || { ok=0; echo "a slash-only answer: [$got]" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "omnigraph_base_url does not resolve answer / environment / env file in order"; fi
+fi
+
+if it "omnigraph: one home is read - the target user's, else HOME - never both"; then
+    tmp="$(mktemp -d)"; ok=1
+    mkdir -p "$tmp/home" "$tmp/target"
+    printf 'OMNIGRAPH_BASE_URL=http://home.test.invalid:8080\n' >"$tmp/home/.autoos-omnigraph.env"
+    # SYS_HOME names the target user (detect.sh): the file under HOME is not read.
+    got="$( ( HOME="$tmp/home" SYS_HOME="$tmp/target" AUTOOS_ANSWERS=()
+              unset OMNIGRAPH_BASE_URL; omnigraph_base_url ) 2>&1 )"
+    [[ "$got" == *"OMNIGRAPH_BASE_URL is not set"* ]] \
+        || { ok=0; echo "SYS_HOME set, got: [$got]" >&2; }
+    got="$( ( HOME="$tmp/home" AUTOOS_ANSWERS=()
+              unset SYS_HOME OMNIGRAPH_BASE_URL; omnigraph_base_url ) 2>&1 )"
+    [[ "$got" == "http://home.test.invalid:8080" ]] \
+        || { ok=0; echo "SYS_HOME unset, got: [$got]" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "omnigraph_base_url consults more than one home"; fi
+fi
+
+if it "omnigraph: the env-file line is parsed - export, quotes, blanks, CRLF, last line wins"; then
+    tmp="$(mktemp -d)"; ok=1
+    while IFS='|' read -r label body want; do
+        [[ -n "$label" ]] || continue
+        got="$(omnigraph_resolve "$tmp/$label" '' '' "$(printf '%b' "$body")")"
+        [[ "$got" == "$want"$'\n'"rc=0" ]] \
+            || { ok=0; printf 'case %s: [%s] expected [%s / rc=0]\n' "$label" "$got" "$want" >&2; }
+    done <<'CASES'
+plain|OMNIGRAPH_BASE_URL=http://plain.test.invalid:8080\n|http://plain.test.invalid:8080
+export|  export OMNIGRAPH_BASE_URL=http://exp.test.invalid:8080\n|http://exp.test.invalid:8080
+dquote|OMNIGRAPH_BASE_URL="http://dq.test.invalid:8080"\n|http://dq.test.invalid:8080
+squote|OMNIGRAPH_BASE_URL='http://sq.test.invalid:8080'\n|http://sq.test.invalid:8080
+blanks|OMNIGRAPH_BASE_URL=  http://blank.test.invalid:8080/  \n|http://blank.test.invalid:8080
+crlf|OMNIGRAPH_BASE_URL=http://crlf.test.invalid:8080\r\n|http://crlf.test.invalid:8080
+last|OMNIGRAPH_BASE_URL=http://first.test.invalid\r\nOMNIGRAPH_BASE_URL="http://last.test.invalid//"\r\n|http://last.test.invalid
+CASES
+    # The two cases whose answer is not a plain URL, spelled out rather than
+    # table-row: an empty quoted value is "not configured", not "configured with
+    # nothing", and a value is data — it used to be sourced, so $(...) in one ran
+    # in every shell.
+    mkdir -p "$tmp/empty" "$tmp/hostile"
+    printf 'OMNIGRAPH_BASE_URL=""\r\n' >"$tmp/empty/.autoos-omnigraph.env"
+    printf 'OMNIGRAPH_BASE_URL=http://x$(touch %s/pwned)\n' "$tmp" >"$tmp/hostile/.autoos-omnigraph.env"
+    got="$(omnigraph_resolve "$tmp/empty")"
+    [[ "$got" == *"OMNIGRAPH_BASE_URL is not set"* && "$got" == *rc=1* ]] \
+        || { ok=0; echo "an empty quoted value: [$got]" >&2; }
+    got="$(omnigraph_resolve "$tmp/hostile")"
+    compgen -G "$tmp/pwned" >/dev/null && { ok=0; echo "the env-file value executed" >&2; }
+    [[ "$got" == 'http://x$(touch '*"$tmp"'/pwned)'$'\n''rc=0' ]] \
+        || { ok=0; echo "a hostile value was rewritten: [$got]" >&2; }
+    rm -rf "$tmp"
+    if (( ok )); then pass; else fail "the omnigraph env file is not parsed the way an env file must be"; fi
+fi
+
+if it "omnigraph: nothing resolved names the variable and every place it can be set"; then
+    tmp="$(mktemp -d)"
+    got="$(omnigraph_resolve "$tmp/none")"
+    rc="${got##*rc=}"
+    rm -rf "$tmp"
     ok=1
-    got="$(zed_omni_url "https://graph.example.invalid:9000/")"
-    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got], not the answer without its trailing slash" >&2; }
-    helper="$( ( AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="https://graph.example.invalid:9000/"; omnigraph_base_url ) 2>&1)"
-    [[ "$helper" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
-    if (( ok )); then pass; else fail "the Zed omnigraph entry ignores the omnigraph_url answer"; fi
+    [[ "$rc" == "1" ]] || { ok=0; echo "rc=$rc" >&2; }
+    for frag in "OMNIGRAPH_BASE_URL is not set" "omnigraph_url" \
+                "export OMNIGRAPH_BASE_URL" ".autoos-omnigraph.env"; do
+        [[ "$got" == *"$frag"* ]] || { ok=0; echo "the message never says [$frag]" >&2; }
+    done
+    [[ "$got" != *"localhost"* ]] || { ok=0; echo "a default is still offered: [$got]" >&2; }
+    if (( ok )); then pass; else fail "an unresolvable OMNIGRAPH_BASE_URL is not reported loudly"; fi
 fi
 
 # The contract is "no trailing slash", not "one slash off": consumers append
 # /paths to the base, and the Windows side does .TrimEnd('/') (every trailing
 # slash). A pasted "http://host//" must not survive as "http://host/".
 if it "omnigraph: omnigraph_base_url strips every trailing slash and nothing else"; then
-    ok=1
+    ok=1; tmp="$(mktemp -d)"; mkdir -p "$tmp/h"
     while IFS='|' read -r given want; do
-        got="$( ( AUTOOS_ANSWERS=(); AUTOOS_ANSWERS[omnigraph_url]="$given"; omnigraph_base_url ) 2>&1)"
+        got="$( ( HOME="$tmp/h" SYS_HOME="$tmp/h" AUTOOS_ANSWERS=()
+                   unset OMNIGRAPH_BASE_URL
+                   AUTOOS_ANSWERS[omnigraph_url]="$given"; omnigraph_base_url ) 2>&1)"
         [[ "$got" == "$want" ]] || { ok=0; echo "omnigraph_url [$given]: the helper says [$got], expected [$want]" >&2; }
     done <<'CASES'
 http://host|http://host
@@ -260,25 +399,169 @@ http://host//|http://host
 http://host:8080///|http://host:8080
 http://host/graph//|http://host/graph
 http://host//graph/|http://host//graph
-/|http://localhost:8080
-//|http://localhost:8080
 CASES
     # ...and the Zed writer, the other consumer, writes the same stripped value.
     got="$(zed_omni_url "https://graph.example.invalid:9000//")"
-    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got] for a doubled trailing slash" >&2; }
+    [[ "$got" == "https://graph.example.invalid:9000" ]] \
+        || { ok=0; echo "the Zed entry says [$got] for a doubled trailing slash" >&2; }
+    rm -rf "$tmp"
     if (( ok )); then pass; else fail "omnigraph_base_url leaves a trailing slash on the base URL"; fi
 fi
 
-if it "zed: the omnigraph entry defaults to localhost:8080"; then
+if it "zed: the omnigraph entry uses the omnigraph_url answer"; then
     ok=1
+    got="$(zed_omni_url "https://graph.example.invalid:9000/")"
+    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got], not the answer without its trailing slash" >&2; }
     got="$(zed_omni_url "")"
-    [[ "$got" == "http://localhost:8080" ]] || { ok=0; echo "the Zed entry says [$got]" >&2; }
-    # Both consumers take the default from the one helper, so they cannot drift.
-    helper="$( ( AUTOOS_ANSWERS=(); omnigraph_base_url ) 2>&1)"
-    [[ "$helper" == "http://localhost:8080" ]] || { ok=0; echo "omnigraph_base_url says [$helper]" >&2; }
-    [[ "$(grep -c '\$(omnigraph_base_url)' lib/linux/install.sh)" -ge 2 ]] \
-        || { ok=0; echo "the helper is not called by both install_omnigraph_client and route_zed_to_proxy" >&2; }
-    if (( ok )); then pass; else fail "the omnigraph default differs between the Zed writer and install_omnigraph_client"; fi
+    [[ "$got" == "NOENTRY" ]] || { ok=0; echo "with nothing configured the Zed entry says [$got]" >&2; }
+    if (( ok )); then pass; else fail "the Zed omnigraph entry ignores the omnigraph_url answer"; fi
+fi
+
+if it "zed: an unresolved base URL skips the entry loudly and still routes the providers"; then
+    scratch="$(mktemp -d)"
+    out="$(zed_omni_run "$scratch")"; rc=$?
+    entry="$(zed_omni_entry "$scratch")"
+    kept="$(python3 -c "
+import json,sys
+cfg=json.load(open(sys.argv[1],encoding='utf-8'))
+ctx=cfg.get('context_servers',{})
+api=cfg.get('language_models',{}).get('openai_compatible',{}).get('autoos-omniroute',{}).get('api_url','')
+print(','.join(sorted(ctx))+'|'+str(api))
+" "$scratch/.config/zed/settings.json" 2>&1)"
+    rm -rf "$scratch"
+    ok=1
+    [[ "$rc" == "1" ]] || { ok=0; echo "rc=$rc (a skipped omnigraph entry must fail the run)" >&2; }
+    [[ "$entry" == "NOENTRY" ]] || { ok=0; echo "the entry says [$entry]" >&2; }
+    [[ "$out" == *"OMNIGRAPH_BASE_URL is not set"* ]] || { ok=0; echo "no loud message: $out" >&2; }
+    [[ "$out" == *"Zed: skipping omnigraph entry"* ]] || { ok=0; echo "the skip is not announced per client" >&2; }
+    # The rest of the writer's job is not the omnigraph entry's failure to do:
+    # the other context servers, the providers, and both key warnings.
+    [[ "$kept" == "autoos-agent,context7,graphify,playwright,serena|http://127.0.0.1:20128/v1" ]] \
+        || { ok=0; echo "the other work changed: [$kept]" >&2; }
+    [[ "$out" == *"AUTOOS_OMNIROUTE_API_KEY not set"* ]] || { ok=0; echo "the omniroute key warning is gone" >&2; }
+    [[ "$out" == *"AUTOOS_LITELLM_API_KEY not set"* ]] || { ok=0; echo "the litellm key warning is gone" >&2; }
+    [[ "$out" == *"Zed agents routed"* ]] || { ok=0; echo "the writer stopped before it finished" >&2; }
+    [[ "$out" != *"localhost:8080"* ]] || { ok=0; echo "a default was written" >&2; }
+    if (( ok )); then pass; else fail "route_zed_to_proxy invents a server or abandons its other work when OMNIGRAPH_BASE_URL is unset"; fi
+fi
+
+if it "zed: an unset run keeps the omnigraph entry the user already had"; then
+    scratch="$(mktemp -d)"
+    mkdir -p "$scratch/.config/zed"
+    printf '%s' '{"context_servers":{"omnigraph":{"command":"npx","args":["-y","dummy"],"env":{"OMNIGRAPH_BASE_URL":"http://existing.test.invalid:8080","OMNIGRAPH_GRAPH_ID":"mine"}}}}' \
+        >"$scratch/.config/zed/settings.json"
+    zed_omni_run "$scratch" >/dev/null 2>&1
+    got="$(zed_omni_entry "$scratch")"
+    graph="$(python3 -c "
+import json,sys
+print(json.load(open(sys.argv[1],encoding='utf-8'))['context_servers']['omnigraph']['env']['OMNIGRAPH_GRAPH_ID'])
+" "$scratch/.config/zed/settings.json" 2>&1)"
+    rm -rf "$scratch"
+    assert_eq "$got|$graph" "http://existing.test.invalid:8080|mine"
+fi
+
+# oc_omni_run <home> <config file> [answer] [env var]: the OpenCode user-config
+# merge on one file, with the same isolation as the Zed fixture above.
+oc_omni_run() {
+    local home="$1" file="$2" answer="${3:-}" envval="${4:-}"
+    mkdir -p "$home" "$(dirname "$file")"
+    [[ -e "$file" ]] || printf '{}\n' >"$file"
+    (
+        HOME="$home" SYS_HOME="$home" AUTOOS_DRY_RUN=0 AUTOOS_ROOT="$ROOT"
+        AUTOOS_ANSWERS=()
+        [[ -z "$answer" ]] || AUTOOS_ANSWERS[omnigraph_url]="$answer"
+        unset OMNIGRAPH_BASE_URL OMNIGRAPH_GRAPH_ID FORCE_COLOR \
+              META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
+        [[ -z "$envval" ]] || export OMNIGRAPH_BASE_URL="$envval"
+        curl() { return 6; }
+        _opencode_merge_config "$file"
+    ) >/dev/null 2>&1
+}
+
+# oc_omni_entry <file>: the URL in the merged mcp.omnigraph entry, or NOENTRY.
+oc_omni_entry() {
+    python3 - "$1" <<'PY' 2>&1
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding='utf-8'))
+except Exception:
+    print('NOWRITE'); sys.exit(0)
+entry = (d.get('mcp') or {}).get('omnigraph')
+print('NOENTRY' if not isinstance(entry, dict)
+      else (entry.get('environment') or {}).get('OMNIGRAPH_BASE_URL', 'NOURL'))
+PY
+}
+
+if it "opencode: the omnigraph entry is written with the resolved URL, not a reference"; then
+    tmp="$(mktemp -d)"
+    oc_omni_run "$tmp/home" "$tmp/home/.config/opencode/config.json" 'http://omnigraph.test.invalid:8080/'
+    got="$(oc_omni_entry "$tmp/home/.config/opencode/config.json")"
+    rm -rf "$tmp"
+    assert_eq "$got" "http://omnigraph.test.invalid:8080"
+fi
+
+if it "opencode: an unresolved base URL writes no entry and keeps the user's"; then
+    tmp="$(mktemp -d)"
+    cfg="$tmp/home/.config/opencode/config.json"
+    mkdir -p "$tmp/home/.config/opencode"
+    printf '%s' '{"mcp":{"omnigraph":{"type":"local","command":["npx","-y","dummy"],"enabled":true,"environment":{"OMNIGRAPH_BASE_URL":"http://existing.test.invalid:8080"}}}}' >"$cfg"
+    oc_omni_run "$tmp/home" "$cfg"
+    got="$(oc_omni_entry "$cfg")"
+    rm -rf "$tmp"
+    assert_eq "$got" "http://existing.test.invalid:8080"
+fi
+
+if it "opencode: a fresh config with nothing configured gets no omnigraph entry"; then
+    tmp="$(mktemp -d)"
+    oc_omni_run "$tmp/home" "$tmp/home/.config/opencode/config.json"
+    got="$(oc_omni_entry "$tmp/home/.config/opencode/config.json")"
+    rm -rf "$tmp"
+    assert_eq "$got" "NOENTRY"
+fi
+
+if it "Antigravity: an unresolved base URL stops before mcp_config.json"; then
+    tmp="$(mktemp -d)"
+    # The same fixture as omni_client_spec, with the resolver itself made to fail:
+    # the answer only carries the run past the component's own gates, so this is
+    # the writer's skip path rather than the component's skip path.
+    out="$( (
+        SYS_HOME="$tmp/home" HOME="$tmp/home" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
+        mkdir -p "$tmp/repo" "$tmp/home/.gemini/config"
+        printf '%s' '{"mcpServers":{}}' >"$tmp/home/.gemini/config/mcp_config.json"
+        export OMNIGRAPH_TOKEN="dummy-token-1234"
+        unset OMNIGRAPH_BASE_URL OMNIGRAPH_GRAPH_ID FORCE_COLOR
+        AUTOOS_ANSWERS=([omnigraph_url]="http://omnigraph.test.invalid:8080")
+        write_omnigraph_env() { :; }
+        omnigraph_install_bridge() { :; }
+        omnigraph_install_wrapper() { :; }
+        omnigraph_retire_rc_token_lines() { :; }
+        report_stale_homelab_mcp_entry() { :; }
+        enable_project_mcp_server() { :; }
+        mcp_has_server() { return 1; }
+        has_cmd() { [[ "$1" == npm ]]; }
+        mcp_package() { printf 'dummy-omnigraph-mcp\n'; }
+        omnigraph_base_url() { printf 'autoos: OMNIGRAPH_BASE_URL is not set\n' >&2; return 1; }
+        register_antigravity_mcp_server() { printf 'TOUCHED:%s\n' "$1" >&2; }
+        install_omnigraph_client
+        printf 'rc=%s\n' "$?"
+    ) 2>&1 )"
+    rm -rf "$tmp"
+    ok=1
+    [[ "$out" == *rc=1* ]] || { ok=0; echo "the client reported success anyway: $out" >&2; }
+    [[ "$out" == *"Antigravity: skipping omnigraph entry"* ]] || { ok=0; echo "no per-client warning" >&2; }
+    [[ "$out" != *"TOUCHED:"* ]] || { ok=0; echo "mcp_config.json was written" >&2; }
+    if (( ok )); then pass; else fail "install_omnigraph_client writes an Antigravity omnigraph entry it cannot resolve"; fi
+fi
+
+if it "omnigraph: no Linux writer keeps a localhost default, and all three share the resolver"; then
+    ok=1
+    grep -qF 'http://localhost:8080' lib/linux/install.sh \
+        && { ok=0; echo "lib/linux/install.sh still carries the localhost default" >&2; }
+    grep -qF '"OMNIGRAPH_BASE_URL": "{env:OMNIGRAPH_BASE_URL}"' opencode.jsonc \
+        || { ok=0; echo "opencode.jsonc does not point at the variable (a public repo cannot hold the site URL)" >&2; }
+    callers="$(grep -c '\$(omnigraph_base_url)' lib/linux/install.sh)"
+    (( callers >= 3 )) || { ok=0; echo "only $callers of the three writers call the resolver" >&2; }
+    if (( ok )); then pass; else fail "an omnigraph writer can still invent a server"; fi
 fi
 
 if it "the omnigraph env file is private, merged, linked for systemd, and stable on a re-run"; then
