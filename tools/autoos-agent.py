@@ -7079,6 +7079,56 @@ def lane_diff_paths(repo, base, sha):
     return paths, _git_out(body.stdout, "replace"), None
 
 
+def lane_commits(repo, base, sha):
+    """``(commits, error)`` -- the lane's own commits and what each one changed.
+
+    The shape ``writer_trailer_refusal`` judges: one dict per commit from ``git log``
+    with ``\\x1f``/``\\x1e`` delimiters (a message carries colons, TABs and newlines, no
+    line-oriented split survives that) plus each non-merge's own added+deleted from
+    ``git show --numstat`` (a binary ``-`` counts 0; a merge's diff is its legs' work).
+    Bytes mode is P4b-fixes D3; fail closed like ``lane_diff_paths``, exit 2 at ready.
+    """
+    rng = "%s..%s" % (base, sha)
+    if _diff_range(base, sha) is None:
+        return [], "cannot read commits: %r and %r must be plain rev tokens" % (base, sha)
+    try:
+        log = subprocess.run(["git", "-C", repo, "log", "--format=%H%x1f%P%x1f%B%x1e",
+                              rng], capture_output=True, timeout=60,
+                             stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [], "git log: %s" % exc
+    if log.returncode != 0:
+        return [], ((_git_out(log.stderr, "replace").strip())
+                    or "git log %s exited %d" % (rng, log.returncode))
+    commits = []
+    for record in _git_out(log.stdout, "replace").split("\x1e"):
+        # git appends its own newline AFTER the format's ``%x1e``, so it leads here.
+        record = record.lstrip("\n")
+        if not record:
+            continue
+        fields = record.split("\x1f", 2)
+        if len(fields) < 3 or not fields[0]:
+            return [], "git log answered with an unparsable record: %r" % record[:60]
+        commit = {"sha": fields[0], "parents": len(fields[1].split()),
+                  "message": fields[2], "lines": 0}
+        if commit["parents"] <= 1:
+            try:
+                stat = subprocess.run(["git", "-C", repo, "show", "--numstat",
+                                       "--format=", commit["sha"]], capture_output=True,
+                                      timeout=60, stdin=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return [], "git show: %s" % exc
+            if stat.returncode != 0:
+                return [], ((_git_out(stat.stderr, "replace").strip())
+                            or "git show --numstat %s exited %d"
+                               % (commit["sha"][:12], stat.returncode))
+            commit["lines"] = sum(
+                int(value) for line in _git_out(stat.stdout, "replace").splitlines()
+                for value in line.split("\t")[:2] if value.isdigit())
+        commits.append(commit)
+    return commits, None
+
+
 def read_guards_text(path):
     """``(text, error)`` -- one brief or report file, read whole or refused.
 
@@ -7612,6 +7662,11 @@ def cmd_ready(args) -> int:
     appends no new field, and `preflight` (the same module's tool check, exit 3 on
     input_required) tells the operator whether the guard tools exist at all.
 
+    Ahead of that block sits GATE-WRITER-TRAILER: `lane_commits` and
+    `writer_trailer_refusal` refuse a commit whose last paragraph names no
+    `Writer: <model> <run id>` (merges exempt) or names a Claude writer over its line
+    cap, spelling out the D-1704 order.
+
     P12b (D-1116): that same diff decides the lane's CLASS for the review gate too —
     `required_r_level` rides into `review_status` as `r_level`, and an R3 (HIGH:
     privileged, installer, state-mutating, auth/access/secrets) lane is refused unless
@@ -7692,6 +7747,16 @@ def cmd_ready(args) -> int:
     if tip != args.sha:
         print("ready: not pushed -- %s is at %s on origin, not %s"
               % (args.branch, tip, args.sha))
+        return 1
+    # GATE-WRITER-TRAILER (D-1704/D-1714): every commit names the writer that wrote
+    # it before anything certifies the lane; a log git cannot answer is exit 2.
+    commits, commits_error = lane_commits(args.repo or os.getcwd(), base, args.sha)
+    if commits_error:
+        print("ready: cannot read lane commits: %s" % commits_error, file=sys.stderr)
+        return 2
+    trailer_refusal = ready_guards.writer_trailer_refusal(commits)
+    if trailer_refusal:
+        print("ready: not appended -- writer-trailer: %s" % trailer_refusal)
         return 1
     ci_field = ""
     # AO-WRITER-GUARDS P4b (writer-ops.md §4-5, helpers in

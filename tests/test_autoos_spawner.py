@@ -11179,6 +11179,8 @@ class ReadyCommandTests(unittest.TestCase):
         # patch — installed in setUp, asserted again by `ready()` below — is what
         # keeps every ready test in this class and its subclasses off real git.
         self.stub_lane_diff()
+        # GATE-WRITER-TRAILER: the trailer gate reads the commits on EVERY ready too.
+        self.stub_lane_commits()
 
     def stub_lane_diff(self, paths=(), added="", error=None):
         """Install the recording stub for `lane_diff_paths` (see setUp).
@@ -11201,6 +11203,20 @@ class ReadyCommandTests(unittest.TestCase):
         self.addCleanup(patch.stop)
         self.lane_diff_calls = calls
         return stub
+
+    def stub_lane_commits(self, commits=None, error=None):
+        """Stub for `lane_commits` (see setUp), marked like `stub_lane_diff`'s; the
+        default answer is the commit shape that clears the gate."""
+        if commits is None:
+            commits = [self.commit()]
+
+        def stub(repo, base, sha):
+            return ([] if error else list(commits)), error
+
+        stub.lane_commits_stub = True
+        patch = mock.patch.object(self.agent, "lane_commits", stub)
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def _restore_state(self):
         if self._old_state is None:
@@ -11758,6 +11774,62 @@ class ReadyCommandTests(unittest.TestCase):
                            "/lane/checkout", self.NOT_PUSHED_SHA, inbox)
         self.assertIn("lane_diff_paths", str(ctx.exception))
         self.assertEqual(self.read_inbox(inbox), "")
+
+    def commit(self, message="x\n\nWriter: qwen3.8-flash run-1", parents=1, lines=3,
+               sha="c" * 40):
+        """One commit in the shape `lane_commits` hands the guard."""
+        return {"sha": sha, "parents": parents, "message": message, "lines": lines}
+
+    def test_the_trailer_gate_refuses_this_and_accepts_that(self):
+        # A trailer that cannot name its run proves nothing and one above the body is
+        # not a trailer block; a merge is bookkeeping over legs judged on their own;
+        # `Writer: <model>` is a SHAPE, so a scripted data writer names itself too.
+        guards = self.agent.ready_guards
+        missing = "has no 'Writer: <model> <run id>' trailer"
+        for message, needle in (
+                ("lane work", missing),
+                ("x\n\nWriter: qwen3.8-flash", missing),
+                ("x\n\nwriter: qwen run-1", missing),
+                ("Writer: q run-1\n\nbody after", missing),
+                ("x\n\nWriter: sonnet-5 run-2", "names Claude writer 'sonnet-5' for 11 "
+                                                "changed lines (limit 10)")):
+            with self.subTest(message=message):
+                self.assertIn(needle, guards.writer_trailer_refusal(
+                    [self.commit(message=message, lines=11)]))
+        for message, parents, lines in (("Merge lane/work into main", 2, 400),
+                                        ("export\n\nWriter: export-script run-9", 1, 500),
+                                        ("x\n\nWriter: claude-opus-4 run-1", 1, 10)):
+            with self.subTest(message=message):
+                self.assertEqual(guards.writer_trailer_refusal(
+                    [self.commit(message, parents, lines)]), "")
+        msg = guards.writer_trailer_refusal(
+            [self.commit(sha="1" * 40, message="lane work"),
+             self.commit(sha="2" * 40, message="x\n\nWriter: sonnet-5 run-2", lines=12),
+             self.commit(sha="3" * 40)])
+        self.assertEqual(len(guards.WRITER_ORDER), 7)
+        self.assertIn("11111111 has no", msg)   # every problem joins, none is dropped
+        self.assertIn("; 22222222 names Claude writer", msg)
+        self.assertNotIn("33333333", msg)       # a commit that clears is not named
+        self.assertIn("D-1704 order: 1) %s" % guards.WRITER_ORDER[0], msg)
+        self.assertIn("Next entry to try: 1) %s" % guards.WRITER_ORDER[0], msg)
+        self.assertEqual(guards.writer_trailer_refusal([]), "")
+
+    def test_the_trailer_gate_refuses_the_lane_through_the_cli(self):
+        # Exit 1 and the D-1704 order for commits that name no writer; fail closed at
+        # exit 2 when git cannot answer — "the log never ran" is not "the lane cleared
+        # the check". Neither path touches the inbox.
+        for commits, error, want, needle in (
+                ([self.commit(message="lane work", lines=40)], None, 1, "writer-trailer"),
+                ([], "git log exited 128", 2, "cannot read lane commits")):
+            with self.subTest(needle=needle):
+                repo, sha = self.make_repo()
+                inbox = self.make_inbox("")
+                self.stub_lane_commits(commits, error)
+                rc, out, err = self.ready(self.write_record(*self.READY_RECORD),
+                                          repo, sha, inbox)
+                self.assertEqual(rc, want, out + err)
+                self.assertIn(needle, out + err)
+                self.assertEqual(self.read_inbox(inbox), "")
 
 
 #: An added secret (`token:`) plus added lines whose own text reads as a diff
@@ -12368,6 +12440,11 @@ class ReadyWriterGuardsTests(unittest.TestCase):
         self.inbox = os.path.join(self.work, "L1.md")
         with io.open(self.inbox, "w", encoding="utf-8") as fh:
             fh.write("")
+        # GATE-WRITER-TRAILER: the trailer gate reads the lane's commits on EVERY
+        # ready, so the git log is stubbed like every other outside read here.
+        self._stub("lane_commits", lambda repo, base, sha: ([{
+            "sha": self.SHA, "parents": 1, "lines": 3,
+            "message": "x\n\nWriter: qwen3.8-flash run-1"}], None))
 
     def write_text(self, name, body):
         path = os.path.join(self.work, name)

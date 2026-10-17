@@ -96,6 +96,12 @@ class MainCiFreezeTests(unittest.TestCase):
         # one per ready class — so no ready test in this file or its subclasses
         # shells out to git.
         self.stub_lane_diff()
+        # GATE-WRITER-TRAILER: the trailer gate reads the lane's commits on EVERY ready.
+        commits = mock.patch.object(self.agent, "lane_commits", lambda repo, base, sha: (
+            [{"sha": sha, "parents": 1, "lines": 3,
+              "message": "x\n\nWriter: qwen3.8-flash run-1"}], None))
+        commits.start()
+        self.addCleanup(commits.stop)
 
     def stub_lane_diff(self, paths=(), added="", error=None):
         """Install the recording stub for `lane_diff_paths` (see setUp); the
