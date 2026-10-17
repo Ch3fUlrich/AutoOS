@@ -5,6 +5,8 @@ counted anyway, and the seat's text and the record's `verdict=` field disagreed 
 yes. One owner: `parse_verdict`, `verdict_word`, `seat_prompt`. Hermetic (D-852)."""
 import re
 
+from autoos_ready_guards import _Fences  # the one markdown-fence rule (P4a fix 1)
+
 VERDICTS = ("ACCEPT", "REJECT", "HOLD")
 READY_TOKEN = "accept"        # the record gate's yes, lower-cased like its word list
 UNCOUNTABLE_TOKEN = "HOLD"    # a stated HOLD is honest, and reviews nothing
@@ -84,7 +86,8 @@ def parse_verdict(text):
 
     Exactly ONE line, decoration normalised, must be `VERDICT: ACCEPT|REJECT|HOLD` — one
     colon, the bare word, trailing punctuation tolerated — wherever it stands (D-1515: a
-    seat that reviews first and concludes last was logged as no verdict). No verdict line,
+    seat that reviews first and concludes last was logged as no verdict); a line inside a
+    markdown fence is quoted material and never counts. No verdict line,
     a second verdict, an unknown word (`SHIP`, `LGTM`), or the reviewer talking after the
     word on that line is invalid and says which. A seat that says IT could not see the change has voided its
     ACCEPT (P2/G2); a REJECT stands — losing a blocking finding is the worse failure — and
@@ -99,8 +102,12 @@ def parse_verdict(text):
     if not lines:
         return invalid("no non-empty line to read a verdict from")
     # D-1515: the verdict line may stand anywhere (seats review first and conclude last);
-    # exactly one is read, zero or two fail closed.
-    found = [ln for ln in map(_normalise, lines) if _VERDICT_RE.match(ln)]
+    # exactly one is read, zero or two fail closed. A fenced line is quoted material
+    # (a sample from the diff), never the seat's own: the one fence rule every reader
+    # shares (_Fences), so an unclosed fence swallows the rest.
+    fences = _Fences()
+    found = [ln for ln in map(_normalise, (ln for ln in lines if not fences.feed(ln)))
+             if _VERDICT_RE.match(ln)]
     if not found:
         return invalid("no verdict line in the answer: %s" % _normalise(lines[0])[:60])
     if len(found) > 1:

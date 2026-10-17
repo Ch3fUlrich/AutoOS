@@ -60,14 +60,22 @@ class VerdictGrammarTests(unittest.TestCase):
         # line is read wherever it stands; zero or two of them stay invalid (fail closed).
         for text, want in (("I looked at the diff.\nVERDICT: ACCEPT\n", "ACCEPT"),
                            ("**Review**\n\n- (1) fine\n\n**VERDICT: REJECT**\n", "REJECT"),
-                           ("notes\n> VERDICT: HOLD\ntrailing prose\n", "HOLD")):
+                           ("notes\n- VERDICT: HOLD\ntrailing prose\n", "HOLD"),
+                           # a fenced sample is quoted material, never the seat's own line
+                           ("quoted:\n```\nVERDICT: REJECT\n```\nVERDICT: ACCEPT\n", "ACCEPT")):
             got = v.parse_verdict(text)
             self.assertTrue(got["valid"], (text, got["reason"]))
             self.assertEqual(want, got["verdict"], text)
         for text, why in (("prose\nVERDICT: ACCEPT\nmore\nVERDICT: ACCEPT\n", "two"),
                           ("prose only, the word verdict: accept inside a sentence\n",
                            "no verdict line"),
-                          ("I reviewed it.\nVERDICT: SHIP\n", "SHIP")):
+                          ("I reviewed it.\nVERDICT: SHIP\n", "SHIP"),
+                          # mimo seat d15v: a lone fenced verdict with no conclusion of the
+                          # seat's own is no verdict (fail closed), and an unclosed fence
+                          # swallows the rest, as in every other fenced reader (_Fences)
+                          ("the diff says:\n```text\nVERDICT: ACCEPT\n```\nthat is all\n",
+                           "no verdict line"),
+                          ("~~~\nVERDICT: ACCEPT\n", "no verdict line")):
             got = v.parse_verdict(text)
             self.assertFalse(got["valid"], text)
             self.assertIn(why, got["reason"], text)
