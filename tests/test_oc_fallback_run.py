@@ -43,6 +43,7 @@ class OcFallbackRunTests(unittest.TestCase):
     def setUpClass(cls):
         global _WORKERS
         _WORKERS = tempfile.mkdtemp(prefix="oc-fallback-workers-")
+        cls.addClassCleanup(shutil.rmtree, _WORKERS, True)  # runs even when setUpClass fails later
         class H(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 self.send_response(200 if self.path == "/global/health" else 404)
@@ -59,7 +60,6 @@ class OcFallbackRunTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.srv.shutdown()
         cls.srv.server_close()
-        shutil.rmtree(_WORKERS, ignore_errors=True)
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
