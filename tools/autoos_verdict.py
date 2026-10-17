@@ -5,6 +5,8 @@ counted anyway, and the seat's text and the record's `verdict=` field disagreed 
 yes. One owner: `parse_verdict`, `verdict_word`, `seat_prompt`. Hermetic (D-852)."""
 import re
 
+from autoos_ready_guards import _Fences  # the one markdown-fence rule (P4a fix 1)
+
 VERDICTS = ("ACCEPT", "REJECT", "HOLD")
 READY_TOKEN = "accept"        # the record gate's yes, lower-cased like its word list
 UNCOUNTABLE_TOKEN = "HOLD"    # a stated HOLD is honest, and reviews nothing
@@ -82,10 +84,12 @@ def _blind_statement(text):
 def parse_verdict(text):
     """`{"verdict", "valid", "reason", "countable"}` for one seat's whole answer.
 
-    The FIRST non-empty line, decoration normalised, must be `VERDICT: ACCEPT|REJECT|HOLD`
-    — one colon, the bare word, trailing punctuation tolerated. A verdict further down, a
-    second verdict, an unknown word (`SHIP`, `LGTM`), or the reviewer talking after it
-    is invalid and says which. A seat that says IT could not see the change has voided its
+    Exactly ONE line, decoration normalised, must be `VERDICT: ACCEPT|REJECT|HOLD` — one
+    colon, the bare word, trailing punctuation tolerated — wherever it stands (D-1515: a
+    seat that reviews first and concludes last was logged as no verdict); a line inside a
+    markdown fence or a `>` blockquote is quoted material and never counts. No verdict line,
+    a second verdict, an unknown word (`SHIP`, `LGTM`), or the reviewer talking after the
+    word on that line is invalid and says which. A seat that says IT could not see the change has voided its
     ACCEPT (P2/G2); a REJECT stands — losing a blocking finding is the worse failure — and
     a HOLD stays valid but never countable."""
     out = {"verdict": None, "valid": False, "reason": "", "countable": False}
@@ -97,14 +101,21 @@ def parse_verdict(text):
     lines = [ln for ln in (text or "").splitlines() if _fold_invisible(ln).strip()]
     if not lines:
         return invalid("no non-empty line to read a verdict from")
-    first = _normalise(lines[0])
-    match = _VERDICT_RE.match(first)
-    others = [ln for ln in map(_normalise, lines[1:]) if _VERDICT_RE.match(ln)]
-    if not match:
-        return invalid("verdict is not on the first non-empty line" if others
-                        else "first line is not a verdict line: %s" % first[:60])
-    if others:
+    # D-1515: the verdict line may stand anywhere (seats review first and conclude last);
+    # exactly one is read, zero or two fail closed. A fenced line is quoted material
+    # (a sample from the diff), never the seat's own: the one fence rule every reader
+    # shares (_Fences), so an unclosed fence swallows the rest.
+    fences = _Fences()
+    # A `>` blockquote is quoted material the same way (seat qwen d15v r3).
+    own = [ln for ln in lines
+           if not fences.feed(ln) and not _fold_invisible(ln).lstrip().startswith(">")]
+    found = [ln for ln in map(_normalise, own) if _VERDICT_RE.match(ln)]
+    if not found:
+        return invalid("no verdict line in the answer: %s" % _normalise(lines[0])[:60])
+    if len(found) > 1:
         return invalid("two verdicts in one answer")
+    first = found[0]
+    match = _VERDICT_RE.match(first)
     rest, word = match.group("rest"), match.group("rest").strip(_PUNCT)
     for bad, why in ((":" in rest, "the verdict line wants exactly one colon: %s" % rest[:60]),
                      (not word, "no verdict word after the colon: %s" % first[:60]),
