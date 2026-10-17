@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- SPAWN-OPENCODE-FALLBACK A7 (2026-10-17, lane/oc-fallback-a7): uncouple Claude-limit switch from fallthrough cap, guard half-switched state during plan build, and verify free Muse path and build-plan refusal.
 - SPAWN-OPENCODE-FALLBACK A6 (2026-10-17, lane/oc-fallback-a6): default fallback to omniroute/mimo-v2.6-flash, support free muse-spark-1.3, guard joinable runs, and remove opencode.jsonc injection hack.
 - SPAWN-OPENCODE-FALLBACK A5 (2026-10-17, lane/oc-fallback-a5): fold Claude-limit switch into existing fallthrough block and guard test shell shims against POSIX lint.
 - SPAWN-OPENCODE-FALLBACK A4 (2026-10-17, lane/oc-fallback-a4): close health-check response, fail fast on transport TypeError without retry, and verify fallback execution in UP scenario with fake opencode executable.

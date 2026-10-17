@@ -14590,25 +14590,38 @@ def cmd_run(args, cfg: dict) -> int:
             print("autoos-agent: --no-fallthrough: the run ends on its pinned model "
                   "(%s), no re-plan" % (plan["model"] or plan["route"].get("combo")),
                   file=sys.stderr)
-        if ((stop is not None or oc_switch) and not args.joinable and not args.no_fallthrough
-                and fallthroughs < MAX_FALLTHROUGH):
+        if (((stop is not None and fallthroughs < MAX_FALLTHROUGH) or oc_switch)
+                and not args.joinable and not args.no_fallthrough):
             next_plan = None
             fell_from = fell_to = None
+            oc_refused = False
             try:
                 if oc_switch:
-                    oc_fallbacks += 1
-                    args.client = "opencode"
-                    args.free = oc_switch["free"]
-                    args.model = oc_switch["opencode_model"]
-                    client = clients.CLIENTS["opencode"]
-                    uses_key = client.gateway and not args.free
-                    if uses_key and key is None:
-                        key = client_key(ROOT)
-                    capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
-                    print("autoos-agent: claude limit - switching to opencode %s" % oc_switch["model"], file=sys.stderr)
-                    next_plan = build_plan(args, cfg, sandbox=plan["sandbox"], fence=fence)
-                    fell_from = plan["route"].get("combo")
-                    fell_to = (next_plan["route"].get("combo") or args.model)
+                    saved_state = (args.client, args.free, args.model, client, uses_key, key, capture)
+                    try:
+                        args.client = "opencode"
+                        args.free = oc_switch["free"]
+                        args.model = oc_switch["opencode_model"]
+                        client = clients.CLIENTS["opencode"]
+                        uses_key = client.gateway and not args.free
+                        if uses_key and key is None:
+                            key = client_key(ROOT)
+                        capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
+                        print("autoos-agent: claude limit - switching to opencode %s" % oc_switch["model"], file=sys.stderr)
+                        next_plan = build_plan(args, cfg, sandbox=plan["sandbox"], fence=fence)
+                        if next_plan is None:
+                            raise RuntimeError("build_plan returned None")
+                        oc_fallbacks += 1
+                        fell_from = plan["route"].get("combo")
+                        fell_to = (next_plan["route"].get("combo") or args.model)
+                    except Exception as exc:
+                        args.client, args.free, args.model, client, uses_key, key, capture = saved_state
+                        reason = redact_output(str(exc) or type(exc).__name__)
+                        print("autoos-agent: opencode fallback refused: %s; Claude is rate-limited - not retrying Claude"
+                              % reason, file=sys.stderr)
+                        rc = EXIT_OC_FALLBACK_DOWN
+                        oc_refused = True
+                        next_plan = None
                 elif args.free:
                     next_plan, fell_from, fell_to = _free_fallthrough_plan(
                         args, cfg, plan, free_chain, excluded_free_models,
@@ -14651,6 +14664,8 @@ def cmd_run(args, cfg: dict) -> int:
             except FamilyFenceRefused as exc:
                 fence_refused = exc
                 next_plan = None
+            if oc_refused:
+                break
             if next_plan is not None:
                 fell_through = True
                 fallthroughs += 1

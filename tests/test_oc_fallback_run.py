@@ -29,12 +29,14 @@ _WORKERS = tempfile.mkdtemp(prefix="oc-fallback-workers-")
 atexit.register(shutil.rmtree, _WORKERS, True)
 
 
-def _run(cli_dir, url, *extra, root=None):
+def _run(cli_dir, url, *extra, root=None, env_extra=None):
     env = claude_env(PATH=cli_dir + os.pathsep + os.environ.get("PATH", ""), AUTOOS_OPENCODE_URL=url)
     env = {k: v for k, v in env.items() if not k.startswith("GIT_CONFIG_")}
     env["GIT_CONFIG_PARAMETERS"] = "'core.longpaths=true'"
     # run-tests.sh points AUTOOS_WORKERS_DIR at a TRACKED fixture tree; a run that records there trips the --isolate LEAK check (rc 7)
     env["AUTOOS_WORKERS_DIR"] = _WORKERS
+    if env_extra:
+        env.update(env_extra)
     return run_agent("run", "--client", "claude", "--tier", "1", "--isolate", *extra, "task", env=env, root=root)
 
 
@@ -114,6 +116,29 @@ class OcFallbackRunTests(unittest.TestCase):
         assert oc_args.exists()
         with open(oc_args) as f:
             assert "omniroute/mimo-v2.6-flash" in f.read()
+
+    def test_muse_spark_up(self):
+        d, cnt = self.fake_claude(LIMIT, 1)
+        r = _run(d, self.health_server, env_extra={"AUTOOS_OPENCODE_FALLBACK_MODEL": "muse-spark-1.3"})
+        assert "switching to opencode muse-spark-1.3" in r.stderr
+        with open(cnt) as f:
+            assert len(f.readlines()) == 1
+        oc_cnt = Path(d) / "oc_cnt.txt"
+        assert oc_cnt.exists()
+        with open(oc_cnt) as f:
+            assert len(f.readlines()) >= 1
+        oc_args = Path(d) / "oc_args.txt"
+        assert oc_args.exists()
+        with open(oc_args) as f:
+            assert "muse-spark-1.3" in f.read()
+
+    def test_fallback_refused_build_plan_clean(self):
+        d, cnt = self.fake_claude(LIMIT, 1)
+        r = _run(d, self.health_server, "--clean")
+        assert r.returncode == 15
+        assert "not retrying Claude" in r.stderr
+        with open(cnt) as f:
+            assert len(f.readlines()) == 1
 
     def test_fallback_decision_muse_spark_env(self):
         resp_ok = mock.Mock(status=200)
