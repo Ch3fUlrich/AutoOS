@@ -35,16 +35,49 @@ omnigraph_url_answer() {
     printf '%s\n' "$omni"
 }
 
-# omnigraph_base_url: the omnigraph server the clients' bridges point at - the
-# omnigraph_url answer without its trailing slashes (ALL of them, as the Windows
-# side's TrimEnd('/') does: consumers append /paths), else http://localhost:8080.
-# ONE derivation, used by install_omnigraph_client (the Antigravity entry) and
-# route_zed_to_proxy (the Zed writer once hardcoded the default and ignored the
-# answer).
+# omnigraph_base_url: the omnigraph server the clients' bridges point at. The
+# omnigraph_url answer, else the OMNIGRAPH_BASE_URL environment variable, else
+# the OMNIGRAPH_BASE_URL= line of ${SYS_HOME:-$HOME}/.autoos-omnigraph.env -
+# ONE home: SYS_HOME is the target user's (detect.sh) and HOME only stands in for
+# it, because reading both would make the answer depend on the machine that ran
+# the check. Every trailing slash comes off (as the Windows side's TrimEnd('/')
+# does: consumers append /paths). Nothing resolved is reported by name on stderr
+# and returns 1 - never a guess: since D-1398 nothing listens on the old
+# localhost default, so an entry pointing there reads as a connected server that
+# answers nothing, which is worse than the missing entry a user can see.
 omnigraph_base_url() {
-    local omni
+    local omni home line value q_dq q_sq
+    q_dq='"'
+    q_sq="'"
     omni="$(omnigraph_url_answer)"
-    if [[ -z "$omni" ]]; then printf '%s\n' "http://localhost:8080"; else printf '%s\n' "$omni"; fi
+    if [[ -z "$omni" ]]; then
+        omni="${OMNIGRAPH_BASE_URL:-}"
+    fi
+    if [[ -z "$omni" ]]; then
+        home="${SYS_HOME:-$HOME}"
+        # Parsed, never sourced: a value holding $(...) used to execute in every
+        # shell that read the file. The last occurrence wins.
+        line="$(grep -E '^[[:space:]]*(export[[:space:]]+)?OMNIGRAPH_BASE_URL[[:space:]]*=' \
+            "$home/.autoos-omnigraph.env" 2>/dev/null | tail -n 1)"
+        if [[ -n "$line" ]]; then
+            line="${line%$'\r'}"
+            value="${line#*=}"
+            value="${value#"${value%%[![:space:]]*}"}"
+            value="${value%"${value##*[![:space:]]}"}"
+            # One pair of matching quotes and only a pair; a lone one is data.
+            if (( ${#value} >= 2 )) \
+                && [[ "$value" == "$q_dq"*"$q_dq" || "$value" == "$q_sq"*"$q_sq" ]]; then
+                value="${value:1:${#value}-2}"
+            fi
+            omni="$value"
+        fi
+    fi
+    while [[ "$omni" == */ ]]; do omni="${omni%/}"; done
+    if [[ -z "$omni" ]]; then
+        printf '%s\n' "autoos: OMNIGRAPH_BASE_URL is not set - answer omnigraph_url, export OMNIGRAPH_BASE_URL, or put OMNIGRAPH_BASE_URL=<url> in ~/.autoos-omnigraph.env" >&2
+        return 1
+    fi
+    printf '%s\n' "$omni"
 }
 
 run() {
@@ -3103,7 +3136,15 @@ route_zed_to_proxy() {
         ui_err "could not back up $cfg - Zed settings left unchanged"
         return 1
     fi
-    OMNI_BASE="$(omnigraph_base_url)" python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
+    # The omnigraph entry is written only from a resolved server URL; an
+    # unresolved one is skipped with a warning and the run fails at the end,
+    # after every other job this writer has (providers, keys, profiles).
+    local omni_base="" omni_ok=1
+    if ! omni_base="$(omnigraph_base_url)"; then
+        ui_warn "Zed: skipping omnigraph entry (OMNIGRAPH_BASE_URL is not set)"
+        omni_ok=0
+    fi
+    OMNI_BASE="$omni_base" python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
 import json, os, sys
 path = sys.argv[1]
 harness_file = sys.argv[2]
@@ -3161,12 +3202,14 @@ ctx["graphify"] = {
 }
 # The bridge exits at start-up without a base URL and a graph id ("Connection
 # closed" in the panel). The token is never written here: Zed inherits it from
-# the session env (~/.config/environment.d, see write_omnigraph_env).
-ctx["omnigraph"] = {
-    "command": "npx",
-    "args": ["-y", pins["omnigraph"]["package"]],
-    "env": {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"], "OMNIGRAPH_GRAPH_ID": "autoos"},
-}
+# the session env (~/.config/environment.d, see write_omnigraph_env). No server
+# resolved (OMNI_BASE empty) writes nothing and keeps whatever the user has.
+if os.environ.get("OMNI_BASE"):
+    ctx["omnigraph"] = {
+        "command": "npx",
+        "args": ["-y", pins["omnigraph"]["package"]],
+        "env": {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"], "OMNIGRAPH_GRAPH_ID": "autoos"},
+    }
 ctx["playwright"] = {
     "command": "npx",
     "args": ["-y", pins["playwright"]["package"]],
@@ -3217,6 +3260,9 @@ PY
     [[ -n "${AUTOOS_OMNIROUTE_API_KEY:-}" ]] || ui_warn "AUTOOS_OMNIROUTE_API_KEY not set - export the OmniRoute client key before starting Zed, or the provider stays hidden"
     [[ -n "${AUTOOS_LITELLM_API_KEY:-}" ]] || ui_warn "AUTOOS_LITELLM_API_KEY not set - export the LiteLLM master key before starting Zed, or the fallback stays hidden"
     ui_ok "Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)"
+    # Last, not first: the writer's other work is not the omnigraph skip's to
+    # undo, and the three routing tests read those warnings.
+    (( omni_ok )) || return 1
     return 0
 }
 
@@ -4947,14 +4993,18 @@ install_omnigraph_client() {
     # Antigravity has no project scope — its config is the user's own
     # ~/.gemini/config/mcp_config.json — so its omnigraph entry has to be written
     # here, and it is the one artifact that carries the resolved URL and token.
-    local omni_pkg omni_spec
+    local omni_pkg omni_spec omni_base
     omni_pkg="$(mcp_package omnigraph)"
-    # The base URL is the user's omnigraph_url answer: it reaches python through
-    # the environment (as in the Zed writer), never spliced into the source. The
-    # token is deliberately today's rule — only an OMNIGRAPH_TOKEN the user
-    # exported themselves: this file is world-readable by default, so a keys-file
-    # secret must not be copied into it.
-    omni_spec="$(OMNI_BASE="$(omnigraph_base_url)" OMNI_PKG="$omni_pkg" python3 -c "
+    # The base URL is resolved by the one helper (answer, environment, env file):
+    # it reaches python through the environment (as in the Zed writer), never
+    # spliced into the source. The token is deliberately today's rule — only an
+    # OMNIGRAPH_TOKEN the user exported themselves: this file is world-readable
+    # by default, so a keys-file secret must not be copied into it.
+    if ! omni_base="$(omnigraph_base_url)"; then
+        ui_warn "Antigravity: skipping omnigraph entry (OMNIGRAPH_BASE_URL is not set)"
+        return 1
+    fi
+    omni_spec="$(OMNI_BASE="$omni_base" OMNI_PKG="$omni_pkg" python3 -c "
 import json, os
 # bridge 0.8 refuses to start without a graph id (there is no fallback graph
 # any more), so an unset one pins this repo's graph like the other clients.
@@ -5635,7 +5685,18 @@ _opencode_merge_config() {
     local ide_file
     ide_file="$(ide_models_file)"
 
-    OLLAMA_BASE_URL="$ollama_url" python3 -c "
+    # Resolved once, here, and passed in through the environment: the writer must
+    # put the URL itself in the file, not an {env:...} reference, because a value
+    # that came from the answer or from ~/.autoos-omnigraph.env is not in
+    # opencode's own environment. Nothing resolved writes no entry — and never
+    # removes the one the user already has.
+    local omni_base=""
+    if ! omni_base="$(omnigraph_base_url)"; then
+        ui_warn "OpenCode: skipping omnigraph entry (OMNIGRAPH_BASE_URL is not set)"
+        omni_base=""
+    fi
+
+    OLLAMA_BASE_URL="$ollama_url" OMNI_BASE="$omni_base" python3 -c "
 import importlib.util as _ilu
 import json, os, sys
 
@@ -5893,12 +5954,16 @@ mcps['context7'] = {
     'command': ['npx', '-y', MCP_PACKAGES['context7']],
     'enabled': True
 }
-mcps['omnigraph'] = {
-    'type': 'local',
-    'command': ['npx', '-y', MCP_PACKAGES['omnigraph']],
-    'enabled': True,
-    'environment': {'OMNIGRAPH_BASE_URL': 'http://localhost:8080', 'OMNIGRAPH_GRAPH_ID': 'autoos'}
-}
+# No server resolved (OMNI_BASE empty) writes no omnigraph entry at all, and an
+# entry the user already has is left exactly as it is.
+_omni_base = os.environ.get('OMNI_BASE', '')
+if _omni_base:
+    mcps['omnigraph'] = {
+        'type': 'local',
+        'command': ['npx', '-y', MCP_PACKAGES['omnigraph']],
+        'enabled': True,
+        'environment': {'OMNIGRAPH_BASE_URL': _omni_base, 'OMNIGRAPH_GRAPH_ID': 'autoos'}
+    }
 mcps['playwright'] = {
     'type': 'local',
     'command': ['npx', '-y', MCP_PACKAGES['playwright']],

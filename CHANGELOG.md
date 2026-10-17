@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- OMNIGRAPH-URL-LOUD A (2026-10-17, routing D-1781): the Linux `omnigraph_base_url` resolves the omnigraph_url answer, then `OMNIGRAPH_BASE_URL`, then one home's `~/.autoos-omnigraph.env` and names the variable on stderr when none of them answers; Zed, Antigravity and OpenCode skip their omnigraph entry (keeping any existing one) instead of writing the old localhost default, and the tracked `opencode.jsonc` now carries `{env:OMNIGRAPH_BASE_URL}`.
 - OMNIGRAPH-URL-LOUD (2026-10-17, routing D-1781): fail loudly when OMNIGRAPH_BASE_URL is not set instead of silently falling back to localhost:8080 in check-omnigraph and .mcp.json.
 - OMNIGRAPH-URL-LOUD D (2026-10-17, routing D-1781): document that OMNIGRAPH_BASE_URL resolution fails loudly without defaulting to localhost:8080, update client table for Claude Code, opencode, and Zed, and document resolution order and check-omnigraph.py exit behavior.
 - SPAWN-OPENCODE-FALLBACK A7 (2026-10-17, lane/oc-fallback-a7): uncouple Claude-limit switch from fallthrough cap, guard half-switched state during plan build, and verify free Muse path and build-plan refusal.
