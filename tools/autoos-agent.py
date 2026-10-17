@@ -309,6 +309,8 @@ import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
 import autoos_overlay as overlay_mod  # noqa: E402
+import autoos_oc_fallback as oc_fallback  # noqa: E402
+from autoos_oc_fallback import EXIT_OC_FALLBACK_DOWN  # noqa: E402
 import autoos_inbox as inbox  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
 import autoos_redact as redact  # noqa: E402
@@ -14229,6 +14231,7 @@ def cmd_run(args, cfg: dict) -> int:
     # the run's re-plan budget — but counted with it when a launch is numbered
     # below, because the kill store and the scope unit key on the attempt.
     cooldown_retries = 0
+    oc_fallbacks = 0
     # `free_policy` / `free_chain` were settled above, before the plan: FAMILYFENCE
     # trims the chain before the first model is picked, so a second copy of that
     # read here would be a fence applied too late to bind.
@@ -14496,6 +14499,30 @@ def cmd_run(args, cfg: dict) -> int:
         # test's own exit object) passes None and keeps the old merged scan.
         stop = provider_stop(check_tail, getattr(run_rc, "raw_err", None))
         rate_limited = stop is not None and rate_limit_stop(stop)
+        if client.name == "claude" and not getattr(args, "no_fallthrough", False) and not oc_fallbacks:
+            decision = oc_fallback.fallback_decision(client.name, stop, os.environ, rate_limit_stop)
+            if decision.get("refused"):
+                print(decision["message"], file=sys.stderr)
+                rc = decision["rc"]
+                break
+            if decision.get("switch"):
+                oc_fallbacks += 1
+                args.client = "opencode"
+                args.model = decision["model"]
+                print("autoos-agent: claude limit - switching to opencode %s" % args.model, file=sys.stderr)
+                client = clients.CLIENTS["opencode"]
+                uses_key = client.gateway and not args.free
+                if uses_key and key is None:
+                    key = client_key(ROOT)
+                plan = build_plan(args, cfg, sandbox=plan.get("sandbox"), fence=fence)
+                capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
+                zen = plan_zen_key(client.name, plan["model"], ROOT, warn=False)
+                env = worker_env(plan, key if uses_key else None, zen_key=zen)
+                if not provision_worker_dirs(env):
+                    rc = 2
+                    break
+                register_secret_env(env)
+                continue
         # AO-SPAWN-COOLDOWN-RETRY: its own class of stop, decided from the line
         # and not from the window it stated — a cooldown that states nothing is
         # still a cooldown, and still exits the run on the stop's rc.
