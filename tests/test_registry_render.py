@@ -187,8 +187,8 @@ class RenderMatchesTodayTests(unittest.TestCase):
         # not reach a gateway render, or the live gateway serves a dead leg.
         rendered = registry.render_omniroute(real_registry())
         combos_by_name = {c["name"]: c for c in rendered["combos"]}
-        self.assertNotIn("opencode-zen/deepseek-v4.1-flash",
-                         combos_by_name["l2-worker-clean"]["models"])
+        # OVH-REMOVE T2b: whole-render form; that combo went with vertex.
+        self.assertNotIn("opencode-zen/deepseek-v4.1-flash", json.dumps(rendered))
         # D657-CHAIN 2026-10-08: expectation moved by the re-chain - l2-worker is
         # bazaarlink -> openrouter nemotron -> vertex now, so the served-leg example
         # moves to l3-driver, which still carries the re-opened groq leg
@@ -281,39 +281,50 @@ class GatewayRefTests(unittest.TestCase):
         # The mechanism AGYID added (and this AGYCANON change must not break): a
         # provider whose catalog id differs from its registry id renders under the
         # declared model_prefix. SCWREMOVAL 2026-10-06 retired the scaleway example
-        # with the provider and D657-CHAIN 2026-10-08 gated ovhcloud
-        # (available: false, six spellings x both gateways answered 404), so the
-        # live example was bazaarlink -> bzl, which now heads l1-orchestrator.
-        # OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1) puts ovhcloud back on
-        # the live side of that example — 200 on re-probe, an L3 leg only — so the
-        # render carries BOTH prefix spellings, and the re-spelling is pinned in
-        # the render instead of only as a provider fact.
-        self.assertEqual(registry.gateway_ref("ovhcloud/Qwen3.8-27B", real_registry()),
-                         "ovh/Qwen3.8-27B")
-        self.assertIs(real_registry()["providers"]["ovhcloud"].get("available"), True)
+        # with the provider and OVH-REMOVE retires ovhcloud, so the live registry
+        # example is bazaarlink -> bzl, which heads l1-orchestrator. The re-spelling
+        # is pinned both as a provider fact (gateway_ref) and in the render, then
+        # re-proven on an inline provider so the mechanism never rests on whichever
+        # live provider happens to declare a prefix today. (The old OVH leg was also
+        # an L3-only placement example; that policy belonged to ovhcloud itself, so
+        # it is not reproduced here.)
+        self.assertEqual(
+            registry.gateway_ref("bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+                                 real_registry()),
+            "bzl/deepseek/deepseek-v4-flash-0731free:free")
+        self.assertIs(real_registry()["providers"]["bazaarlink"].get("available"), True)
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
         self.assertEqual(by_name["l1-orchestrator"]["models"][0],
                          "bzl/deepseek/deepseek-v4-flash-0731free:free")
-        self.assertIn("ovh/Qwen3.8-27B", by_name["l3-implementer"]["models"])
-        # and no orchestrator layer renders it (OVH documents no prompt cache)
-        for name, combo in by_name.items():
-            if name.startswith(("l0-", "l1-", "l2-")):
-                for model in combo["models"]:
-                    self.assertFalse(model.startswith("ovh/"), (name, model))
+        # Mechanism, provider-independent: an inline provider whose registry id is
+        # "prefprov" and catalog prefix is "ppfx" renders under the declared prefix,
+        # and the registry spelling never reaches the combo.
+        inline = {
+            "providers": {"prefprov": {"id": "prefprov", "model_prefix": "ppfx"}},
+            "models": {"m": {"id": "m"}},
+            "routes": {"prefixed": {
+                "id": "prefixed", "class": "cheap", "strategy": "priority",
+                "legs": ["prefprov/m"],
+                "surfaces": {"omniroute": {"context_declared": "8k"}}}},
+        }
+        inline_render = registry.render_omniroute(inline)
+        inline_combo = {c["name"]: c for c in inline_render["combos"]}["prefixed"]
+        self.assertEqual(inline_combo["models"], ["ppfx/m"])
+        self.assertNotIn("prefprov/", json.dumps(inline_render))
 
     def test_render_omniroute_leaves_other_providers_unchanged(self):
         # Providers without a model_prefix keep their registry spelling in
         # the render. D657-CHAIN 2026-10-08 moved the examples: mistral-code-latest
         # and the deepseek DIRECT leg left every chain (probe-banned: §8 drops the
         # paid deepseek leg, and mistral answered no ack on either gateway), so the
-        # unprefixed spellings pinned here are groq, cohere and vertex.
+        # unprefixed spellings pinned here are groq, cohere and openrouter.
         rendered = registry.render_omniroute(real_registry())
         by_name = {c["name"]: c for c in rendered["combos"]}
         self.assertNotIn("groq/qwen/qwen3.8-27b", by_name["l3-driver"]["models"])  # retired
         self.assertIn("cohere/command-a-03-2025", by_name["l3-driver"]["models"])
-        self.assertIn("vertex/gemini-3.8-flash",
-                      by_name["l2-worker-clean"]["models"])
+        self.assertIn("openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+                      by_name["l2-worker"]["models"])
         for gone in ("mistral/mistral-code-latest", "deepseek/deepseek-flash"):
             self.assertNotIn(gone, json.dumps(rendered))
 
@@ -374,15 +385,16 @@ class ChangedLegFailsCheckTests(unittest.TestCase):
     """--check exits 1 and names the combo when a leg differs from combos.json."""
 
     def test_changed_leg_exits_one_and_names_the_combo(self):
+        # OVH-REMOVE T2b: l3-driver, not its "-clean" twin (no legs to mutate).
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["l3-driver-clean"]["legs"][0] = "ghost-provider/ghost-model"
+        reg["routes"]["l3-driver"]["legs"][0] = "ghost-provider/ghost-model"
         path = write_registry(reg)
         try:
             proc = run_cli("render", "omniroute", "--registry", path, "--check")
         finally:
             Path(path).unlink()
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertIn("combos.l3-driver-clean", proc.stdout)
+        self.assertIn("combos.l3-driver", proc.stdout)
 
     def test_unmodified_registry_check_exits_zero_on_the_real_files(self):
         proc = run_cli("render", "omniroute", "--check")
@@ -456,27 +468,23 @@ class LitellmRenderMatchesTodayTests(unittest.TestCase):
         # l1-orchestrator-free-only is NOT gone: T1FREE gave it a gemini
         # servable leg. l3-driver-free-only left this set when FREEAI gave it
         # a servable free_ai/qwen7b leg.
-        # D657-CHAIN 2026-10-08 adds the clean band and two omitted singles: every
-        # *-clean route now serves only vertex/gemini-3.8-flash (litellm_auth, no
-        # api_key -> stripped), and providers.ovhcloud.available: false empties the
-        # three ovh-* routes, so they render nothing here and sit in combos.json's
-        # `omitted` there. OVH-REPROBE 2026-10-08 restores the provider, so
-        # ovh-qwen3.8-27b renders its block again (it carries an OVH api_key);
-        # ovh-gpt-oss-120b stays in this set because its leg is gated per-leg as
-        # unpriced — which is the shape this test exists to pin: an all-gated
-        # route renders nothing. ovh-qwen3-coder-30b left with OVHCODER-DROP
-        # 2026-10-08, and not as an example of that shape: OVH withdrew the id
-        # upstream, so the route was deleted and its id retired rather than
-        # declared-and-gated. A deleted route is not a declaration that renders
-        # nothing, so it belongs to no set here (pinned in
-        # test_ovh_coder_leg_is_retired_not_merged).
+        # D657-CHAIN 2026-10-08 adds the clean band: every *-clean route now
+        # serves only vertex/gemini-3.8-flash (litellm_auth, no api_key ->
+        # stripped), so it renders nothing here. That is the shape this test
+        # exists to pin - an all-gated route renders no block. (ovh-gpt-oss-120b
+        # was a second example of that shape; OVH-REMOVE takes the whole ovhcloud
+        # provider and its routes out, so the positive half - "a route that carries
+        # a live provider api_key DOES render a block" - is now pinned on l2-worker,
+        # whose bazaarlink leg carries os.environ/BAZAARLINK_API_KEY. A deleted
+        # route is not a declaration that renders nothing, so it belongs to no set
+        # here - pinned in test_ovh_coder_leg_is_retired_not_merged, in
+        # tests/test_registry.py.)
         rendered = registry.render_litellm_blocks(real_registry(), real_litellm_config())
         for gone in ("opus-5-5", "samba/gpt-oss-120b", "samba/MiniMax-M3",
-                     "l2-worker-clean", "l3-driver-clean", "l1-orchestrator-clean",
-                     "ovh-gpt-oss-120b"):
+                     "l2-worker-clean", "l3-driver-clean", "l1-orchestrator-clean"):
             self.assertNotIn(gone, rendered)
-        self.assertIn("ovh-qwen3.8-27b", rendered)
-        self.assertIn("os.environ/OVHCLOUD_API_KEY", rendered["ovh-qwen3.8-27b"])
+        self.assertIn("l2-worker", rendered)
+        self.assertIn("os.environ/BAZAARLINK_API_KEY", rendered["l2-worker"])
 
     def test_a_legless_hand_group_is_never_rendered(self):
         # l2-worker-paid/l3-driver-paid declare no legs; they are hand-curated
@@ -732,7 +740,8 @@ class ALeglessRouteIsOfferedThroughNoComboTests(unittest.TestCase):
         # The control: the rule reads `legs`, not the route id. Give the lens a
         # served leg and it is offered through the gateway again.
         reg = copy.deepcopy(real_registry())
-        reg["routes"]["l3-review-transcript"]["legs"] = ["vertex/gemini-3.8-flash"]
+        reg["routes"]["l3-review-transcript"]["legs"] = [
+            "bazaarlink/deepseek/deepseek-v4-flash-0731free:free"]  # live in all 3
         self.assertIn("omniroute", self.by_id(reg)["l3-review-transcript"]["surfaces"])
 
     def test_the_dynamic_bootstraps_are_exempt(self):
@@ -830,25 +839,20 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
 
     def test_effort_ladder_derived_from_head_leg(self):
         reg = copy.deepcopy(real_registry())
-        # Pick a route whose head leg's model actually carries an effort_ladder
-        # (l2-orchestrator heads antigravity/claude-sonnet-5-5-medium since the
-        # operator's CLAUDE55 order; l2-worker was the fixture until GLM55
-        # 2026-10-05 put oc/glm-5.3-flash - no ladder - at its head;
-        # l1-orchestrator was the example before that until it fail-closed
-        # 2026-09-27 and left the ide render).
-        # D657-CHAIN + D657-EFFORT 2026-10-08 move it once more: l1-orchestrator is
-        # back in the render but heads the free bazaarlink mirror, whose row
-        # documents an EMPTY ladder, so the fixture is l2-orchestrator-clean (one
-        # vertex leg, ladder low/medium/high) and l1-orchestrator is counter-pinned
-        # as the no-ladder head case.
-        route = reg["routes"]["l2-orchestrator-clean"]
-        _pid, mid = registry.resolve_leg(route["legs"][0], reg)
+        # Pick a route whose head leg's model actually carries an effort_ladder.
+        # D657-CHAIN 2026-10-08 left l1-orchestrator heading the free bazaarlink
+        # mirror, whose row documents an EMPTY ladder. OVH-REMOVE T2b: every
+        # "-clean" route headed vertex/gemini-3.8-flash, so the fixture is
+        # l3-review-codebase (head nemotron-3-ultra :free) - it keeps a ladder in
+        # all three states, and l1-orchestrator stays counter-pinned.
+        route = reg["routes"]["l3-review-codebase"]
+        _pid, mid = registry.resolve_leg(registry.gateway_legs(route, reg)[0], reg)
         model_entry = reg["models"][mid]
         self.assertIn("effort_ladder", model_entry)
         self.assertTrue(model_entry["effort_ladder"])
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertEqual(by_id["l2-orchestrator-clean"]["effort_ladder"],
+        self.assertEqual(by_id["l3-review-codebase"]["effort_ladder"],
                          [e for e in model_entry["effort_ladder"] if e != "none"])
         _pid, head_mid = registry.resolve_leg(
             registry.gateway_legs(reg["routes"]["l1-orchestrator"], reg)[0], reg)
@@ -858,16 +862,14 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
 
     def test_none_is_dropped_from_effort_ladder(self):
         reg = copy.deepcopy(real_registry())
-        # GLM55 2026-10-05: the fixture moved from l2-worker - its head legs
-        # changed twice (oc/glm-5.3-flash then the gate) and the render derives
-        # the ladder from the first SERVABLE leg. D657-CHAIN 2026-10-08: that leg
-        # of l2-worker-clean is now vertex/gemini-3.8-flash, still stable.
-        route = reg["routes"]["l2-worker-clean"]
-        _pid, mid = registry.resolve_leg(route["legs"][0], reg)
+        # The render derives the ladder from the first SERVABLE leg, so this
+        # fixture follows whichever leg that is. "none" is never offered.
+        route = reg["routes"]["l3-review-codebase"]
+        _pid, mid = registry.resolve_leg(registry.gateway_legs(route, reg)[0], reg)
         reg["models"][mid]["effort_ladder"] = ["none", "low", "medium", "high"]
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertEqual(by_id["l2-worker-clean"]["effort_ladder"], ["low", "medium", "high"])
+        self.assertEqual(by_id["l3-review-codebase"]["effort_ladder"], ["low", "medium", "high"])
 
     def test_no_effort_ladder_when_model_has_no_ladder(self):
         reg = copy.deepcopy(real_registry())
@@ -877,21 +879,18 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         # l3-review-codebase is the only route SS3 left that heads a ladder model
         # nobody else heads (openrouter nemotron-3-ultra :free).
         route = reg["routes"]["l3-review-codebase"]
-        _pid, mid = registry.resolve_leg(route["legs"][0], reg)
+        _pid, mid = registry.resolve_leg(registry.gateway_legs(route, reg)[0], reg)
+        ladder = reg["models"][mid].get("effort_ladder")
+        self.assertTrue(ladder, "the fixture head must carry a ladder to pop")
+        # T2b: the "-clean" control route is gone; the control is before/after.
+        before = {m["id"]: m for m in registry.render_ide(copy.deepcopy(reg))["models"]}
+        self.assertEqual(before["l3-review-codebase"]["effort_ladder"],
+                         [e for e in ladder if e != "none"])
         # Ensure the model has no effort_ladder
         reg["models"][mid].pop("effort_ladder", None)
-        # l2-orchestrator-clean still has a ladder via the first leg's model
-        # (l2-orchestrator was the control until D657-CHAIN put the bazaarlink
-        # DeepSeek mirror - which documents no ladder - at its head; l2-worker was
-        # the control before that, until GLM55 2026-10-05).
-        t2_route = reg["routes"]["l2-orchestrator-clean"]
-        _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
-        t2_ladder = reg["models"][t2_mid].get("effort_ladder", [])
-        expected = [e for e in t2_ladder if isinstance(e, str) and e != "none"]
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
         self.assertNotIn("effort_ladder", by_id["l3-review-codebase"])
-        self.assertEqual(by_id["l2-orchestrator-clean"]["effort_ladder"], expected)
 
     def test_no_effort_ladder_when_route_has_no_legs(self):
         # The rule is about a route that declares no legs at all. SS8 (operator
@@ -900,16 +899,16 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         # still means "no legs" if anyone legs it again.
         reg = copy.deepcopy(real_registry())
         reg["routes"]["l1-orchestrator-paid"]["legs"] = []
-        # l2-orchestrator-clean heads a model that carries a ladder (the
-        # l2-orchestrator control moved with D657-CHAIN, see above).
-        t2_route = reg["routes"]["l2-orchestrator-clean"]
-        _t2_pid, t2_mid = registry.resolve_leg(t2_route["legs"][0], reg)
+        # l3-review-codebase heads a model that carries a ladder.
+        t2_route = reg["routes"]["l3-review-codebase"]
+        _t2_pid, t2_mid = registry.resolve_leg(registry.gateway_legs(t2_route, reg)[0], reg)
         t2_ladder = reg["models"][t2_mid].get("effort_ladder", [])
+        self.assertTrue(t2_ladder, "the control head must carry a ladder")
         expected = [e for e in t2_ladder if isinstance(e, str) and e != "none"]
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
         self.assertNotIn("effort_ladder", by_id["l1-orchestrator-paid"])
-        self.assertEqual(by_id["l2-orchestrator-clean"]["effort_ladder"], expected)
+        self.assertEqual(by_id["l3-review-codebase"]["effort_ladder"], expected)
 
     def test_the_contributor_ladder_reaches_every_surface_that_carries_one(self):
         # MUSEAPI step 3 pinned the contributor ladder on the routes the
@@ -1193,19 +1192,24 @@ class ModelsDocCellsComeFromTheRegistryTests(unittest.TestCase):
     def test_context_column_falls_back_to_the_surfaces_numeric_context(self):
         reg = copy.deepcopy(real_registry())
         del reg["routes"]["l3-driver"]["surfaces"]["omniroute"]["context_declared"]
-        rendered = registry.render_models_doc(reg)
         # FREEKEYS-2c: the numeric fallback is clamped like every other context
-        # cell (clamp_route_context narrows a numeric surface context too).
-        # D657-CHAIN 2026-10-08 moved the clamped number from 128,000 to 131,072:
-        # the scaleway/nebius 128k legs left the chain and the smallest window a
-        # serving leg now advertises is the groq/cohere 131072 band, which equals
-        # the surface promise - so the cell follows the numeric field rather than
-        # the deleted "128k" label. OVH-REPROBE 2026-10-08 puts a 128,000 leg back
-        # in the chain, and the clamp follows it: the cell narrows under the
-        # smallest serving leg, which is the mechanism this test owns. The
-        # comma-spelled number is the fallback's signature either way.
-        self.assertIn("128,000", row_for(rendered, "l3-driver"))
-        self.assertNotIn("128k", row_for(rendered, "l3-driver"))
+        # cell (clamp_route_context narrows a numeric surface context too), and the
+        # comma-spelled number - never a "k" label - is the fallback's signature.
+        # The ovhcloud/Qwen3.5-397B-A17B leg (128,000) used to be the smallest
+        # serving window here and pinned "128,000"; OVH-REMOVE retires that leg, so
+        # drop it from the copy (present before removal, absent after) to make the
+        # clamp follow the surviving cohere 131,072 band identically in both states,
+        # then raise the surface promise above it so the clamp visibly narrows it -
+        # exactly what D657-CHAIN pinned when the scaleway/nebius 128k legs left.
+        route = reg["routes"]["l3-driver"]
+        route["legs"] = [l for l in route["legs"] if not l.startswith("ovhcloud/")]
+        route["surfaces"]["omniroute"]["context"] = 262144
+        rendered = registry.render_models_doc(reg)
+        row = row_for(rendered, "l3-driver")
+        self.assertIn("131,072", row)
+        self.assertNotIn("262,144", row)  # narrowed by the clamp, not echoed
+        self.assertNotIn("128,000", row)
+        self.assertNotIn("128k", row)
 
     def test_context_column_falls_back_to_a_legs_model_when_no_surface_carries_one(self):
         reg = copy.deepcopy(real_registry())
@@ -1481,42 +1485,43 @@ class GatewayLegsFilterTests(unittest.TestCase):
         # Every -clean combo is one leg now: spec 3.1 rule 3 admits only a
         # non-training paid/credit/subscription leg and rule (b-or) forces every
         # openrouter leg ':free', so no free band can ever be clean.
-        combos = {c["name"]: c for c in
-                  registry.render_omniroute(real_registry())["combos"]}
+        # OVH-REMOVE T2b: those were the vertex chains, and every real route pairing
+        # a gated leg with a live one goes with vertex - both move to l3-driver-free.
+        reg = real_registry()
+        rendered = registry.render_omniroute(reg)
+        combos = {c["name"]: c for c in rendered["combos"]}
         self.assertEqual(
-            combos["l2-worker"]["models"],
-            ["bzl/deepseek/deepseek-v4-flash-0731free:free",
-             "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-             "vertex/gemini-3.8-flash"])
-        self.assertEqual(combos["l2-worker-clean"]["models"], ["vertex/gemini-3.8-flash"])
-        # A gated leg is dropped while the route survives on its other leg:
-        # l1-orchestrator-clean's contributor copy is probe-denied (402/403), the
-        # vertex leg serves, so the combo carries one model, not none.
-        self.assertEqual(combos["l1-orchestrator-clean"]["models"], ["vertex/gemini-3.8-flash"])
-        self.assertNotIn("openrouter/meta/muse-spark-1.3-contributor",
-                         combos["l1-orchestrator-clean"]["models"])
+            combos["l3-driver-free-only"]["models"],
+            ["openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+             "cohere/command-a-03-2025",
+             "openrouter/poolside/laguna-s-2.1:free",
+             "cohere/command-a-plus-05-2026",
+             "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+             "bzl/deepseek/deepseek-v4-flash-0731free:free",
+             "openrouter/cohere/north-mini-code:free"])
+        gated = copy.deepcopy(reg)
+        gated["providers"]["gatedprov"] = {"id": "gatedprov", "available": False}
+        gated["models"]["gated-model"] = {"id": "gated-model"}
+        gated["routes"]["l3-driver-free-only"]["legs"].insert(
+            2, "gatedprov/gated-model")
+        gated_render = registry.render_omniroute(gated)
+        self.assertEqual({c["name"]: c for c in gated_render["combos"]}
+                         ["l3-driver-free-only"]["models"],
+                         combos["l3-driver-free-only"]["models"])
+        self.assertNotIn("gatedprov/gated-model", json.dumps(gated_render))
         # samba/SambaNova is available: false, so every one of its legs goes -
         # including the pinned one-leg routes, and with them spark-1.3-contributor,
         # whose only legs are the SS8-banned contributor copies (OR1d: declared
-        # legs, none servable -> no declaration). OVH-REPROBE 2026-10-08 moved
-        # ovh-qwen3.8-27b out of this set (the provider is live and priced again,
-        # so the seat renders); ovh-gpt-oss-120b stays omitted because its leg is
-        # gated for want of a price. OVHCODER-DROP 2026-10-08 took ovh-qwen3-coder-30b
-        # out of the omitted set by deleting the route: an omitted route is still a
-        # declaration, and a model OVH no longer serves is not one - it sits in the
-        # render's `retired` list instead, which is what makes apply prune the live
-        # combo (pinned in test_ovh_coder_leg_is_retired_not_merged).
-        rendered = registry.render_omniroute(real_registry())
-        combos = {c["name"]: c for c in rendered["combos"]}
+        # legs, none servable -> no declaration). The ovh-* seats this set used to
+        # pin (ovh-gpt-oss-120b omitted for want of a price, ovh-qwen3.8-27b live,
+        # ovh-qwen3-coder-30b deleted-and-retired) all belonged to the ovhcloud
+        # provider itself; OVH-REMOVE takes them out, so none is a declaration of
+        # any kind here. That retired-vs-omitted mechanism stays pinned in
+        # test_ovh_coder_leg_is_retired_not_merged, in tests/test_registry.py.
         for gone in ("samba/gpt-oss-120b", "samba/MiniMax-M3", "spark-1.3-contributor",
-                     "ovh-gpt-oss-120b",
                      "deepseek-v4.1-flash"):
             self.assertNotIn(gone, combos)
             self.assertIn(gone, rendered["omitted"])
-        self.assertNotIn("ovh-qwen3-coder-30b", combos)
-        self.assertNotIn("ovh-qwen3-coder-30b", rendered["omitted"])
-        self.assertIn("ovh-qwen3-coder-30b", rendered["retired"])
-        self.assertEqual(combos["ovh-qwen3.8-27b"]["models"], ["ovh/Qwen3.8-27B"])
 
 
     def test_real_litellm_drops_gated_legs(self):
@@ -1534,10 +1539,24 @@ class GatewayLegsFilterTests(unittest.TestCase):
                      "model: openai/deepseek-v4.1-flash",
                      "model: openrouter/deepseek/deepseek-v4.1-flash"):
             self.assertNotIn(gone, rendered["l2-worker"], gone)
-        # vertex/gemini-3.8-flash IS a live leg but authenticates without a LiteLLM
-        # api_key, so it lands as a litellm-skip comment, never a model line.
-        self.assertIn("# litellm-skip: vertex/gemini-3.8-flash", rendered["l2-worker"])
-        self.assertNotIn("model: vertex/gemini-3.8-flash", rendered["l2-worker"])
+        # A live leg whose provider authenticates WITHOUT a LiteLLM api_key is a
+        # litellm-skip comment, never a model line - data-driven, plus inline control.
+        sync = registry._load_sync_router_tiers()
+        no_key = sync.no_litellm_key_providers(real_registry())
+        for prefix in sorted(no_key):
+            for block in rendered.values():
+                self.assertNotIn("model: %s/" % prefix, block)
+        control = copy.deepcopy(real_registry())
+        control["providers"]["nokeyprov"] = {"id": "nokeyprov",
+                                             "litellm_auth": "service_account"}
+        control["models"]["nokey-model"] = {"id": "nokey-model"}
+        control["routes"]["l2-worker"]["legs"].append("nokeyprov/nokey-model")
+        control_blocks = registry.render_litellm_blocks(
+            control, real_litellm_config(), tiers=("l2-worker",))
+        self.assertIn("# litellm-skip: nokeyprov/nokey-model",
+                      control_blocks["l2-worker"], control_blocks["l2-worker"])
+        self.assertNotIn("model: nokeyprov/nokey-model", control_blocks["l2-worker"])
+        self.assertNotIn("NOKEYPROV_API_KEY", control_blocks["l2-worker"])
         # l3-driver keeps the proven free band: groq retired 2026-10-14
         # (7k TPM cap), so the pinned servable legs are the cohere pair;
         # nothing of the dead providers (samba/cerebras/groq) or of the
@@ -1550,14 +1569,20 @@ class GatewayLegsFilterTests(unittest.TestCase):
         self.assertNotIn("ovhcloud/Qwen3.8-27B", rendered["l3-driver"])
 
     def test_models_doc_still_strikes_through_a_gated_leg(self):
-        # D657-CHAIN 2026-10-08: l2-worker no longer keeps a gated leg at all (SS8
-        # deleted the OVH credit legs from its declared chain), so
-        # l1-orchestrator-clean is the example - it serves vertex/gemini-3.8-flash
-        # and still shows the probe-denied contributor copy struck through for the
-        # human reader, which no gateway render mirrors.
-        row = row_for(registry.render_models_doc(real_registry()), "l1-orchestrator-clean")
-        self.assertIn("~~openrouter `meta/muse-spark-1.3-contributor`~~ (unavailable)", row)
-        self.assertIn("vertex `gemini-3.8-flash`", row)
+        # D657-CHAIN 2026-10-08: l2-worker keeps no gated leg, so the example was
+        # l1-orchestrator-clean - vertex served, the probe-denied contributor copy
+        # stayed struck through for the human reader, mirrored by no gateway render.
+        # OVH-REMOVE T2b builds that gate INLINE on a route live in every state.
+        reg = copy.deepcopy(real_registry())
+        route = reg["routes"]["l3-driver-free-only"]
+        gated_leg = "cohere/command-a-plus-05-2026"
+        self.assertIn(gated_leg, route["legs"])
+        route.setdefault("unavailable_legs", {})[gated_leg] = {
+            "available": False, "reason": "inline fixture"}
+        row = row_for(registry.render_models_doc(reg), "l3-driver-free-only")
+        self.assertIn("~~cohere `command-a-plus-05-2026`~~ (unavailable)", row)
+        self.assertIn("openrouter `nvidia/nemotron-3-super-120b-a12b:free`", row)
+        self.assertNotIn("~~cohere `command-a-03-2025`~~", row)
 
 
 class NoServableLegOffersNoDeclarationTests(unittest.TestCase):
@@ -1676,15 +1701,17 @@ class UnavailableUntilRenderIndependenceTests(unittest.TestCase):
         reg["routes"]["spark-1.3-contributor"]["unavailable_legs"][
             "meta_api/muse-spark-1.3-contributor"]["unavailable_until"] = (
                 "2026-10-01T09:05:00Z")
-        # One leg with an until but no available:false at all - inert because its
-        # PROVIDER is the gate (ovhcloud is off, so the route already renders
-        # nothing either way). CLAUDE55 2026-10-05 moved this from opus-4-6 (now
-        # opus-5-5); D657-CHAIN moved it again because every leg that still has a
-        # route-level gate also has available:false now.
-        reg["routes"]["ovh-qwen3.8-27b"]["unavailable_legs"] = {
-            "ovhcloud/Qwen3.8-27B": {
-                "unavailable_until": "2026-10-01T09:05:00Z"},
-        }
+        # A live route (it renders a combo) carrying an unavailable_legs gate whose
+        # ONLY field is unavailable_until and no available:false at all - the leg
+        # stays servable, so adding the until changes no render. OVH-REMOVE retires
+        # the ovhcloud/ leg this used to ride on (a provider-gated route that
+        # rendered nothing either way, so it proved the point while the provider was
+        # live); OVH-REMOVE T2b takes l2-worker-clean with it, so the until-only
+        # entry rides l2-worker's head leg - a combo-rendering route in every
+        # state, where honouring the until would visibly drop a model line.
+        head_leg = registry.gateway_legs(reg["routes"]["l2-worker"], reg)[0]
+        reg["routes"]["l2-worker"].setdefault("unavailable_legs", {})[
+            head_leg] = {"unavailable_until": "2026-10-01T09:05:00Z"}
         reg["clients"]["agy"]["unavailable_until"] = "2026-10-01T09:05:00Z"
         return reg
 
@@ -1871,15 +1898,18 @@ class FreeAiRenderTests(unittest.TestCase):
                  if m.startswith(("free-ai/", "free_ai/"))],
                 combo["name"])
 
-    def test_l2_worker_combo_closes_with_the_vertex_leg(self):
+    def test_l2_worker_combo_closes_with_its_last_declared_leg(self):
         # CIGREEN: expectation moved by ba73f1cf (same TORDER TASK2 reorder:
         # paid last, deepseek last). D657-CHAIN supersedes that tail again - SS8
-        # removed deepseek/deepseek-flash from every chain, so the combo closes
-        # on the cached vertex leg and free_ai appears nowhere.
-        combos = {c["name"]: c for c in
-                  registry.render_omniroute(real_registry())["combos"]}
+        # removed deepseek/deepseek-flash from every chain, so the combo closed on
+        # the cached vertex leg. OVH-REMOVE T2b pins the rule as written: models are
+        # the declared legs in order, under each leg's gateway spelling.
+        reg = real_registry()
+        combos = {c["name"]: c for c in registry.render_omniroute(reg)["combos"]}
         models = combos["l2-worker"]["models"]
-        self.assertEqual(models[-1], "vertex/gemini-3.8-flash")
+        self.assertEqual(models, [registry.gateway_ref(leg, reg)
+                                  for leg in reg["routes"]["l2-worker"]["legs"]])
+        self.assertTrue(models)
         self.assertNotIn("deepseek/deepseek-flash", models)
         self.assertNotIn("free-ai/qwen7b", models)
 
@@ -2109,18 +2139,25 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
     the served head rejects is dropped rather than forwarded (combos.json's old
     rule: "a combo NEVER forwards an effort its head leg rejects")."""
 
-    def _t1_gated_to_vertex_gemini(self):
-        # FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head was removed from
-        # every route, so the single-served-leg fixture now uses the vertex leg
-        # that shares the same gemini-3.8-flash model row (ladder low/medium/high,
-        # no xhigh).
+    def _t1_gated_to_a_ladder_head(self):
+        # FREEWIRE 2026-09-30: the gemini/gemini-3.8-flash head left every route, so
+        # the single-served-leg fixture used the vertex leg on the same gemini-3.8-
+        # flash row (ladder low/medium/high, no xhigh). OVH-REMOVE T2b builds that
+        # head INLINE on a copy of the registry - every DECLARED leg gated, the
+        # surface effort_default named by the fixture, shape otherwise unchanged.
         reg = copy.deepcopy(real_registry())
+        reg["providers"]["ladderprov"] = {"id": "ladderprov"}
+        reg["models"]["ladder-model"] = {"id": "ladder-model",
+                                         "effort_ladder": ["low", "medium", "high"]}
         route = reg["routes"]["l1-orchestrator"]
         route.setdefault("unavailable_legs", {})
         for leg in list(route["legs"]):
-            if leg != "vertex/gemini-3.8-flash":
-                route["unavailable_legs"][leg] = {"available": False}
-        reg["routes"]["l1-orchestrator"]["legs"] = ["vertex/gemini-3.8-flash"]
+            route["unavailable_legs"][leg] = {"available": False}
+        route["legs"] = list(route["legs"]) + ["ladderprov/ladder-model"]
+        route["surfaces"]["omniroute"]["effort_default"] = "xhigh"
+        served = registry.gateway_legs(route, reg)
+        self.assertEqual(served, ["ladderprov/ladder-model"],
+                         "the fixture must leave exactly the ladder leg servable")
         return reg
 
     def _ide_entry(self, reg, route_id):
@@ -2142,11 +2179,12 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         self.assertEqual(entry["context"], 1000000)
 
     def test_effort_ladder_comes_from_the_first_servable_leg(self):
-        entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "l1-orchestrator")
+        entry = self._ide_entry(self._t1_gated_to_a_ladder_head(), "l1-orchestrator")
         self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
 
     def test_an_effort_default_the_served_head_rejects_is_dropped(self):
-        entry = self._ide_entry(self._t1_gated_to_vertex_gemini(), "l1-orchestrator")
+        # The fixture names "xhigh", which the served head's ladder does not carry.
+        entry = self._ide_entry(self._t1_gated_to_a_ladder_head(), "l1-orchestrator")
         self.assertNotIn("reasoning_effort", entry)
 
     def test_a_default_the_served_head_carries_is_still_forwarded(self):
@@ -2154,9 +2192,9 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         # tops out at "high" - so the positive branch needs a registry whose
         # served head DOES carry the surface default. D657-CHAIN 2026-10-08 took
         # meta_api/muse-spark-1.3-contributor (whose "xhigh" this was) out of every
-        # chain under SS8, so the branch uses the vertex gemini leg the route does
-        # serve - ladder low/medium/high - and names "high" as the surface default.
-        reg = self._t1_gated_to_vertex_gemini()
+        # chain under SS8; OVH-REMOVE T2b uses the same inline ladder head and
+        # names "high" - a rung it does carry.
+        reg = self._t1_gated_to_a_ladder_head()
         reg["routes"]["l1-orchestrator"]["surfaces"]["omniroute"]["effort_default"] = "high"
         entry = self._ide_entry(reg, "l1-orchestrator")
         self.assertEqual(entry.get("reasoning_effort"), "high")
@@ -2169,13 +2207,14 @@ class IdeContextAndEffortFollowServedLegsTests(unittest.TestCase):
         # bazaarlink DeepSeek mirror, whose registry row documents NO effort
         # ladder, so render_ide() omits the field rather than inventing rungs -
         # test_sync_ide_models.py pins the same thing on the picker surface. The
-        # cached clean band still heads vertex gemini and keeps its ladder.
+        # positive half (OVH-REMOVE T2b: was the vertex-headed clean band) is
+        # l3-review-codebase, the one real route heading a ladder model.
         for route_id in ("l1-orchestrator", "l1-orchestrator-free-only",
                          "l2-orchestrator", "l3-researcher"):
             entry = self._ide_entry(real_registry(), route_id)
             self.assertNotIn("effort_ladder", entry, route_id)
             self.assertNotIn("reasoning_effort", entry, route_id)
-        entry = self._ide_entry(real_registry(), "l1-orchestrator-clean")
+        entry = self._ide_entry(real_registry(), "l3-review-codebase")
         self.assertEqual(entry["effort_ladder"], ["low", "medium", "high"])
 
     def test_openhands_max_input_tokens_is_clamped(self):
@@ -2217,19 +2256,32 @@ class VertexNoKeyLitellmSkipTests(unittest.TestCase):
         self.blocks = registry.render_litellm_blocks(self.reg, self.text)
 
     def test_no_keyless_provider_leg_is_rendered(self):
-        for tier, block in sorted(self.blocks.items()):
-            self.assertNotIn("model: vertex/", block, tier)
-            self.assertNotIn("VERTEX_API_KEY", block, tier)
+        # OVH-REMOVE T2b: data-driven over the providers declaring an auth LiteLLM
+        # cannot express; the inline control below keeps it from going vacuous.
+        sync = registry._load_sync_router_tiers()
+        prefixes = sorted(sync.no_litellm_key_providers(self.reg))
+        for prefix in prefixes:
+            for tier, block in sorted(self.blocks.items()):
+                self.assertNotIn("model: %s/" % prefix, block, tier)
+                self.assertNotIn("%s_API_KEY" % prefix.upper(), block, tier)
 
     def test_a_dropped_leg_is_named_in_a_rendered_comment(self):
-        tiers = [t for t, r in self.reg["routes"].items()
-                 if isinstance(r, dict)
-                 and any(l.startswith("vertex/") for l in (r.get("legs") or []))]
-        self.assertTrue(tiers, "no route carries a vertex leg any more?")
-        named = [t for t in tiers if t in self.blocks]
-        self.assertTrue(named, "no managed tier carries the vertex leg: %s" % tiers)
-        for tier in named:
-            self.assertIn("# litellm-skip: vertex/gemini-3.8-flash", self.blocks[tier], tier)
+        # The naming half, pinned on an INLINE declared-auth provider
+        # (OVH-REMOVE T2b): needing a real vertex leg cannot be green when removed.
+        sync = registry._load_sync_router_tiers()
+        control = copy.deepcopy(self.reg)
+        control["providers"]["nokeyprov"] = {"id": "nokeyprov",
+                                             "litellm_auth": "service_account"}
+        control["models"]["nokey-model"] = {"id": "nokey-model"}
+        control["routes"]["l2-worker"]["legs"].append("nokeyprov/nokey-model")
+        self.assertIn("nokeyprov", sync.no_litellm_key_providers(control))
+        block = registry.render_litellm_blocks(
+            control, self.text, tiers=("l2-worker",))["l2-worker"]
+        self.assertIn("# litellm-skip: nokeyprov/nokey-model", block, block)
+        self.assertNotIn("model: nokeyprov/nokey-model", block)
+        # the negative control: a leg of a normal key provider still renders.
+        self.assertIn("model: bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+                      block)
 
     def test_the_committed_config_matches_the_render(self):
         self.assertEqual(registry.litellm_diff(self.blocks, self.text), [])
@@ -2256,6 +2308,14 @@ class CombosDeclaredAuthSkipTests(unittest.TestCase):
     def setUp(self):
         self.sync = registry._load_sync_router_tiers()
         self.reg = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+        # OVH-REMOVE T2b: vertex_ai - the only shipped provider declaring a LiteLLM-
+        # inexpressible auth - goes with OVH, so the fixture supplies its own.
+        self.nokey_leg = "nokeyprov/nokey-model"
+        self.reg["providers"]["nokeyprov"] = {"id": "nokeyprov",
+                                              "litellm_auth": "service_account"}
+        self.reg["models"]["nokey-model"] = {"id": "nokey-model"}
+        self.kept_leg = "cohere/command-a-03-2025"
+        self.assertIn(self.kept_leg, self.reg["routes"]["t4-rag"]["legs"])
         self.sync.PROVIDER_PREFIX, self.sync.API_BASE, self.sync.ENV_KEY = (
             self.sync.provider_maps_from_dict(self.reg["providers"]))
 
@@ -2268,14 +2328,14 @@ class CombosDeclaredAuthSkipTests(unittest.TestCase):
         # F2: combos_refs' `no_key` clause had no test - deleting it survived.
         with tempfile.TemporaryDirectory() as tmp:
             path = self._combos(tmp, [{"name": "l1-orchestrator", "models": [
-                "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
+                self.nokey_leg, self.kept_leg]}])
             refs = self.sync.combos_refs(path, registry=self.reg)
-            self.assertEqual(refs["l1-orchestrator"], ["ovhcloud/gpt-oss-120b"])
+            self.assertEqual(refs["l1-orchestrator"], [self.kept_leg])
             self.assertEqual(self.sync.SKIPPED_BY_TIER["l1-orchestrator"],
-                             ["vertex/gemini-3.8-flash"])
+                             [self.nokey_leg])
             block = self.sync.render_block("l1-orchestrator",
                                            refs["l1-orchestrator"])
-            self.assertIn("# litellm-skip: vertex/gemini-3.8-flash",
+            self.assertIn("# litellm-skip: %s" % self.nokey_leg,
                           "\n".join(block), block)
 
     def test_each_call_owns_the_skip_state_it_leaves_behind(self):
@@ -2284,10 +2344,10 @@ class CombosDeclaredAuthSkipTests(unittest.TestCase):
         # the first call's skips sitting there for render_block() to pick up.
         with tempfile.TemporaryDirectory() as tmp:
             path = self._combos(tmp, [{"name": "l2-worker", "models": [
-                "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
+                self.nokey_leg, self.kept_leg]}])
             self.sync.combos_refs(path, registry=self.reg)
             second = self._combos(tmp, [{"name": "l1-orchestrator", "models": [
-                "ovhcloud/gpt-oss-120b"]}])
+                self.kept_leg]}])
             combos = self.sync.combos_refs(second, registry=self.reg)
             self.assertEqual(set(self.sync.SKIPPED_BY_TIER), {"l1-orchestrator"})
             block = "\n".join(self.sync.render_block(
@@ -2297,7 +2357,7 @@ class CombosDeclaredAuthSkipTests(unittest.TestCase):
     def test_the_registry_call_clears_a_prior_combos_call(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._combos(tmp, [{"name": "l2-worker", "models": [
-                "vertex/gemini-3.8-flash", "ovhcloud/gpt-oss-120b"]}])
+                self.nokey_leg, self.kept_leg]}])
             self.sync.combos_refs(path, registry=self.reg)
             self.sync.registry_refs(str(REGISTRY_PATH), tiers=("t4-rag",))
             self.assertEqual(set(self.sync.SKIPPED_BY_TIER), {"t4-rag"})
@@ -2307,13 +2367,13 @@ class CombosDeclaredAuthSkipTests(unittest.TestCase):
         # whose every leg is a declared-auth skip got no block and its
         # "# litellm-skip:" line rendered nowhere - the drop went invisible.
         with tempfile.TemporaryDirectory() as tmp:
-            path = self._combos(tmp, [{"name": "vertex-gemini-3.8-flash",
-                                       "models": ["vertex/gemini-3.8-flash"]}])
+            path = self._combos(tmp, [{"name": "nokey-only",
+                                       "models": [self.nokey_leg]}])
             combos = self.sync.combos_refs(path, registry=self.reg)
             self.assertEqual(combos, {})
-            self.assertEqual(self.sync.SKIPPED_BY_TIER["vertex-gemini-3.8-flash"],
-                             ["vertex/gemini-3.8-flash"])
-            self.assertIn("vertex-gemini-3.8-flash: vertex/gemini-3.8-flash",
+            self.assertEqual(self.sync.SKIPPED_BY_TIER["nokey-only"],
+                             [self.nokey_leg])
+            self.assertIn("nokey-only: %s" % self.nokey_leg,
                           self.sync.unmanaged_skip_notices(combos))
 
     def test_a_combo_dropped_only_by_gateway_only_stays_unnamed(self):
