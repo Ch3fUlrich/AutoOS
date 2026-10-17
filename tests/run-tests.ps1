@@ -4476,23 +4476,121 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer rewrites an entry th
 
 Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
     $realAppData = $env:APPDATA
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))
     try {
         $env:APPDATA = $scratch
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
         Set-AutoOSZedProxy 6>$null | Out-Null
         $s = Get-Content (Join-Path $scratch 'Zed\settings.json') -Raw | ConvertFrom-Json
         $e = $s.context_servers.omnigraph.env
         Assert-True ($null -ne $e) 'omnigraph context server has no env'
         Assert-Equal $e.OMNIGRAPH_GRAPH_ID 'autoos'
-        Assert-True ([bool]$e.OMNIGRAPH_BASE_URL) 'no base URL'
+        Assert-Equal $e.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the resolved URL did not reach the entry'
         Assert-True ($null -eq $e.PSObject.Properties['OMNIGRAPH_TOKEN']) 'a token landed in Zed settings'
     } finally {
         $env:APPDATA = $realAppData
+        if ($null -eq $realBase) { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
+        else { $env:OMNIGRAPH_BASE_URL = $realBase }
         Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
+# ─── OMNIGRAPH-URL-LOUD: a missing base URL fails loudly, it never defaults ──
+# Nothing listens on localhost:8080 on the server since D-1398, so the silent
+# default wrote a config that looked fine and failed at call time. The resolver
+# warns - naming the variable and every place it can be set - and returns $null;
+# a writer holding $null skips its omnigraph entry, never deleting the user's.
+
+function Invoke-OmnigraphBaseScratch {
+    # Run a body with every source the resolver reads under test control:
+    # USERPROFILE, HOME and APPDATA point into a temp dir (the real
+    # ~/.autoos-omnigraph.env is never read), the answer and the variable are set
+    # per case, all four names are restored, and the body's output is returned.
+    param(
+        [Parameter(Mandatory)][scriptblock]$Body,
+        [hashtable]$Answers = @{},
+        [string]$EnvUrl = '',
+        [string]$EnvFile = ''
+    )
+    $names = @('USERPROFILE', 'HOME', 'APPDATA', 'OMNIGRAPH_BASE_URL')
+    $saved = @{}
+    foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-obase-$([Guid]::NewGuid().ToString('N'))"
+    $result = $null
+    try {
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'AppData\Zed')
+        $env:USERPROFILE = $scratch
+        $env:HOME = $scratch
+        $env:APPDATA = Join-Path $scratch 'AppData'
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        if ($EnvFile) { [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), $EnvFile) }
+        if ($EnvUrl) { $env:OMNIGRAPH_BASE_URL = $EnvUrl } else { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
+        # The resolver runs in the module, which reads $HOME, not the test's.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun:$false -Answers $Answers -RepoRoot $Root
+        $result = & $Body $scratch
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
+        Initialize-AutoOSInstaller -DryRun:$false -RepoRoot $Root
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $result
+}
+
+Test-Case 'omnigraph base URL: nothing configured warns naming the variable and yields no URL' {
+    Invoke-OmnigraphBaseScratch -Body {
+        $warnings = @(Get-AutoOSOmnigraphBaseUrl 3>&1 | Where-Object { $_ -is [Management.Automation.WarningRecord] })
+        Assert-Equal $warnings.Count 1 'the resolver did not warn exactly once'
+        $text = "$($warnings[0])"
+        Assert-True ($text -match 'OMNIGRAPH_BASE_URL' -and $text -match 'omnigraph_url' -and $text -match '\.autoos-omnigraph\.env') "the warning does not name the variable and where to set it: $text"
+        $got = Get-AutoOSOmnigraphBaseUrl 3>$null
+        Assert-True ($null -eq $got) "a localhost default leaked through: [$got]"
+    }
+}
+
+Test-Case 'omnigraph base URL: the answer beats OMNIGRAPH_BASE_URL beats the env file, slashes and quotes are stripped' {
+    $cases = @(
+        @{ Desc = 'environment variable'; Answers = @{}; EnvUrl = 'http://env.invalid:8080'; EnvFile = ''; Want = 'http://env.invalid:8080' }
+        @{ Desc = 'env file line'; Answers = @{}; EnvUrl = ''; EnvFile = 'OMNIGRAPH_BASE_URL=http://file.invalid'; Want = 'http://file.invalid' }
+        @{ Desc = 'environment beats env file'; Answers = @{}; EnvUrl = 'http://env.invalid'; EnvFile = 'OMNIGRAPH_BASE_URL=http://file.invalid'; Want = 'http://env.invalid' }
+        @{ Desc = 'answer beats environment'; Answers = @{ omnigraph_url = 'http://answer.invalid' }; EnvUrl = 'http://env.invalid'; EnvFile = 'OMNIGRAPH_BASE_URL=http://file.invalid'; Want = 'http://answer.invalid' }
+        @{ Desc = 'trailing slashes stripped'; Answers = @{ omnigraph_url = 'https://slash.invalid//' }; EnvUrl = 'http://env.invalid'; EnvFile = ''; Want = 'https://slash.invalid' }
+        @{ Desc = 'one pair of quotes stripped'; Answers = @{}; EnvUrl = ''; EnvFile = 'OMNIGRAPH_BASE_URL="http://quoted.invalid"'; Want = 'http://quoted.invalid' }
+        @{ Desc = 'a scheme-less env value is skipped'; Answers = @{}; EnvUrl = 'omnigraph.test.invalid:8080'; EnvFile = ''; Want = $null }
+        @{ Desc = 'a scheme-less env-file value is skipped'; Answers = @{}; EnvUrl = ''; EnvFile = 'OMNIGRAPH_BASE_URL=localhost:8080'; Want = $null }
+    )
+    foreach ($case in $cases) {
+        $got = Invoke-OmnigraphBaseScratch -Answers $case.Answers -EnvUrl $case.EnvUrl -EnvFile $case.EnvFile -Body {
+            Get-AutoOSOmnigraphBaseUrl 3>$null
+        }
+        if ($got -ne $case.Want) { throw "$($case.Desc): got [$got], want [$($case.Want)]" }
+    }
+    Pass
+}
+
+Test-Case 'omnigraph base URL: Zed with none configured writes no entry and keeps the user''s own, then the resolved value' {
+    $keepers = '{"theme":"mine","context_servers":{"omnigraph":{"command":"npx","args":["-y","user-pin"],"env":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}}}'
+    Invoke-OmnigraphBaseScratch -Body {
+        param($scratch)
+        $cfg = Join-Path $scratch 'AppData\Zed\settings.json'
+        $run = { Set-AutoOSZedProxy 6>$null | Out-Null; Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 | ConvertFrom-Json }
+        $s = & $run
+        Assert-True ($null -eq $s.context_servers.PSObject.Properties['omnigraph']) 'an omnigraph entry was written with no base URL'
+        [IO.File]::WriteAllText($cfg, $keepers)
+        $s = & $run
+        Assert-Equal $s.context_servers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://keep.invalid' "the user's omnigraph entry was rewritten"
+        Assert-True ((Get-Content -LiteralPath $cfg -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in Zed settings'
+        # The URL resolves from the env file while the variable stays absent:
+        # what lands in settings.json has to be the value, not a reference.
+        [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
+        $s = & $run
+        Assert-Equal $s.context_servers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
+    }
+}
 
 # tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
 # YAML shapes both Set-AutoOSSerenaExclusions (here) and ensure_serena_exclusions
@@ -7949,11 +8047,15 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
     $realAppData = $env:APPDATA
     $realOmni = $env:AUTOOS_OMNIROUTE_KEY
     $realLit = $env:LITELLM_MASTER_KEY
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
     try {
         $env:APPDATA = $scratch
         $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
         $env:LITELLM_MASTER_KEY = 'test-lit-key'
+        # The omnigraph entry is only written when a base URL resolves (see
+        # Get-AutoOSOmnigraphBaseUrl), so this case supplies one.
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         $cfgDir = Join-Path $scratch 'Zed'
         New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
         '{"theme":"mine","language_models":{"openai":{"api_url":"https://x"}}}' |
@@ -8023,6 +8125,8 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         else { $env:AUTOOS_OMNIROUTE_KEY = $realOmni }
         if ($null -eq $realLit) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
         else { $env:LITELLM_MASTER_KEY = $realLit }
+        if ($null -eq $realBase) { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
+        else { $env:OMNIGRAPH_BASE_URL = $realBase }
     }
 }
 
@@ -8188,7 +8292,9 @@ function Invoke-OpenCodeScratch {
         [string]$OpenCodeVersion = '1.4.0',
         [string]$Seed = ''
     )
-    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY')
+    # OMNIGRAPH_BASE_URL belongs to the saved set: the writers resolve the
+    # omnigraph base URL from it, so a host that has one set must not tilt a run.
+    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY', 'OMNIGRAPH_BASE_URL')
     $savedEnv = @{}
     foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
     $savedHome = $HOME
@@ -8230,6 +8336,7 @@ function Invoke-OpenCodeScratch {
         $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
         $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
         Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue
         # The writer reads $HOME, which the environment does not set on every
         # host: prove the module sees the scratch home before it writes anything.
         if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
@@ -8390,6 +8497,30 @@ Test-Case 'opencode V2: a V1 CLI gets no providers block' {
         if ($null -eq $w.provider.PSObject.Properties['custom']) { throw 'a foreign V1 provider of the user was dropped' }
         if ($w.model -notlike 'ollama/*') { throw "a V1 CLI's default model is not the Ollama default: [$($w.model)]" }
         Pass
+    }
+}
+
+# The URL must reach the config as a resolved value, never as an {env:...}
+# reference: OMNIGRAPH_BASE_URL is absent from the environment below (the
+# scratch harness removes it), so a reference would read as empty - OpenCode
+# gives an MCP server its own environment, not the installer's.
+Test-Case 'omnigraph base URL: OpenCode with none configured writes no entry and keeps the user''s own, then the resolved value' {
+    $keepers = '{"theme":"mine","mcp":{"omnigraph":{"type":"local","command":["npx","-y","user-pin"],"enabled":true,"environment":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}}}'
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        $log = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True ($null -eq $w.mcp.PSObject.Properties['omnigraph']) 'an omnigraph entry was written with no base URL'
+        Assert-True ($log -match 'OMNIGRAPH_BASE_URL is not set') "the writer never said why it skipped: $log"
+        [IO.File]::WriteAllText($c.CfgFile, $keepers)
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Equal $w.mcp.omnigraph.environment.OMNIGRAPH_BASE_URL 'http://keep.invalid' "the user's omnigraph entry was rewritten"
+        Assert-True ((Get-Content -LiteralPath $c.CfgFile -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in the OpenCode config'
+        [IO.File]::WriteAllText((Join-Path $c.Scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Equal $w.mcp.omnigraph.environment.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
     }
 }
 

@@ -47,6 +47,42 @@ function Get-AutoOSAnswer {
     if ($script:Answers.ContainsKey($Key)) { $script:Answers[$Key] } else { $Default }
 }
 
+function Get-AutoOSOmnigraphBaseUrl {
+    <#
+      .SYNOPSIS
+        Resolve the omnigraph base URL - warn and return nothing when there is none.
+
+      .DESCRIPTION
+        Deliberately no default: nothing listens on localhost:8080 on the server
+        since D-1398, so a silently defaulted URL wrote a config that looked
+        healthy and failed as "fetch failed" in whichever client loaded it. The
+        warning names the variable and every place it can be set; callers skip
+        their entry rather than delete one the user wrote. Sources, in order: the
+        omnigraph_url answer, $env:OMNIGRAPH_BASE_URL, the OMNIGRAPH_BASE_URL=
+        line of %USERPROFILE%\.autoos-omnigraph.env (fallback $HOME) - read line
+        by line, never dot-sourced, as that file holds the token too. Only an
+        http(s):// value counts; trailing slashes go, clients append paths.
+    #>
+    $profileHome = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($HOME) { $HOME } else { '~' }
+    $envFile = Join-Path $profileHome '.autoos-omnigraph.env'
+    $fromFile = ''
+    if (Test-Path -LiteralPath $envFile -PathType Leaf) {
+        foreach ($line in @([IO.File]::ReadAllLines($envFile))) {
+            if ($line -match '^\s*OMNIGRAPH_BASE_URL\s*=\s*(.*)$') {
+                # blanks trimmed, one matching pair of quotes removed
+                $fromFile = ($Matches[1].Trim() -replace '^([''"])(.*)\1$', '$2')
+                break
+            }
+        }
+    }
+    foreach ($candidate in @((Get-AutoOSAnswer 'omnigraph_url' ''), $env:OMNIGRAPH_BASE_URL, $fromFile)) {
+        $value = "$candidate".Trim()
+        if ($value -match '^https?://') { return $value.TrimEnd('/') }
+    }
+    Write-Warning 'autoos: OMNIGRAPH_BASE_URL is not set - answer omnigraph_url, set OMNIGRAPH_BASE_URL, or put OMNIGRAPH_BASE_URL=<url> in %USERPROFILE%\.autoos-omnigraph.env'
+    return $null
+}
+
 # ─── OmniRoute gateway key resolution (mirrors lib/linux/install.sh) ───
 function Test-AutoOSLocalGateway {
     # The same rule as tools/autoos_gateway_key.py is_local_gateway (see its docstring): a plain
@@ -2592,14 +2628,22 @@ function Set-AutoOSOpenCodeConfig {
         command = @('npx', '-y', (Get-AutoOSMcpPackage -Name 'context7'))
         enabled = $true
     }
-    $mcpServers['omnigraph'] = [ordered]@{
-        type    = 'local'
-        command = @('npx', '-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
-        enabled = $true
-        environment = [ordered]@{
-            OMNIGRAPH_BASE_URL = 'http://localhost:8080'
-            OMNIGRAPH_GRAPH_ID = 'autoos'
+    # Written as a value: OpenCode gives an MCP server its own environment, which
+    # is empty of OMNIGRAPH_BASE_URL when the URL came from the answer or the env
+    # file. Nothing resolved: skip the entry, keep any the user already wrote.
+    $omniBase = Get-AutoOSOmnigraphBaseUrl
+    if ($null -ne $omniBase) {
+        $mcpServers['omnigraph'] = [ordered]@{
+            type    = 'local'
+            command = @('npx', '-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
+            enabled = $true
+            environment = [ordered]@{
+                OMNIGRAPH_BASE_URL = $omniBase
+                OMNIGRAPH_GRAPH_ID = 'autoos'
+            }
         }
+    } else {
+        Write-AutoOSLine 'OpenCode: OMNIGRAPH_BASE_URL is not set - skipping the omnigraph entry' -Level warn
     }
     $mcpServers['playwright'] = [ordered]@{
         type    = 'local'
@@ -4020,12 +4064,20 @@ function Set-AutoOSZedProxy {
     # environment Set-AutoOSOmnigraphEnv keeps), playwright
     # (browser verification) and context7 (library docs). Pins resolve from
     # catalog/agent-harness.json at runtime, never as literals.
-    $omnigraphCtx = [ordered]@{
-        command = 'npx'
-        args = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
-        env = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://localhost:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
+    # Written as a value, not a reference: Zed's env block is not the installer's
+    # environment, so a URL from the answer or the env file has to be spelled out.
+    # Nothing resolved: skip the entry, keep any the user already wrote.
+    $omniBase = Get-AutoOSOmnigraphBaseUrl
+    if ($null -ne $omniBase) {
+        $omnigraphCtx = [ordered]@{
+            command = 'npx'
+            args = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
+            env = [ordered]@{ OMNIGRAPH_BASE_URL = $omniBase; OMNIGRAPH_GRAPH_ID = 'autoos' }
+        }
+        Add-Member -InputObject $settings.context_servers -NotePropertyName 'omnigraph' -NotePropertyValue $omnigraphCtx -Force
+    } else {
+        Write-AutoOSLine 'Zed: OMNIGRAPH_BASE_URL is not set - skipping the omnigraph entry' -Level warn
     }
-    Add-Member -InputObject $settings.context_servers -NotePropertyName 'omnigraph' -NotePropertyValue $omnigraphCtx -Force
     $playwrightCtx = [ordered]@{
         command = 'npx'
         args = @('-y', (Get-AutoOSMcpPackage -Name 'playwright'))
@@ -4294,7 +4346,7 @@ function Invoke-AutoOSPostInstall {
 }
 
 Export-ModuleMember -Function `
-    Initialize-AutoOSInstaller, Get-AutoOSAnswer, Invoke-AutoOSProcess, Add-AutoOSPathEntry,
+    Initialize-AutoOSInstaller, Get-AutoOSAnswer, Get-AutoOSOmnigraphBaseUrl, Invoke-AutoOSProcess, Add-AutoOSPathEntry,
     Test-AutoOSLocalGateway, Get-AutoOSHostConfigPath, ConvertTo-AutoOSHostName,
     Get-AutoOSHostName, Get-AutoOSClientKeyField, Get-AutoOSClientKey,
     Read-AutoOSSecretsFile, Read-AutoOSApiSecrets, Resolve-AutoOSOllamaBaseUrl,
