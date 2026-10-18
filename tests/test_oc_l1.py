@@ -285,6 +285,60 @@ class ChildEnvValidationTest(unittest.TestCase):
                 self._resolved(agent_layer=bad)
 
 
+class ModelOptionsValidationTest(unittest.TestCase):
+    """OCGO-L1-FALLBACK: a lane's `model` block may carry an OPTIONAL `options`
+    map whose only key today is `reasoning_effort` (low|medium|high); anything
+    else - a non-dict, an unknown key, a value outside the set (bool/int/case
+    variants included) - is a config error that names the lane (exit 2)."""
+
+    def _resolved(self, options):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_test_") as td:
+            lane = make_lane(Path(td))
+            if options is not None:
+                lane["model"]["options"] = options
+            return oc_l1.validate_lane(lane, "l1test")
+
+    def test_absent_options_is_unchanged(self):
+        resolved = self._resolved(None)
+        self.assertNotIn("options", resolved["model"])
+
+    def test_each_valid_reasoning_effort_is_accepted(self):
+        for value in ("low", "medium", "high"):
+            resolved = self._resolved({"reasoning_effort": value})
+            self.assertEqual(resolved["model"]["options"],
+                             {"reasoning_effort": value})
+
+    def test_bad_options_are_refused_and_name_the_lane(self):
+        for bad in (
+            {"reasoning_effort": "extreme"},     # not a level
+            {"reasoning_effort": "HIGH"},        # case variant
+            {"reasoning_effort": True},          # bool
+            {"reasoning_effort": 1},             # int
+            {"reasoning_effort": None},          # null value
+            {"temperature": 0.2},                # unknown key
+            {"reasoning_effort": "low", "x": 1},  # extra key beside a valid one
+            "high",                              # not a dict
+            ["low"],                             # not a dict
+            True,                                # bool, not a dict
+        ):
+            with self.assertRaises(oc_l1.LaneError, msg="options=%r" % (bad,)) as cm:
+                self._resolved(bad)
+            self.assertIn("l1test", str(cm.exception))
+            self.assertIn("options", str(cm.exception))
+
+    def test_bad_options_exit_2_via_main(self):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_test_") as td:
+            tmp = Path(td)
+            lane = make_lane(tmp)
+            lane["model"]["options"] = {"reasoning_effort": "extreme"}
+            cfg = write_cfg(tmp, lane)
+            rc, _, err = run_main(["render", "--name", "l1test", "--config", str(cfg)])
+            self.assertEqual(rc, 2)
+            self.assertIn("l1test", err)
+            self.assertIn("options", err)
+            self.assertFalse((tmp / "scratch").exists())
+
+
 class DefaultConfigPathTest(unittest.TestCase):
     def test_per_platform(self):
         d = oc_l1.default_config_path()

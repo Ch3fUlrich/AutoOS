@@ -296,6 +296,14 @@ def render(lane, repo_config_path):
             "limit": dict(limit),
         }
     }
+    # OCGO-L1-FALLBACK: the lane's model.options.reasoning_effort rides the
+    # PRIMARY model only, in opencode's own camelCase spelling
+    # (reasoningEffort; @ai-sdk/openai-compatible sends it as
+    # reasoning_effort). The fallback entry gets nothing, and a lane without
+    # options renders exactly as before.
+    effort = (m.get("options") or {}).get("reasoning_effort")
+    if effort:
+        models[mid]["options"] = {"reasoningEffort": effort}
     if m.get("fallback_modelID"):
         fid = m["fallback_modelID"]
         # muse-spark seat 2026-10-06, finding 3: the fallback leg must NOT

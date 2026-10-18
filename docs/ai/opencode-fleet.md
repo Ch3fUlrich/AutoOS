@@ -94,6 +94,7 @@ The config is host-local and never committed: `${XDG_CONFIG_HOME:-~/.config}/aut
   canary, so such a lane could only ever exit 5 (D-665). `render` alone still accepts an empty list.
 - The scratch file uses opencode's OWN config schema (singular `provider`, models keyed by the gateway model id, a flat `mcp` map,
   `plugins`, `permission`, no `server` block), not the repo-file shape; `tests/test_oc_l1_render.py` pins it field by field.
+- Lane `model.options.reasoning_effort` (low|medium|high, optional, primary model only) renders as the model's `reasoningEffort` option.
 - The `autoos-agent` MCP entry gets `AUTOOS_WORKERS_DIR` (lane key `workers_dir`, default `<cwd>/logs/workers`): without it the MCP
   tools run `git rev-parse` with an inherited stdin and, under opencode's stdio transport, the first `ps` call hangs.
 - Six optional keys exist for a lane that orchestrates instead of writes (D-665, used by `oc_l2.py`): `permission` (a map merged

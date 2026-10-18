@@ -213,6 +213,28 @@ class RenderShapeTest(unittest.TestCase):
             self.assertNotIn("plugins", cfg3)
             self.assertNotIn("plugin", cfg3)
 
+    def test_reasoning_effort_renders_on_the_primary_model_only(self):
+        # OCGO-L1-FALLBACK: model.options.reasoning_effort renders as the
+        # PRIMARY model's camelCase reasoningEffort option (opencode's own
+        # schema; @ai-sdk/openai-compatible sends it as reasoning_effort) -
+        # the fallback model entry gets nothing.
+        cfg, _ = render(self.tmp, model={
+            "provider": "omniroute", "key": "k", "modelID": "vendor/Some-Model-1",
+            "fallback_key": "f", "fallback_modelID": "vendor/Some-Fallback-1",
+            "options": {"reasoning_effort": "high"}})
+        models = cfg["provider"]["omniroute"]["models"]
+        self.assertEqual(models["vendor/Some-Model-1"]["options"],
+                         {"reasoningEffort": "high"})
+        self.assertNotIn("options", models["vendor/Some-Fallback-1"])
+
+    def test_absent_options_renders_no_options_key_on_either_model(self):
+        # OCGO-L1-FALLBACK: without model.options the rendered config is
+        # byte-identical to before the option existed.
+        cfg, text = render(self.tmp)
+        for entry in cfg["provider"]["omniroute"]["models"].values():
+            self.assertEqual(set(entry), {"name", "limit"})
+        self.assertNotIn("reasoningEffort", text)
+
     def test_only_env_references_no_secret_values(self):
         os.environ["AUTOOS_OMNIROUTE_KEY"] = "sk-TEST-SECRET-DO-NOT-LEAK-000"
         os.environ["AUTOOS_OMNIROUTE_URL"] = "http://127.0.0.1:20128"
