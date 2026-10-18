@@ -26613,7 +26613,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(rc, self.agent.EXIT_HOST_ADMISSION, out + err)
         self.assertEqual(started, [], "the client never started")
         self.assertIn("queue or run on workstation", err)
-        self.assertIn("cap 6", err)
+        self.assertIn("cap 10", err)
         self.assertIn("floor 1024 MB", err)
         self.assertFalse(os.path.isdir(os.path.join(self.tmp, "sandboxes")))
 
