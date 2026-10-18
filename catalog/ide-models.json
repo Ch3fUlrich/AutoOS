@@ -510,6 +510,18 @@
       }
     },
     {
+      "id": "opencode-go/minimax-m3",
+      "name": "OpenCode Go · minimax-m3 (subscription, 128k)",
+      "context": 131072,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
       "id": "opencode-go/kimi-k3",
       "name": "OpenCode Go · kimi-k3 (subscription, 128k)",
       "context": 131072,

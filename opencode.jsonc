@@ -740,6 +740,11 @@
           "name": "OpenCode Go · glm-5.3-flash (subscription, 1M)",
           "limit": { "context": 1048576, "output": 32768 }
         },
+        "opencode-go/minimax-m3": {
+          "modelID": "opencode-go/minimax-m3",
+          "name": "OpenCode Go · minimax-m3 (subscription, 128k)",
+          "limit": { "context": 131072, "output": 16384 }
+        },
         "opencode-go/kimi-k3": {
           "modelID": "opencode-go/kimi-k3",
           "name": "OpenCode Go · kimi-k3 (subscription, 128k)",

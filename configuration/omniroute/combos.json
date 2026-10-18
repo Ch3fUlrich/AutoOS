@@ -326,6 +326,14 @@
       ]
     },
     {
+      "name": "opencode-go/minimax-m3",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "opencode-go/minimax-m3"
+      ]
+    },
+    {
       "name": "opencode-go/qwen3.8-flash",
       "strategy": "priority",
       "context": "200k",
