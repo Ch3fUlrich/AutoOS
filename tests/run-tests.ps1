@@ -10218,6 +10218,9 @@ print('%s|%s|%s|%s' % (
         'l1-orchestrator' = '1M'
         'l1-orchestrator-free-only' = '1M'
         'l1-orchestrator-paid' = '1M'
+        # WIN-COMBOS-CONTEXT-PIN 2026-10-18: routes.l1-orchestrator-clean in
+        # catalog/ai-registry.json renders 1M (clamp = smallest servable leg window).
+        'l1-orchestrator-clean' = '1M'
         'spark-1.3-contributor' = '1M'
         'l2-worker' = '128k'
         'l2-worker-clean' = '128k'; 'l2-worker-free-only' = '128k'; 'l2-orchestrator' = '1M'; 'l3-driver' = '128k'; 'l3-driver-clean' = '128k'; 'l3-driver-free-only' = '128k'; 't4-rag' = '128k'
