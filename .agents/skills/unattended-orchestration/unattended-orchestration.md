@@ -204,10 +204,15 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   `~/.gitconfig` (`url.insteadOf`, `core.sshCommand`, `core.hooksPath`) is not
   what a worker's git reads — which is also why
   the parent's ssh state cannot ride along with a spawned run.
-- **`--free`** maps every tier to a free seat through `OPENCODE_CONFIG_CONTENT`. The default
-  is the keyless promo `opencode/muse-spark-1.3-contributor-free`; when a gateway key
-  (`AUTOOS_OMNIROUTE_KEY`) is on the machine the chain prefers the OpenCode Go heads
-  (`omniroute/opencode-go/…`) ahead of it and falls back to the promo ids without one. Use it
+- **`--free`** maps every tier to a free seat through `OPENCODE_CONFIG_CONTENT`. The
+  model a plain `--free` run starts on is unchanged — the keyless promo
+  `opencode/muse-spark-1.3-contributor-free` (the first model of the chain is always
+  the `--free-model` given, and a caller-typed `omniroute/` pin under `--free` is
+  refused). The OpenCode Go heads (`omniroute/opencode-go/…`) are **fallthrough
+  steps**: with a gateway key (`AUTOOS_OMNIROUTE_KEY`) on the machine, a `--free` walk
+  that hits provider stops goes to the Go heads (glm-5.3-flash, minimax-m3, kimi-k3,
+  qwen3.8-flash) BEFORE the keyless promo ids; without a key the Go ids are dropped
+  from the chain and the walk stays on the promo ids. Use it
   to exercise the chain and the fences before any provider key exists. Both the promo models
   and the Go seats train on prompts, so `--free` is public-only work — `--free --clean` and a
   `privacy=sensitive` card are refused.
