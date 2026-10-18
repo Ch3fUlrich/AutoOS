@@ -1717,6 +1717,13 @@ IDE_MODEL_ORDER = (
     "faik-gpt-6-sol",
     "cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
     "samba/gpt-oss-120b", "samba/MiniMax-M3",
+    # OCGO-PREFER 2026-10-18 (operator D-1840/D-1919): the OpenCode Go pinned
+    # singles, listed here because render_ide() requires this constant to name
+    # every route id. Placed with the other pinned single-model routes and
+    # ahead of the dynamic auto* pickers, so every pre-existing menu position
+    # keeps its order.
+    "opencode-go/glm-5.3-flash",
+    "opencode-go/kimi-k3", "opencode-go/qwen3.8-flash",
     "auto/smart", "auto", "auto/cheap",
 )
 

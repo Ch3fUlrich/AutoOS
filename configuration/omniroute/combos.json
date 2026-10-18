@@ -311,6 +311,30 @@
       ]
     },
     {
+      "name": "opencode-go/glm-5.3-flash",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "opencode-go/glm-5.3-flash"
+      ]
+    },
+    {
+      "name": "opencode-go/kimi-k3",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "opencode-go/kimi-k3"
+      ]
+    },
+    {
+      "name": "opencode-go/qwen3.8-flash",
+      "strategy": "priority",
+      "context": "200k",
+      "models": [
+        "opencode-go/qwen3.8-flash"
+      ]
+    },
+    {
       "name": "or-laguna-s-2.1-free",
       "strategy": "priority",
       "context": "256k",
