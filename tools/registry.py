@@ -1706,10 +1706,9 @@ IDE_MODEL_ORDER = (
     # TORDER 2026-10-01: pinned single-provider credit combos (ovh x3 + vertex).
     # Listed here because render_ide() requires this constant to name every
     # route id (a route added without it raises rather than silently mis-ordering).
-    # OVHCODER-DROP 2026-10-08: ovh-qwen3-coder-30b left IDE_MODEL_ORDER with its
-    # route (OVH withdrew Qwen3-Coder-30B-A3B-Instruct upstream, live 404), so
-    # TORDER's ovh x3 is now ovh x2.
-    "ovh-qwen3.8-27b", "ovh-gpt-oss-120b",
+    # OVHCODER-DROP 2026-10-08 took the first of TORDER's three ovh ids; OVH-REMOVE
+    # 2026-10-18 (operator D-1816(12), credits empty) took the other two out with
+    # the `ovhcloud` provider, so no ovh-* combo is listed here any more.
     "vertex-gemini-3.8-flash",
     "mimo-v2.6-flash", "mimo-v2.6-pro",
     # FAIK 2026-10-07: pinned single-provider credit singles (operator: usable
