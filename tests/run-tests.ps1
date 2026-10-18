@@ -10157,10 +10157,11 @@ rendered = registry.render_omniroute(reg)
 routes = reg['routes']
 legless = sorted(rid for rid, r in routes.items()
                  if isinstance(r, dict) and not (r.get('legs') or []))
-print('%s|%s|%s' % (
+print('%s|%s|%s|%s' % (
     ','.join(c['name'] for c in rendered['combos']),
     ','.join(rendered.get('omitted') or []),
-    ','.join(legless)))
+    ','.join(legless),
+    ';'.join('%s=%s' % (c['name'], c['context']) for c in rendered['combos'])))
 '@
     $derivePath = Join-Path ([IO.Path]::GetTempPath()) "autoos-combos-derive-$PID.py"
     [IO.File]::WriteAllText($derivePath, $derive)
@@ -10171,6 +10172,17 @@ print('%s|%s|%s' % (
     Assert-Equal ($names -join ',') $parts[0] 'combos.json is not the registry render of servable tiers'
     $expectedOmitted = @($parts[1] -split ',' | Where-Object { $_ })
     $leglessRoutes = @($parts[2] -split ',' | Where-Object { $_ })
+    # The render's per-combo context, so a route the table below does not
+    # hand-pin is still checked against the registry rather than a literal here.
+    # OVH-REMOVE 2026-10-18 (D-1816(12)): the pinned ovh credit singles
+    # (ovh-qwen3.8-27b / ovh-gpt-oss-120b) left the table for this — they existed
+    # only while the registry carried them, and a removed route must not leave a
+    # stale expectation behind.
+    $renderedContexts = @{}
+    foreach ($kv in ($parts[3] -split ';' | Where-Object { $_ })) {
+        $k, $v = $kv -split '=', 2
+        $renderedContexts[$k] = $v
+    }
     # "retired" is the one home of the ids a rename left behind: apply prunes
     # them from the store, so a retired id must never also be a current combo.
     $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -10222,11 +10234,11 @@ print('%s|%s|%s' % (
         # states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in / 384K
         # out, so the 128k clamp was stale data (models.deepseek-flash).
         'deepseek-v4.1-flash' = '1M'
-        # TORDER pinned singles: free :free 128k/256k, credit ovh/vertex.
+        # TORDER pinned singles: free :free 128k/256k, credit vertex. Other
+        # pinned singles come from the registry (see $renderedContexts).
         'groq-qwen3.8-27b' = '128k'; 'hf-glm-5.2' = '128k'; 'hf-qwen3.8-27b' = '128k'
         'or-nemotron-3-super-free' = '256k'
         'or-north-mini-code-free' = '256k'; 'or-laguna-s-2.1-free' = '256k'
-        'ovh-qwen3.8-27b' = '128k'; 'ovh-gpt-oss-120b' = '128k'
         'vertex-gemini-3.8-flash' = '1M'
     }
     foreach ($c in $combos) {
@@ -10234,7 +10246,10 @@ print('%s|%s|%s' % (
         foreach ($m in $c.models) {
             Assert-True ($m -match '^[A-Za-z0-9@._/:-]+$') "$($c.name): bad ref '$m'"
         }
-        Assert-Equal $c.context $contexts[$c.name]
+        $expectedContext = $contexts[$c.name]
+        if ($null -eq $expectedContext) { $expectedContext = $renderedContexts[$c.name] }
+        Assert-True ($null -ne $expectedContext) "$($c.name): no expected context"
+        Assert-Equal $c.context $expectedContext
     }
     # Every route the render fails closed is named in "omitted" and is never a
     # combo (l1-orchestrator-clean since DSMAX 2026-09-27; deepseek-v4.1-flash
@@ -10255,9 +10270,11 @@ print('%s|%s|%s' % (
     # contract) is banned in l2-worker-clean/l3-driver-clean
     # (l1-orchestrator-clean is omitted, see above). Direct-key legs
     # (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
-    # on the same key, so they stay. L1-CLEAN 2026-10-05: ovhcloud is a
-    # metered credit-tier provider (providers.ovhcloud tier credit), not a
-    # free pool, so its Qwen leg is exempted from the /qwen free-pool ban.
+    # on the same key, so they stay. L1-CLEAN 2026-10-05: ovhcloud was a
+    # metered credit-tier provider (providers.ovhcloud tier credit), not a free
+    # pool, so its Qwen leg was exempted from the /qwen free-pool ban. The
+    # provider was removed (OVH-REMOVE 2026-10-18, D-1816(12)); the exemption
+    # stays so a stale combo carrying an ovh leg is still judged by the old rule.
     $freeRe = 'contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|(?<!ovh(cloud)?)/qwen'
     $noTrainRe = '-contributor$'
     foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
