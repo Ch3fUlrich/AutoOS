@@ -715,6 +715,11 @@
           "name": "Laguna-S-2.1 via OpenRouter :free",
           "limit": { "context": 262144, "output": 32768 }
         },
+        "ovh-qwen3.8-27b": {
+          "modelID": "ovh-qwen3.8-27b",
+          "name": "Qwen3.8-27B via OVH (credit)",
+          "limit": { "context": 128000, "output": 32768 }
+        },
         "vertex-gemini-3.8-flash": {
           "modelID": "vertex-gemini-3.8-flash",
           "name": "Gemini-3.8-Flash via Vertex (credit)",
