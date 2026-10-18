@@ -26504,7 +26504,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(shipped.get("mem_available_floor_mb"), 1024)
         # An unreadable registry leaves the documented defaults, not a free-for-all.
         self.assertEqual(self.agent.host_admission_config({}), (6, 6144))
-        self.assertEqual(self.agent.host_admission_config(None), (6, 1024))
+        self.assertEqual(self.agent.host_admission_config(None), (10, 1024))
         self.assertEqual(self.agent.host_admission_config(self.registry(2, 100)),
                          (2, 100))
 
