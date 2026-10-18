@@ -1703,13 +1703,13 @@ IDE_MODEL_ORDER = (
     # route (openrouter qwen3.8-27b:free measured 404 upstream).
     "or-north-mini-code-free", "or-laguna-s-2.1-free",
     "groq-qwen3.8-27b",
-    # TORDER 2026-10-01: pinned single-provider credit combos (ovh x3 + vertex).
-    # Listed here because render_ide() requires this constant to name every
+    # TORDER 2026-10-01: pinned single-provider credit combos (ovh x3 + vertex
+    # then). Listed here because render_ide() requires this constant to name every
     # route id (a route added without it raises rather than silently mis-ordering).
-    # OVHCODER-DROP 2026-10-08: ovh-qwen3-coder-30b left IDE_MODEL_ORDER with its
-    # route (OVH withdrew Qwen3-Coder-30B-A3B-Instruct upstream, live 404), so
-    # TORDER's ovh x3 is now ovh x2.
-    "ovh-qwen3.8-27b", "ovh-gpt-oss-120b",
+    # OVHCODER-DROP 2026-10-08 took the first ovh single with its route (OVH
+    # withdrew Qwen3-Coder-30B-A3B-Instruct upstream, live 404); OVH-REMOVE
+    # 2026-10-18 (operator D-1816(12), OVH credits empty) took the other two with
+    # the provider, leaving vertex-gemini-3.8-flash.
     "vertex-gemini-3.8-flash",
     "mimo-v2.6-flash", "mimo-v2.6-pro",
     # FAIK 2026-10-07: pinned single-provider credit singles (operator: usable
