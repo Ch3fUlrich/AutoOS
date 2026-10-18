@@ -4765,7 +4765,6 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
-        "ovhcloud/Qwen3.5-397B-A17B",
         "vertex/gemini-3.8-flash"
       ],
       "strategy": "priority",
@@ -4943,9 +4942,7 @@
       "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/Qwen3.8-27B (live ovh/Qwen3.8-27B 128000; registry adv 262000 from OVH catalogue page, renders 256k; priced per OVH pricing page, proven). Class credit. opencode/zed only (no openhands_profile, the groq-qwen/hf-glm precedent). B2-OVH 2026-10-01: surfaces 256k->128k to match measured 128000 window; contract live check passes without exception.",
       "class": "credit",
       "id": "ovh-qwen3.8-27b",
-      "legs": [
-        "ovhcloud/Qwen3.8-27B"
-      ],
+      "legs": [],
       "strategy": "priority",
       "surfaces": {
         "omniroute": {
@@ -4995,9 +4992,7 @@
       "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/gpt-oss-120b (live ovh/gpt-oss-120b 400000; registry shared model adv 131072, renders 128k; shared row price 0 = unpriced grant, unproven - renders but resolver refuses until priced, same stance as deepinfra credit tails). Class credit. opencode/zed only.",
       "class": "credit",
       "id": "ovh-gpt-oss-120b",
-      "legs": [
-        "ovhcloud/gpt-oss-120b"
-      ],
+      "legs": [],
       "strategy": "priority",
       "surfaces": {
         "omniroute": {
@@ -5009,12 +5004,6 @@
           "context_declared": "128k",
           "display_name": "GPT-OSS-120B via OVH (credit)",
           "output": 32768
-        }
-      },
-      "unavailable_legs": {
-        "ovhcloud/gpt-oss-120b": {
-          "$comment": "OVH-REPROBE 2026-10-08: the leg answers 200 again, but it is gated because it is UNPRICED, not because it is dead. ovhcloud/gpt-oss-120b resolves to the shared models.gpt-oss-120b row (cerebras/sambanova's free spelling), whose price_in/price_out are 0.0 with no price_source — providers.ovhcloud is tier credit, so combo-contract rule (h) fails the closed: a credit leg with no price row bills $0 while it drains the $200 grant invisibly (§7b delta b). The per-leg mechanism exists now (models.<id>.provider_prices.<provider>, LANE-PRICE-GAP/T1-CREDIT-FIX-6), it only needs a cited OVH number — none is readable: the OVH catalogue and prices pages were fetched 2026-10-08 and carry no per-token row for gpt-oss-120b. Gap filed in logs/briefs/denylegs-gaps.md. Re-open by filing provider_prices.ovhcloud with price_source + price_as_of.",
-          "available": false
         }
       }
     },
@@ -5084,7 +5073,6 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
-        "ovhcloud/Qwen3.8-27B",
         "vertex/gemini-3.8-flash"
       ],
       "surfaces": {

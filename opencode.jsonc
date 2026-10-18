@@ -603,7 +603,7 @@
         "l3-driver": {
           "modelID": "l3-driver",
           "name": "L3 · l3-driver · 128k",
-          "limit": { "context": 128000, "output": 16384 }
+          "limit": { "context": 131072, "output": 16384 }
         },
         "l3-driver-clean": {
           "modelID": "l3-driver-clean",
@@ -633,7 +633,7 @@
         "l3-implementer": {
           "modelID": "l3-implementer",
           "name": "L3 · l3-implementer · 128k",
-          "limit": { "context": 128000, "output": 8192 }
+          "limit": { "context": 131072, "output": 8192 }
         },
         "l3-implementer-clean": {
           "modelID": "l3-implementer-clean",
@@ -714,11 +714,6 @@
           "modelID": "or-laguna-s-2.1-free",
           "name": "Laguna-S-2.1 via OpenRouter :free",
           "limit": { "context": 262144, "output": 32768 }
-        },
-        "ovh-qwen3.8-27b": {
-          "modelID": "ovh-qwen3.8-27b",
-          "name": "Qwen3.8-27B via OVH (credit)",
-          "limit": { "context": 128000, "output": 32768 }
         },
         "vertex-gemini-3.8-flash": {
           "modelID": "vertex-gemini-3.8-flash",
@@ -801,7 +796,7 @@
         "l3-driver": {
           "modelID": "l3-driver",
           "name": "L3 · l3-driver · 128k",
-          "limit": { "context": 128000, "output": 16384 }
+          "limit": { "context": 131072, "output": 16384 }
         },
         "l3-driver-paid": {
           "modelID": "l3-driver-paid",
