@@ -10247,7 +10247,7 @@ print('%s|%s|%s|%s' % (
             Assert-True ($m -match '^[A-Za-z0-9@._/:-]+$') "$($c.name): bad ref '$m'"
         }
         $expectedContext = $contexts[$c.name]
-        if ($null -eq $expectedContext) { $expectedContext = $renderedContexts[$c.name] }
+        if ($null -eq $expectedContext -and $c.name -like 'ovh-*') { $expectedContext = $renderedContexts[$c.name] }  # only the legacy ovh singles (gone with the registry removal) are exempt from the hand pin; any other unpinned combo still fails
         Assert-True ($null -ne $expectedContext) "$($c.name): no expected context"
         Assert-Equal $c.context $expectedContext
     }
