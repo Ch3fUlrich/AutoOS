@@ -101,7 +101,7 @@
   },
   "models": {
     "MiniMax-M3": {
-      "$comment": "samba's leg (extension item 1, operator priority 2026-09-26T15:54Z), exact operator-given spelling/casing preserved. tier paid, trains_on_prompts true (conservative default, providers.samba's own $comment) - NOT private-safe, never added to a -clean route. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror sibling minimax-m2.7 entry already in this registry; price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet).",
+      "$comment": "samba's leg (extension item 1, operator priority 2026-09-26T15:54Z), exact operator-given spelling/casing preserved. OCGO-PREFER 2026-10-18 (operator D-1840/D-1919): the OpenCode Go plan serves these weights under the lowercase id `opencode-go/minimax-m3` (200 on 3/3 probe calls, median 1.27 s, Go /v1/models row reports context 1048576). The leg keeps the spelling the gateway answers and resolve_leg() fold-matches it to THIS key — a second, lowercase model key would break rule 1b's case-fold uniqueness. context_advertised stays samba's 131072 (context is per model, not per provider — see models.'qwen/qwen3.8-27b'), so the Go route declares 128k rather than the Go row's wider number. tier paid, trains_on_prompts true (conservative default, providers.samba's own $comment) - NOT private-safe, never added to a -clean route. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror sibling minimax-m2.7 entry already in this registry; price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet).",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -639,7 +639,7 @@
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "kimi-k3": {
-      "$comment": "cheaperinference resale leg (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "$comment": "cheaperinference resale leg (own billing, NOT a free tier). OCGO-PREFER 2026-10-18 (operator D-1840/D-1919): the same weights answer the OpenCode Go plan as `opencode-go/kimi-k3` (200 on 3/3 probe calls, median 1.44 s) and the Go /v1/models row reports context 1048576 — wider than this row's 131072, which is cheaperinference's. context_advertised is per model, not per provider (no provider-scoped context field exists yet; the same gap models.'qwen/qwen3.8-27b' documents), so the row keeps 131072 and the Go route declares 128k rather than promising what only one of the two providers was measured answering. Go trains on request data (providers.opencode_go.trains_on_prompts true, operator D-1919), so that leg is never private-safe. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -1504,6 +1504,23 @@
       "reasoning": false,
       "tool_calls": "proven"
     },
+    "qwen3.8-flash": {
+      "$comment": "OCGO-PREFER (operator D-1840/D-1919, 2026-10-18 Go probe): the OpenCode Go copy, spelled exactly as the gateway serves it (`opencode-go/qwen3.8-flash`, answered 200 on 3/3 calls, median 1.54 s, /v1/models row reported context 200000). This is the bare key the Go leg resolves to; `qwen/qwen3.8-flash` above is OpenRouter's vendor-prefixed spelling of the same weights and stays untouched. context_advertised 200000 is the probe-measured gateway row; context_usable is the 50% default, not a measurement. output_max 16384 mirrors the sibling qwen rows (the probe reported none) — the registry's conservative unknown, not evidence the model stops there. reasoning false and effort_ladder empty follow the family's existing pattern and are unmeasured; tool_calls stays 'unproven' because no tool-call trial was answered for this id. Price 0.0 with a price_source: the plan is a flat subscription (providers.opencode_go.tier), so nothing is metered per token. trains_on_prompts inherits providers.opencode_go = true, which tools/registry.py private_safe() reads as never private-safe.",
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "qwen3.8-flash",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "price_source": "OpenCode Go: a flat subscription seat, no per-token API price is metered (the providers.opencode_go shape) — 0.0 here means 'not metered', not 'free' (2026-10-18 Go probe)",
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
     "qwen7b": {
       "$comment": "Free.ai's model id (BRIEF FREEAI 2026-09-27), spelled exactly as served ('qwen7b'); it answers with Qwen/Qwen3-30B-A3B-Instruct (L0 measured 2026-09-27: POST https://api.free.ai/v1/chat/completions -> 200, OpenAI-compatible). context_advertised/output_max are a conservative SIBLING DEFAULT, not a live measurement - no context field was sourced from /v1/models, so 131072/16384 mirror the family's other entries (qwen-3.8-27b, qwen/qwen3.8-27b). price 0.0 is the free tier's real price, not an unsourced placeholder. tool_calls unproven (no probe run) and reasoning false match the Qwen family default; neither is evidence the model lacks reasoning.",
       "context_advertised": 131072,
@@ -1888,7 +1905,7 @@
       "tool_calls": "unproven"
     },
     "glm-5.3-flash": {
-      "$comment": "GLM55 2026-10-05 (operator): implementation/review leg via the OpenCode connection - live oc/glm-5.3-flash at context 1000000, thinking + tool_calling in the catalog's capabilities (2026-10-05). Front band in the worker/driver/researcher combos: an expiring grant is used up first (D-346 pattern). Site data: unmeasured - never referenced by a -clean route.",
+      "$comment": "GLM55 2026-10-05 (operator): implementation/review leg via the OpenCode connection - live oc/glm-5.3-flash at context 1000000, thinking + tool_calling in the catalog's capabilities (2026-10-05). Front band in the worker/driver/researcher combos: an expiring grant is used up first (D-346 pattern). Site data: unmeasured - never referenced by a -clean route. OCGO-PREFER 2026-10-18 (operator D-1840/D-1919): the preferred copy of these weights is now the OpenCode Go leg `opencode-go/glm-5.3-flash` — 200 on 3/3 probe calls, median 0.98 s (the fastest Go id answered), and its /v1/models row reports context 1000000, the window this row already records. Go trains on request data (providers.opencode_go.trains_on_prompts, operator D-1919), so the Go leg is never private-safe.",
       "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
@@ -2897,6 +2914,38 @@
         "leg": "opencode-zen/deepseek-v4.1-flash",
         "paid": true,
         "source": "operator 2026-09-27T20:3xZ (REVROUTE)"
+      },
+      {
+        "client": "opencode",
+        "model": "omniroute/opencode-go/glm-5.3-flash",
+        "family": "zhipu",
+        "leg": "opencode-go/glm-5.3-flash",
+        "paid": false,
+        "source": "operator D-1840/D-1919 2026-10-18 (OCGO-PREFER); Go probe 2026-10-18"
+      },
+      {
+        "client": "opencode",
+        "model": "omniroute/opencode-go/minimax-m3",
+        "family": "minimax",
+        "leg": "opencode-go/minimax-m3",
+        "paid": false,
+        "source": "operator D-1840/D-1919 2026-10-18 (OCGO-PREFER); Go probe 2026-10-18"
+      },
+      {
+        "client": "opencode",
+        "model": "omniroute/opencode-go/kimi-k3",
+        "family": "moonshot",
+        "leg": "opencode-go/kimi-k3",
+        "paid": false,
+        "source": "operator D-1840/D-1919 2026-10-18 (OCGO-PREFER); Go probe 2026-10-18"
+      },
+      {
+        "client": "opencode",
+        "model": "omniroute/opencode-go/qwen3.8-flash",
+        "family": "qwen",
+        "leg": "opencode-go/qwen3.8-flash",
+        "paid": false,
+        "source": "operator D-1840/D-1919 2026-10-18 (OCGO-PREFER); Go probe 2026-10-18"
       },
       {
         "client": "opencode",
@@ -3962,6 +4011,20 @@
       "trains_on_prompts": null,
       "available": true,
       "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'opencode' is registered and active, its catalog exposes 121 canonical model id(s) under prefix 'opencode', 0 answered a tool-call trial end to end. Statuses measured: 400 'not available in the active live catalog for provider opencode' x121 (the free noauth tier serves only the opencode client, not gateway chat completions). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. GLM55 2026-10-05 (operator): glm-5.3-flash is served through this connection; the live catalog's canonical spelling is oc/* (opencode/* is the alias row), so model_prefix 'oc' makes gateway_ref() emit oc/glm-5.3-flash. The ZCode provider stays a local-process spawn (not installed on the gateway host): the operator's 'ZCode glm-5.3-flash' grant lands through this OpenCode connection centrally; the workstation holds the ZCode connection. GLM55 2026-10-05 (operator): available:false LIFTED - the FREEKEYS-1 400s measured 2026-09-28 predate the connection's current catalog (live /v1/models now exposes 129 oc/* rows incl. oc/glm-5.3-flash, thinking + tool_calling). Only legs a route references become servable; glm-5.3-flash is the first and its tool_calls stay 'unproven' until a live seat quotes one."
+    },
+    "opencode_go": {
+      "id": "opencode_go",
+      "omniroute_id": "opencode-go",
+      "model_prefix": null,
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "litellm_auth": "gateway_connection",
+      "api_base": null,
+      "provider_data": null,
+      "tier": "subscription",
+      "trains_on_prompts": true,
+      "available": true,
+      "$comment": "OCGO-PREFER (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go plan is live and healthy on both gateways and is PREFERRED over the opencode free models for routes and seats — an operator decision, recorded here rather than measured. tier `subscription`, exactly like the other seat-metered providers (providers.cc / cxa / devin / xiaomi_mimo): a flat plan with no per-token API price, so no credit_usd/monthly_cap_usd row and its model rows carry 0.0 plus a price_source that says 'not metered'. model_prefix is null like providers.zen, so gateway_ref() returns the leg verbatim and the gateway sees the lowercase id the probe answered (`opencode-go/<model>`), not a canonicalised model key — which is why the MiniMax leg is `opencode-go/minimax-m3` and fold-resolves to models.'MiniMax-M3'. trains_on_prompts is TRUE by operator D-1919 ('Allow paid endpoints that train on request data', enabled in the Go workspace) — a decision, not a vendor term this lane read. No gate was changed to admit it: tools/registry.py private_safe() refuses any provider whose trains_on_prompts is not exactly false, so no `opencode-go/*` leg can enter a privacy=sensitive card's reviewer list or a -clean route, and the rule holds by construction rather than by this comment. The same fact answers from the other side: several Go models return 400 'This Go model trains on request data' to a plain chat completion. Evidence (2026-10-18 Go probe of the live connection: 77 ids listed, 39 answered 200 on 3/3 calls with cost 0; served id == requested id; best base ids by median latency): glm-5.3-flash 0.98 s, minimax-m3 1.27 s, kimi-k3 1.44 s, qwen3.8-flash 1.54 s. NOT registered here: deepseek-v4.1-flash — the Go copy answers 400 'requires Global regions', so the plan's DeepSeek id has no usable leg and the old `opencode-zen/deepseek-v4.1-flash` reviewer row keeps no Go replacement (the muse-spark contributor ids likewise 400 behind the training gate). litellm_env is null: the key lives in the gateway connection, so tools/mirror-litellm-env.py keeps no .env line for it. `litellm_auth` is declared for the same reason Vertex AI declares `service_account` (T1-CLEAN-4 K6): the credential is the OmniRoute connection's, so no `os.environ/OPENCODE_GO_API_KEY` exists to mirror, and tools/sync-router-tiers.py's no_litellm_key_providers() keeps every `opencode-go/*` leg out of a managed LiteLLM block instead of emitting an unset variable (the META_API_KEY startup hazard) — the data field does the work the older GATEWAY_ONLY list does by hand for cc and xiaomi_mimo."
     },
     "ai_horde": {
       "id": "ai_horde",
@@ -5324,6 +5387,90 @@
             "max_output_tokens": 65536,
             "reasoning": true
           }
+        }
+      }
+    },
+    "opencode-go/glm-5.3-flash": {
+      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): OpenCode Go is preferred over the opencode free models for routes and seats. Exists so `--model omniroute/opencode-go/glm-5.3-flash` is addressable — declared_models() in tools/autoos-agent.py reads opencode.jsonc's modelIDs, and only a named route, never a bare leg, renders one (same mechanism as routes.'cheaperinference/kimi-k3' and routes.'samba/MiniMax-M3'). Leg is the probe-verified gateway spelling (providers.opencode_go carries model_prefix null, so gateway_ref() passes it through); context/output follow models.'glm-5.3-flash' (the Go /v1/models row reported context 1000000, 200 on 3/3, median 0.98 s — the fastest Go id answered). Not added to a tier band: an l2-* combo needs a measured prompt cache from every leg (tools/combo-contract.py rule (f)) and the Go probe measured none, and TIER_ORDER ranks subscription with paid, so a Go leg in a free-headed band would trail the free legs anyway (the routes.'l2-worker' MIMO note is the precedent). It is a seat and a reviewer, not a band. trains_on_prompts true (operator D-1919) keeps it off every -clean route and every privacy=sensitive card by tools/registry.py private_safe().",
+      "class": "cheap",
+      "id": "opencode-go/glm-5.3-flash",
+      "legs": [
+        "opencode-go/glm-5.3-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "OpenCode Go · glm-5.3-flash (subscription, 1M)",
+          "output": 32768
+        }
+      }
+    },
+    "opencode-go/minimax-m3": {
+      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go copy of MiniMax M3, preferred over the opencode free models for routes and seats. The leg is spelled as the gateway answers it (`opencode-go/minimax-m3`, lowercase, 200 on 3/3, median 1.27 s) and resolve_leg() fold-matches it to models.'MiniMax-M3' — the registry keeps ONE key per model (rule 1b case-fold uniqueness), so the lowercase row is not added. Named route for the same reason as routes.'samba/MiniMax-M3': only a route renders an opencode.jsonc modelID, which is what makes `--model omniroute/opencode-go/minimax-m3` resolvable. Window is the shared model row's 131072 (samba's), not the Go row's measured 1048576, until a provider-scoped context field exists (see models.'MiniMax-M3' $comment). Not in a tier band: no measured prompt cache (rule (f)) and subscription ranks with paid (rule (b)). trains_on_prompts true (D-1919) keeps it off -clean routes and sensitive cards.",
+      "class": "cheap",
+      "id": "opencode-go/minimax-m3",
+      "legs": [
+        "opencode-go/minimax-m3"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "OpenCode Go · minimax-m3 (subscription, 128k)",
+          "output": 16384
+        }
+      }
+    },
+    "opencode-go/kimi-k3": {
+      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go copy of Kimi K3, preferred over the opencode free models for routes and seats (200 on 3/3, median 1.44 s; the Go /v1/models row reports 1048576 while the shared models.'kimi-k3' row records cheaperinference's 131072, so this surface declares 128k — the registry narrows promises to what every leg of it is measured taking, and there is no provider-scoped context field yet). Distinct from routes.'cheaperinference/kimi-k3', which is the same weights on a credit grant: two ids so a seat can name which bill it wants. Named route because only a route renders the opencode.jsonc modelID that makes `--model omniroute/opencode-go/kimi-k3` resolvable. Not in a tier band (no measured prompt cache for rule (f); subscription ranks with paid for rule (b)). trains_on_prompts true (D-1919) keeps it off -clean routes and sensitive cards.",
+      "class": "cheap",
+      "id": "opencode-go/kimi-k3",
+      "legs": [
+        "opencode-go/kimi-k3"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "OpenCode Go · kimi-k3 (subscription, 128k)",
+          "output": 32768
+        }
+      }
+    },
+    "opencode-go/qwen3.8-flash": {
+      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go copy of Qwen3.8 Flash, preferred over the opencode free models for routes and seats (200 on 3/3, median 1.54 s, Go /v1/models row reports context 200000). Distinct from models.'qwen/qwen3.8-flash' (OpenRouter's vendor-prefixed spelling, referenced by no route since the 2026-09-26 BYOK withdrawal): this leg resolves to the new bare key models.'qwen3.8-flash'. Named route for the opencode.jsonc modelID, as in routes.'samba/MiniMax-M3'. tool_calls stays 'unproven' — the Go probe answered chat completions, not a tool-call trial — so a card that needs tools is not sent here on evidence it does not have. Not in a tier band (rule (f) cache gate; subscription ranks with paid under rule (b)). trains_on_prompts true (D-1919) keeps it off -clean routes and sensitive cards.",
+      "class": "cheap",
+      "id": "opencode-go/qwen3.8-flash",
+      "legs": [
+        "opencode-go/qwen3.8-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 200000,
+          "context_declared": "200k",
+          "display_name": "OpenCode Go · qwen3.8-flash (subscription, 200k)",
+          "output": 16384
         }
       }
     },

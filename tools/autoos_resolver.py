@@ -2044,9 +2044,39 @@ def _leg_model_id(leg):
     return leg.partition("/")[2]
 
 
+def _model_key(leg, registry):
+    """The ``models`` key a "<provider>/<model>" leg names, or None.
+
+    Exact key first, then the case fold, because ``tools/registry.py``'s
+    ``resolve_leg`` -- the authority that decides whether a leg exists at all --
+    matches the model half exactly then folds. This module must not be the one
+    place that disagrees with it: OCGO-PREFER 2026-10-18 added the leg
+    ``opencode-go/minimax-m3`` (the probe measured that exact id answering 200,
+    and an unlisted id answers 400) against the row keyed ``MiniMax-M3``, the
+    samba spelling, because rule 1b keeps one row per model instead of a second
+    lowercase row for the other gateway's casing. Indexing the literal leg half
+    raised ``KeyError: 'minimax-m3'`` on a leg the registry accepts.
+    """
+    # ci_key short-circuits on an exact hit; the fold runs only for a leg with no exact key.
+    return ci_key((registry.get("models") or {}), _leg_model_id(leg))
+
+
+def _model_entry(leg, registry):
+    """The ``models.<id>`` row a "<provider>/<model>" leg names.
+
+    Raises KeyError naming the id when nothing matches, as ``registry["models"]
+    [literal]`` did: a hallucinated leg still fails loudly instead of planning
+    against no row.
+    """
+    key = _model_key(leg, registry)
+    if key is None:
+        raise KeyError(_leg_model_id(leg))
+    return registry["models"][key]
+
+
 def _model_family(leg, registry):
     """The ``family`` of the model half of a "<provider>/<model>" leg string."""
-    return registry["models"][_leg_model_id(leg)].get("family")
+    return _model_entry(leg, registry).get("family")
 
 
 def _next_rung(ladder, current):
@@ -2618,7 +2648,7 @@ def _escalation(chosen, scores, registry, card=None, env=None):
     """
     holds = budget_holds_claude(card or {}, registry, env,
                                 kind="escalation")
-    model = registry["models"][_leg_model_id(chosen["leg"])]
+    model = _model_entry(chosen["leg"], registry)
     ladder = model["effort_ladder"]
     logic_step = {
         "on": "logic",
@@ -2828,8 +2858,8 @@ def plan(card, features, client_state, registry, overlay, track_record,
     defer_time, defer_reason = defer_until(card, chosen, registry, now)
     reason_parts.append(defer_reason)
 
-    model_id = _leg_model_id(chosen["leg"])
-    model = registry["models"][model_id]
+    model_id = _model_key(chosen["leg"], registry) or _leg_model_id(chosen["leg"])
+    model = _model_entry(chosen["leg"], registry)
     route_class = registry["routes"][chosen["route"]]["class"]
 
     reviewers = _select_reviewers(scores, survivors, chosen, card, bucket_name,

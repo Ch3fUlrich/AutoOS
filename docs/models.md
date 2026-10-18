@@ -83,6 +83,10 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `l3-review-transcript` | cheap | 1M | (none) |
 | `mimo-v2.6-flash` | cheap | 1M | xiaomi_mimo `mimo-v2.6-flash` |
 | `mimo-v2.6-pro` | mid | 1M | xiaomi_mimo `mimo-v2.6-pro` |
+| `opencode-go/glm-5.3-flash` | cheap | 1M | opencode-go `glm-5.3-flash` |
+| `opencode-go/kimi-k3` | cheap | 128k | opencode-go `kimi-k3` |
+| `opencode-go/minimax-m3` | cheap | 128k | opencode-go `minimax-m3` |
+| `opencode-go/qwen3.8-flash` | cheap | 200k | opencode-go `qwen3.8-flash` |
 | `opus-5-5` | frontier | 1M | ~~antigravity `claude-opus-5-5-medium`~~ (unavailable) |
 | `or-laguna-s-2.1-free` | free | 256k | openrouter `poolside/laguna-s-2.1:free` |
 | `or-nemotron-3-super-free` | free | 256k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` |

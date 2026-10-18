@@ -510,6 +510,54 @@
       }
     },
     {
+      "id": "opencode-go/glm-5.3-flash",
+      "name": "OpenCode Go · glm-5.3-flash (subscription, 1M)",
+      "context": 1048576,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "opencode-go/minimax-m3",
+      "name": "OpenCode Go · minimax-m3 (subscription, 128k)",
+      "context": 131072,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "opencode-go/kimi-k3",
+      "name": "OpenCode Go · kimi-k3 (subscription, 128k)",
+      "context": 131072,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "opencode-go/qwen3.8-flash",
+      "name": "OpenCode Go · qwen3.8-flash (subscription, 200k)",
+      "context": 200000,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
       "id": "auto/smart",
       "name": "bootstrap: auto smart (no combo needed)",
       "context": 131072,

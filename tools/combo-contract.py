@@ -159,6 +159,19 @@ def resolve_leg(leg, registry):
     if pid is None:
         raise ValueError("leg %r: no provider matches prefix %r" % (leg, prefix))
     if model_id not in (registry.get("models") or {}):
+        # OCGO-PREFER 2026-10-18: parity with tools/registry.py's resolve_leg,
+        # which this copy duplicates ("Stdlib only" at the top of this file).
+        # registry.py fold-matches a leg's model half against the ONE case-folded
+        # model key (rule 1b keeps those keys unique under folding; T1-CLEAN-3
+        # retired a case-variant row on exactly that mechanism). The first live
+        # combo leg that needs it is `opencode-go/minimax-m3`: the gateway serves
+        # the lowercase id, while the registry's single key for those weights is
+        # 'MiniMax-M3'. Rule (c) still fails a leg no model answers at all, and
+        # still fails an ambiguous fold — one match only, never the closest one.
+        folded = [k for k in (registry.get("models") or {})
+                  if k.lower() == model_id.lower()]
+        if len(folded) == 1:
+            return pid, folded[0]
         raise ValueError("leg %r: no model matches %r" % (leg, model_id))
     return pid, model_id
 
