@@ -758,6 +758,44 @@ class FailClosedPrivateSafeTests(unittest.TestCase):
         self.assertTrue(safe, reason)
 
 
+class OpenCodeGoNeverPrivateSafeTests(unittest.TestCase):
+    """OCGO-PREFER 3 (operator D-1923 prefers the Go seats for a `--free` RUN);
+    the preference is a routing decision, never a privacy one. OpenCode Go
+    trains on request data (`providers.opencode_go.trains_on_prompts`, operator
+    D-1919), so `private_safe()` must reject every `opencode-go/*` leg and no
+    `-clean` route may carry one — which is what keeps promoting a Go head to be
+    a `--free` run's STARTING model from widening what `--free` may serve: the
+    flag stays public-only work, exactly as it was with the promo ids."""
+
+    GO_LEGS = ["opencode-go/glm-5.3-flash", "opencode-go/minimax-m3",
+               "opencode-go/kimi-k3", "opencode-go/qwen3.8-flash"]
+
+    def test_the_go_provider_declares_that_it_trains(self):
+        reg = load_registry()
+        self.assertIs(reg["providers"]["opencode_go"]["trains_on_prompts"], True)
+
+    def test_every_opencode_go_leg_is_rejected_by_private_safe(self):
+        reg = load_registry()
+        for leg in self.GO_LEGS:
+            provider_id, model_id = registry.resolve_leg(leg, reg)
+            safe, reason = registry.private_safe(provider_id, model_id, reg)
+            self.assertFalse(safe, "%s must never be private-safe" % leg)
+            self.assertTrue(reason, "%s refused without a reason" % leg)
+
+    def test_no_clean_route_carries_an_opencode_go_leg(self):
+        # Every route whose name ends in the clean suffix, exemptions included:
+        # registry.CLEAN_ROUTE_EXEMPTIONS excuses l1-orchestrator-clean's
+        # OpenRouter CONTRIBUTOR leg, and nothing else about it.
+        reg = load_registry()
+        offenders = [(route_id, leg)
+                     for route_id, route in (reg.get("routes") or {}).items()
+                     if route_id.endswith(registry.CLEAN_ROUTE_SUFFIX)
+                     for leg in (route.get("legs") or [])
+                     if str(leg).startswith("opencode-go/")]
+        self.assertEqual([], offenders,
+                         "a -clean route carries a trainable Go leg: %s" % offenders)
+
+
 class CleanRouteExemptionTests(unittest.TestCase):
     """PRIV2 brief 2026-09-26: rule 3 checks every leg of a -clean route,
     including one flagged in unavailable_legs -- the OmniRoute gateway does

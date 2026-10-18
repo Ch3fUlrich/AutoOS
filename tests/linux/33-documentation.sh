@@ -598,7 +598,7 @@ if it "autoos-agent: --clean picks the twin, undeclared models and --free --clea
     assert_eq "$rc" "2"
 fi
 
-if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
+if it "autoos-agent --free never prints a key value and --isolate plans a fenced clone, never a worktree"; then
     # SEAT-PYTEST (P4) exports PYTHONPATH only where the seat python3's own user site
     # exists under $HOME and passes the safety checks, so the real HOME would decide
     # the answer (D-852: keep it off the host). A fresh empty HOME has no user site on
@@ -632,8 +632,15 @@ if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never 
     # ChildRuntimeDirTests asserts the private dirs are created 0700.
     assert_eq "$missing" ""
     assert_eq "$leaked" ""
-    if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then
-        fail "free/isolated plan mentions a worktree or the gateway key"
+    # OCGO-PREFER 3 (D-1923): a plain --free run with a gateway key on the machine
+    # now STARTS on an OpenCode Go head, so the credential's NAME legitimately
+    # appears in the env line. What must never appear is its VALUE — the plan
+    # prints names only. This now matches the Windows twin, which bans only
+    # `worktree add|never-print-this-key` (tests/run-tests.ps1, "autoos-agent
+    # plans tier runs without spawning or leaking a key"). Key-free runs still
+    # carry neither, pinned in tests/test_autoos_spawner.py FreePreferredHeadTests.
+    if grep -q "worktree add\|never-print-this-key" <<<"$out"; then
+        fail "free/isolated plan mentions a worktree or prints the gateway key value"
     else pass; fi
 fi
 
