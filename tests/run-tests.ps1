@@ -10254,6 +10254,14 @@ print('%s|%s|%s|%s' % (
         'or-nemotron-3-super-free' = '256k'
         'or-north-mini-code-free' = '256k'; 'or-laguna-s-2.1-free' = '256k'
         'vertex-gemini-3.8-flash' = '1M'
+        # OCGO-PREFER 2026-10-18: the OpenCode Go pinned singles, each read off
+        # `python3 tools/registry.py render omniroute` (combos[].context from
+        # routes.* in catalog/ai-registry.json), which equals combos.json:
+        # glm-5.3-flash 1M, kimi-k3 128k (shared models.kimi-k3 window),
+        # qwen3.8-flash 200k.
+        'opencode-go/glm-5.3-flash' = '1M'
+        'opencode-go/kimi-k3' = '128k'
+        'opencode-go/qwen3.8-flash' = '200k'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
