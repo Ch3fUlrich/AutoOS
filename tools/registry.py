@@ -1288,6 +1288,10 @@ OMNIROUTE_RETIRED_IDS = [
     # deleted and the id retires so apply prunes the live combo, the same way
     # ORQWEN404 retired or-qwen3.8-27b-free.
     "ovh-qwen3-coder-30b",
+    # OVH-REMOVE 2026-10-18 (operator D-1816(12)): OVH credits empty — the
+    # ovhcloud provider and its two single-leg routes are deleted from the
+    # registry; the ids retire so apply prunes the live combos.
+    "ovh-qwen3.8-27b", "ovh-gpt-oss-120b",
 ]
 
 
