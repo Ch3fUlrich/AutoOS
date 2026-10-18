@@ -159,6 +159,19 @@ def resolve_leg(leg, registry):
     if pid is None:
         raise ValueError("leg %r: no provider matches prefix %r" % (leg, prefix))
     if model_id not in (registry.get("models") or {}):
+        # Parity with tools/registry.py's resolve_leg, which this copy
+        # duplicates ("Stdlib only" at the top of this file): match the model
+        # half exactly, then by the unique case fold. Rule 1b keeps model keys
+        # unique under folding, but a leg carries its provider's own wire
+        # casing -- the first live combo leg that needs it is
+        # `opencode-go/minimax-m3` (the Go gateway serves the lowercase id while
+        # the registry's single key for those weights is 'MiniMax-M3'). One match
+        # only: an ambiguous fold (two keys equal ignoring case) and a no-match
+        # both still raise, never the closest key.
+        folded = [k for k in (registry.get("models") or {})
+                  if isinstance(k, str) and k.lower() == model_id.lower()]
+        if len(folded) == 1:
+            return pid, folded[0]
         raise ValueError("leg %r: no model matches %r" % (leg, model_id))
     return pid, model_id
 

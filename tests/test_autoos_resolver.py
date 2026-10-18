@@ -6149,5 +6149,60 @@ class QoderSigninProbeTests(unittest.TestCase):
         self.assertNotIn("r-qoder", removed)
 
 
+class CaseFoldModelLookupTests(unittest.TestCase):
+    """OCGO-PREFER 1b: the resolver's model lookup folds case, matching
+    ``tools/registry.py``'s ``resolve_leg``.
+
+    The gateway serves ``opencode-go/minimax-m3`` while the registry keeps ONE
+    row keyed ``MiniMax-M3`` (rule 1b keeps model keys unique under folding, so
+    there is no second lowercase row). Indexing the literal leg half raised
+    ``KeyError: 'minimax-m3'`` on a leg the registry accepts. These pin the four
+    outcomes on synthetic registries -- no real Go data.
+    """
+
+    def reg(self, extra_models=None):
+        models = {
+            "MiniMax-M3": {"id": "MiniMax-M3", "family": "minimax",
+                           "context_usable": {"tokens": 131072,
+                                              "source": "default"}},
+        }
+        models.update(extra_models or {})
+        return {
+            "providers": {"go": {"id": "go", "tier": "subscription",
+                                 "trains_on_prompts": True}},
+            "models": models,
+            "routes": {},
+        }
+
+    def test_a_leg_differing_only_by_case_resolves_to_the_row(self):
+        reg = self.reg()
+        self.assertEqual(r._model_key("go/minimax-m3", reg), "MiniMax-M3")
+        self.assertEqual(r._model_family("go/minimax-m3", reg), "minimax")
+        self.assertEqual(r._model_entry("go/minimax-m3", reg)["family"],
+                         "minimax")
+
+    def test_the_exact_key_wins_when_both_an_exact_and_a_folded_row_exist(self):
+        # A row spelled exactly like the leg half must beat the case-fold row.
+        reg = self.reg(extra_models={
+            "minimax-m3": {"id": "minimax-m3", "family": "exact",
+                           "context_usable": {"tokens": 1, "source": "default"}}})
+        self.assertEqual(r._model_key("go/minimax-m3", reg), "minimax-m3")
+        self.assertEqual(r._model_family("go/minimax-m3", reg), "exact")
+
+    def test_an_ambiguous_fold_still_fails_loudly(self):
+        # 'MiniMax-M3' and 'minimax-m3' both fold to 'minimax-m3'; a leg spelled
+        # in a third casing matches neither exactly, so the fold is ambiguous.
+        reg = self.reg(extra_models={
+            "minimax-m3": {"id": "minimax-m3", "family": "twin",
+                           "context_usable": {"tokens": 1, "source": "default"}}})
+        with self.assertRaises(ValueError):
+            r._model_family("go/MINIMAX-M3", reg)
+
+    def test_a_hallucinated_leg_still_raises_keyerror_naming_the_id(self):
+        with self.assertRaises(KeyError) as ctx:
+            r._model_family("go/does-not-exist", self.reg())
+        self.assertIn("does-not-exist", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
