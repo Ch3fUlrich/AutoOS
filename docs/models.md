@@ -87,8 +87,6 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `or-laguna-s-2.1-free` | free | 256k | openrouter `poolside/laguna-s-2.1:free` |
 | `or-nemotron-3-super-free` | free | 256k | openrouter `nvidia/nemotron-3-super-120b-a12b:free` |
 | `or-north-mini-code-free` | free | 256k | openrouter `cohere/north-mini-code:free` |
-| `ovh-gpt-oss-120b` | credit | 128k | (none) |
-| `ovh-qwen3.8-27b` | credit | 128k | (none) |
 | `samba/MiniMax-M3` | cheap | 128k | ~~samba `MiniMax-M3`~~ (unavailable) |
 | `samba/gpt-oss-120b` | cheap | 128k | ~~samba `gpt-oss-120b`~~ (unavailable) |
 | `spark-1.3-contributor` | cheap | 1M | ~~meta_api `muse-spark-1.3-contributor`~~ (unavailable) → ~~opencode-zen `muse-spark-1.3-contributor-free`~~ (unavailable) |
