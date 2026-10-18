@@ -71,6 +71,51 @@
   ],
   "combos": [
     {
+      "name": "class-128k",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "vertex/gemini-3.8-flash",
+        "opencode-go/kimi-k3",
+        "mimo/mimo-v2.6-flash"
+      ],
+      "contextRequirements": {
+        "minContextWindow": 128000,
+        "contextFilterMode": "strict"
+      },
+      "targetTimeoutMs": 180000
+    },
+    {
+      "name": "class-1m",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash",
+        "opencode-go/glm-5.3-flash",
+        "mimo/mimo-v2.6-flash"
+      ],
+      "contextRequirements": {
+        "minContextWindow": 1000000,
+        "contextFilterMode": "strict"
+      },
+      "targetTimeoutMs": 600000
+    },
+    {
+      "name": "class-256k",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "vertex/gemini-3.8-flash",
+        "opencode-go/glm-5.3-flash",
+        "mimo/mimo-v2.6-flash"
+      ],
+      "contextRequirements": {
+        "minContextWindow": 256000,
+        "contextFilterMode": "strict"
+      },
+      "targetTimeoutMs": 300000
+    },
+    {
       "name": "gemini-3.8-flash",
       "strategy": "priority",
       "context": "1M",

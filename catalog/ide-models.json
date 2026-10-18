@@ -581,6 +581,57 @@
           "zed"
         ]
       }
+    },
+    {
+      "id": "class-128k",
+      "name": "Class · class-128k · 128k",
+      "context": 128000,
+      "output": 16384,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "class-256k",
+      "name": "Class · class-256k · 256k",
+      "context": 256000,
+      "output": 16384,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "class-1m",
+      "name": "Class · class-1m · 1M",
+      "context": 1000000,
+      "output": 16384,
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
     }
   ]
 }

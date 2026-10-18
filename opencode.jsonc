@@ -769,6 +769,36 @@
           "modelID": "auto/cheap",
           "name": "bootstrap: auto cheapest",
           "limit": { "context": 131072, "output": 16384 }
+        },
+        "class-128k": {
+          "modelID": "class-128k",
+          "name": "Class · class-128k · 128k",
+          "limit": { "context": 128000, "output": 16384 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
+        },
+        "class-256k": {
+          "modelID": "class-256k",
+          "name": "Class · class-256k · 256k",
+          "limit": { "context": 256000, "output": 16384 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
+        },
+        "class-1m": {
+          "modelID": "class-1m",
+          "name": "Class · class-1m · 1M",
+          "limit": { "context": 1000000, "output": 16384 },
+          "variants": [
+            { "id": "low", "settings": { "reasoningEffort": "low" } },
+            { "id": "medium", "settings": { "reasoningEffort": "medium" } },
+            { "id": "high", "settings": { "reasoningEffort": "high" } }
+          ]
         }
         // AUTOOS-MANAGED-END omniroute
       }
