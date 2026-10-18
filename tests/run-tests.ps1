@@ -10230,6 +10230,17 @@ print('%s|%s|%s|%s' % (
         # RENDERFIX 2026-10-01: the researcher-tier lane added this route; it is
         # the t4 tier like t4-rag, so it clamps to its lowest leg (128k).
         'l2-researcher' = '128k'
+        # WIN-COMBOS-CONTEXT-PIN round 2 2026-10-18: the rest of the routes the
+        # render serves, each read off `python3 tools/registry.py render
+        # omniroute` (combos[].context from catalog/ai-registry.json), which
+        # equals combos.json. The gate stays fail-fast: a served combo missing
+        # from this table still fails.
+        'l2-orchestrator-clean' = '1M'; 'l2-worker-1m' = '1M'
+        'l3-driver-1m' = '1M'; 'l3-driver-256k' = '256k'
+        'l3-implementer' = '128k'; 'l3-implementer-clean' = '128k'
+        'l3-researcher' = '1M'; 'l3-researcher-clean' = '1M'
+        'l3-review-codebase' = '1M'; 'l3-review-diff' = '128k'; 'l3-review-tests' = '1M'
+        'mimo-v2.6-flash' = '1M'; 'mimo-v2.6-pro' = '1M'
         'gemini-3.8-flash' = '1M'; 'opus-4-6' = '1M'
         # GLM55 wave 2026-10-05: new opus-5-5 single (antigravity opus, 1M).
         'opus-5-5' = '1M'
