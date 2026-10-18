@@ -8,6 +8,11 @@ combos) and `catalog/ai-registry.json` route classes. Sections marked
 superseded by §A and the generated table in `docs/models.md`; history kept for
 provenance, not as setup. OS-32 approval for gateway applies stands.
 
+OVH REMOVED 2026-10-18 (D-1816(12)): `ovhcloud` ran out of credits, so the
+provider, its routes (`ovh-gpt-oss-120b`, `ovh-qwen3.8-27b`) and its models are
+gone from the registry. §A and §G below are dated re-renders and keep their
+`ovh/*` legs as snapshots, marked row by row — do not treat them as setup.
+
 ## 2026-09-30 refresh — status at a glance (historical)
 
 Re-read against `configuration/omniroute/combos.json` (15 curated combos,
@@ -154,18 +159,18 @@ boot, curated combos to work.
 | `l1-orchestrator-paid` | `meta-api/muse-spark-1.3-contributor` → `deepseek/deepseek-flash` | cheap, 1M | **keep** (rendered from registry l1-orchestrator-paid) |
 | `l2-orchestrator` | `agy/claude-sonnet-5-5-medium` → `vertex/gemini-3.8-flash` → `deepseek/deepseek-flash` | frontier, 1M | **keep** (rendered from registry l2-orchestrator) |
 | `l2-researcher` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `free-ai/qwen7b` | free, 128k | **keep** (rendered from registry l2-researcher) |
-| `l2-worker` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `groq/qwen/qwen3.8-27b` → `openrouter/nvidia/nemotron-3-super-120b-a12b:free` → `groq/openai/gpt-oss-20b` → `openrouter/cohere/north-mini-code:free` → `groq/openai/gpt-oss-120b` → `openrouter/poolside/laguna-s-2.1:free` → `free-ai/qwen7b` → `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `meta-api/muse-spark-1.3-contributor` → `deepseek/deepseek-flash` | mid, 128k | **keep** (rendered from registry l2-worker) |
-| `l2-worker-clean` | `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `deepseek/deepseek-flash` | mid, 128k | **keep** (rendered from registry l2-worker-clean) |
+| `l2-worker` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `groq/qwen/qwen3.8-27b` → `openrouter/nvidia/nemotron-3-super-120b-a12b:free` → `groq/openai/gpt-oss-20b` → `openrouter/cohere/north-mini-code:free` → `groq/openai/gpt-oss-120b` → `openrouter/poolside/laguna-s-2.1:free` → `free-ai/qwen7b` → `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `meta-api/muse-spark-1.3-contributor` → `deepseek/deepseek-flash` | mid, 128k | **keep** (rendered from registry l2-worker); `ovh/*` legs removed 2026-10-18 (D-1816(12)) |
+| `l2-worker-clean` | `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `deepseek/deepseek-flash` | mid, 128k | **keep** (rendered from registry l2-worker-clean); `ovh/*` legs removed 2026-10-18 (D-1816(12)) |
 | `l2-worker-free-only` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `groq/qwen/qwen3.8-27b` → `openrouter/nvidia/nemotron-3-super-120b-a12b:free` → `groq/openai/gpt-oss-20b` → `openrouter/cohere/north-mini-code:free` → `groq/openai/gpt-oss-120b` → `openrouter/poolside/laguna-s-2.1:free` → `free-ai/qwen7b` | free, 128k | **keep** (rendered from registry l2-worker-free-only) |
-| `l3-driver` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `groq/qwen/qwen3.8-27b` → `openrouter/nvidia/nemotron-3-super-120b-a12b:free` → `groq/openai/gpt-oss-20b` → `openrouter/cohere/north-mini-code:free` → `groq/openai/gpt-oss-120b` → `openrouter/poolside/laguna-s-2.1:free` → `free-ai/qwen7b` → `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `mistral/mistral-code-latest` → `meta-api/muse-spark-1.3-contributor` → `deepseek/deepseek-flash` | cheap, 128k | **keep** (rendered from registry l3-driver) |
-| `l3-driver-clean` | `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `deepseek/deepseek-flash` | cheap, 128k | **keep** (rendered from registry l3-driver-clean) |
+| `l3-driver` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `groq/qwen/qwen3.8-27b` → `openrouter/nvidia/nemotron-3-super-120b-a12b:free` → `groq/openai/gpt-oss-20b` → `openrouter/cohere/north-mini-code:free` → `groq/openai/gpt-oss-120b` → `openrouter/poolside/laguna-s-2.1:free` → `free-ai/qwen7b` → `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `mistral/mistral-code-latest` → `meta-api/muse-spark-1.3-contributor` → `deepseek/deepseek-flash` | cheap, 128k | **keep** (rendered from registry l3-driver); `ovh/*` legs removed 2026-10-18 (D-1816(12)) |
+| `l3-driver-clean` | `ovh/gpt-oss-120b` → `ovh/Qwen3.8-27B` → `vertex/gemini-3.8-flash` → `deepseek/deepseek-flash` | cheap, 128k | **keep** (rendered from registry l3-driver-clean); `ovh/*` legs removed 2026-10-18 (D-1816(12)) |
 | `l3-driver-free-only` | `ainative/llama-4-maverick` → `gemini/gemini-3.8-flash` → `groq/qwen/qwen3.8-27b` → `openrouter/nvidia/nemotron-3-super-120b-a12b:free` → `openrouter/poolside/laguna-s-2.1:free` → `groq/openai/gpt-oss-20b` → `openrouter/cohere/north-mini-code:free` → `groq/openai/gpt-oss-120b` → `free-ai/qwen7b` | free, 128k | **keep** (rendered from registry l3-driver-free-only) |
 | `opus-5-5` | `agy/claude-opus-5-5-medium` | frontier, 1M | **keep** (rendered from registry opus-5-5) |
 | `or-laguna-s-2.1-free` | `openrouter/poolside/laguna-s-2.1:free` | free, 256k | **keep** (rendered from registry or-laguna-s-2.1-free) |
 | `or-nemotron-3-super-free` | `openrouter/nvidia/nemotron-3-super-120b-a12b:free` | free, 256k | **keep** (rendered from registry or-nemotron-3-super-free) |
 | `or-north-mini-code-free` | `openrouter/cohere/north-mini-code:free` | free, 256k | **keep** (rendered from registry or-north-mini-code-free) |
-| `ovh-gpt-oss-120b` | `ovh/gpt-oss-120b` | credit, 128k | **keep** (rendered from registry ovh-gpt-oss-120b) |
-| `ovh-qwen3.8-27b` | `ovh/Qwen3.8-27B` | credit, 128k | **keep** (rendered from registry ovh-qwen3.8-27b) |
+| `ovh-gpt-oss-120b` | `ovh/gpt-oss-120b` | credit, 128k | **removed 2026-10-18 (D-1816(12))** — `ovhcloud` credits empty, route deleted; row kept as a snapshot |
+| `ovh-qwen3.8-27b` | `ovh/Qwen3.8-27B` | credit, 128k | **removed 2026-10-18 (D-1816(12))** — `ovhcloud` credits empty, route deleted; row kept as a snapshot |
 | `spark-1.3-contributor` | `meta-api/muse-spark-1.3-contributor` | cheap, 1M | **keep** (rendered from registry spark-1.3-contributor) |
 | `t4-rag` | `cohere/command-a-03-2025` → `cohere/command-r-plus-08-2024` | cheap, 128k | **keep** (rendered from registry t4-rag) |
 | `vertex-gemini-3.8-flash` | `vertex/gemini-3.8-flash` | credit, 1M | **keep** (rendered from registry vertex-gemini-3.8-flash) |
@@ -197,9 +202,11 @@ groq legs 413 on large contexts, so point qwen at 128k+ combos).
 Order rationale (applies to every banded combo): trial → free →
 credits → paid, deepseek LAST, no free leg after a paid leg. Position
 numbers are 1-based indices into the committed `models` array: low =
-tried first. Singles (`ovh-*`, `groq-qwen3.8-27b`, `gemini-3.8-flash`,
+tried first. Singles (`groq-qwen3.8-27b`, `gemini-3.8-flash`,
 `vertex-gemini-3.8-flash`, `deepseek-v4.1-flash`, `spark-1.3-contributor`)
-are single-leg by design. `omitted` routes render no combo.
+are single-leg by design. `omitted` routes render no combo. The `ovh-*`
+singles left this list when the `ovhcloud` provider was removed 2026-10-18
+(D-1816(12), credits empty).
 
 | `SambaNova` | — | tier free, available False | none | no legs reference it |
 | `agentrouter` | — | tier free, available False | none | no legs reference it |
@@ -256,9 +263,9 @@ are single-leg by design. `omitted` routes render no combo.
 | `openrouter` | `meta/muse-spark-1.3-contributor` | paid $1e-07 | — | not wired into any band (see route $comments) |
 | `openrouter` | `nvidia/nemotron-3-super-120b-a12b:free` | free | l2-worker (#4); l2-worker-free-only (#4); l3-driver (#4); l3-driver-free-only (#4); or-nemotron-3-super-free (#1) |  |
 | `openrouter` | `poolside/laguna-s-2.1:free` | free | l2-worker (#8); l2-worker-free-only (#8); l3-driver (#8); l3-driver-free-only (#5); or-laguna-s-2.1-free (#1) |  |
-| `ovhcloud` | `Qwen3-Coder-30B-A3B-Instruct` | credit $7e-08 | — | OVHCODER-DROP 2026-10-08: OVH withdrew the id (live 404), its seat route is deleted and retired; the model row stays for pricing history |
-| `ovhcloud` | `Qwen3.8-27B` | credit $4.7e-07 | l2-worker (#11); l2-worker-clean (#2); l3-driver (#11); l3-driver-clean (#2); ovh-qwen3.8-27b (#1) |  |
-| `ovhcloud` | `gpt-oss-120b` | credit | l2-worker (#10); l2-worker-clean (#1); l3-driver (#10); l3-driver-clean (#1); ovh-gpt-oss-120b (#1) |  |
+| `ovhcloud` | `Qwen3-Coder-30B-A3B-Instruct` | credit $7e-08 | — | OVHCODER-DROP 2026-10-08: OVH withdrew the id (live 404), its seat route is deleted and retired; the model row stayed for pricing history until the whole provider was removed 2026-10-18 (D-1816(12)) |
+| `ovhcloud` | `Qwen3.8-27B` | credit $4.7e-07 | l2-worker (#11); l2-worker-clean (#2); l3-driver (#11); l3-driver-clean (#2); ovh-qwen3.8-27b (#1) | REMOVED 2026-10-18 (D-1816(12)): credits empty, provider/routes/models deleted from the registry; the combo refs are the 2026-10-07 snapshot |
+| `ovhcloud` | `gpt-oss-120b` | credit | l2-worker (#10); l2-worker-clean (#1); l3-driver (#10); l3-driver-clean (#1); ovh-gpt-oss-120b (#1) | REMOVED 2026-10-18 (D-1816(12)): as above |
 | `pollinations` | — | tier free, available False | none | no legs reference it |
 | `qoder_ai` | — | tier free, available False | none | no legs reference it |
 | `requesty` | — | tier free, available False | none | no legs reference it |
@@ -304,9 +311,10 @@ Managed blocks mirror the registry tiers (served today): `t1-orchestrator`,
 `t3-driver`, `t3-driver-clean`, `t3-driver-free-only`, `t3-driver-paid`,
 `t4-rag`, `t4-researcher`, `spark-1.3-contributor`, `deepseek-v4.1-flash`,
 `gemini-3.8-flash`, `groq-qwen3.8-27b`, `or-laguna-s-2.1-free`,
-`or-nemotron-3-super-free`, `or-north-mini-code-free`, `ovh-gpt-oss-120b`,
-`ovh-qwen3.8-27b`. `ovh-qwen3-coder-30b` left this list when OVHCODER-DROP
-2026-10-08 deleted the route (OVH withdrew the model upstream, live 404).
+`or-nemotron-3-super-free`, `or-north-mini-code-free`. `ovh-qwen3-coder-30b`
+left this list when OVHCODER-DROP 2026-10-08 deleted the route (OVH withdrew the
+model upstream, live 404); `ovh-gpt-oss-120b` and `ovh-qwen3.8-27b` left it when
+the `ovhcloud` provider was removed 2026-10-18 (D-1816(12), credits empty).
 `t2-worker-paid`/`t3-driver-paid`
 have no gateway combo (hand-curated `deepseek/deepseek-flash` only). The
 `-free-only` groups mirror the gateway combos of the same name minus legs
@@ -486,7 +494,7 @@ Standalone `qwen` CLI returns 401 (connects to Alibaba Cloud, not the gateway).
 | OpenCode Free | `opencode` (noauth pool) | Refs incl `oc/gemini-3.8-flash`, `oc/glm-5.3`, `oc/deepseek-v4-flash-free` | auto/* replacement or t3 tail | connection added, test FAILS key check — needs a live chat probe with client key to prove the pool serves |
 | Kilo/Codex/Cursor | `kilocode`/`codex`/`cursor-cli` | subscription models | only with those subscriptions | tell me which you hold |
 
-## F. FREEKEYS-2: free/credit provider onboarding (2026-09-30 — historical snapshot; vertex/ovh/ainative since onboarded with registry rows, scaleway/nebius removed)
+## F. FREEKEYS-2: free/credit provider onboarding (2026-09-30 — historical snapshot; vertex/ovh/ainative since onboarded with registry rows, scaleway/nebius removed, `ovhcloud` removed again 2026-10-18 (D-1816(12)): credits empty)
 
 Program set (operator, 2026-09-29; full probe plan in the routing repo,
 `PROBE-PLAN.md`). Recon, names-only: live `api-keys.yml` entries exist for
@@ -501,7 +509,7 @@ exists (alias-or-lane ruling pending).
 |---|---|---|---|
 | `vertex_ai` | $250 credit | **live** — `vertex/`, 65 models | none yet |
 | `nscale` | $5 credit | — | none |
-| `ovhcloud` | $200 credit | — | none |
+| `ovhcloud` | $200 credit | — | none — onboarded later, removed 2026-10-18 (D-1816(12)) |
 | `kilo` `ainative` `siliconflow` `sealion` `routeway` `requesty` `aion_labs` `agnes_ai` `pollinations` | trial/keyed | — | none |
 | `felo` `uncloseai` `opencode` `ai_horde` | keyless | — | none |
 
