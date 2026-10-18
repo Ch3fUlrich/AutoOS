@@ -26500,7 +26500,7 @@ class HostAdmissionTests(unittest.TestCase):
 
     def test_host_admission_limits_come_from_the_shipped_registry(self):
         shipped = SHIPPED_REGISTRY.get("host_admission") or {}
-        self.assertEqual(shipped.get("max_live_workers"), 6)
+        self.assertEqual(shipped.get("max_live_workers"), 10)
         self.assertEqual(shipped.get("mem_available_floor_mb"), 1024)
         # An unreadable registry leaves the documented defaults, not a free-for-all.
         self.assertEqual(self.agent.host_admission_config({}), (6, 6144))
