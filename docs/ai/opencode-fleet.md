@@ -95,6 +95,12 @@ The config is host-local and never committed: `${XDG_CONFIG_HOME:-~/.config}/aut
 - The scratch file uses opencode's OWN config schema (singular `provider`, models keyed by the gateway model id, a flat `mcp` map,
   `plugins`, `permission`, no `server` block), not the repo-file shape; `tests/test_oc_l1_render.py` pins it field by field.
 - Lane `model.options.reasoning_effort` (low|medium|high, optional, primary model only) renders as the model's `reasoningEffort` option.
+- Lane `model.provider` is exactly `omniroute` (the gateway, as above) or `opencode-go` — opencode's own built-in Go provider, which
+  authenticates directly and needs no key and no URL anywhere. For `opencode-go` the `modelID` is the BARE id (the renderer pins the
+  `opencode-go/<id>` model itself and writes a minimal provider block with no `npm`, `apiKey`, `baseURL` or headers for it), while
+  `fallback_key`/`fallback_modelID` still name an omniroute gateway model and render as their own gateway block with the usual
+  `{env:...}` placeholders — the example config's `l1-direct-go` lane shows the shape. Any other provider value is a config error
+  (exit 2, naming the lane and both choices).
 - The `autoos-agent` MCP entry gets `AUTOOS_WORKERS_DIR` (lane key `workers_dir`, default `<cwd>/logs/workers`): without it the MCP
   tools run `git rev-parse` with an inherited stdin and, under opencode's stdio transport, the first `ps` call hangs.
 - Six optional keys exist for a lane that orchestrates instead of writes (D-665, used by `oc_l2.py`): `permission` (a map merged

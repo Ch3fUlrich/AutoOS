@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from test_oc_l1 import make_lane, run_main, write_cfg  # noqa: E402
+from test_oc_l1 import SECRET_ENV_VALUE, make_lane, run_main, write_cfg  # noqa: E402
 from oc_l1_render import PERMISSIONS  # noqa: E402
 
 
@@ -246,6 +246,71 @@ class RenderShapeTest(unittest.TestCase):
         self.assertNotIn("sk-TEST-SECRET-DO-NOT-LEAK-000", text)
         self.assertNotIn("http://127.0.0.1:20128", text)
         self.assertIn("{env:AUTOOS_OMNIROUTE_KEY}", text)
+
+
+class OpenCodeGoRenderTest(unittest.TestCase):
+    """An opencode-go primary pins the model and writes no key/URL (OCGO-L1-FALLBACK)."""
+
+    GO_MODEL = {
+        "provider": "opencode-go",
+        "key": "Go direct model",
+        "modelID": "gemini-4-argon-contributor",
+    }
+    GO_WITH_FALLBACK = dict(
+        GO_MODEL, fallback_key="gateway fallback", fallback_modelID="glm-5.3"
+    )
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory(prefix="oc_l1_render_go_")
+        self.tmp = Path(self._td.name)
+
+    def tearDown(self):
+        self._td.cleanup()
+
+    def _render(self, model):
+        return render(self.tmp, model=model)[0]
+
+    def test_primary_pinned_to_opencode_go(self):
+        cfg = self._render(dict(self.GO_MODEL))
+        self.assertEqual(cfg["model"], "opencode-go/gemini-4-argon-contributor")
+
+    def test_no_key_or_url_written_for_opencode_go(self):
+        cfg = self._render(dict(self.GO_MODEL))
+        provider = cfg["provider"]["opencode-go"]
+        self.assertNotIn("apiKey", provider)
+        self.assertNotIn("npm", provider)
+        self.assertNotIn("baseURL", provider)
+        self.assertNotIn("options", provider["models"]["gemini-4-argon-contributor"])
+
+    def test_reasoning_effort_rendered_when_set(self):
+        cfg = self._render(dict(self.GO_MODEL, options={"reasoning_effort": "high"}))
+        opts = cfg["provider"]["opencode-go"]["models"][
+            "gemini-4-argon-contributor"
+        ]["options"]
+        self.assertEqual(opts["reasoningEffort"], "high")
+
+    def test_fallback_renders_omniroute_provider_block(self):
+        cfg = self._render(dict(self.GO_WITH_FALLBACK))
+        omni = cfg["provider"]["omniroute"]
+        self.assertEqual(list(omni["models"]), ["glm-5.3"])
+        self.assertEqual(omni["options"]["apiKey"], "{env:AUTOOS_OMNIROUTE_KEY}")
+        self.assertEqual(omni["options"]["baseURL"], "{env:AUTOOS_OMNIROUTE_URL}/v1")
+        self.assertIn("headers", omni["options"])
+
+    def test_no_fallback_renders_no_omniroute_provider(self):
+        cfg = self._render(dict(self.GO_MODEL))
+        self.assertNotIn("omniroute", cfg["provider"])
+
+    def test_never_writes_a_literal_secret(self):
+        os.environ["AUTOOS_OMNIROUTE_URL"] = "http://127.0.0.1:20128"
+        os.environ["AUTOOS_OMNIROUTE_KEY"] = SECRET_ENV_VALUE
+        try:
+            _, text = render(self.tmp, model=dict(self.GO_WITH_FALLBACK))
+        finally:
+            for k in ("AUTOOS_OMNIROUTE_URL", "AUTOOS_OMNIROUTE_KEY"):
+                os.environ.pop(k, None)
+        self.assertNotIn(SECRET_ENV_VALUE, text)
+        self.assertEqual(text.count("opencode-go/"), 1)  # the pinned model only
 
 
 if __name__ == "__main__":

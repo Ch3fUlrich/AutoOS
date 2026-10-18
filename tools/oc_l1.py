@@ -271,11 +271,23 @@ def validate_lane(lane, name):
     model = lane.get("model")
     if not isinstance(model, dict):
         raise LaneError("lane '%s': 'model' object is required" % name)
-    if model.get("provider") != "omniroute":
-        raise LaneError("lane '%s': model.provider must be 'omniroute'" % name)
+    provider = model.get("provider")
+    if provider not in ("omniroute", "opencode-go"):
+        raise LaneError(
+            "lane '%s': model.provider must be 'omniroute' (the gateway) or "
+            "'opencode-go' (opencode's built-in Go provider)" % name
+        )
     mkey, mid = model.get("key"), model.get("modelID")
     if not isinstance(mkey, str) or not mkey or not isinstance(mid, str) or not mid:
         raise LaneError("lane '%s': model.key and model.modelID are required" % name)
+    if provider == "opencode-go" and (
+        mid.startswith("opencode-go/") or any(ch.isspace() for ch in mid)
+    ):
+        raise LaneError(
+            "lane '%s': model.modelID must be the BARE id for provider "
+            "'opencode-go' (no 'opencode-go/' prefix, no whitespace; the "
+            "prefix is added by the renderer)" % name
+        )
     fkey, fid = model.get("fallback_key"), model.get("fallback_modelID")
     if (fkey is None) != (fid is None):
         raise LaneError(
