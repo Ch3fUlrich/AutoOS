@@ -3631,16 +3631,42 @@ def free_overlay(model: str) -> dict:
 FREE_MODEL_POLICY_KEY = "free_client_models"
 
 
-def free_model_chain(policy: dict | None, client: str, first: str) -> list:
+def _spawn_needs_gateway_key(client, free: bool, model) -> bool:
+    """Whether this launch's child must be handed the gateway credential.
+
+    A gateway-client run does, always. A `--free` run does ONLY when the model it
+    is about to launch is a gateway id (an `omniroute/…` head of the free chain,
+    e.g. an OpenCode Go seat): the keyless promo ids (`opencode/…-free`) and every
+    own-account client need no key. `free_model_chain` keeps a gateway id out of the
+    `--free` chain when no gateway key is available, so a keyless `--free` run never
+    reaches the branch that would ask for one — and an authenticated gateway
+    (`--tier`/`--card`) run is unchanged (`not free` short-circuits).
+    """
+    return bool(getattr(client, "gateway", False)) and (
+        not free or str(model or "").startswith("omniroute/"))
+
+
+def free_model_chain(policy: dict | None, client: str, first: str,
+                     has_gateway_key: bool = True) -> list:
     """The free models to try in order: `first`, then the client's registry
     list that `first` did not already name. A missing policy section (an old
     registry, a registry that failed to load) leaves the single given model -
-    exactly today's one-shot --free run."""
+    exactly today's one-shot --free run.
+
+    `has_gateway_key` (OCGO-PREFER): the free list can lead with gateway heads
+    (`omniroute/opencode-go/…`, an OpenCode Go seat that rides the gateway and
+    needs AUTOOS_OMNIROUTE_KEY). When the run has no gateway key they are dropped
+    here, so a keyless `--free` run walks only onto the keyless promo ids it can
+    actually serve instead of onto a head that dies on 'Authentication required'.
+    """
     chain = [first]
     listed = ((policy or {}).get(FREE_MODEL_POLICY_KEY) or {}).get(client) or []
     for model in listed:
-        if model and model not in chain:
-            chain.append(model)
+        if not model or model in chain:
+            continue
+        if not has_gateway_key and model.startswith("omniroute/"):
+            continue
+        chain.append(model)
     return chain
 
 
@@ -14030,7 +14056,15 @@ def cmd_run(args, cfg: dict) -> int:
             except (OSError, ValueError):
                 registry = None  # an unreadable registry leaves one free model
         free_policy = (registry or {}).get("policy") or {}
-        free_chain = free_model_chain(free_policy, client.name, args.free_model)
+        # OCGO-PREFER: the free chain can lead with gateway heads (an
+        # OpenCode Go seat). They ride the gateway and need AUTOOS_OMNIROUTE_KEY,
+        # so read whether a key is on this machine BEFORE choosing the chain:
+        # with no key, free_model_chain drops them and the run stays on the
+        # keyless promo ids it can serve. (client_key only reads env/file — it
+        # sends no request and prints no value.)
+        free_gateway_key_available = bool(client_key(ROOT)) if client.gateway else False
+        free_chain = free_model_chain(free_policy, client.name, args.free_model,
+                                      has_gateway_key=free_gateway_key_available)
         if fence["families"]:
             head = fence_free_head(free_chain, registry, fence)
             if head is None:
@@ -14124,7 +14158,7 @@ def cmd_run(args, cfg: dict) -> int:
         lean_note, lean_refusal = lean_decision(client.name, route)
         if lean_refusal is not None:
             return refuse(lean_refusal)
-    uses_key = client.gateway and not args.free
+    uses_key = _spawn_needs_gateway_key(client, args.free, plan["model"])
     # D-1214: the promo credential is decided per plan, before the dry run names
     # the env and before the first launch builds it. A `--free` run with no Zen
     # key on the machine proceeds anonymously as it always did, with one warning.
@@ -14697,6 +14731,17 @@ def cmd_run(args, cfg: dict) -> int:
                         args, cfg, plan, free_chain, excluded_free_models,
                         benched=set(provider_cooldown), fence=fence,
                         registry=live_registry or registry)
+                    # OCGO-PREFER: the next free model may be a gateway head (an
+                    # OpenCode Go seat). Landing on one makes this re-run a gateway
+                    # launch, so recompute the key decision the first launch made
+                    # and mint the credential lazily. free_model_chain only keeps a
+                    # gateway head in the chain when a key is on this machine, so
+                    # this finds one; a walk back onto a keyless promo id drops it.
+                    if next_plan is not None:
+                        uses_key = _spawn_needs_gateway_key(
+                            client, args.free, next_plan["model"])
+                        if uses_key and not key:
+                            key = client_key(ROOT)
                 elif plan["route"].get("resolver") and plan["sandbox"]:
                     # RATELIMITRETRY: after a 429 the next leg is picked for a
                     # DIFFERENT provider, so walk past a candidate that every one of

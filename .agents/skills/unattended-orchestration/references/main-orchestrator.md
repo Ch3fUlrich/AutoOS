@@ -89,7 +89,9 @@ R-orch-14. Put both ids in every L2 brief.
   and result in the DONE note, then scale.
 
 **Seat-model evidence (D-260 / D-261).** A review seat run keyless on the opencode path
-(`autoos-agent.py run --free --free-model opencode/<model>`) cannot be taken at its word. A gate
+(`autoos-agent.py run --free --free-model opencode/<model>`) cannot be taken at its word. (With a
+gateway key the free chain leads with an OpenCode Go head — `omniroute/opencode-go/<model>` — which
+is a gateway seat, so verify it `--gateway` response-side, as below, not request-side.) A gate
 review proved opencode stores **no provider-response model** in its session db: the per-turn
 `data.model` it writes is the model the CLI was *started* with — **request-side** evidence only. So
 a keyless seat is checked three ways (D-261) and all three must equal `--expect`: (a) the run

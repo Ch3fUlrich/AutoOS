@@ -7497,6 +7497,13 @@ FREE_MODELS = ["opencode/nemotron-3-ultra-free",
                "opencode/muse-spark-1.3-contributor-free",
                "opencode/mimo-v2.6-flash-free"]
 
+# OCGO-PREFER: the OpenCode Go gateway heads that lead the --free chain when a
+# gateway key is on the machine, in probe-latency order (operator D-1840/D-1919).
+GO_FREE_HEADS = ["omniroute/opencode-go/glm-5.3-flash",
+                 "omniroute/opencode-go/minimax-m3",
+                 "omniroute/opencode-go/kimi-k3",
+                 "omniroute/opencode-go/qwen3.8-flash"]
+
 
 class FreeModelFallthroughTests(unittest.TestCase):
     """SPAWNFREE (S2) item 1: a --free run's model is not a route, so the
@@ -7531,6 +7538,52 @@ class FreeModelFallthroughTests(unittest.TestCase):
 
     def test_a_chain_with_no_policy_is_the_single_given_model(self):
         self.assertEqual(self.agent.free_model_chain(None, "opencode", "m-x"), ["m-x"])
+
+    def test_the_go_heads_lead_the_chain_when_a_gateway_key_is_available(self):
+        # OCGO-PREFER: an OpenCode Go head is a gateway seat; with a key on the
+        # machine it is preferred over the keyless promo ids and leads them in the
+        # probe-latency order the registry lists (glm, minimax, kimi, qwen).
+        chain = self.agent.free_model_chain(
+            {"free_client_models": {"opencode": GO_FREE_HEADS + FREE_MODELS}},
+            "opencode", FREE_MODELS[1], has_gateway_key=True)
+        self.assertEqual(
+            chain, [FREE_MODELS[1]] + GO_FREE_HEADS
+            + [FREE_MODELS[0], FREE_MODELS[2]],
+            "the given keyless head, then the four Go heads ahead of the free ids")
+
+    def test_no_gateway_key_skips_the_go_heads_from_the_chain(self):
+        # A --free run with no AUTOOS_OMNIROUTE_KEY cannot serve a gateway head,
+        # so they never enter its chain — the run stays on the keyless promo ids.
+        chain = self.agent.free_model_chain(
+            {"free_client_models": {"opencode": GO_FREE_HEADS + FREE_MODELS}},
+            "opencode", FREE_MODELS[1], has_gateway_key=False)
+        self.assertFalse([m for m in chain if m.startswith("omniroute/")],
+                         "a gateway head must not reach a keyless --free chain")
+        self.assertEqual(chain, [FREE_MODELS[1], FREE_MODELS[0], FREE_MODELS[2]],
+                         "the keyless chain is unchanged from before OCGO-PREFER")
+
+    def test_the_real_free_chain_leads_with_the_go_seats(self):
+        # The shipped policy orders the OpenCode Go heads ahead of the three
+        # keyless promo ids (operator D-1840/D-1919: go > free).
+        registry = self.agent.load_registry(self.agent.REGISTRY_PATH)
+        chain = registry["policy"]["free_client_models"]["opencode"]
+        self.assertEqual([m for m in chain if m.startswith("omniroute/opencode-go/")],
+                         GO_FREE_HEADS,
+                         "the four Go heads lead, in glm/minimax/kimi/qwen order")
+        self.assertEqual(chain, GO_FREE_HEADS + FREE_MODELS)
+
+    def test_a_sensitive_card_never_reaches_the_free_chain(self):
+        # The review seat's gate: the privacy fence fires before any head is
+        # chosen, so a sensitive card is refused on a --free run even though the
+        # chain now leads with trainable Go seats. Nothing is launched, and no
+        # gateway head appears in the plan.
+        r = plan_of("--free", "--client", "opencode", "--isolate", "--dry-run",
+                    "--card", "role=review,privacy=sensitive", "t",
+                    env=clean_env())
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("privacy", r.stderr)
+        self.assertNotIn("opencode-go", r.stdout + r.stderr,
+                         "a refused sensitive run must not name a Go head")
 
     def test_a_free_provider_stop_re_runs_the_next_free_model_in_the_same_sandbox(self):
         rc, out, err, calls, sandboxes = self._run(stops=1)

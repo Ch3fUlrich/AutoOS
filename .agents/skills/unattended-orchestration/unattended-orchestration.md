@@ -204,10 +204,13 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   `~/.gitconfig` (`url.insteadOf`, `core.sshCommand`, `core.hooksPath`) is not
   what a worker's git reads — which is also why
   the parent's ssh state cannot ride along with a spawned run.
-- **`--free`** maps every tier to opencode's own free model (default
-  `opencode/muse-spark-1.3-contributor-free`) through `OPENCODE_CONFIG_CONTENT`. Use it to
-  exercise the chain and the fences before any provider key exists. Free
-  promo models may train on prompts, so `--free --clean` is refused.
+- **`--free`** maps every tier to a free seat through `OPENCODE_CONFIG_CONTENT`. The default
+  is the keyless promo `opencode/muse-spark-1.3-contributor-free`; when a gateway key
+  (`AUTOOS_OMNIROUTE_KEY`) is on the machine the chain prefers the OpenCode Go heads
+  (`omniroute/opencode-go/…`) ahead of it and falls back to the promo ids without one. Use it
+  to exercise the chain and the fences before any provider key exists. Both the promo models
+  and the Go seats train on prompts, so `--free` is public-only work — `--free --clean` and a
+  `privacy=sensitive` card are refused.
 
 ### Over MCP (OpenHands, Claude Code, opencode, Zed)
 
