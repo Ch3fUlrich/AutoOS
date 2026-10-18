@@ -10257,9 +10257,11 @@ print('%s|%s|%s|%s' % (
         # OCGO-PREFER 2026-10-18: the OpenCode Go pinned singles, each read off
         # `python3 tools/registry.py render omniroute` (combos[].context from
         # routes.* in catalog/ai-registry.json), which equals combos.json:
-        # glm-5.3-flash 1M, kimi-k3 128k (shared models.kimi-k3 window),
+        # glm-5.3-flash 1M, minimax-m3 128k (shared models.'MiniMax-M3' window,
+        # not the Go row's 1M), kimi-k3 128k (shared models.kimi-k3 window),
         # qwen3.8-flash 200k.
         'opencode-go/glm-5.3-flash' = '1M'
+        'opencode-go/minimax-m3' = '128k'
         'opencode-go/kimi-k3' = '128k'
         'opencode-go/qwen3.8-flash' = '200k'
     }
