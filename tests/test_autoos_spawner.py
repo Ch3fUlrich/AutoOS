@@ -25924,7 +25924,7 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
     (credit tier + explicit `trains_on_prompts: false` + an evidence block with a
     url and a quote), not one vendor's row. The existing PRIV3 door already
     covers a name that is no registry route: nothing proves it private-safe,
-    which is why the `ovh-direct-*` hand-entry refusal below still holds whether
+    which is why the hand-entry refusal below still holds whether
     or not OVH is present.
 
     The run needs *a* routable name for the door, so the inline leg heads the
@@ -25992,10 +25992,16 @@ class SensitiveHandEntryPrivacyTests(unittest.TestCase):
         # The refusal needs no provider: a passthrough whose modelID is not a
         # registry route is a modelID nothing can certify trains_on_prompts:
         # false, so the sensitive card is refused in every state of the removal
-        # lane. `agy-gemini-3.8-flash` is the durable spelling; the ovh-direct
-        # one is the case the rule was measured on.
+        # lane. `agy-gemini-3.8-flash` is the durable spelling; the second name
+        # is a shipped declared hand entry whose provider *negatively* verifies
+        # privacy — Meta trains on contributor-tier prompts (opencode.jsonc's
+        # own note, providers.meta_api.trains_on_prompts true in the registry),
+        # so the door's reason is "privacy", not "not declared". OVH-REMOVE
+        # (D-1816(12)): this slot was the `ovh-direct-*` entry the rule was
+        # measured on; the entry is gone with its provider, and an undeclared
+        # name would refuse for the wrong reason.
         for name in ("omniroute/agy-gemini-3.8-flash",
-                     "omniroute/ovh-direct-gpt-oss-120b"):
+                     "omniroute/meta-direct-muse-spark-1.3-contributor"):
             rc, out, err = self.run_cmd(name)
             self.assertEqual(rc, 2, name + out + err)
             self.assertIn("privacy", err, name)

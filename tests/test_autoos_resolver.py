@@ -2342,7 +2342,11 @@ class GatewayOrderTests(unittest.TestCase):
     # The chain l3-driver ships, in order: the probe-passed free band, then the
     # priced tail — OVH-REPROBE 2026-10-08 put the re-probed OVH grant in the
     # band's trial position and the vertex leg the D-657 probes confirmed closes
-    # the chain.
+    # the chain. Legs of RETIRED_PROVIDER below are the state-conditional ones:
+    # pinned against this chain while the provider still serves any route, and
+    # droppable from the first registry state in which OVH-REMOVE (D-1816(12))
+    # has taken them out of every route — a step ahead of the provider itself
+    # leaving, so their presence proves nothing about resolve_leg.
     L3_DRIVER_CHAIN = (
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
         "cohere/command-a-03-2025",
@@ -2355,6 +2359,10 @@ class GatewayOrderTests(unittest.TestCase):
         "vertex/gemini-3.8-flash",
     )
 
+    # The provider OVH-REMOVE (D-1816(12)) retires. Its chain legs are the only
+    # droppable ones: pinned while the provider still serves, gone after it.
+    RETIRED_PROVIDER = "ovhcloud"
+
     @staticmethod
     def _resolvable(registry, leg):
         """Is `leg` still a provider/model the loaded registry names?"""
@@ -2363,6 +2371,17 @@ class GatewayOrderTests(unittest.TestCase):
         except ValueError:
             return False
         return True
+
+    def _provider_serves_anything(self, registry):
+        """Does the retired provider still ride ANY declared route? Step A of
+        the removal takes its legs out of every route while the provider entry
+        itself survives until step B, so this — not resolve_leg, which stays
+        true through that intermediate state — is what says the removal has
+        landed. Today the provider's own ovh-* routes still carry it."""
+        wanted = self.RETIRED_PROVIDER
+        return any(str(leg).split("/", 1)[0] == wanted
+                   for route in registry["routes"].values()
+                   for leg in (route.get("legs") or []))
 
     def test_t3_driver_free_legs_rank_ahead_of_the_priced_tail(self):
         # D657-D2 (AO-DENYLEGS D2, 2026-10-08) re-cut l3-driver. The credit legs
@@ -2380,19 +2399,45 @@ class GatewayOrderTests(unittest.TestCase):
         # OVH-REMOVE (D-1816(12)) and D-1626 retire the providers those two legs
         # name, so the tail is not a fixed pair any more. The pin is restored at
         # its full strength by naming the WHOLE chain and reading it against the
-        # registry that is actually loaded: every leg the registry still resolves
-        # must be present, in this order, and nothing else may appear. That is
-        # exact in every state (with both providers present it is a leg-for-leg
-        # equality on all nine), it fails if a removal strips a leg that was not
-        # the removed provider's, and the trial->free->credits->paid walk it
-        # implies is checked on the tier sequence below rather than assumed.
+        # registry that is actually loaded: one equality against the chain
+        # rebuilt for the state, which is leg-for-leg the nine of today in every
+        # state where the retired provider still serves a route. Only after the
+        # removal has withdrawn its legs from every route do they become
+        # droppable — and droppable, never reorderable: the expected list is
+        # rebuilt from L3_DRIVER_CHAIN, keeping a droppable leg only while the
+        # route still carries it, so the route must be that list exactly. A leg
+        # that moves, a leg of the retired provider re-added at the tail, a leg
+        # the chain does not name at all: each breaks the equality. Step A is
+        # what makes "still resolvable" an unusable gate — it takes the legs out
+        # of the chains while the provider entry survives until step B, so the
+        # intermediate registry resolves a leg no route carries any more, and the
+        # gate has to be the provider riding no route instead. A retired leg the
+        # registry does not resolve is never excused (the loop below fails on
+        # it), and the trial->free->credits->paid walk this order implies is
+        # checked on the tier sequence below rather than assumed.
         registry = self.registry()
         legs = self._legs(registry, "l3-driver")
+        # What the route does carry must name a provider/model the registry
+        # knows: read before the ordering pin, so a dead leg fails with a
+        # message instead of raising out of leg_tier.
+        for leg in legs:
+            try:
+                cc.resolve_leg(leg, registry)
+            except ValueError as exc:
+                self.fail("l3-driver carries a leg the loaded registry does not "
+                          "name: %s (%s)" % (leg, exc))
+        # A leg of the retired provider the registry no longer resolves is
+        # never droppable — the loop above already fails on such a dead leg.
+        retired = set(leg for leg in self.L3_DRIVER_CHAIN
+                      if leg.split("/", 1)[0] == self.RETIRED_PROVIDER)
+        droppable = retired if not self._provider_serves_anything(registry) else set()
+        expected = [leg for leg in self.L3_DRIVER_CHAIN
+                    if leg not in droppable or leg in legs]
         self.assertEqual(
-            legs, [leg for leg in self.L3_DRIVER_CHAIN
-                   if self._resolvable(registry, leg)],
-            "l3-driver must be the shipped chain minus the legs the loaded "
-            "registry no longer resolves")
+            legs, expected,
+            "l3-driver must be the shipped chain - leg for leg while the "
+            "provider the removal retires still serves, its legs droppable "
+            "(never reordered, repeated or replaced) once it serves nothing")
         self.assertEqual(len(set(legs)), len(legs),
                          "l3-driver carries a leg twice: %s" % legs)
         tiers = [cc.leg_tier(registry, leg) for leg in legs]

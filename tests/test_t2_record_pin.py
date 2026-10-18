@@ -115,8 +115,13 @@ NEMOTRON = "opencode/nemotron-3-ultra-free"
 # openrouter :free slug measured 404 upstream and its hand entry left
 # opencode.jsonc. The mechanism under test (a bare pin qualifies with the one
 # provider that declares it) is pinned against a LIVE declared hand entry.
-BARE_OR = "ovh-direct-qwen3.8-27b"
-QUALIFIED_OR = "omniroute/ovh-direct-qwen3.8-27b"
+# OVH-REMOVE round 2 (D-1816(12)): the ovh-direct hand entry this pinned is
+# deleted with the provider, so the pin is `deepseek-direct-flash` - the same
+# passthrough shape (a `*-direct-*` hand entry the gateway serves under its own
+# provider prefix), kept in every state of the removal lane (the spawner's
+# D-1816(12) re-pins name the same entry).
+BARE_OR = "deepseek-direct-flash"
+QUALIFIED_OR = "omniroute/deepseek-direct-flash"
 
 
 class ModelPinHonouredTests(unittest.TestCase):
