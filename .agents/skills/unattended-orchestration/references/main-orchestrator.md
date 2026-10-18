@@ -90,10 +90,11 @@ R-orch-14. Put both ids in every L2 brief.
 
 **Seat-model evidence (D-260 / D-261).** A review seat run keyless on the opencode path
 (`autoos-agent.py run --free --free-model opencode/<model>`) cannot be taken at its word. (A
-`--free` run always *starts* on its `--free-model`, so a seat started that way is keyless. The
-OpenCode Go heads — `omniroute/opencode-go/<model>` — are fallthrough steps: with a gateway key on
-the machine, a `--free` walk that hits provider stops reaches a Go head before the keyless promo
-ids (without a key the Go ids are dropped), and a Go head is a gateway seat, so verify it
+`--free` run starts on the `--free-model` its caller typed, so a seat started that way is keyless;
+a *plain* `--free` run — no `--free-model` — starts on the first OpenCode Go head
+(`omniroute/opencode-go/glm-5.3-flash`) when a gateway key is on the machine and walks the rest of
+the Go heads before the keyless promo ids, and on the keyless `opencode/muse-spark-1.3-contributor-free`
+chain when it is not (OCGO-PREFER, D-1923). A Go head is a gateway seat, so verify it
 `--gateway` response-side, as below, not request-side.) A gate
 review proved opencode stores **no provider-response model** in its session db: the per-turn
 `data.model` it writes is the model the CLI was *started* with — **request-side** evidence only. So

@@ -3673,6 +3673,40 @@ def free_model_chain(policy: dict | None, client: str, first: str,
     return chain
 
 
+def free_start_model(policy: dict | None, client: str, given,
+                     has_gateway_key: bool = False):
+    """The model a `--free` run STARTS on — the whole of the OCGO-PREFER choice.
+
+    Operator D-1923: "opencode go via OmniRoute before opencode free; free =
+    fallback only". A *plain* `--free` run (the caller typed no `--free-model`,
+    which the CLI spells as `None`, `""` or `DEFAULT_FREE_MODEL`) starts on the
+    first gateway head the client's registry list names — an OpenCode Go seat —
+    when a gateway key resolves on the machine. Every other case returns `given`
+    untouched: with no key the run starts on the keyless `DEFAULT_FREE_MODEL`
+    exactly as before, a caller-typed pin is never replaced (the caller's model
+    is what runs, and it may be a keyless one), and a list with no gateway head
+    has nothing to prefer. "Typed" is read the way the rest of this file reads
+    it — `--free-model` defaults to `DEFAULT_FREE_MODEL` in argparse, so a pin
+    that says the default's own words is indistinguishable from no pin, and
+    `model_mismatch_refusal` is what keeps the launch equal to it either way.
+
+    THIS IS THE DEFAULT PATH, NOT A CALLER PIN. The D-1214 guard in `cmd_run`
+    refuses an `omniroute/` spelling *the caller typed* under `--free`, and it
+    reads argv, which is settled before this is called: promoting the default
+    here does not slip past that guard and does not weaken it — a caller still
+    cannot ask for a gateway model by name and call it a keyless run.
+    """
+    if not has_gateway_key:
+        return given
+    if str(given or "") not in ("", DEFAULT_FREE_MODEL):
+        return given
+    listed = ((policy or {}).get(FREE_MODEL_POLICY_KEY) or {}).get(client) or []
+    for model in listed:
+        if str(model or "").startswith("omniroute/"):
+            return model
+    return given
+
+
 def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
                            tried: set, benched: set | None = None,
                            fence: dict | None = None,
@@ -14067,6 +14101,16 @@ def cmd_run(args, cfg: dict) -> int:
         # keyless promo ids it can serve. (client_key only reads env/file — it
         # sends no request and prints no value.)
         free_gateway_key_available = bool(client_key(ROOT)) if client.gateway else False
+        # OCGO-PREFER 3 (operator D-1923): the SAME read decides where the run
+        # STARTS. A plain `--free` run takes the first gateway head of the list;
+        # a caller-typed `--free-model` and a run with no key keep what they had.
+        # One place, before the chain is built, so the chain, the fence, the plan
+        # and the record all read the one value. This default is NOT the caller
+        # pin the D-1214 guard above refuses — that guard reads argv, which was
+        # settled before it, and a gateway head named here is the registry's
+        # preference, not a request for the authenticated gateway under `--free`.
+        args.free_model = free_start_model(free_policy, client.name, args.free_model,
+                                           has_gateway_key=free_gateway_key_available)
         free_chain = free_model_chain(free_policy, client.name, args.free_model,
                                       has_gateway_key=free_gateway_key_available)
         if fence["families"]:

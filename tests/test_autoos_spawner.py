@@ -7497,9 +7497,11 @@ FREE_MODELS = ["opencode/nemotron-3-ultra-free",
                "opencode/muse-spark-1.3-contributor-free",
                "opencode/mimo-v2.6-flash-free"]
 
-# OCGO-PREFER: the OpenCode Go gateway heads the --free walk falls through onto
-# (ahead of the keyless promo ids) when a gateway key is on the machine — never
-# a run's first model. Probe-latency order, operator D-1840/D-1919.
+# OCGO-PREFER: the OpenCode Go gateway heads a --free run prefers to the keyless
+# promo ids when a gateway key is on the machine — since round 3 the first of
+# them is also where a PLAIN --free run starts (FreePreferredHeadTests), and the
+# rest are fallthrough steps; a caller-typed --free-model still starts the run.
+# Probe-latency order, operator D-1840/D-1919/D-1923.
 GO_FREE_HEADS = ["omniroute/opencode-go/glm-5.3-flash",
                  "omniroute/opencode-go/minimax-m3",
                  "omniroute/opencode-go/kimi-k3",
@@ -7591,16 +7593,17 @@ class FreeModelFallthroughTests(unittest.TestCase):
     def test_a_walk_back_onto_a_keyless_model_drops_the_gateway_credential(self):
         # OCGO-PREFER round 2: the credential minted for a Go head must not ride
         # into the next keyless child. The walk with a key on the machine: the
-        # keyless promo model the run started on (no credential) -> provider stop
-        # onto the Go head (a gateway launch: the key is minted and attached) ->
-        # provider stop back onto a keyless promo id (credential dropped again).
+        # keyless promo model the CALLER TYPED (OCGO-PREFER 3 promotes only a
+        # plain run's default, never a pin) -> provider stop onto the Go head (a
+        # gateway launch: the key is minted and attached) -> provider stop back
+        # onto a keyless promo id (credential dropped again).
         rc, out, err, calls, _ = self._run(
-            stops=2,
+            stops=2, free_model=FREE_MODELS[0],
             policy={"free_client_models":
                     {"opencode": [GO_FREE_HEADS[0]] + FREE_MODELS}})
         self.assertEqual(rc, 0, out + err)
         self.assertEqual(calls["free_models"],
-                         [FREE_MODELS[1], GO_FREE_HEADS[0], FREE_MODELS[0]],
+                         [FREE_MODELS[0], GO_FREE_HEADS[0], FREE_MODELS[1]],
                          "keyless start, one Go head, walk back to a keyless id")
         self.assertNotIn("AUTOOS_OMNIROUTE_KEY", calls["envs"][0],
                          "the keyless start is handed no credential")
@@ -7728,6 +7731,182 @@ class FreeModelFallthroughTests(unittest.TestCase):
             policy={"free_client_models": {"opencode": []}})
         self.assertEqual(rc, 8, out + err)
         self.assertEqual(calls["n"], 1, "nowhere to fall through to")
+
+
+class FreePreferredHeadTests(unittest.TestCase):
+    """OCGO-PREFER 3 (operator D-1923: "opencode go via OmniRoute before
+    opencode free; free = fallback only"): the FIRST model of a PLAIN `--free`
+    run — one whose caller typed no `--free-model` — is the first OpenCode Go
+    head when a gateway key resolves on the machine, and the keyless
+    `DEFAULT_FREE_MODEL` when it does not. With no key nothing else changes: the
+    same start, the same chain, the same child env. The fallthrough walk and the
+    per-launch credential are lane 2's (`FreeModelFallthroughTests` above); this
+    class owns the start and the two router conditions — no key means exactly the
+    run it was, and a caller-typed `omniroute/` pin stays refused by D-1214
+    because the default is not a caller pin."""
+
+    # What a keyless `--free` run walked before OCGO-PREFER existed, spelled out
+    # instead of derived: router condition (1) fails if the shipped list grows a
+    # leg a keyless run cannot serve.
+    PRE_LANE_FREE_CHAIN = [FREE_MODELS[1], FREE_MODELS[0], FREE_MODELS[2]]
+    GO_LED_POLICY = {"free_client_models": {"opencode": GO_FREE_HEADS + FREE_MODELS}}
+
+    def setUp(self):
+        self.agent = load_agent()
+        allow_in_place(self, self.agent)
+
+    def _dry(self, *extra, key):
+        env = (clean_env(AUTOOS_OMNIROUTE_KEY="test-only-key") if key
+               else clean_env())
+        return plan_of("--free", "--client", "opencode", "--isolate", "--dry-run",
+                       *extra, "t", env=env)
+
+    @staticmethod
+    def _env_line(r):
+        return next((ln for ln in r.stdout.splitlines() if ln.startswith("env:")), "")
+
+    def _walk(self, stops):
+        # `_fallthrough_run` always holds a gateway key, and its `free_model`
+        # default is `DEFAULT_FREE_MODEL`: the plain `--free` run exactly.
+        return _fallthrough_run(self, ["r-free"], stops=stops,
+                                args_over={"free": True, "isolate": True},
+                                policy=self.GO_LED_POLICY)
+
+    # --- the choice, as a pure function -------------------------------------
+
+    def test_with_a_key_the_default_free_model_becomes_the_first_gateway_head(self):
+        self.assertEqual(
+            self.agent.free_start_model(self.GO_LED_POLICY, "opencode",
+                                        self.agent.DEFAULT_FREE_MODEL,
+                                        has_gateway_key=True),
+            GO_FREE_HEADS[0])
+        self.assertEqual(
+            self.agent.free_start_model(self.GO_LED_POLICY, "opencode", None,
+                                        has_gateway_key=True),
+            GO_FREE_HEADS[0], "an unset pin is the same plain run")
+
+    def test_without_a_key_the_start_is_the_keyless_default(self):
+        for given in (self.agent.DEFAULT_FREE_MODEL, None, FREE_MODELS[0]):
+            self.assertEqual(
+                self.agent.free_start_model(self.GO_LED_POLICY, "opencode", given),
+                given, "no key: nothing is promoted")
+
+    def test_a_caller_typed_pin_is_never_replaced_by_the_default_head(self):
+        self.assertEqual(
+            self.agent.free_start_model(self.GO_LED_POLICY, "opencode", FREE_MODELS[0],
+                                        has_gateway_key=True),
+            FREE_MODELS[0], "the caller's model is what runs")
+
+    def test_a_list_with_no_gateway_head_starts_where_it_ever_did(self):
+        self.assertEqual(
+            self.agent.free_start_model({"free_client_models": {"opencode": FREE_MODELS}},
+                                        "opencode", self.agent.DEFAULT_FREE_MODEL,
+                                        has_gateway_key=True),
+            self.agent.DEFAULT_FREE_MODEL)
+
+    def test_the_fail_safe_chain_drops_every_gateway_id(self):
+        # OCGO-PREFER round 2's default, re-asserted against the shipped list:
+        # a caller that does not answer the key question never walks onto a seat
+        # that dies on 'Authentication required'.
+        for chain in (self.agent.free_model_chain(self.GO_LED_POLICY, "opencode",
+                                                  self.agent.DEFAULT_FREE_MODEL),
+                      self.agent.free_model_chain(self.GO_LED_POLICY, "opencode",
+                                                  self.agent.DEFAULT_FREE_MODEL,
+                                                  has_gateway_key=False)):
+            self.assertEqual(chain, self.PRE_LANE_FREE_CHAIN,
+                             "keyless: the pre-OCGO chain, unchanged")
+
+    def test_a_keyed_start_walks_the_go_heads_then_the_keyless_ids(self):
+        head = self.agent.free_start_model(self.GO_LED_POLICY, "opencode",
+                                           self.agent.DEFAULT_FREE_MODEL,
+                                           has_gateway_key=True)
+        self.assertEqual(
+            self.agent.free_model_chain(self.GO_LED_POLICY, "opencode", head,
+                                        has_gateway_key=True),
+            GO_FREE_HEADS + FREE_MODELS,
+            "every Go head in order, then the keyless promo ids")
+
+    # --- the run, at the CLI -------------------------------------------------
+
+    def test_a_plain_free_run_with_a_key_starts_on_the_first_go_head(self):
+        r = self._dry(key=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--model %s" % GO_FREE_HEADS[0], r.stdout,
+                      "the plain run STARTS on the Go head, not merely walks onto it")
+
+    def test_the_keyed_go_start_is_handed_the_gateway_credential(self):
+        r = self._dry(key=True)
+        self.assertIn("AUTOOS_OMNIROUTE_KEY", self._env_line(r),
+                      "a Go head rides the gateway, so its child gets the key")
+
+    def test_a_plain_free_run_without_a_key_starts_on_the_promo_model(self):
+        r = self._dry(key=False)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--model %s" % self.agent.DEFAULT_FREE_MODEL, r.stdout)
+        self.assertEqual(self.agent.DEFAULT_FREE_MODEL,
+                         "opencode/muse-spark-1.3-contributor-free",
+                         "DEFAULT_FREE_MODEL stays the keyless fallback (D-1923)")
+
+    def test_a_plain_free_run_without_a_key_hands_the_child_no_credential(self):
+        r = self._dry(key=False)
+        self.assertNotIn("AUTOOS_OMNIROUTE_KEY", self._env_line(r),
+                         "a keyless run sends no gateway credential, Go or not")
+
+    def test_a_caller_typed_keyless_free_model_still_starts_first_with_a_key(self):
+        r = self._dry("--free-model", FREE_MODELS[0], key=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("--model %s" % FREE_MODELS[0], r.stdout)
+        self.assertNotIn(GO_FREE_HEADS[0], r.stdout,
+                         "the typed pin is the start; the Go heads follow it")
+
+    def test_a_caller_typed_omniroute_pin_under_free_is_still_refused(self):
+        # D-1214, and the point of this lane: the guard reads the argv the caller
+        # typed, so the promoted DEFAULT is not the mistake it refuses. A key on
+        # the machine does not unlock a typed gateway pin either.
+        r = self._dry("--free-model", GO_FREE_HEADS[0], key=True)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("drop --free", r.stderr)
+
+    def test_a_sensitive_card_is_refused_on_a_free_run_even_with_a_key(self):
+        # Privacy is unchanged by the promotion: `--free` is public-only work
+        # because every leg of it trains on prompts — the Go seats exactly like
+        # the promo ids — and the refusal fires before a seat is launched.
+        r = plan_of("--free", "--client", "opencode", "--isolate",
+                    "--dry-run", "--card", "role=review,privacy=sensitive",
+                    "t", env=clean_env(AUTOOS_OMNIROUTE_KEY="test-only-key"))
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("privacy", r.stderr)
+        self.assertNotIn("would run:", r.stdout, "a refused run launches nothing")
+
+    # --- the run, through the launch loop ------------------------------------
+
+    def test_a_plain_free_launch_with_a_key_starts_on_the_go_head_with_the_key(self):
+        rc, out, err, calls, _ = self._walk(stops=0)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["free_models"], [GO_FREE_HEADS[0]], out + err)
+        self.assertEqual(calls["envs"][0].get("AUTOOS_OMNIROUTE_KEY"), "test-only-key",
+                         "the start is a gateway launch, not a keyless promo seat")
+
+    def test_a_plain_free_walk_with_a_key_starts_the_run_on_a_seat_it_can_serve(self):
+        # The start is a gateway launch, so its child carries the credential the
+        # seat needs; the ordering of the rest of the walk — and the benching of
+        # a provider that just answered 429 — is lane 2's, owned by
+        # FreeModelFallthroughTests above.
+        rc, out, err, calls, _ = self._walk(stops=1)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["free_models"][0], GO_FREE_HEADS[0], out + err)
+        self.assertEqual(calls["envs"][0].get("AUTOOS_OMNIROUTE_KEY"), "test-only-key")
+
+    def test_a_plain_free_run_with_no_resolved_key_launches_the_promo_model(self):
+        # Router condition (1), at the launch: no key means exactly the run it
+        # was — the keyless start, and no credential in the child's env even
+        # though this caller's environment carries one (worker_env pops it and
+        # re-mints only for a gateway launch).
+        with mock.patch.object(self.agent, "client_key", lambda root: None):
+            rc, out, err, calls, _ = self._walk(stops=0)
+        self.assertEqual(rc, 0, out + err)
+        self.assertEqual(calls["free_models"], [self.agent.DEFAULT_FREE_MODEL], out + err)
+        self.assertNotIn("AUTOOS_OMNIROUTE_KEY", calls["envs"][0])
 
 
 QODERCLI_1_1_63_HELP = """Usage: qodercli [options] [command] [query...]
