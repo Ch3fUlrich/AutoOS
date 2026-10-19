@@ -826,5 +826,43 @@ class TestChildEnvGatewayDefault(unittest.TestCase):
         self.assertNotIn("AUTOOS_OMNIROUTE_KEY", env)
 
 
+class TestChildEnvSystemRoot(unittest.TestCase):
+    """Windows server children need SystemRoot to bind (measured 2026-10-19).
+
+    `opencode serve` (Bun) dies ~100ms after spawn with a bogus "port is in
+    use" when SystemRoot is absent from its environment; python binds the
+    same port fine, and the same binary+config+cwd serves fine from a shell
+    that has it. The L1 lane config carries child_env ["SYSTEMROOT"]
+    (learned the hard way), but lanes built without it — every oc_l2 lane,
+    any L1 from the example config — could never start on Windows. Forwarded
+    by presence only when the launcher has it; never invented. A system path,
+    not a credential (WINDIR precedent in LANE_ENV_ALLOW).
+    """
+
+    def _env(self, parent, windows, **lane_over):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_env_") as td:
+            lane = make_lane(Path(td), 47255)
+            lane.update(lane_over)
+            with mock.patch.dict(os.environ, parent, clear=True), \
+                    mock.patch.object(oc_l1_serve, "_needs_systemroot",
+                                      return_value=windows):
+                return oc_l1_serve._child_env(
+                    lane, Path(td) / "opencode.json", PW_VALUE)
+
+    def test_systemroot_reaches_the_child_on_windows(self):
+        env = self._env({"SystemRoot": "C:\\Windows"}, True)
+        self.assertEqual(env.get("SystemRoot"), "C:\\Windows")
+
+    def test_systemroot_absent_from_launcher_means_absent_from_child(self):
+        env = self._env({"PATH": os.environ.get("PATH", "")}, True)
+        self.assertNotIn("SystemRoot", env)
+        self.assertNotIn("SYSTEMROOT", env)
+
+    def test_no_systemroot_forwarding_off_windows(self):
+        env = self._env({"SystemRoot": "C:\\Windows"}, False)
+        self.assertNotIn("SystemRoot", env)
+        self.assertNotIn("SYSTEMROOT", env)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2168,5 +2168,35 @@ class ForeignRepoFooterTests(unittest.TestCase):
         self.assertIn(self.INBOX, self.text)
 
 
+class BuildLaneServePortTest(unittest.TestCase):
+    """build_lane must always carry serve_port (measured 2026-10-19).
+
+    build_lane set serve_port only when --port was passed; cmd_start,
+    _resolve_port and status all read lane["serve_port"] unconditionally, so
+    a lane started without --port died in cmd_start with KeyError before the
+    server even spawned. oc_l1 lanes default to the stable per-name hash
+    (derive_port); L2 lanes do the same now.
+    """
+
+    def _lane(self, **over):
+        kw = dict(repo=ROOT, phase="p1", brief=ROOT / "README.md",
+                  combo="l2-orchestrator",
+                  l1_inbox=ROOT / "HANDOFF.md",
+                  opencode_bin=str(ROOT / "fake_opencode"),
+                  password_env="PW_ENV_FOR_TEST",
+                  guard_dir=str(GUARD_DIR))
+        kw.update(over)
+        return oc_l2.build_lane("l2-proj-abcdef-p1", **kw)
+
+    def test_serve_port_defaults_to_the_derived_hash(self):
+        lane = self._lane()
+        self.assertEqual(lane["serve_port"],
+                         oc_l1.derive_port("l2-proj-abcdef-p1"))
+
+    def test_an_explicit_port_is_kept(self):
+        lane = self._lane(port=47280)
+        self.assertEqual(lane["serve_port"], 47280)
+
+
 if __name__ == "__main__":
     unittest.main()

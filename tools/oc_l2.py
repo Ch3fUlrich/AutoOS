@@ -446,6 +446,12 @@ def build_lane(name, repo, phase, brief, combo, l1_inbox, *, opencode_bin=None,
     }
     if port:
         lane["serve_port"] = port
+    else:
+        # A lane without serve_port dies in cmd_start with KeyError
+        # (lane["serve_port"] is read unconditionally when the result is
+        # built, and _resolve_port reads it before spawning). Mirror the L1
+        # rule: the stable per-name hash when no port is given.
+        lane["serve_port"] = oc_l1.derive_port(name)
     return lane
 
 
