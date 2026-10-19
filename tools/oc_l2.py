@@ -210,6 +210,20 @@ class L2Error(Exception):
     """A refusal or a config problem: exit 2, nothing started."""
 
 
+def direct_model(provider, key, model_id):
+    """The lane model dict for --model-id, or None when no direct id given.
+
+    Operator order 2026-10-19: run an L2 on a named model with the combos
+    bypassed. The combo is then never resolved; render carries this dict
+    verbatim (same shape as an oc_l1 lane model).
+    """
+    if not model_id:
+        return None
+    if not str(model_id).strip():
+        raise L2Error("--model-id must be a non-empty model id")
+    return {"provider": provider, "key": key or model_id, "modelID": model_id}
+
+
 def _now_ts():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1548,6 +1562,15 @@ def build_parser():
     p.add_argument("--brief", required=True, help="the phase brief - the first prompt's body")
     p.add_argument("--combo", default=DEFAULT_COMBO,
                    help="gateway combo that names the L2 model (default %s)" % DEFAULT_COMBO)
+    p.add_argument("--model-id", default=None,
+                   help="direct model id (e.g. opencode-go/muse-spark-1.3-contributor): "
+                        "runs the lane on this exact model instead of --combo "
+                        "(combos bypassed by operator order; no new combo is "
+                        "created or audited; --combo is then ignored)")
+    p.add_argument("--model-key", default=None,
+                   help="label for a --model-id lane (default: the model id)")
+    p.add_argument("--model-provider", default="omniroute",
+                   help="gateway provider for --model-id (default omniroute)")
     p.add_argument("--inbox", default=None,
                    help="the L1 inbox REPORT/DONE lines land in (else %s)" % ENV_L1_INBOX)
     p.add_argument("--opencode-bin", default=None,
@@ -1572,10 +1595,13 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
         if args.cmd == "start":
+            model = direct_model(args.model_provider, args.model_key,
+                                 args.model_id)
             result, rc = cmd_start(args.repo, args.phase, args.brief,
                                    combo=args.combo, l1_inbox=args.inbox,
                                    opencode_bin=args.opencode_bin,
-                                   password_env=args.password_env, port=args.port)
+                                   password_env=args.password_env, port=args.port,
+                                   model=model)
         elif args.cmd == "status":
             result, rc = cmd_status(args.lane)
         elif args.cmd == "stop":
