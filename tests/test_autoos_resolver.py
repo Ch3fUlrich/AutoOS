@@ -6244,12 +6244,15 @@ class AutoOSResolverBenchmarksTests(unittest.TestCase):
         self.assertEqual(ranked, ["mimo/mimo-v2.6-pro", "opencode-go/qwen3.8-max"])
 
         pref = r.TIER_PREFERENCE_ORDER
+        self.assertIn("opencode-go/gemini-4-argon-contributor", pref)
         self.assertIn("mimo/mimo-v2.6-pro", pref)
         self.assertIn("opencode-go/qwen3.8-max", pref)
+        self.assertLess(pref.index("opencode-go/gemini-4-argon-contributor"), pref.index("agy/claude-sonnet-5-5-xhigh"))
         self.assertLess(pref.index("mimo/mimo-v2.6-pro"), pref.index("opencode-go/qwen3.8-max"))
 
-    def test_all_nine_benchmarks_resolved(self):
+    def test_all_benchmarks_resolved(self):
         expected = {
+            "opencode-go/gemini-4-argon-contributor": 53.0,
             "mimo/mimo-v2.6-pro": 46.0,
             "opencode-go/qwen3.8-max": 45.4,
             "mimo/mimo-v2.6-flash": 37.9,

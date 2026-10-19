@@ -1728,6 +1728,7 @@ IDE_MODEL_ORDER = (
     # keeps its order.
     "opencode-go/glm-5.3-flash", "opencode-go/minimax-m3",
     "opencode-go/kimi-k3", "opencode-go/qwen3.8-flash",
+    "opencode-go/gemini-4-argon-contributor",
     "auto/smart", "auto", "auto/cheap",
 )
 

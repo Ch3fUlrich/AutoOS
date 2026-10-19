@@ -2118,6 +2118,31 @@
         "quota_pool": "agy-gemini-flash"
       }
     },
+    "gemini-4-argon-contributor": {
+      "": "OpenCode Go frontier model: gemini-4-argon-contributor (measured Artificial Analysis v4.3.2: aa_intelligence 53.0, deepswe 77.9, verified_tok_per_s 115, cost_per_task_usd 0.50). 1M context, 64k output.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "effort_ladder": [
+        "high"
+      ],
+      "family": "google",
+      "id": "gemini-4-argon-contributor",
+      "output_max": 65536,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven",
+      "benchmarks": {
+        "aa_intelligence": 53.0,
+        "deepswe": 77.9,
+        "verified_tok_per_s": 115,
+        "cost_per_task_usd": 0.50,
+        "quota_pool": "opencode-go-argon"
+      }
+    },
     "gpt-6-luna-high": {
       "": "CXA subscription leg gpt-6-luna-high (measured Artificial Analysis v4.3.2).",
       "context_advertised": 128000,
@@ -5554,6 +5579,26 @@
           "context_declared": "200k",
           "display_name": "OpenCode Go \u00b7 qwen3.8-flash (subscription, 200k)",
           "output": 16384
+        }
+      }
+    },
+    "opencode-go/gemini-4-argon-contributor": {
+      "$comment": "OpenCode Go frontier model route for gemini-4-argon-contributor (aa_intelligence 53.0).",
+      "class": "smart",
+      "id": "opencode-go/gemini-4-argon-contributor",
+      "legs": [
+        "opencode-go/gemini-4-argon-contributor"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode"
+          ],
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "OpenCode Go · gemini-4-argon-contributor (subscription, 1M)",
+          "output": 65536
         }
       }
     },

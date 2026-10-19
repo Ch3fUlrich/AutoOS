@@ -2929,6 +2929,7 @@ def plan(card, features, client_state, registry, overlay, track_record,
 # mimo/mimo-v2.6-pro (46.0, mimo-sub) ranks ahead of opencode-go/qwen3.8-max (45.4, opencode-go-qwen).
 TIER_PREFERENCE_ORDER = [
     "agy/claude-opus-5-5-high",
+    "opencode-go/gemini-4-argon-contributor",
     "agy/claude-sonnet-5-5-xhigh",
     "agy/claude-sonnet-5-5-high",
     "mimo/mimo-v2.6-pro",
