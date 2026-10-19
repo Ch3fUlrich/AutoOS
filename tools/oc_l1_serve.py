@@ -314,6 +314,23 @@ def _child_env(lane, rendered, password):
     # silent timeout. Whitespace alone is just as unreachable.
     if not (env.get(oc_l1.ENV_URL) or "").strip():
         env[oc_l1.ENV_URL] = oc_l1.DEFAULT_BASE_URL
+    # D-2129-S4 (option i approved): plangraph/opencode.jsonc pins
+    # providers.omniroute.settings.baseURL to `{env:PLANGRAPH_REVIEW_URL}`,
+    # which overrides the scratch OPENCODE_CONFIG's literal baseURL at
+    # model-init time — and the variable is unset on this host, so every
+    # cwd=plangraph server resolved omniroute baseURL to "" and every model
+    # turn died with `provider.no-route ... requires an endpoint baseURL`.
+    # Forward the lane's own resolved gateway URL under that name (blank ->
+    # forward, never invent beyond the default above; an explicit value is
+    # kept, so read it from the launcher env even though the allowlist does
+    # not cover it): a project `{env:...}` reference then resolves to the
+    # same endpoint without editing the other checkout. A system endpoint
+    # alias, not a credential (WINDIR precedent in oc_l1.LANE_ENV_ALLOW).
+    explicit_review = (os.environ.get("PLANGRAPH_REVIEW_URL") or "").strip()
+    if explicit_review:
+        env["PLANGRAPH_REVIEW_URL"] = explicit_review
+    elif not (env.get("PLANGRAPH_REVIEW_URL") or "").strip():
+        env["PLANGRAPH_REVIEW_URL"] = env[oc_l1.ENV_URL]
     # Windows server children need SystemRoot in their environment (see
     # _needs_systemroot): the allowlist above drops it, and lanes that declare
     # no child_env — every L2 lane, any L1 from the example config — could

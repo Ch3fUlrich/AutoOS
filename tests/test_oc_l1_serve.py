@@ -826,6 +826,54 @@ class TestChildEnvGatewayDefault(unittest.TestCase):
         self.assertNotIn("AUTOOS_OMNIROUTE_KEY", env)
 
 
+class TestChildEnvPlangraphReviewUrl(unittest.TestCase):
+    """D-2129-S4 (RED first): a cwd=plangraph lane server must resolve the
+    project config's `{env:PLANGRAPH_REVIEW_URL}` reference to non-empty.
+
+    Root cause proven 15:34 UTC: plangraph/opencode.jsonc pins
+    providers.omniroute.settings.baseURL to `{env:PLANGRAPH_REVIEW_URL}`,
+    which overrides the scratch OPENCODE_CONFIG's literal baseURL at
+    model-init time. The variable is unset on this host, so every
+    cwd=plangraph server resolved omniroute baseURL to "" and every model
+    turn died with `provider.no-route ... requires an endpoint baseURL`
+    while the L1 (cwd=AutoOS, literal baseURL in project config) served
+    fine. Forwarding the lane's own resolved gateway URL under that name
+    makes the project reference resolve to the same endpoint — no plangraph
+    edit needed (option i approved).
+    """
+
+    def _env(self, parent, **lane_over):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_env_") as td:
+            lane = make_lane(Path(td), 47255)
+            lane.update(lane_over)
+            with mock.patch.dict(os.environ, parent, clear=True):
+                return oc_l1_serve._child_env(
+                    lane, Path(td) / "opencode.json", PW_VALUE)
+
+    def test_review_url_follows_the_gateway_url_by_default(self):
+        env = self._env({"PATH": os.environ.get("PATH", "")})
+        self.assertEqual(env.get("PLANGRAPH_REVIEW_URL"),
+                         env.get("AUTOOS_OMNIROUTE_URL"))
+
+    def test_review_url_follows_an_explicit_gateway_url(self):
+        env = self._env({"AUTOOS_OMNIROUTE_URL": "http://gateway.invalid:9999"})
+        self.assertEqual(env.get("PLANGRAPH_REVIEW_URL"),
+                         "http://gateway.invalid:9999")
+
+    def test_an_explicit_review_url_is_kept(self):
+        env = self._env({"AUTOOS_OMNIROUTE_URL": "http://gateway.invalid:9999",
+                         "PLANGRAPH_REVIEW_URL": "http://review.invalid:8888"})
+        self.assertEqual(env.get("PLANGRAPH_REVIEW_URL"),
+                         "http://review.invalid:8888")
+
+    def test_blank_review_url_is_replaced(self):
+        for blank in ("", "   "):
+            env = self._env({"PLANGRAPH_REVIEW_URL": blank})
+            self.assertEqual(env.get("PLANGRAPH_REVIEW_URL"),
+                             env.get("AUTOOS_OMNIROUTE_URL"),
+                             repr(blank))
+
+
 class TestChildEnvSystemRoot(unittest.TestCase):
     """Windows server children need SystemRoot to bind (measured 2026-10-19).
 
