@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 20128
+  },
+  "defaults": {
+    "strategy": "priority",
+    "healthCheckIntervalSec": 60,
+    "requestTimeoutMs": 120000,
+    "enableModelBenchmarks": true,
+    "enableRequestEnvelopeControls": true
+  }
+}

@@ -2919,3 +2919,85 @@ def plan(card, features, client_state, registry, overlay, track_record,
         "skipped_legs": skipped_legs,
         "re_probe_notes": re_probe_notes,
     }
+
+
+# ==============================================================================
+# Model benchmarks & Intelligence Ranking (Artificial Analysis v4.3.2)
+# ==============================================================================
+
+# Preference ordering: higher intelligence models placed first.
+# mimo/mimo-v2.6-pro (46.0, mimo-sub) ranks ahead of opencode-go/qwen3.8-max (45.4, opencode-go-qwen).
+TIER_PREFERENCE_ORDER = [
+    "agy/claude-opus-5-5-high",
+    "agy/claude-sonnet-5-5-xhigh",
+    "agy/claude-sonnet-5-5-high",
+    "mimo/mimo-v2.6-pro",
+    "opencode-go/qwen3.8-max",
+    "opencode-go/muse-spark-1.3-contributor",
+    "agy/gemini-3.8-flash-tiered-high",
+    "cxa/gpt-6-luna-high",
+    "mimo/mimo-v2.6-flash",
+]
+
+
+def model_benchmarks(model_or_leg: str, registry: dict | None = None) -> dict:
+    """The Artificial Analysis benchmark metrics for a model or leg string.
+
+    Accepts wire gateway legs (e.g. 'mimo/mimo-v2.6-pro', 'opencode-go/qwen3.8-max'),
+    canonical registry legs (e.g. 'xiaomi_mimo/mimo-v2.6-pro'), or bare model ids
+    (e.g. 'mimo-v2.6-pro', 'qwen3.8-max'). Returns a dict of benchmark metrics,
+    such as aa_intelligence, verified_tok_per_s, cost_per_task_usd, quota_pool.
+    """
+    if registry is None:
+        import registry as _reg
+        registry = _reg.load(_reg.DEFAULT_REGISTRY_PATH)
+    models = registry.get("models") or {}
+
+    # 1. Exact match in models
+    if model_or_leg in models:
+        return (models[model_or_leg].get("benchmarks") or {}).copy()
+
+    # 2. Match after splitting '/'
+    name = _leg_model_id(model_or_leg)
+    if name and name in models:
+        return (models[name].get("benchmarks") or {}).copy()
+
+    # 3. Try _model_key resolution
+    mkey = _model_key(model_or_leg, registry)
+    if mkey and mkey in models:
+        return (models[mkey].get("benchmarks") or {}).copy()
+
+    # 4. Case-insensitive match on model_or_leg
+    folded = [k for k in models if isinstance(k, str) and k.lower() == model_or_leg.lower()]
+    if len(folded) == 1:
+        return (models[folded[0]].get("benchmarks") or {}).copy()
+
+    # 5. Check if model is part of a route with matching id
+    routes = registry.get("routes") or {}
+    if model_or_leg in routes:
+        route_legs = routes[model_or_leg].get("legs") or []
+        if route_legs:
+            return model_benchmarks(route_legs[0], registry)
+
+    return {}
+
+
+def rank_models_by_intelligence(models_or_legs: list[str], registry: dict | None = None) -> list[str]:
+    """Sort models or legs descending by Artificial Analysis intelligence (aa_intelligence).
+
+    Promotes higher-intelligence models ahead of lower-intelligence models. Specifically,
+    mimo/mimo-v2.6-pro (Intelligence 46.0) ranks ahead of opencode-go/qwen3.8-max (Intelligence 45.4).
+    """
+    if registry is None:
+        import registry as _reg
+        registry = _reg.load(_reg.DEFAULT_REGISTRY_PATH)
+
+    def sort_key(item: str) -> tuple[float, str]:
+        bm = model_benchmarks(item, registry)
+        intel = bm.get("aa_intelligence")
+        # float for intelligence (higher is better, so negate for descending sort)
+        intel_val = float(intel) if intel is not None else -1.0
+        return (-intel_val, item)
+
+    return sorted(models_or_legs, key=sort_key)
+

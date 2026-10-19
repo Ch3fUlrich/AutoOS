@@ -6204,5 +6204,176 @@ class CaseFoldModelLookupTests(unittest.TestCase):
         self.assertIn("does-not-exist", str(ctx.exception))
 
 
+class AutoOSResolverBenchmarksTests(unittest.TestCase):
+    """Assertions for resolver model benchmarks and intelligence rankings."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).resolve().parent.parent / "catalog" / "ai-registry.json"
+        cls.reg = json.loads(path.read_text(encoding="utf-8"))
+
+    def test_default_settings_file_exists_and_valid(self):
+        settings_path = (Path(__file__).resolve().parent.parent
+                         / "configuration" / "omniroute" / "default-settings.json")
+        self.assertTrue(settings_path.is_file(), f"File {settings_path} does not exist")
+        with open(settings_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertEqual(data.get("schema_version"), 1)
+        self.assertEqual(data.get("listen", {}).get("port"), 20128)
+        self.assertEqual(data.get("defaults", {}).get("strategy"), "priority")
+
+    def test_mimo_pro_benchmarks_and_ranks_above_qwen_max(self):
+        mimo_bm = r.model_benchmarks("mimo/mimo-v2.6-pro", self.reg)
+        qwen_bm = r.model_benchmarks("opencode-go/qwen3.8-max", self.reg)
+
+        self.assertEqual(mimo_bm.get("aa_intelligence"), 46.0)
+        self.assertEqual(mimo_bm.get("verified_tok_per_s"), 51)
+        self.assertEqual(mimo_bm.get("direct_api_tok_per_s"), 29)
+        self.assertEqual(mimo_bm.get("cost_per_task_usd"), 0.13)
+        self.assertEqual(mimo_bm.get("quota_pool"), "mimo-sub")
+
+        self.assertEqual(qwen_bm.get("aa_intelligence"), 45.4)
+        self.assertEqual(qwen_bm.get("verified_tok_per_s"), 85)
+        self.assertEqual(qwen_bm.get("cost_per_task_usd"), 0.45)
+        self.assertEqual(qwen_bm.get("quota_pool"), "opencode-go-qwen")
+
+        self.assertGreater(mimo_bm["aa_intelligence"], qwen_bm["aa_intelligence"])
+
+        ranked = r.rank_models_by_intelligence(
+            ["opencode-go/qwen3.8-max", "mimo/mimo-v2.6-pro"], self.reg)
+        self.assertEqual(ranked, ["mimo/mimo-v2.6-pro", "opencode-go/qwen3.8-max"])
+
+        pref = r.TIER_PREFERENCE_ORDER
+        self.assertIn("mimo/mimo-v2.6-pro", pref)
+        self.assertIn("opencode-go/qwen3.8-max", pref)
+        self.assertLess(pref.index("mimo/mimo-v2.6-pro"), pref.index("opencode-go/qwen3.8-max"))
+
+    def test_all_nine_benchmarks_resolved(self):
+        expected = {
+            "mimo/mimo-v2.6-pro": 46.0,
+            "opencode-go/qwen3.8-max": 45.4,
+            "mimo/mimo-v2.6-flash": 37.9,
+            "agy/claude-opus-5-5-high": 57.6,
+            "agy/claude-sonnet-5-5-xhigh": 51.9,
+            "agy/claude-sonnet-5-5-high": 46.8,
+            "opencode-go/muse-spark-1.3-contributor": 45.0,
+            "agy/gemini-3.8-flash-tiered-high": 41.0,
+            "cxa/gpt-6-luna-high": 38.4,
+        }
+        for leg, expected_intel in expected.items():
+            bm = r.model_benchmarks(leg, self.reg)
+            self.assertEqual(bm.get("aa_intelligence"), expected_intel,
+                             f"Leg {leg} intelligence mismatch")
+
+
+class ProductionSmartRoutingSimulationTests(unittest.TestCase):
+    """End-to-end production simulation tests for smart routing and intelligence ranking."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = Path(__file__).resolve().parent.parent / "catalog" / "ai-registry.json"
+        cls.reg = json.loads(path.read_text(encoding="utf-8"))
+        cls.client_state = {
+            "opencode": {"installed": True, "signed_in": True, "reason": ""},
+            "qoder": {"installed": True, "signed_in": True, "reason": ""},
+        }
+
+    def test_end_to_end_plan_s0_to_s3_high_risk_cards(self):
+        """Simulate S0, S1, S2, and S3 high-risk cards against real registry."""
+        bucket_configs = [
+            ("S0", {"files": 1, "modules": 1, "fanout": 4, "lines": 20, "tests": True, "need_tokens": 1000}),
+            ("S1", {"files": 2, "modules": 1, "fanout": 4, "lines": 100, "tests": True, "need_tokens": 1000}),
+            ("S2", {"files": 4, "modules": 2, "fanout": 10, "lines": 140, "tests": True, "need_tokens": 1000}),
+            ("S3", {"files": 5, "modules": 2, "fanout": 10, "lines": 200, "tests": False, "need_tokens": 1000}),
+        ]
+        for expected_bucket, feats in bucket_configs:
+            with self.subTest(bucket=expected_bucket):
+                card = {
+                    "kind": "implement",
+                    "risk": "high",
+                    "mode": "balanced",
+                    "spec": "exact",
+                    "privacy": "public",
+                }
+                res = r.plan(card, feats, self.client_state, self.reg, {}, [], "muse-spark")
+                self.assertEqual(res["bucket"], expected_bucket)
+                self.assertIsNotNone(res["route"])
+                self.assertIsNotNone(res["leg"])
+                self.assertEqual(res["state"], "ready")
+                if expected_bucket == "S3":
+                    self.assertTrue(res["decompose"])
+                else:
+                    self.assertFalse(res["decompose"])
+
+    def test_cross_family_reviewer_selection(self):
+        """Assert reviewer selection enforces cross-family constraint (reviewer.family != writer.family)."""
+        test_authors = [
+            ("mimo/mimo-v2.6-pro", "xiaomi"),
+            ("opencode-go/glm-5.3-flash", "zhipu"),
+            ("opencode-go/minimax-m3", "minimax"),
+        ]
+        feats = {"files": 1, "modules": 1, "fanout": 4, "lines": 20, "tests": True, "need_tokens": 1000}
+        for author_model, expected_writer_family in test_authors:
+            with self.subTest(author=author_model):
+                card = {
+                    "kind": "review",
+                    "risk": "high",
+                    "mode": "balanced",
+                    "spec": "exact",
+                    "privacy": "public",
+                    "author": author_model,
+                }
+                res = r.plan(card, feats, self.client_state, self.reg, {}, [], "muse-spark")
+                self.assertIsNotNone(res["review"])
+                rev_info = res["review"]
+                self.assertEqual(rev_info["state"], "resolved")
+                self.assertEqual(rev_info["author_family"], expected_writer_family)
+                reviewer = rev_info["reviewer"]
+                self.assertIsNotNone(reviewer)
+                self.assertNotEqual(reviewer["family"], expected_writer_family,
+                                    f"Reviewer family {reviewer['family']} must not match writer family {expected_writer_family}")
+
+    def test_benchmark_intelligence_ranking_and_metrics_consistency(self):
+        """Assert intelligence ranking order and verified metrics across key models."""
+        ranked = r.rank_models_by_intelligence(["opencode-go/qwen3.8-max", "mimo/mimo-v2.6-pro"], self.reg)
+        self.assertEqual(ranked, ["mimo/mimo-v2.6-pro", "opencode-go/qwen3.8-max"])
+
+        all_models = [
+            "mimo/mimo-v2.6-flash",
+            "cxa/gpt-6-luna-high",
+            "agy/gemini-3.8-flash-tiered-high",
+            "opencode-go/muse-spark-1.3-contributor",
+            "opencode-go/qwen3.8-max",
+            "mimo/mimo-v2.6-pro",
+            "agy/claude-sonnet-5-5-high",
+            "agy/claude-sonnet-5-5-xhigh",
+            "agy/claude-opus-5-5-high",
+        ]
+        sorted_models = r.rank_models_by_intelligence(all_models, self.reg)
+        expected_order = [
+            "agy/claude-opus-5-5-high",
+            "agy/claude-sonnet-5-5-xhigh",
+            "agy/claude-sonnet-5-5-high",
+            "mimo/mimo-v2.6-pro",
+            "opencode-go/qwen3.8-max",
+            "opencode-go/muse-spark-1.3-contributor",
+            "agy/gemini-3.8-flash-tiered-high",
+            "cxa/gpt-6-luna-high",
+            "mimo/mimo-v2.6-flash",
+        ]
+        self.assertEqual(sorted_models, expected_order)
+
+        mimo_flash = r.model_benchmarks("mimo/mimo-v2.6-flash", self.reg)
+        self.assertEqual(mimo_flash.get("verified_tok_per_s"), 54)
+        self.assertEqual(mimo_flash.get("direct_api_tok_per_s"), 29)
+
+        sonnet_xhigh = r.model_benchmarks("agy/claude-sonnet-5-5-xhigh", self.reg)
+        self.assertEqual(sonnet_xhigh.get("max_safe_effort"), "xhigh")
+
+        gpt6_luna = r.model_benchmarks("cxa/gpt-6-luna-high", self.reg)
+        self.assertEqual(gpt6_luna.get("aa_intelligence"), 38.4)
+        self.assertEqual(gpt6_luna.get("verified_tok_per_s"), 180)
+
+
 if __name__ == "__main__":
     unittest.main()

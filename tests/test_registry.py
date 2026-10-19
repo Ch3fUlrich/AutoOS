@@ -5319,5 +5319,119 @@ class ProviderSpellingTests(unittest.TestCase):
                                                                             spelling))
 
 
+class OmniRouteDefaultSettingsTests(unittest.TestCase):
+    """Assertions for configuration/omniroute/default-settings.json."""
+
+    SETTINGS_PATH = ROOT / "configuration" / "omniroute" / "default-settings.json"
+
+    def test_default_settings_file_exists(self):
+        self.assertTrue(self.SETTINGS_PATH.is_file(),
+                        f"Expected {self.SETTINGS_PATH} to exist")
+
+    def test_default_settings_valid_json(self):
+        with open(self.SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        self.assertIsInstance(data, dict)
+        self.assertEqual(data.get("schema_version"), 1)
+
+        listen = data.get("listen")
+        self.assertIsInstance(listen, dict)
+        self.assertEqual(listen.get("host"), "127.0.0.1")
+        self.assertEqual(listen.get("port"), 20128)
+
+        defaults = data.get("defaults")
+        self.assertIsInstance(defaults, dict)
+        self.assertEqual(defaults.get("strategy"), "priority")
+        self.assertEqual(defaults.get("healthCheckIntervalSec"), 60)
+        self.assertEqual(defaults.get("requestTimeoutMs"), 120000)
+        self.assertIs(defaults.get("enableModelBenchmarks"), True)
+        self.assertIs(defaults.get("enableRequestEnvelopeControls"), True)
+
+
+class ModelBenchmarksRegistryTests(unittest.TestCase):
+    """Assertions for Artificial Analysis v4.3.2 model benchmarks in ai-registry.json."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.reg = load_registry()
+        cls.models = cls.reg.get("models", {})
+
+    def test_mimo_pro_benchmarks_and_ranks_above_qwen_max(self):
+        self.assertIn("mimo-v2.6-pro", self.models)
+        self.assertIn("qwen3.8-max", self.models)
+
+        mimo_bm = self.models["mimo-v2.6-pro"].get("benchmarks", {})
+        qwen_bm = self.models["qwen3.8-max"].get("benchmarks", {})
+
+        self.assertEqual(mimo_bm.get("aa_intelligence"), 46.0)
+        self.assertEqual(mimo_bm.get("verified_tok_per_s"), 51)
+        self.assertEqual(mimo_bm.get("direct_api_tok_per_s"), 29)
+        self.assertEqual(mimo_bm.get("cost_per_task_usd"), 0.13)
+        self.assertEqual(mimo_bm.get("quota_pool"), "mimo-sub")
+
+        self.assertEqual(qwen_bm.get("aa_intelligence"), 45.4)
+        self.assertEqual(qwen_bm.get("verified_tok_per_s"), 85)
+        self.assertEqual(qwen_bm.get("cost_per_task_usd"), 0.45)
+        self.assertEqual(qwen_bm.get("quota_pool"), "opencode-go-qwen")
+
+        self.assertGreater(mimo_bm["aa_intelligence"], qwen_bm["aa_intelligence"])
+
+    def test_all_specified_benchmarks_present(self):
+        expected_benchmarks = {
+            "mimo-v2.6-flash": {
+                "aa_intelligence": 37.9,
+                "verified_tok_per_s": 54,
+                "direct_api_tok_per_s": 29,
+                "cost_per_task_usd": 0.04,
+                "quota_pool": "mimo-sub"
+            },
+            "claude-opus-5-5-high": {
+                "aa_intelligence": 57.6,
+                "verified_tok_per_s": 98,
+                "cost_per_task_usd": 1.82,
+                "quota_pool": "agy-3p-partner"
+            },
+            "claude-sonnet-5-5-xhigh": {
+                "aa_intelligence": 51.9,
+                "verified_tok_per_s": 114,
+                "cost_per_task_usd": 1.12,
+                "quota_pool": "agy-3p-partner",
+                "max_safe_effort": "xhigh"
+            },
+            "claude-sonnet-5-5-high": {
+                "aa_intelligence": 46.8,
+                "verified_tok_per_s": 100,
+                "cost_per_task_usd": 1.12,
+                "quota_pool": "agy-3p-partner"
+            },
+            "muse-spark-1.3-contributor": {
+                "aa_intelligence": 45.0,
+                "coding_index": 75.8,
+                "verified_tok_per_s": 287,
+                "cost_per_task_usd": 1.37,
+                "quota_pool": "opencode-go-muse"
+            },
+            "gemini-3.8-flash-tiered-high": {
+                "aa_intelligence": 41.0,
+                "verified_tok_per_s": 158,
+                "cost_per_task_usd": 1.24,
+                "quota_pool": "agy-gemini-flash"
+            },
+            "gpt-6-luna-high": {
+                "aa_intelligence": 38.4,
+                "verified_tok_per_s": 180,
+                "cost_per_task_usd": 0.07,
+                "quota_pool": "cxa-sub"
+            }
+        }
+
+        for model_id, expected in expected_benchmarks.items():
+            self.assertIn(model_id, self.models, f"Model {model_id} not in registry")
+            actual = self.models[model_id].get("benchmarks", {})
+            for key, val in expected.items():
+                self.assertEqual(actual.get(key), val,
+                                 f"Model {model_id} benchmark mismatch on {key}")
+
+
 if __name__ == "__main__":
     unittest.main()

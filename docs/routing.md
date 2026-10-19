@@ -30,6 +30,23 @@ Exit 0 in sync, 1 on any `drift`/`missing`/`extra` line, 3 when the store cannot
 `apply.sh` and `apply.ps1` also prune the two managed-orphan lists in `combos.json` from the live store: `retired` (dead ids a rename left) and `omitted` (OR1g: only the orphaned routes — a route that declared legs but the render serves none for) — never a combo in `combos.json`, and never one the user made. A deliberately legless route (`legs: []`: the LiteLLM-only `*-paid` and the dynamic `auto*`) is in neither list, so a live combo with one of its ids is never pruned.
 `--drift` reports an omitted live combo as `extra <id> (omitted: no servable leg)`, and a non-object `combo list` answer as an unreadable store (exit 3), not a crash.
 
+## Architectural boundary with plangraph
+
+AutoOS and plangraph maintain a strict architectural separation of concerns:
+- **AutoOS**: Host provisioner and client router. Installs host packages (`opencode-cli`, `tailscale`, `omniroute`, agent CLIs), maintains `configuration/omniroute/default-settings.json` (`listen: 127.0.0.1:20128`, `strategy: "priority"`, `enableModelBenchmarks: true`, `enableRequestEnvelopeControls: true`), renders provider/combo configs (`combos.json`, `ide-models.json`, `opencode.jsonc`), and executes resolver planning (`tools/autoos_resolver.py`).
+- **plangraph**: Downstream autonomous orchestration repository. Houses the dynamic SQLite model/benchmark catalog cache (`plangraph.spawner`) and the MCP agent spawner.
+
+## Baseline OmniRoute settings (`configuration/omniroute/default-settings.json`)
+
+Fresh installations deploy `configuration/omniroute/default-settings.json` specifying the baseline listener and default options:
+- `listen.host`: `127.0.0.1`
+- `listen.port`: `20128`
+- `defaults.strategy`: `"priority"`
+- `defaults.enableModelBenchmarks`: `true`
+- `defaults.enableRequestEnvelopeControls`: `true`
+- `defaults.healthCheckIntervalSec`: `60`
+- `defaults.requestTimeoutMs`: `120000`
+
 ## Standby router (LiteLLM :4000)
 
 LiteLLM is the manual fallback when you want the same tier names served

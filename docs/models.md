@@ -403,6 +403,43 @@ must never be exported as an API key, and `audit-router.py` fails any
 anthropic/claude model ref in routing surfaces. ChatGPT/Grok legs ship only
 where funded — none are funded today, so no rows.
 
+## Baseline OmniRoute Settings & plangraph Boundary
+
+Fresh host installations provision baseline OmniRoute settings via `configuration/omniroute/default-settings.json`:
+- `listen`: `127.0.0.1:20128`
+- `defaults.strategy`: `"priority"`
+- `defaults.healthCheckIntervalSec`: `60`
+- `defaults.requestTimeoutMs`: `120000`
+- `defaults.enableModelBenchmarks`: `true`
+- `defaults.enableRequestEnvelopeControls`: `true`
+
+### Architectural Boundary with plangraph
+
+- **AutoOS**: Host and CLI provisioner. Installs packages (`opencode-cli`, `tailscale`, `omniroute`, agent CLIs), provisions host defaults (`default-settings.json`), renders IDE and gateway combos (`combos.json`, `ide-models.json`), and provides static catalog metadata and resolver logic (`catalog/ai-registry.json`, `tools/autoos_resolver.py`).
+- **plangraph**: Downstream orchestration engine. Houses the dynamic SQLite model and benchmark catalog cache (`plangraph.spawner`) and the MCP agent spawner for autonomous task graphs.
+
+## Verified Artificial Analysis Benchmarks (v4.3.2)
+
+Models in `catalog/ai-registry.json` carry verified benchmark metrics under the `benchmarks` metadata block (`aa_intelligence`, `coding_index`, `verified_tok_per_s`, `direct_api_tok_per_s`, `cost_per_task_usd`, `quota_pool`, `max_safe_effort`).
+
+| Model / Leg | Intelligence (`aa_intelligence`) | Coding Index | Verified Speed | Direct API Speed | Cost / Task | Quota Pool | Safe Effort |
+|---|---|---|---|---|---|---|---|
+| `agy/claude-opus-5-5-high` | 57.6 | 72.0 | 42 tok/s | - | $0.85 | `agy-sub` | `high` |
+| `agy/claude-sonnet-5-5-xhigh` | 51.9 | 68.4 | 48 tok/s | - | $0.42 | `agy-sub` | `xhigh` |
+| `agy/claude-sonnet-5-5-high` | 46.8 | 62.1 | 54 tok/s | - | $0.28 | `agy-sub` | `high` |
+| `mimo/mimo-v2.6-pro` | 46.0 | 61.2 | 51 tok/s | 29 tok/s | $0.13 | `mimo-sub` | `high` |
+| `opencode-go/qwen3.8-max` | 45.4 | 59.8 | 85 tok/s | - | $0.45 | `opencode-go-qwen` | `high` |
+| `opencode-go/muse-spark-1.3-contributor` | 45.0 | 58.2 | 70 tok/s | - | $0.10 | `meta-contributor` | `high` |
+| `agy/gemini-3.8-flash-tiered-high` | 41.0 | 52.3 | 110 tok/s | - | $0.08 | `agy-sub` | `high` |
+| `cxa/gpt-6-luna-high` | 38.4 | 48.0 | 180 tok/s | - | $0.12 | `cxa-pool` | `high` |
+| `mimo-v2.6-flash` | 37.9 | 47.5 | 54 tok/s | 29 tok/s | $0.05 | `mimo-free` | `medium` |
+
+Key resolver rankings and throughput characteristics:
+- **`mimo/mimo-v2.6-pro` vs `opencode-go/qwen3.8-max`**: `tools/autoos_resolver.py`'s `TIER_PREFERENCE_ORDER` and `rank_models_by_intelligence()` place `mimo/mimo-v2.6-pro` (Intelligence 46.0, 51 tok/s, $0.13/task, `mimo-sub` pool) ahead of `opencode-go/qwen3.8-max` (Intelligence 45.4, 85 tok/s, $0.45/task, `opencode-go-qwen` pool).
+- **`mimo-v2.6-flash`**: Achieves 54 tok/s overall verified throughput and 29 tok/s over direct API.
+- **`claude-sonnet-5-5-xhigh`**: Verified with `max_safe_effort: "xhigh"`.
+- **`cxa/gpt-6-luna-high`**: High throughput at 180 tok/s with 38.4 Intelligence score.
+
 ## Client fallback ladder (when the top rung breaks, step down one)
 
 Every client below routes through OmniRoute on `:20128` with the same
