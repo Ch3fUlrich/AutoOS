@@ -352,6 +352,12 @@
       ],
       "family": "deepseek",
       "id": "deepseek-flash",
+      "benchmarks": {
+        "aa_intelligence": 45.0,
+        "verified_tok_per_s": 231,
+        "cost_per_task_usd": 0.26,
+        "quota_pool": "deepseek-payg"
+      },
       "output_max": 393216,
       "price_cache_read": 3e-08,
       "price_in": 3e-07,

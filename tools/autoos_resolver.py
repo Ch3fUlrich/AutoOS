@@ -2935,6 +2935,8 @@ TIER_PREFERENCE_ORDER = [
     "mimo/mimo-v2.6-pro",
     "opencode-go/qwen3.8-max",
     "opencode-go/muse-spark-1.3-contributor",
+    "opencode-go/deepseek-v4-flash-max",
+    "deepseek/deepseek-flash",
     "agy/gemini-3.8-flash-tiered-high",
     "cxa/gpt-6-luna-high",
     "mimo/mimo-v2.6-flash",
