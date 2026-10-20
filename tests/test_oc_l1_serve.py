@@ -898,7 +898,7 @@ class TestChildEnvSystemRoot(unittest.TestCase):
                     lane, Path(td) / "opencode.json", PW_VALUE)
 
     def test_systemroot_reaches_the_child_on_windows(self):
-        env = self._env({"SystemRoot": "C:\\Windows"}, True)
+        env = self._env({"SYSTEMROOT": "C:\\Windows"}, True)
         self.assertEqual(env.get("SystemRoot"), "C:\\Windows")
 
     def test_systemroot_absent_from_launcher_means_absent_from_child(self):
@@ -907,7 +907,7 @@ class TestChildEnvSystemRoot(unittest.TestCase):
         self.assertNotIn("SYSTEMROOT", env)
 
     def test_no_systemroot_forwarding_off_windows(self):
-        env = self._env({"SystemRoot": "C:\\Windows"}, False)
+        env = self._env({"SYSTEMROOT": "C:\\Windows"}, False)
         self.assertNotIn("SystemRoot", env)
         self.assertNotIn("SYSTEMROOT", env)
 

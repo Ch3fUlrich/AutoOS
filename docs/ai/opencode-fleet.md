@@ -326,3 +326,21 @@ python3 tools/oc_l2.py status --lane l2-project-p1 && python3 tools/oc_l2.py sto
 
 `start` answering `canary.denied=true` with `exit_code: 0` is the proof the lane may run unattended; `exit_code: 5` means the
 guard did not deny, the brief was never posted, and the lane must be stopped and fixed, not supervised anyway.
+
+**Direct-model flags & Windows/plangraph child env (D-2131).** `tools/oc_l2.py start` also accepts `--model-id <id>` (with
+optional `--model-key` and `--model-provider`, default `omniroute`) via `direct_model()` to pin a specific model triple instead
+of a combo, and defaults `serve_port` via `oc_l1.derive_port(name)` when `--port` is omitted. In `tools/oc_l1_serve.py`,
+`_child_env` forwards `SystemRoot` on Windows when uppercase `SYSTEMROOT` is present in the launcher environment and defaults
+`PLANGRAPH_REVIEW_URL` from the resolved `AUTOOS_OMNIROUTE_URL` when blank so project configs referencing `{env:PLANGRAPH_REVIEW_URL}`
+never blank out the gateway `baseURL`.
+
+## Cross-host Fleet-Bus Relay (`tools/fleet_bus.py`, D-2024 / D-2130)
+
+`tools/fleet_bus.py` is a stdlib-only HTTP relay for tailnet-only cross-host messaging (`POST /inbox` + `GET /outbox?since=<cursor>`):
+
+- **Authentication & bounds:** `POST /inbox` requires `X-Fleet-Sig` = hex `HMAC-SHA256(secret, "ts|nonce|from|to|sha256(text)")`
+  using a 0600 `--secret-file` (value never printed), `|now - ts| <= 60` s skew check, 10 000-entry nonce LRU, and a 4096-byte
+  body cap. Message text is scrubbed to a single line (`<= 2000` chars).
+- **Pull & logging:** `GET /outbox?since=<cursor>` returns `{"cursor", "records"}` after `cursor` from the 1000-entry in-memory
+  ring; disk logs under `<log-dir>/YYYY-MM-DD.jsonl` record metadata only (`id`, `ts`, `from`, `to`, `len`) and never message text.
+
