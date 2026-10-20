@@ -985,6 +985,9 @@ fi
 if it "fleet hooks: Stop report + inbox injector (unit tests)"; then
     out="$(python3 tests/test_fleet_hook.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
+if it "fleet_bus: HMAC, skew, nonce LRU, body cap, metadata-only jsonl log (unit tests)"; then
+    out="$(python3 tests/test_fleet_bus.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
 
 # tools/unit_breaker.py + tools/gateway_alerts.py (P1.2): the circuit breaker around agent-starting units and the
 # provider-suspension check - fake systemctl, fixture sqlite, tmp state dirs, never the live ones.
