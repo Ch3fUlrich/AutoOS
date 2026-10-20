@@ -343,4 +343,7 @@ never blank out the gateway `baseURL`.
   body cap. Message text is scrubbed to a single line (`<= 2000` chars).
 - **Pull & logging:** `GET /outbox?since=<cursor>` returns `{"cursor", "records"}` after `cursor` from the 1000-entry in-memory
   ring; disk logs under `<log-dir>/YYYY-MM-DD.jsonl` record metadata only (`id`, `ts`, `from`, `to`, `len`) and never message text.
+- **Binding:** `--bind` or `FLEET_BUS_BIND` names the tailnet address on the host that runs the relay. The public default is
+  `127.0.0.1`: a site address is never a literal in this public repository (AutoOS Hard Rule 1). A host that needs the relay on
+  the tailnet sets the variable in its own 0600 unit/config, never in a tracked file.
 

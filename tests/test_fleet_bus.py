@@ -188,5 +188,29 @@ class FleetBusTest(unittest.TestCase):
             thread.join(timeout=10)
 
 
+class BindConfigTest(unittest.TestCase):
+    """The public tree must not carry a site address as the relay default.
+
+    The live relay still binds to the tailnet address, but that value comes
+    from the host environment (`FLEET_BUS_BIND`) or the `--bind` flag, never
+    from a literal in this public repository (AutoOS Hard Rule 1).
+    """
+
+    def test_default_bind_is_loopback_not_site_shaped(self):
+        self.assertEqual(fleet_bus.DEFAULT_BIND, "127.0.0.1")
+        self.assertEqual(fleet_bus.bind_default({}), "127.0.0.1")
+
+    def test_env_supplies_the_bind_address(self):
+        self.assertEqual(
+            fleet_bus.bind_default({"FLEET_BUS_BIND": "127.0.0.2"}),
+            "127.0.0.2",
+        )
+
+    def test_cli_default_reads_the_environment(self):
+        args = fleet_bus.build_parser({"FLEET_BUS_BIND": "127.0.0.3"}).parse_args([])
+        self.assertEqual(args.bind, "127.0.0.3")
+        self.assertEqual(fleet_bus.build_parser({}).parse_args([]).bind, "127.0.0.1")
+
+
 if __name__ == "__main__":
     unittest.main()

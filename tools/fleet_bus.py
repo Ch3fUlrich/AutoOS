@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """fleet_bus.py - tailnet-only relay listener (D-2024 OCGO-FLEET-BUS, pull mode).
 
-One stdlib HTTP server per host, bound to the tailnet address only. The
+One stdlib HTTP server per host, bound to the tailnet address only. The bind
+address comes from --bind or FLEET_BUS_BIND; the public default is loopback
+because a site address is never a literal in this public repository. The
 coding-side poller pulls; this side never dials out, so no round-trip is
 wasted: a single GET carries everything new since the poller's cursor.
 
@@ -51,7 +53,21 @@ SKEW_S = 60
 NONCE_CAP = 10000
 RING_CAP = 1000
 DEFAULT_PORT = 58690
-DEFAULT_BIND = "100.116.246.27"
+# Loopback is the only safe public default: the live relay takes its tailnet
+# address from FLEET_BUS_BIND (or --bind), so no site address is a literal in
+# this public tree (AutoOS Hard Rule 1).
+DEFAULT_BIND = "127.0.0.1"
+BIND_ENV = "FLEET_BUS_BIND"
+
+
+def bind_default(env=None):
+    """The relay bind address: ``FLEET_BUS_BIND``, else loopback.
+
+    The live host names its tailnet address in its own 0600 environment or
+    unit file; this public tree ships no site-shaped default.
+    """
+    source = os.environ if env is None else env
+    return source.get(BIND_ENV, DEFAULT_BIND)
 
 
 class FleetBusError(Exception):
@@ -239,12 +255,13 @@ def read_secret(path):
     return value.encode("utf-8")
 
 
-def build_parser():
+def build_parser(env=None):
     ap = argparse.ArgumentParser(
         prog="fleet_bus.py",
         description="Tailnet-only relay listener (D-2024 OCGO-FLEET-BUS, pull mode).")
-    ap.add_argument("--bind", default=DEFAULT_BIND,
-                    help="bind address, tailnet-only (default %s)" % DEFAULT_BIND)
+    ap.add_argument("--bind", default=bind_default(env),
+                    help="bind address, tailnet-only (default: $%s or %s)"
+                         % (BIND_ENV, DEFAULT_BIND))
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
                     help="relay port (default %d)" % DEFAULT_PORT)
     ap.add_argument("--secret-file", default=None,
