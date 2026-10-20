@@ -206,10 +206,21 @@ class BindConfigTest(unittest.TestCase):
             "127.0.0.2",
         )
 
+    def test_an_empty_env_falls_back_to_loopback(self):
+        # A set-but-empty systemd Environment= line must not become "" —
+        # HTTPServer binds "" to INADDR_ANY, which would expose the relay.
+        self.assertEqual(fleet_bus.bind_default({"FLEET_BUS_BIND": ""}), "127.0.0.1")
+        self.assertEqual(fleet_bus.bind_default({"FLEET_BUS_BIND": "   "}), "127.0.0.1")
+
     def test_cli_default_reads_the_environment(self):
         args = fleet_bus.build_parser({"FLEET_BUS_BIND": "127.0.0.3"}).parse_args([])
         self.assertEqual(args.bind, "127.0.0.3")
         self.assertEqual(fleet_bus.build_parser({}).parse_args([]).bind, "127.0.0.1")
+
+    def test_an_explicit_bind_beats_the_environment(self):
+        args = fleet_bus.build_parser({"FLEET_BUS_BIND": "127.0.0.3"}).parse_args(
+            ["--bind", "127.0.0.4"])
+        self.assertEqual(args.bind, "127.0.0.4")
 
 
 if __name__ == "__main__":

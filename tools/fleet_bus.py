@@ -67,7 +67,10 @@ def bind_default(env=None):
     unit file; this public tree ships no site-shaped default.
     """
     source = os.environ if env is None else env
-    return source.get(BIND_ENV, DEFAULT_BIND)
+    value = (source.get(BIND_ENV) or "").strip()
+    # A set-but-empty systemd Environment= line must not become "":
+    # HTTPServer binds "" to INADDR_ANY, which would expose the relay.
+    return value or DEFAULT_BIND
 
 
 class FleetBusError(Exception):
