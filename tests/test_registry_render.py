@@ -2525,6 +2525,12 @@ class ClassComboFloorClampTests(unittest.TestCase):
         self.assertEqual(self._combo(reg)["models"],
                          ["clean/first", "clean/second"])
 
+    def test_a_leg_with_no_recorded_window_never_reaches_the_combo(self):
+        reg = self._reg()
+        del reg["models"]["second"]["context_advertised"]
+        self.assertIsNone(registry.leg_advertised_context("clean/second", reg))
+        self.assertEqual(self._combo(reg)["models"], ["clean/first"])
+
     def test_no_real_class_combo_lists_a_leg_below_its_own_floor(self):
         reg = real_registry()
         rendered = registry.render_omniroute(reg)
@@ -2555,6 +2561,17 @@ class ClassComboFloorClampTests(unittest.TestCase):
         self.assertTrue(named, "a below-floor leg passed validation silently: %s" % problems)
         self.assertTrue(any("cohere/command-a-03-2025" in p for p in named), named)
         self.assertTrue(any(str(256000) in p for p in named), named)
+
+    def test_validate_names_a_leg_with_no_recorded_window(self):
+        reg = copy.deepcopy(real_registry())
+        route_id = "class-256k"
+        leg = reg["routes"][route_id]["legs"][0]
+        _provider_id, model_id = registry.resolve_leg(leg, reg)
+        del reg["models"][model_id]["context_advertised"]
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(route_id in p and leg in p
+                            and "records no context_advertised window" in p
+                            for p in problems), problems)
 
     def test_validate_rejects_a_floor_that_is_not_a_positive_integer(self):
         reg = copy.deepcopy(real_registry())
