@@ -2485,6 +2485,25 @@ class ClassComboFloorClampTests(unittest.TestCase):
     all gated, so apply.sh/apply.ps1 prunes it rather than serving it)."""
 
     FLOOR = 200000
+    # Gateway-unresolvable windows, measured with getModelContextLimit on fork feat/model-benchmarks-catalog: strict drops them; #8786 fail-open can resurrect them.
+    # Remove an entry only when the OmniRoute gateway knows its window.
+    GATEWAY_UNKNOWN_WINDOW_LEGS = ("xiaomi_mimo/mimo-v2.6-flash",)
+
+    def _gateway_unknown_window_legs(self, reg):
+        return [(route_id, leg)
+                for route_id in ClassComboNativeFieldTests.CLASS_ROUTES
+                for leg in reg["routes"][route_id]["legs"]
+                if leg in self.GATEWAY_UNKNOWN_WINDOW_LEGS]
+
+    def test_no_class_route_lists_a_leg_the_gateway_cannot_size(self):
+        reg = copy.deepcopy(real_registry())
+        self.assertEqual(self._gateway_unknown_window_legs(reg), [])
+
+    def test_adding_an_unsized_leg_back_is_caught(self):
+        reg = copy.deepcopy(real_registry())
+        leg = self.GATEWAY_UNKNOWN_WINDOW_LEGS[0]
+        reg["routes"]["class-1m"]["legs"].append(leg)
+        self.assertIn(("class-1m", leg), self._gateway_unknown_window_legs(reg))
 
     def _reg(self):
         reg = synthetic_gateway_registry()
