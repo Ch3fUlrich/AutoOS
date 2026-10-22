@@ -211,6 +211,44 @@ generated table above already shows it):
   (CLAUDE55 2026-10-05: the agy CLI model list carries only the 5-5 generation),
   declared 1M.
 
+### Class floor combos (RT-P1, native 3.8.51 fields)
+
+Three `priority` combos (`class-128k`, `class-256k`, `class-1m`) exist purely to
+guarantee a **minimum context window**: the registry declares `contextRequirements`
+(`min_context_window` + `context_filter_mode: "strict"`) and `targetTimeoutMs`, and
+`tools/registry.py render_omniroute` emits them into `combos.json` as the native
+camelCase `contextRequirements` / `targetTimeoutMs` — only when the route declares
+them, so every existing combo renders byte-identical.
+
+| Combo | Floor | Legs (all LiteLLM-unaddressable) | targetTimeoutMs |
+|---|---|---|---|
+| `class-128k` | 128000 | vertex gemini-3.8-flash · opencode-go kimi-k3 (131072) · mimo v2.6-flash | 180000 |
+| `class-256k` | 256000 | vertex gemini-3.8-flash · opencode-go glm-5.3-flash · mimo v2.6-flash | 300000 |
+| `class-1m` | 1000000 | vertex gemini-3.8-flash · opencode-go glm-5.3-flash · mimo v2.6-flash | 600000 |
+
+Floor enforcement is two-layer: `floor_route_legs()` drops any servable leg whose
+recorded window is under the floor (a leg with **no** recorded window is dropped too)
+at render time, and `_check_context_floors()` fails `registry validate` loudly,
+naming route + leg + window. `clients` is `["opencode","zed"]` — no `"openhands"`,
+so no `openhands_profile`/tier-profile is owed and `tier-profiles.json`/`config.toml`
+stay untouched; the ids do ride `IDE_MODEL_ORDER` (ide-models.json / opencode.jsonc
+regenerated with them). Because none of the legs are LiteLLM-addressable
+(`litellm_auth` service-account / gateway-only), these combos owe no `config.yaml`
+block in the sync contract.
+
+**Resilience knobs (OmniRoute 3.8.51 defaults, verified in `settings.ts` /
+`resilience/settings.ts` source — `apply.sh`/`apply.ps1` do not set them yet, so the
+gateway runs its own defaults):**
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `providerCooldown` (`PROVIDER_COOLDOWN_ENABLED`) | **OFF** | no per-provider 429 cool-down sweep |
+| `minRetryCooldownMs` | 5000 | shortest cooldown after a retryable failure |
+| `maxRetryCooldownMs` | 300000 | cooldown ceiling |
+| `stickyRoundRobinLimit` | 3 | consecutive requests may pin the same leg |
+| `promptCacheAffinityEnabled` | true | prefer the leg that already holds the prompt cache |
+| `disableSessionStickiness` | false | session stickiness stays on (providerCooldown / stickiness are global gateway state, not per-combo — no combo in this repo sets them) |
+
 ### Per-model fallback chains (single-model routes, cheapest-first)
 
 A tier combo is a *role*; sometimes a caller pins one model. Each pinned model
