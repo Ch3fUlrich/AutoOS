@@ -13576,15 +13576,28 @@ def visible_workers(directory: str, include_ended: bool = False, now=None) -> li
             or (_parse_iso(r["ended"]) or cutoff) > cutoff]
 
 
-def host_admission_config(registry=None) -> tuple:
+def host_admission_config(registry=None, platform=None) -> tuple:
     """(max_live_workers, mem_available_floor_mb) - the host's own limits.
 
-    catalog/ai-registry.json's top-level `host_admission` is the single source
+    catalog/ai-registry.json's `host_admission` with platform overrides is the single source
     (operator order 2026-10-08). A section that is absent, or a field that is not
     a number, takes the documented default rather than no limit: an unparseable
     cap must not read as an unbounded host. AUTOOS_ADMISSION_OFF=1 is the
     test-only escape, honoured by `host_admission_refusal`, not by the numbers.
     """
+    return tuple(_host_admission_value(registry, platform, field, default)
+                 for field, default in (
+                     ("max_live_workers", ADMISSION_MAX_LIVE_DEFAULT),
+                     ("mem_available_floor_mb", ADMISSION_MEM_FLOOR_MB_DEFAULT)))
+
+
+def host_admission_commit_max(registry=None, platform=None):
+    """Commit-charge ceiling in percent, or None when not configured."""
+    return _host_admission_value(registry, platform, "commit_charge_max_pct", None)
+
+
+def _host_admission_value(registry, platform, field, default):
+    """Resolve one integer override without losing valid top-level siblings."""
     if registry is None:
         try:
             registry = load_registry(REGISTRY_PATH)
@@ -13592,20 +13605,46 @@ def host_admission_config(registry=None) -> tuple:
             registry = {}
     section = (registry or {}).get("host_admission")
     section = section if isinstance(section, dict) else {}
-    out = []
-    for field, default in (("max_live_workers", ADMISSION_MAX_LIVE_DEFAULT),
-                           ("mem_available_floor_mb", ADMISSION_MEM_FLOOR_MB_DEFAULT)):
-        value = section.get(field)
-        out.append(value if isinstance(value, int) and not isinstance(value, bool)
-                   else default)
-    return tuple(out)
+    platforms = section.get("by_platform")
+    override = platforms.get(sys.platform if platform is None else platform) \
+        if isinstance(platforms, dict) else None
+    override = override if isinstance(override, dict) else {}
+    for source in (override, section):
+        value = source.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return default
+
+
+def windows_memory_status():
+    """Available physical MB and system commit percentage, or None on failure."""
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_uint32),
+                        ("dwMemoryLoad", ctypes.c_uint32)] + [
+                            (name, ctypes.c_uint64) for name in (
+                                "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile",
+                                "ullAvailPageFile", "ullTotalVirtual", "ullAvailVirtual",
+                                "ullAvailExtendedVirtual")]
+
+        status = MEMORYSTATUSEX()
+        status.dwLength = ctypes.sizeof(status)
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+            return None
+        return (status.ullAvailPhys // (1024 * 1024),
+                (status.ullTotalPageFile - status.ullAvailPageFile)
+                / status.ullTotalPageFile * 100)
+    except Exception:
+        return None
 
 
 def mem_available_mb(path=None):
     """MemAvailable from /proc/meminfo in MB, or None where it cannot be read.
 
-    The kernel writes it in kB. None is Windows, or a container mounted without
-    /proc: the live-worker half of the rule still binds there, and the memory
+    The kernel writes it in kB. None is a container mounted without /proc, or
+    Windows (which `windows_memory_status` measures instead): the live-worker half of the rule still binds there, and the memory
     half stands down instead of refusing every run on a host it cannot measure.
     """
     path = path or os.environ.get(ADMISSION_MEMINFO_ENV) or MEMINFO_PATH
@@ -13657,7 +13696,8 @@ def live_admission_reservations(directory: str) -> int:
     return len(live)
 
 
-def host_admission_claim(registry=None, workers=None, meminfo=None):
+def host_admission_claim(registry=None, workers=None, meminfo=None,
+                         memstatus=None, platform=None):
     """Ask the host for a worker, and take the slot when it says yes.
 
     Returns (refusal, claim-token). The two are one critical section: the same
@@ -13677,7 +13717,8 @@ def host_admission_claim(registry=None, workers=None, meminfo=None):
     lock = free_slot_lock_take(directory)
     try:
         refusal = host_admission_refusal(registry=registry, workers=directory,
-                                         meminfo=meminfo)
+                                         meminfo=meminfo, memstatus=memstatus,
+                                         platform=platform)
         if refusal is not None:
             return refusal, None
         return None, _reserve_free_slot(directory, None, None,
@@ -13697,7 +13738,8 @@ def _admission_text(live: int, cap: int, free_mb, floor: int, which: str) -> str
             % (live, cap, free, floor, which))
 
 
-def host_admission_refusal(registry=None, workers=None, meminfo=None):
+def host_admission_refusal(registry=None, workers=None, meminfo=None,
+                           memstatus=None, platform=None):
     """Why this host cannot take another worker right now, or None to admit.
 
     Read-only, and it never waits (R-worker: queueing is the caller's job - the
@@ -13707,11 +13749,18 @@ def host_admission_refusal(registry=None, workers=None, meminfo=None):
     """
     if os.environ.get(ADMISSION_OFF_ENV) == "1":
         return None
-    cap, floor = host_admission_config(registry)
+    cap, floor = host_admission_config(registry, platform)
+    commit_max = host_admission_commit_max(registry, platform)
     live = live_worker_count(workers)
-    free_mb = mem_available_mb(meminfo)
+    commit_pct = None
+    if (sys.platform if platform is None else platform) == "win32" \
+            and meminfo is None and not os.environ.get(ADMISSION_MEMINFO_ENV):
+        status = (memstatus or windows_memory_status)()
+        free_mb, commit_pct = status if status is not None else (None, None)
+    else:
+        free_mb = mem_available_mb(meminfo)
     # HOSTADMISSION-FAILOPEN: `free_mb is None` means the host could not be
-    # measured (no /proc/meminfo: Windows, a container mounted without it, an
+    # measured (a failed Windows reader, a container without /proc/meminfo, or an
     # unreadable path), and the memory half of the rule then stands down — it
     # FAILS OPEN rather than refuse every run on a machine it cannot read. The
     # live-worker half does not: `live >= cap` still binds, and it is the half
@@ -13721,6 +13770,10 @@ def host_admission_refusal(registry=None, workers=None, meminfo=None):
         return _admission_text(live, cap, free_mb, floor, "the live-worker cap")
     if free_mb is not None and free_mb < floor:
         return _admission_text(live, cap, free_mb, floor, "the memory floor")
+    if commit_pct is not None and commit_max is not None and commit_pct >= commit_max:
+        return _admission_text(live, cap, free_mb, floor,
+                               "the commit-charge ceiling") + (
+            "; commit charge %g%% >= max %g%%" % (commit_pct, commit_max))
     return None
 
 
