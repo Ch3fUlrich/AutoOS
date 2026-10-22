@@ -4156,14 +4156,13 @@
       }
     },
     "class-128k": {
-      "$comment": "RT-P1-CLASS-COMBOS: always-on 128k-floor priority combo. OmniRoute 3.8.51 native fields (context_requirements, target_timeout_ms) are declared snake_case here and rendered camelCase into combos.json only for routes that carry them; floor_route_legs() drops any servable leg advertising less than 128000. The legs are all providers LiteLLM cannot address (vertex service_account, opencode-go gateway_connection, xiaomi_mimo gateway-only) so litellm_servable_refs() is empty and this route gets no AUTOOS-MANAGED block in configuration/litellm/config.yaml - omniroute-only. Kimi (131072) is the leg that makes the 128k floor real: it cannot ride class-256k.",
+      "$comment": "RT-P1-CLASS-COMBOS: always-on 128k-floor priority combo. OmniRoute 3.8.51 native fields (context_requirements, target_timeout_ms) are declared snake_case here and rendered camelCase into combos.json only for routes that carry them; floor_route_legs() drops any servable leg advertising less than 128000. The legs are all providers LiteLLM cannot address (vertex service_account, opencode-go gateway_connection) so litellm_servable_refs() is empty and this route gets no AUTOOS-MANAGED block in configuration/litellm/config.yaml - omniroute-only. Kimi (131072) is the leg that makes the 128k floor real: it cannot ride class-256k. xiaomi_mimo/mimo-v2.6-flash was dropped (D-2207): the gateway reports no context window for it, so the strict filter cannot place it under the floor; restore when the gateway knows the mimo-v2.6-flash window (OMNI-BENCH-PREP adds it to the xiaomi-mimo model list).",
       "id": "class-128k",
       "class": "cheap",
       "strategy": "priority",
       "legs": [
         "vertex/gemini-3.8-flash",
-        "opencode-go/kimi-k3",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "opencode-go/kimi-k3"
       ],
       "surfaces": {
         "omniroute": {
@@ -4184,14 +4183,13 @@
       }
     },
     "class-256k": {
-      "$comment": "RT-P1-CLASS-COMBOS: always-on 256k-floor priority combo - only legs advertising >= 256000 (all three are 1048576), so kimi (131072) rides class-128k only. Same omniroute-only leg rule as class-128k: vertex/opencode-go/xiaomi_mimo are all LiteLLM-unaddressable, so litellm_servable_refs() is empty and no managed block is owed.",
+      "$comment": "RT-P1-CLASS-COMBOS: always-on 256k-floor priority combo - only legs advertising >= 256000 (both are 1048576), so kimi (131072) rides class-128k only. Same omniroute-only leg rule as class-128k: vertex/opencode-go are all LiteLLM-unaddressable, so litellm_servable_refs() is empty and no managed block is owed. xiaomi_mimo/mimo-v2.6-flash was dropped (D-2207): the gateway reports no context window for it, so the strict filter cannot place it under the floor; restore when the gateway knows the mimo-v2.6-flash window (OMNI-BENCH-PREP adds it to the xiaomi-mimo model list).",
       "id": "class-256k",
       "class": "cheap",
       "strategy": "priority",
       "legs": [
         "vertex/gemini-3.8-flash",
-        "opencode-go/glm-5.3-flash",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "opencode-go/glm-5.3-flash"
       ],
       "surfaces": {
         "omniroute": {
@@ -4212,14 +4210,13 @@
       }
     },
     "class-1m": {
-      "$comment": "RT-P1-CLASS-COMBOS: always-on 1M-floor priority combo - every declared leg advertises 1048576 >= 1000000, so no floor clamp fires here. Same three LiteLLM-unaddressable legs as class-256k (the only gateway-only/no-key providers with 1M windows); the floor that separates this route from class-256k is the native context_requirements, not the leg list.",
+      "$comment": "RT-P1-CLASS-COMBOS: always-on 1M-floor priority combo - every declared leg advertises 1048576 >= 1000000, so no floor clamp fires here. Same two LiteLLM-unaddressable legs as class-256k (the only gateway-only/no-key providers with 1M windows); the floor that separates this route from class-256k is the native context_requirements, not the leg list. xiaomi_mimo/mimo-v2.6-flash was dropped (D-2207): the gateway reports no context window for it, so the strict filter cannot place it under the floor; restore when the gateway knows the mimo-v2.6-flash window (OMNI-BENCH-PREP adds it to the xiaomi-mimo model list).",
       "id": "class-1m",
       "class": "cheap",
       "strategy": "priority",
       "legs": [
         "vertex/gemini-3.8-flash",
-        "opencode-go/glm-5.3-flash",
-        "xiaomi_mimo/mimo-v2.6-flash"
+        "opencode-go/glm-5.3-flash"
       ],
       "surfaces": {
         "omniroute": {

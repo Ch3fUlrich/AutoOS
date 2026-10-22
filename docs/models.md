@@ -49,9 +49,9 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `auto/smart` | mid | 131,072 | (none) |
 | `cheaperinference/glm-5.2` | cheap | 128k | ~~cheaperinference `glm-5.2`~~ (unavailable) |
 | `cheaperinference/kimi-k3` | cheap | 128k | ~~cheaperinference `kimi-k3`~~ (unavailable) |
-| `class-128k` | cheap | 128k | vertex `gemini-3.8-flash` → opencode-go `kimi-k3` → xiaomi_mimo `mimo-v2.6-flash` |
-| `class-1m` | cheap | 1M | vertex `gemini-3.8-flash` → opencode-go `glm-5.3-flash` → xiaomi_mimo `mimo-v2.6-flash` |
-| `class-256k` | cheap | 256k | vertex `gemini-3.8-flash` → opencode-go `glm-5.3-flash` → xiaomi_mimo `mimo-v2.6-flash` |
+| `class-128k` | cheap | 128k | vertex `gemini-3.8-flash` → opencode-go `kimi-k3` |
+| `class-1m` | cheap | 1M | vertex `gemini-3.8-flash` → opencode-go `glm-5.3-flash` |
+| `class-256k` | cheap | 256k | vertex `gemini-3.8-flash` → opencode-go `glm-5.3-flash` |
 | `deepseek-v4.1-flash` | cheap | 1M | ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
 | `faik-gpt-6-sol` | credit | 128k | ~~freeaiapikey `openai/gpt-6-sol`~~ (unavailable) |
 | `gemini-3.8-flash` | cheap | 1M | ~~gemini `gemini-3.8-flash`~~ (unavailable) → vertex `gemini-3.8-flash` |
@@ -222,9 +222,11 @@ them, so every existing combo renders byte-identical.
 
 | Combo | Floor | Legs (all LiteLLM-unaddressable) | targetTimeoutMs |
 |---|---|---|---|
-| `class-128k` | 128000 | vertex gemini-3.8-flash · opencode-go kimi-k3 (131072) · mimo v2.6-flash | 180000 |
-| `class-256k` | 256000 | vertex gemini-3.8-flash · opencode-go glm-5.3-flash · mimo v2.6-flash | 300000 |
-| `class-1m` | 1000000 | vertex gemini-3.8-flash · opencode-go glm-5.3-flash · mimo v2.6-flash | 600000 |
+| `class-128k` | 128000 | vertex gemini-3.8-flash · opencode-go kimi-k3 (131072) | 180000 |
+| `class-256k` | 256000 | vertex gemini-3.8-flash · opencode-go glm-5.3-flash | 300000 |
+| `class-1m` | 1000000 | vertex gemini-3.8-flash · opencode-go glm-5.3-flash | 600000 |
+
+Restore `xiaomi_mimo/mimo-v2.6-flash` only when the gateway knows its context window (D-2207; OMNI-BENCH-PREP adds it to the xiaomi-mimo model list).
 
 Floor enforcement is two-layer: `floor_route_legs()` drops any servable leg whose
 recorded window is under the floor (a leg with **no** recorded window is dropped too)

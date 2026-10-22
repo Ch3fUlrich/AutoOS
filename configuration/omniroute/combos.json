@@ -76,8 +76,7 @@
       "context": "128k",
       "models": [
         "vertex/gemini-3.8-flash",
-        "opencode-go/kimi-k3",
-        "mimo/mimo-v2.6-flash"
+        "opencode-go/kimi-k3"
       ],
       "contextRequirements": {
         "minContextWindow": 128000,
@@ -91,8 +90,7 @@
       "context": "1M",
       "models": [
         "vertex/gemini-3.8-flash",
-        "opencode-go/glm-5.3-flash",
-        "mimo/mimo-v2.6-flash"
+        "opencode-go/glm-5.3-flash"
       ],
       "contextRequirements": {
         "minContextWindow": 1000000,
@@ -106,8 +104,7 @@
       "context": "256k",
       "models": [
         "vertex/gemini-3.8-flash",
-        "opencode-go/glm-5.3-flash",
-        "mimo/mimo-v2.6-flash"
+        "opencode-go/glm-5.3-flash"
       ],
       "contextRequirements": {
         "minContextWindow": 256000,
