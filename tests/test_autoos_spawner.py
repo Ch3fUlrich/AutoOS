@@ -25955,6 +25955,8 @@ class DirectSeatHandEntriesTests(unittest.TestCase):
 
     # entry name -> (gateway modelID, registry leg, spends Claude)
     ENTRIES = {
+        "cx-gpt-6.1-sol": (
+            "cx/gpt-6.1-sol", "cx/gpt-6.1-sol", False),
         "agy-gemini-3.8-flash": (
             "agy/gemini-3.8-flash-high", "antigravity/gemini-3.8-flash-high", False),
         "agy-claude-sonnet-5-5-high": (
@@ -26006,7 +26008,9 @@ class DirectSeatHandEntriesTests(unittest.TestCase):
             _provider, model_id = self.agent.resolve_leg(leg, SHIPPED_REGISTRY)
             row = SHIPPED_REGISTRY["models"][model_id]
             limit = self.models[name]["limit"]
-            self.assertEqual(limit["context"], row["context_advertised"], name)
+            context = (row["context_usable"]["tokens"] if name == "cx-gpt-6.1-sol"
+                       else row["context_advertised"])
+            self.assertEqual(limit["context"], context, name)
             self.assertEqual(limit["output"], row["output_max"], name)
 
     def test_the_two_new_agy_rows_carry_family_and_effort(self):
@@ -26015,6 +26019,23 @@ class DirectSeatHandEntriesTests(unittest.TestCase):
         self.assertEqual(rows["claude-sonnet-5-5-high"]["effort_ladder"], ["high"])
         self.assertEqual(rows["gemini-3.8-flash-high"]["family"], "google")
         self.assertEqual(rows["gemini-3.8-flash-high"]["effort_ladder"], ["high"])
+
+    def test_cx_sol_is_the_newest_subscription_writer(self):
+        provider = SHIPPED_REGISTRY["providers"]["cx"]
+        self.assertEqual(provider["tier"], "subscription")
+        self.assertTrue(provider["available"])
+        row = SHIPPED_REGISTRY["models"]["gpt-6.1-sol"]
+        self.assertEqual(row["family"], "openai")
+        self.assertEqual(row["context_advertised"], 500000)
+        self.assertEqual(row["context_usable"]["tokens"], 475000)
+        self.assertEqual(row["output_max"], 128000)
+        result = run_agent("run", "--client", "opencode", "--model",
+                           "omniroute/cx-gpt-6.1-sol", "--tier", "2", "--dry-run", "probe")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        family, _source, reason = self.agent.run_model_family(
+            "omniroute/cx-gpt-6.1-sol", client="opencode",
+            registry=SHIPPED_REGISTRY, cfg=self.cfg)
+        self.assertEqual(family, "openai", reason)
 
 
 class ShippedRegistryValidationTests(unittest.TestCase):
