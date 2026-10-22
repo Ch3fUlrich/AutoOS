@@ -2428,6 +2428,10 @@ class ClassComboNativeFieldTests(unittest.TestCase):
             self.assertIsInstance(route, dict, "%s is not a declared route" % route_id)
             self.assertIn(route_id, combos, "%s renders no combo" % route_id)
 
+    def test_class_routes_have_no_ide_exposure(self):
+        self.assertFalse(any(m["id"].startswith("class-")
+                             for m in registry.render_ide(real_registry())["models"]))
+
     def test_each_class_combo_carries_the_native_fields(self):
         combos = self._combos()
         for route_id, want in self.CLASS_ROUTES.items():

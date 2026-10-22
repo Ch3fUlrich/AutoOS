@@ -1826,6 +1826,9 @@ def render_ide(registry: dict) -> dict:
         if not gateways:
             raise ValueError(
                 "routes.%s has no omniroute/litellm surface with a clients list" % route_id)
+        if not any(surface.get("clients") for surface in gateways.values()):
+            # Gateway-only routes stay servable without advertising a client entry.
+            continue
         # NOLEGS-OFFER (2026-10-08, fix-ci-round2): a legless route is in no
         # combo - render_omniroute() gives `legs: []` no combo at all - so its
         # omniroute membership would advertise a picker entry the gateway cannot
