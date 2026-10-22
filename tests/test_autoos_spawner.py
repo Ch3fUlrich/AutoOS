@@ -26436,6 +26436,70 @@ class GeminiSideModelPinTests(unittest.TestCase):
         self.assertEqual(child.get("GEMINI_MODEL"), flag)
 
 
+class HostAdmissionWindowsTests(unittest.TestCase):
+    def setUp(self):
+        HostAdmissionTests.setUp(self)
+
+    def refusal(self, status, **kwargs):
+        with mock.patch.object(self.agent, "live_worker_count", return_value=0), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            return self.agent.host_admission_refusal(
+                registry=SHIPPED_REGISTRY, platform="win32",
+                memstatus=lambda: status, **kwargs)
+
+    def test_platform_limits_from_shipped_registry(self):
+        for platform, limits, commit in (("win32", (20, 12288), 80),
+                                         ("linux", (10, 1024), None)):
+            self.assertEqual(self.agent.host_admission_config(
+                SHIPPED_REGISTRY, platform=platform), limits)
+            self.assertEqual(self.agent.host_admission_commit_max(
+                SHIPPED_REGISTRY, platform=platform), commit)
+
+    def test_low_available_memory_refuses(self):
+        self.assertIn("the memory floor", self.refusal((12287, 70)))
+
+    def test_commit_ceiling_inclusive(self):
+        for pct in (80, 85):
+            text = self.refusal((12288, pct))
+            for part in ("0 live workers, cap 20", "floor 12288 MB",
+                         "commit charge %d%% >= max 80%%" % pct,
+                         "the commit-charge ceiling", "queue or run on workstation"):
+                self.assertIn(part, text)
+
+    def test_room_and_unreadable_admit(self):
+        for status in ((12288, 79.9), (12288, None), None):
+            self.assertIsNone(self.refusal(status))
+
+    def test_meminfo_override_does_not_call_windows_reader(self):
+        path = HostAdmissionTests.meminfo(self, 16000)
+        with mock.patch.dict(os.environ, {}, clear=True):
+            for kwargs in ({"meminfo": path}, {}):
+                with mock.patch.dict(os.environ, {"AUTOOS_MEMINFO_PATH": path}):
+                    self.assertIsNone(self.agent.host_admission_refusal(
+                        SHIPPED_REGISTRY, workers=self.workers, platform="win32",
+                        memstatus=mock.Mock(side_effect=AssertionError("reader called")),
+                        **kwargs))
+
+    def test_claim_passes_memory_status_through(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            refusal, token = self.agent.host_admission_claim(
+                SHIPPED_REGISTRY, workers=self.workers, platform="win32",
+                memstatus=lambda: (16000, 80))
+        self.assertIn("the commit-charge ceiling", refusal)
+        self.assertIsNone(token)
+
+    def test_malformed_platform_fields_fall_back_individually(self):
+        registry = {"host_admission": {
+            "max_live_workers": 10, "mem_available_floor_mb": 1024,
+            "commit_charge_max_pct": 90, "by_platform": {"win32": {
+                "max_live_workers": True, "mem_available_floor_mb": "bad",
+                "commit_charge_max_pct": 80.5}}}}
+        self.assertEqual(self.agent.host_admission_config(registry, "win32"), (10, 1024))
+        self.assertEqual(self.agent.host_admission_commit_max(registry, "win32"), 90)
+        registry["host_admission"]["by_platform"]["win32"] = []
+        self.assertEqual(self.agent.host_admission_config(registry, "win32"), (10, 1024))
+
+
 class HostAdmissionTests(unittest.TestCase):
     """HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner counts the LIVE
     workers this host already runs and reads MemAvailable before it starts one
@@ -26504,7 +26568,7 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(shipped.get("mem_available_floor_mb"), 1024)
         # An unreadable registry leaves the documented defaults, not a free-for-all.
         self.assertEqual(self.agent.host_admission_config({}), (6, 6144))
-        self.assertEqual(self.agent.host_admission_config(None), (10, 1024))
+        self.assertEqual(self.agent.host_admission_config(None, platform="linux"), (10, 1024))
         self.assertEqual(self.agent.host_admission_config(self.registry(2, 100)),
                          (2, 100))
 
@@ -26613,8 +26677,9 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(rc, self.agent.EXIT_HOST_ADMISSION, out + err)
         self.assertEqual(started, [], "the client never started")
         self.assertIn("queue or run on workstation", err)
-        self.assertIn("cap 10", err)
-        self.assertIn("floor 1024 MB", err)
+        cap, floor = self.agent.host_admission_config()
+        self.assertIn("cap %d" % cap, err)
+        self.assertIn("floor %d MB" % floor, err)
         self.assertFalse(os.path.isdir(os.path.join(self.tmp, "sandboxes")))
 
     def test_cmd_run_refuses_on_memory_alone_for_admission(self):
@@ -26816,7 +26881,7 @@ class HostAdmissionTests(unittest.TestCase):
         started = []
         with mock.patch.dict(os.environ, {"AUTOOS_WORKERS_DIR": self.workers,
                                           "AUTOOS_STATE_DIR": self.tmp,
-                                          "AUTOOS_MEMINFO_PATH": self.meminfo(8000)}), \
+                                          "AUTOOS_MEMINFO_PATH": self.meminfo(16000)}), \
                 mock.patch.object(agent, "build_plan", return_value=self.plan()), \
                 mock.patch.object(agent, "run_client",
                                   lambda *a, **k: started.append(1) or agent.ClientExit(0)), \
