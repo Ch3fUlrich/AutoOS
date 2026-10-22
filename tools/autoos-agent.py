@@ -13643,8 +13643,8 @@ def windows_memory_status():
 def mem_available_mb(path=None):
     """MemAvailable from /proc/meminfo in MB, or None where it cannot be read.
 
-    The kernel writes it in kB. None is Windows, or a container mounted without
-    /proc: the live-worker half of the rule still binds there, and the memory
+    The kernel writes it in kB. None is a container mounted without /proc, or
+    Windows (which `windows_memory_status` measures instead): the live-worker half of the rule still binds there, and the memory
     half stands down instead of refusing every run on a host it cannot measure.
     """
     path = path or os.environ.get(ADMISSION_MEMINFO_ENV) or MEMINFO_PATH
