@@ -95,11 +95,32 @@
     }
   },
   "host_admission": {
-    "$comment": "HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner's own room on the host it runs on, so a fan-out stops starting workers onto a machine that already has them. `max_live_workers` counts the records `ps` calls running (live pid, all lanes of this checkout); `mem_available_floor_mb` is the MemAvailable (kB in /proc/meminfo, MB here) a launch still wants. A refused spawn exits 13 and says 'queue or run on workstation' — queueing is the caller's job, the spawner never waits. Read by tools/autoos-agent.py host_admission_config(); AUTOOS_ADMISSION_OFF=1 is a test-only escape. D-1349 2026-10-15: floor lowered to 1 GB MemAvailable on coding.vm.",
+    "$comment": "HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner's own room on the host it runs on, so a fan-out stops starting workers onto a machine that already has them. `max_live_workers` counts the records `ps` calls running (live pid, all lanes of this checkout); `mem_available_floor_mb` is the MemAvailable (kB in /proc/meminfo, MB here) a launch still wants. A refused spawn exits 13 and says 'queue or run on workstation' — queueing is the caller's job, the spawner never waits. Read by tools/autoos-agent.py host_admission_config(); AUTOOS_ADMISSION_OFF=1 is a test-only escape. D-1349 2026-10-15: floor lowered to 1 GB MemAvailable on coding.vm. Platform overrides apply field by field; win32 requires 12 GiB available physical RAM and commit charge below 80 percent before admitting up to 20 workers.",
     "max_live_workers": 10,
-    "mem_available_floor_mb": 1024
+    "mem_available_floor_mb": 1024,
+    "by_platform": {
+      "win32": {
+        "max_live_workers": 20,
+        "mem_available_floor_mb": 12288,
+        "commit_charge_max_pct": 80
+      }
+    }
   },
   "models": {
+    "gpt-6.1-sol": {
+      "$comment": "AO-CX-GPT61-SOL: cx/gpt-6.1-sol only (D-2038, D-2148). Codex CLI 0.163.0 model catalog fetched 2026-10-22T12:31Z: context_window 500000, effective_context_window_percent 95, usable 475000. output_max 128000 is unsourced, conservative: no readable published output maximum. Gateway GET /api/models 2026-10-22 advertises supportsVision true and separate effort-suffixed ids low, medium, high, xhigh, max, ultra; these are not reasoningEffort settings on this bare id. Live probe 2026-10-22 served gpt-6.1-sol HTTP 200; tool calls and image input remain unproven. Prices 0 represent flat Codex subscription, not a per-token price.",
+      "id": "gpt-6.1-sol",
+      "family": "openai",
+      "context_advertised": 500000,
+      "context_usable": { "source": "default", "tokens": 475000 },
+      "output_max": 128000,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "unproven",
+      "capabilities": { "text": "proven", "image_in": "unproven" },
+      "price_in": 0,
+      "price_out": 0
+    },
     "MiniMax-M3": {
       "$comment": "samba's leg (extension item 1, operator priority 2026-09-26T15:54Z), exact operator-given spelling/casing preserved. OCGO-PREFER 2026-10-18 (operator D-1840/D-1919): the OpenCode Go plan serves these weights under the lowercase id `opencode-go/minimax-m3` (200 on 3/3 probe calls, median 1.27 s, Go /v1/models row reports context 1048576). The leg keeps the spelling the gateway answers and resolve_leg() fold-matches it to THIS key — a second, lowercase model key would break rule 1b's case-fold uniqueness. context_advertised stays samba's 131072 (context is per model, not per provider — see models.'qwen/qwen3.8-27b'), so the Go route declares 128k rather than the Go row's wider number. tier paid, trains_on_prompts true (conservative default, providers.samba's own $comment) - NOT private-safe, never added to a -clean route. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror sibling minimax-m2.7 entry already in this registry; price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet).",
       "context_advertised": 131072,
@@ -3086,6 +3107,18 @@
     }
   },
   "providers": {
+    "cx": {
+      "$comment": "AO-CX-GPT61-SOL: Codex subscription via OmniRoute cx. Gateway GET /api/models 2026-10-22: provider cx, gpt-6.1-sol available true, supportsVision true; separate effort ids gpt-6.1-sol-{low,medium,high,xhigh,max,ultra}. Live probe 2026-10-22 served gpt-6.1-sol, HTTP 200. Flat subscription, no per-token price. Conservative trains_on_prompts:true follows the existing cxa subscription row. D-2148: newest sol only; D-2038: one provider path and one family per row.",
+      "id": "cx",
+      "api_base": null,
+      "provider_data": null,
+      "omniroute_id": "cx",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "tier": "subscription",
+      "trains_on_prompts": true,
+      "available": true
+    },
     "SambaNova": {
       "$comment": [
         "Privacy research 2026-09-26 (Q1 lane): SambaNova's general Privacy Policy (https://sambanova.ai/privacy-policy) and Terms & Conditions (https://sambanova.ai/terms-and-conditions) were fetched and read; neither makes any statement about whether SambaNova Cloud API inference/prompts are used to train models, nor about opting out. Inconclusive research defaults conservative (trains_on_prompts: true, was unsourced 'false' before this migration) per operator policy 2026-09-26 ('default true / not private-safe unless the policy clearly says no training'). Distinct from the new 'samba' provider (a separately-funded paid credit tier) - see that entry's own $comment.",

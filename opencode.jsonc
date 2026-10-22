@@ -510,6 +510,12 @@
           "name": "agy-claude-sonnet-5-5-high - direct Claude Sonnet 5.5 High (agy seat, no combo; Claude budget applies); site data only after T1-CLEAN",
           "limit": { "context": 1048576, "output": 32768 }
         },
+        // Direct seat: registry context_usable/output_max pinned by DirectSeatHandEntriesTests.
+        "cx-gpt-6.1-sol": {
+          "modelID": "cx/gpt-6.1-sol",
+          "name": "cx-gpt-6.1-sol - direct GPT-6.1 Sol (codex subscription via OmniRoute cx, no combo)",
+          "limit": { "context": 475000, "output": 128000 }
+        },
         // Native DeepSeek V4.1 Flash is the one DeepSeek API leg policy.leg_rules
         // allows (allow-deepseek-native-flash); Pro is denied everywhere. Paid, under
         // the monthly cap in providers.deepseek.
