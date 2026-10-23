@@ -347,3 +347,5 @@ never blank out the gateway `baseURL`.
   `127.0.0.1`: a site address is never a literal in this public repository (AutoOS Hard Rule 1). A host that needs the relay on
   the tailnet sets the variable in its own 0600 unit/config, never in a tracked file.
 
+The relay above uses its own `X-Fleet-Sig` format; the separate, versioned fleet-bus v2 wire contract (signing, canonical form, cursors, signed reads, validation, test vectors) is specified in plangraph's [`docs/FLEET-BUS.md`](https://github.com/Ch3fUlrich/plangraph/blob/main/docs/FLEET-BUS.md), implemented by plangraph `src/plangraph/fleet_bus/contract.py`.
+
