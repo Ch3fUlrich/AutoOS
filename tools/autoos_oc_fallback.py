@@ -9,7 +9,7 @@ CLAUDE_LIMIT_MARKERS = (
     "claude usage limit", "5-hour limit reached", "weekly limit reached",
 )
 FALLBACK_MODELS = ("mimo-v2.6-flash", "muse-spark-1.3")
-OPENCODE_IDS = {"mimo-v2.6-flash": "omniroute/mimo-v2.6-flash", "muse-spark-1.3": None}
+OPENCODE_IDS = {"mimo-v2.6-flash": "mimo/mimo-v2.6-flash", "muse-spark-1.3": None}
 FREE_MODELS = {"muse-spark-1.3"}
 
 

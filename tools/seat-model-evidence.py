@@ -446,6 +446,9 @@ def _shift_iso(s, seconds):
 def _served_model(r):
     provider = r.get("provider")
     mid = r.get("model")
+    # D-2459: a provider label must not disguise a combo as a direct MiMo leg.
+    if isinstance(mid, str) and mid.startswith("mimo-v2.6-"):
+        return None
     if isinstance(provider, str) and isinstance(mid, str):
         return f"{GW_PROVIDER_ALIASES.get(provider, provider)}/{mid}"
     return None

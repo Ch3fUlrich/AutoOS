@@ -747,6 +747,34 @@
         "xiaomi_mimo": "documented"
       }
     },
+    "deepseek-v4.1-flash-free": {
+      "$comment": "D-2449: exact opencode models id, verified 2026-10-23. Conservative unknown limits follow the existing Zen free row; not measured. Free client-bound review seat, tool use unproven.",
+      "client_bound": "opencode",
+      "context_advertised": 200000,
+      "context_usable": { "source": "default", "tokens": 100000 },
+      "effort_ladder": [],
+      "family": "deepseek",
+      "id": "deepseek-v4.1-flash-free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "glm-5.3-flash-free": {
+      "$comment": "D-2450: exact opencode models id, verified 2026-10-23. Conservative unknown limits follow the existing Zen free row; not measured. Free client-bound review seat, tool use unproven.",
+      "client_bound": "opencode",
+      "context_advertised": 200000,
+      "context_usable": { "source": "default", "tokens": 100000 },
+      "effort_ladder": [],
+      "family": "zhipu",
+      "id": "glm-5.3-flash-free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
     "mimo-v2.6-flash-free": {
       "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/mimo-v2.6-flash-free resolves to a family; the spelling is the one policy.free_client_models already runs opencode on. Nothing about this leg is measured here: the numbers are the registry's conservative unknown (the same shape as models.'openrouter-free'), reasoning false and effort_ladder empty because no ladder was probed, tool_calls stays 'unproven'. trains_on_prompts unset (inherits providers.zen) — and a free tier is never private-safe anyway (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule, not a probe of this model.",
       "client_bound": "opencode",
@@ -2971,6 +2999,24 @@
         "leg": "opencode-go/qwen3.8-flash",
         "paid": false,
         "source": "operator D-1840/D-1919 2026-10-18 (OCGO-PREFER); Go probe 2026-10-18"
+      },
+      {
+        "client": "opencode",
+        "model": "opencode/deepseek-v4.1-flash-free",
+        "family": "deepseek",
+        "leg": "opencode-zen/deepseek-v4.1-flash-free",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "operator D-2449 2026-10-23"
+      },
+      {
+        "client": "opencode",
+        "model": "opencode/glm-5.3-flash-free",
+        "family": "zhipu",
+        "leg": "opencode-zen/glm-5.3-flash-free",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "operator D-2450 2026-10-23"
       },
       {
         "client": "opencode",
