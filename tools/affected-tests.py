@@ -651,6 +651,8 @@ REGISTRY_TESTS = ("tests/test_registry_render.py",
                   "tests/test_sync_router_tiers_registry.py")
 REGISTRY_PART = "17"
 REGISTRY_TERMS = ("render", "apply")
+# CI 39897765521: routing surface changes missed the offline declarations audit.
+DECLARATIONS_TERM = "declarations"
 # A route, a router tier file, a combo map or a registry: any of them is answered
 # by the routing part, and every one of them is named with one of these words.
 REGISTRY_PATH = re.compile(r"(registry|route|router|combo)", re.IGNORECASE)
@@ -724,6 +726,8 @@ def map_changed_files(files, root: Path = ROOT, ids=()):
         path = str(raw).replace("\\", "/")
         if REGISTRY_PATH.search(path):
             registry = True
+        if REGISTRY_PATH.search(path) or path in ("opencode.jsonc", "catalog/ide-models.json"):
+            terms.append(DECLARATIONS_TERM)
         if path.startswith(OMNIR_ROUTE_DIR):
             terms.append(APPLY_TERM)
         match = LINUX_PART.match(path)

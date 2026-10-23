@@ -647,6 +647,19 @@ class DiffTests(unittest.TestCase):
                         result.stdout)
 
 
+class DeclarationSelectionTests(unittest.TestCase):
+    def test_routing_surfaces_select_the_declarations_audit(self):
+        for path in ("catalog/ai-registry.json", "opencode.jsonc",
+                     "catalog/ide-models.json", "configuration/omniroute/combos.json"):
+            with self.subTest(path=path):
+                result = at.map_changed_files([path])
+                self.assertIn("declarations", result["terms"].split(","))
+
+    def test_unrelated_docs_do_not_select_the_declarations_audit(self):
+        result = at.map_changed_files(["docs/models.md"])
+        self.assertNotIn("declarations", result["terms"].split(","))
+
+
 class RealRepoTests(unittest.TestCase):
     """The tool must work on this repository, not only on the fixture."""
 
