@@ -695,6 +695,10 @@ if it "runner pool unit tests: core, gate, proc, slot loop, CLI"; then
     [ "$rc" = 0 ] && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "CI parallel-vs-single timing unit tests"; then
+    out="$(python3 tests/test_ci_measure_table.py 2>&1)" && pass || fail "$out"
+fi
+
 # AO-REDACT-SPAN (2026-10-09): tools/autoos_redact.py must mask the PEM *span*
 # it matched, not the whole line and not every line after an unterminated BEGIN.
 # Pure in-memory strings; nothing spawned, no file read.
