@@ -188,11 +188,8 @@ def tier_profile_ids() -> set[str]:
     return {t["id"] for t in doc["tiers"]}
 
 
-def openhands_route_names(registry_doc: dict) -> set[str]:
-    """Route ids OpenHands actually serves: routes whose
-    surfaces.omniroute.clients contains "openhands" (catalog/ai-registry.json,
-    read via tools/registry.py's loader). Only these need an
-    tier profile named <name> (PREFIX-STRIP: no `omniroute-` prefix) - opencode/zed-only pinned routes do not."""
+def route_names_for_client(registry_doc: dict, client: str) -> set[str]:
+    """Route ids offered to client; IDE exemptions require an explicit list."""
     out = set()
     routes = registry_doc.get("routes") or {}
     for rid, route in routes.items():
@@ -200,11 +197,32 @@ def openhands_route_names(registry_doc: dict) -> set[str]:
             continue
         surfaces = route.get("surfaces") or {}
         omni = surfaces.get("omniroute") or {} if isinstance(surfaces, dict) else {}
-        if not isinstance(omni, dict):
-            continue
-        if "openhands" in (omni.get("clients") or []):
+        clients = omni.get("clients") if isinstance(omni, dict) else None
+        if client in {"opencode", "zed"} and not isinstance(clients, list):
+            out.add(rid)
+        elif client in (clients or []):
             out.add(rid)
     return out
+
+
+def ide_exempt(registry_doc: dict, client: str) -> set[str]:
+    """Exempt only routes explicitly excluding this IDE; unknowns stay required."""
+    out = set()
+    routes = registry_doc.get("routes") or {}
+    for rid, route in routes.items():
+        if not isinstance(route, dict):
+            continue
+        surfaces = route.get("surfaces")
+        omni = surfaces.get("omniroute") if isinstance(surfaces, dict) else None
+        clients = omni.get("clients") if isinstance(omni, dict) else None
+        if isinstance(clients, list) and client not in clients:
+            out.add(rid)
+    return out
+
+
+def openhands_route_names(registry_doc: dict) -> set[str]:
+    """Only explicitly offered OpenHands routes need tier profiles."""
+    return route_names_for_client(registry_doc, "openhands")
 
 
 def tier_profile_drift(names: list[str], tier_ids: set[str],
@@ -349,9 +367,18 @@ def main(argv=None) -> int:
                     drift.append(f"{c['name']}: live legs {live.get(c['name'])} != repo {c['models']}")
 
     # 2. repo vs client surfaces
+    try:
+        reg_path = Path(args.registry) if args.registry else ROOT / "catalog" / "ai-registry.json"
+        reg_doc = load_registry_tool().load(reg_path)
+    except (OSError, ValueError):
+        reg_doc = None
+    # Unreadable registry must not silently exempt any combo from IDE checks.
+    client_doc = reg_doc if isinstance(reg_doc, dict) else {}
+    oc_exempt = ide_exempt(client_doc, "opencode")
+    zed_exempt = ide_exempt(client_doc, "zed")
     oc = opencode_models()
     for c in names:
-        if c not in oc:
+        if c not in oc_exempt and c not in oc:
             drift.append(f"opencode.jsonc lacks model '{c}'")
     psm = (ROOT / "lib" / "windows" / "AutoOS.Install.psm1").read_text(encoding="utf-8")
     sh = (ROOT / "lib" / "linux" / "install.sh").read_text(encoding="utf-8")
@@ -360,7 +387,7 @@ def main(argv=None) -> int:
     # --check covers the static copies).
     zed = ide_models("omniroute", "zed")
     for c in names:
-        if c not in zed:
+        if c not in zed_exempt and c not in zed:
             drift.append(f"catalog/ide-models.json does not offer '{c}' to zed")
     for label, text in (("psm1", psm), ("install.sh", sh)):
         if "ide-models.json" not in text:
@@ -371,11 +398,6 @@ def main(argv=None) -> int:
         if m not in names and not m.startswith("auto"):
             drift.append(f"catalog/ide-models.json offers '{m}' through omniroute but no combo has that name")
     tp = tier_profile_ids()
-    try:
-        reg_path = Path(args.registry) if args.registry else ROOT / "catalog" / "ai-registry.json"
-        reg_doc = load_registry_tool().load(reg_path)
-    except (OSError, ValueError):
-        reg_doc = None
     if not isinstance(reg_doc, dict) or "routes" not in reg_doc:
         # Registry unreadable: fall back to requiring a profile for every
         # combo (the old, stricter rule) rather than silently skipping.

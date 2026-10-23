@@ -89,7 +89,13 @@ R-orch-14. Put both ids in every L2 brief.
   and result in the DONE note, then scale.
 
 **Seat-model evidence (D-260 / D-261).** A review seat run keyless on the opencode path
-(`autoos-agent.py run --free --free-model opencode/<model>`) cannot be taken at its word. A gate
+(`autoos-agent.py run --free --free-model opencode/<model>`) cannot be taken at its word. (A
+`--free` run starts on the `--free-model` its caller typed, so a seat started that way is keyless;
+a *plain* `--free` run — no `--free-model` — starts on the first OpenCode Go head
+(`omniroute/opencode-go/glm-5.3-flash`) when a gateway key is on the machine and walks the rest of
+the Go heads before the keyless promo ids, and on the keyless `opencode/muse-spark-1.3-contributor-free`
+chain when it is not (OCGO-PREFER, D-1923). A Go head is a gateway seat, so verify it
+`--gateway` response-side, as below, not request-side.) A gate
 review proved opencode stores **no provider-response model** in its session db: the per-turn
 `data.model` it writes is the model the CLI was *started* with — **request-side** evidence only. So
 a keyless seat is checked three ways (D-261) and all three must equal `--expect`: (a) the run
@@ -206,14 +212,14 @@ L2 alike.
   in the brief, and tell them the same token rules.
 - The resolver picks the writer (`route --explain`, R-coord-03); save Opus for judgement.
 
-## 6a. Context cap: automatic recycle at 250k (P1.1)
+## 6a. Context cap: automatic recycle at 300k (P1.1)
 
 - A `PostToolUse` hook, `tools/hooks/context_guard.py`, reads the last assistant turn's usage (input + cache read + cache
   creation) from the tail of the transcript and tells the session itself:
-  - at `AUTOOS_CTX_HANDOFF` (230000): `HANDOFF-NOW` -- finish the step, write the handoff, commit + push, then
+  - at `AUTOOS_CTX_HANDOFF` (270000): `HANDOFF-NOW` -- finish the step, write the handoff, commit + push, then
     `python3 tools/hooks/context_guard.py ready <handoff-path>` (and `SendMessage RECYCLE-READY <path>` to your parent if
     your brief says so);
-  - at `AUTOOS_CTX_HARD` (250000): `HARD-CAP` -- no new work, handoff now.
+  - at `AUTOOS_CTX_HARD` (300000): `HARD-CAP` -- no new work, handoff now.
   - It re-emits at most once per +10k of growth; any error is silent (exit 0). `context_guard.py status` lists the state
     files (`~/.local/state/autoos/ctx-guard/`, or under `$XDG_STATE_HOME`).
 - Install, once per host, in `~/.claude/settings.json`:

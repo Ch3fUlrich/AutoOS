@@ -2044,9 +2044,53 @@ def _leg_model_id(leg):
     return leg.partition("/")[2]
 
 
+def _model_key(leg, registry):
+    """The ``models`` key a "<provider>/<model>" leg names, or None.
+
+    Exact key first, then the *unique* case fold -- the one model-matching rule
+    in ``tools/registry.py``'s ``resolve_leg``, the authority that decides
+    whether a leg exists at all. This module must not be the place that
+    disagrees with it: OCGO-PREFER 2026-10-18 adds the leg
+    ``opencode-go/minimax-m3`` (the gateway answers that exact lowercase id; an
+    unlisted id answers 400) against the row keyed ``MiniMax-M3``, the samba
+    spelling, because rule 1b keeps one row per model instead of a second
+    lowercase row for the other gateway's casing. Indexing the literal leg half
+    raised ``KeyError: 'minimax-m3'`` on a leg the registry accepts.
+
+    An ambiguous fold (two keys equal ignoring case) raises rather than picking
+    one, exactly as ``resolve_leg`` refuses to guess. Returns None when no key
+    matches at all; the caller decides how loudly that fails.
+    """
+    models = registry.get("models") or {}
+    name = _leg_model_id(leg)
+    if name in models:
+        return name
+    folded = [k for k in models
+              if isinstance(k, str) and k.lower() == name.lower()]
+    if len(folded) == 1:
+        return folded[0]
+    if len(folded) > 1:
+        raise ValueError("leg %r: model %r fold-matches more than one key (%s)"
+                         % (leg, name, ", ".join(sorted(folded))))
+    return None
+
+
+def _model_entry(leg, registry):
+    """The ``models.<id>`` row a "<provider>/<model>" leg names.
+
+    Raises ``KeyError`` naming the id when nothing matches, as the old
+    ``registry["models"][_leg_model_id(leg)]`` indexing did: a hallucinated leg
+    still fails loudly instead of planning against no row.
+    """
+    key = _model_key(leg, registry)
+    if key is None:
+        raise KeyError(_leg_model_id(leg))
+    return registry["models"][key]
+
+
 def _model_family(leg, registry):
     """The ``family`` of the model half of a "<provider>/<model>" leg string."""
-    return registry["models"][_leg_model_id(leg)].get("family")
+    return _model_entry(leg, registry).get("family")
 
 
 def _next_rung(ladder, current):
@@ -2618,7 +2662,7 @@ def _escalation(chosen, scores, registry, card=None, env=None):
     """
     holds = budget_holds_claude(card or {}, registry, env,
                                 kind="escalation")
-    model = registry["models"][_leg_model_id(chosen["leg"])]
+    model = _model_entry(chosen["leg"], registry)
     ladder = model["effort_ladder"]
     logic_step = {
         "on": "logic",
@@ -2828,8 +2872,8 @@ def plan(card, features, client_state, registry, overlay, track_record,
     defer_time, defer_reason = defer_until(card, chosen, registry, now)
     reason_parts.append(defer_reason)
 
-    model_id = _leg_model_id(chosen["leg"])
-    model = registry["models"][model_id]
+    model_id = _model_key(chosen["leg"], registry) or _leg_model_id(chosen["leg"])
+    model = _model_entry(chosen["leg"], registry)
     route_class = registry["routes"][chosen["route"]]["class"]
 
     reviewers = _select_reviewers(scores, survivors, chosen, card, bucket_name,

@@ -29,7 +29,9 @@
     "t3-driver-free-only",
     "t3-driver-paid",
     "t4-researcher",
-    "ovh-qwen3-coder-30b"
+    "ovh-qwen3-coder-30b",
+    "ovh-qwen3.8-27b",
+    "ovh-gpt-oss-120b"
   ],
   "omitted": [
     "cheaperinference/glm-5.2",
@@ -40,7 +42,6 @@
     "hf-glm-5.2",
     "hf-qwen3.8-27b",
     "opus-5-5",
-    "ovh-gpt-oss-120b",
     "samba/MiniMax-M3",
     "samba/gpt-oss-120b",
     "spark-1.3-contributor"
@@ -69,6 +70,48 @@
     "gemini-3.8-flash"
   ],
   "combos": [
+    {
+      "name": "class-128k",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "vertex/gemini-3.8-flash",
+        "opencode-go/kimi-k3"
+      ],
+      "contextRequirements": {
+        "minContextWindow": 128000,
+        "contextFilterMode": "strict"
+      },
+      "targetTimeoutMs": 180000
+    },
+    {
+      "name": "class-1m",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "vertex/gemini-3.8-flash",
+        "opencode-go/glm-5.3-flash"
+      ],
+      "contextRequirements": {
+        "minContextWindow": 1000000,
+        "contextFilterMode": "strict"
+      },
+      "targetTimeoutMs": 600000
+    },
+    {
+      "name": "class-256k",
+      "strategy": "priority",
+      "context": "256k",
+      "models": [
+        "vertex/gemini-3.8-flash",
+        "opencode-go/glm-5.3-flash"
+      ],
+      "contextRequirements": {
+        "minContextWindow": 256000,
+        "contextFilterMode": "strict"
+      },
+      "targetTimeoutMs": 300000
+    },
     {
       "name": "gemini-3.8-flash",
       "strategy": "priority",
@@ -177,7 +220,6 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
-        "ovh/Qwen3.5-397B-A17B",
         "vertex/gemini-3.8-flash"
       ]
     },
@@ -237,7 +279,6 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bzl/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
-        "ovh/Qwen3.8-27B",
         "vertex/gemini-3.8-flash"
       ]
     },
@@ -311,6 +352,38 @@
       ]
     },
     {
+      "name": "opencode-go/glm-5.3-flash",
+      "strategy": "priority",
+      "context": "1M",
+      "models": [
+        "opencode-go/glm-5.3-flash"
+      ]
+    },
+    {
+      "name": "opencode-go/kimi-k3",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "opencode-go/kimi-k3"
+      ]
+    },
+    {
+      "name": "opencode-go/minimax-m3",
+      "strategy": "priority",
+      "context": "128k",
+      "models": [
+        "opencode-go/minimax-m3"
+      ]
+    },
+    {
+      "name": "opencode-go/qwen3.8-flash",
+      "strategy": "priority",
+      "context": "200k",
+      "models": [
+        "opencode-go/qwen3.8-flash"
+      ]
+    },
+    {
       "name": "or-laguna-s-2.1-free",
       "strategy": "priority",
       "context": "256k",
@@ -332,14 +405,6 @@
       "context": "256k",
       "models": [
         "openrouter/cohere/north-mini-code:free"
-      ]
-    },
-    {
-      "name": "ovh-qwen3.8-27b",
-      "strategy": "priority",
-      "context": "128k",
-      "models": [
-        "ovh/Qwen3.8-27B"
       ]
     },
     {

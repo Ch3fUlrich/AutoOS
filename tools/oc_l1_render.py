@@ -205,6 +205,28 @@ def _abs_agent_mcp_command(command):
     return command, False
 
 
+def _gateway_block(lane, models):
+    """The omniroute provider block: env var NAMES only, never a secret value.
+
+    Shared by the pure-gateway lane and by an opencode-go lane's fallback leg,
+    so both spell the placeholders and the session-tag header identically.
+    """
+    return {
+        "npm": PROVIDER_NPM,
+        "name": PROVIDER_NAME,
+        "options": {
+            # env var NAMES only: the values exist in the start
+            # environment, never in this file.
+            "baseURL": "{env:%s}/v1" % ENV_URL,
+            "apiKey": "{env:%s}" % ENV_KEY,
+            # P1.2: the gateway call log groups spend by this id; without it every opencode call
+            # lands untagged. A plain string (no secret), flat so autoos_usage's lane = the whole tag.
+            "headers": {SESSION_TAG_HEADER: session_tag(lane["name"])},
+        },
+        "models": models,
+    }
+
+
 def render(lane, repo_config_path):
     """Write the scratch opencode config; return the output path."""
     if not repo_config_path.is_file():
@@ -290,12 +312,19 @@ def render(lane, repo_config_path):
         return {"context": ctx, "output": out}
 
     limit = _limit(m.get("limit"), mid)
-    models = {
-        mid: {
-            "name": _display_name(mid, m.get("key")),
-            "limit": dict(limit),
-        }
+    primary = {
+        "name": _display_name(mid, m.get("key")),
+        "limit": dict(limit),
     }
+    # OCGO-L1-FALLBACK: the lane's model.options.reasoning_effort rides the
+    # PRIMARY model only, in opencode's own camelCase spelling
+    # (reasoningEffort; @ai-sdk/openai-compatible sends it as
+    # reasoning_effort). The fallback entry gets nothing, and a lane without
+    # options renders exactly as before.
+    effort = (m.get("options") or {}).get("reasoning_effort")
+    if effort:
+        primary["options"] = {"reasoningEffort": effort}
+    fallback_models = None
     if m.get("fallback_modelID"):
         fid = m["fallback_modelID"]
         # muse-spark seat 2026-10-06, finding 3: the fallback leg must NOT
@@ -306,30 +335,34 @@ def render(lane, repo_config_path):
         # not be a 128k deepseek fallback"); a pinned fallback_limit wins,
         # and only a model with no registry row falls to the 128k default.
         flimit = _limit(m.get("fallback_limit"), fid) if m.get("fallback_limit") else _limit(None, fid)
-        models[fid] = {
-            "name": _display_name(fid, m.get("fallback_key")),
-            "limit": flimit,
+        fallback_models = {
+            fid: {
+                "name": _display_name(fid, m.get("fallback_key")),
+                "limit": flimit,
+            }
         }
+
+    if provider == "opencode-go":
+        # OCGO-L1-FALLBACK part 2: opencode-go is the opencode binary's OWN
+        # built-in Go provider - it authenticates directly, so NO npm, apiKey,
+        # baseURL or headers may be written for it (any of those would either
+        # break the provider or smuggle a credential into a file). The block
+        # only pins the model's display name, window and options. A fallback
+        # leg still means an omniroute-gateway model, so it renders as its own
+        # gateway block with the env placeholders - never a literal secret.
+        provider_blocks = {provider: {"models": {mid: primary}}}
+        if fallback_models:
+            provider_blocks["omniroute"] = _gateway_block(lane, fallback_models)
+    else:
+        models = {mid: primary}
+        if fallback_models:
+            models.update(fallback_models)
+        provider_blocks = {provider: _gateway_block(lane, models)}
 
     cfg = {
         "$schema": "https://opencode.ai/config.json",
         "model": "%s/%s" % (provider, mid),
-        "provider": {
-            provider: {
-                "npm": PROVIDER_NPM,
-                "name": PROVIDER_NAME,
-                "options": {
-                    # env var NAMES only: the values exist in the start
-                    # environment, never in this file.
-                    "baseURL": "{env:%s}/v1" % ENV_URL,
-                    "apiKey": "{env:%s}" % ENV_KEY,
-                    # P1.2: the gateway call log groups spend by this id; without it every opencode call
-                    # lands untagged. A plain string (no secret), flat so autoos_usage's lane = the whole tag.
-                    "headers": {SESSION_TAG_HEADER: session_tag(lane["name"])},
-                },
-                "models": models,
-            }
-        },
+        "provider": provider_blocks,
         "instructions": list(lane["instructions"]),
         "mcp": mcp_out,
         "permission": dict(PERMISSIONS),

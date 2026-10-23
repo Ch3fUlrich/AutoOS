@@ -285,6 +285,215 @@ class ChildEnvValidationTest(unittest.TestCase):
                 self._resolved(agent_layer=bad)
 
 
+class ModelOptionsValidationTest(unittest.TestCase):
+    """OCGO-L1-FALLBACK: a lane's `model` block may carry an OPTIONAL `options`
+    map whose only key today is `reasoning_effort` (low|medium|high); anything
+    else - a non-dict, an unknown key, a value outside the set (bool/int/case
+    variants included) - is a config error that names the lane (exit 2)."""
+
+    def _resolved(self, options):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_test_") as td:
+            lane = make_lane(Path(td))
+            if options is not None:
+                lane["model"]["options"] = options
+            return oc_l1.validate_lane(lane, "l1test")
+
+    def test_absent_options_is_unchanged(self):
+        resolved = self._resolved(None)
+        self.assertNotIn("options", resolved["model"])
+
+    def test_each_valid_reasoning_effort_is_accepted(self):
+        for value in ("low", "medium", "high"):
+            resolved = self._resolved({"reasoning_effort": value})
+            self.assertEqual(resolved["model"]["options"],
+                             {"reasoning_effort": value})
+
+    def test_bad_options_are_refused_and_name_the_lane(self):
+        for bad in (
+            {"reasoning_effort": "extreme"},     # not a level
+            {"reasoning_effort": "HIGH"},        # case variant
+            {"reasoning_effort": True},          # bool
+            {"reasoning_effort": 1},             # int
+            {"reasoning_effort": None},          # null value
+            {"temperature": 0.2},                # unknown key
+            {"reasoning_effort": "low", "x": 1},  # extra key beside a valid one
+            "high",                              # not a dict
+            ["low"],                             # not a dict
+            True,                                # bool, not a dict
+        ):
+            with self.assertRaises(oc_l1.LaneError, msg="options=%r" % (bad,)) as cm:
+                self._resolved(bad)
+            self.assertIn("l1test", str(cm.exception))
+            self.assertIn("options", str(cm.exception))
+
+    def test_bad_options_exit_2_via_main(self):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_test_") as td:
+            tmp = Path(td)
+            lane = make_lane(tmp)
+            lane["model"]["options"] = {"reasoning_effort": "extreme"}
+            cfg = write_cfg(tmp, lane)
+            rc, _, err = run_main(["render", "--name", "l1test", "--config", str(cfg)])
+            self.assertEqual(rc, 2)
+            self.assertIn("l1test", err)
+            self.assertIn("options", err)
+            self.assertFalse((tmp / "scratch").exists())
+
+
+class ModelProviderValidationTest(unittest.TestCase):
+    """OCGO-L1-FALLBACK part 2: a lane's `model.provider` is exactly
+    'omniroute' or 'opencode-go' (the opencode CLI's OWN built-in Go provider -
+    direct login, no key and no URL in any file). An unknown provider, a
+    modelID that already carries the `opencode-go/` prefix, or whitespace in
+    one is a config error that names the lane (exit 2). The gateway lane of
+    part 1 validates exactly as it did before."""
+
+    GO_MODEL = {
+        "provider": "opencode-go",
+        "key": "Go direct model",
+        "modelID": "gemini-4-argon-contributor",
+        "fallback_key": "gateway fallback",
+        "fallback_modelID": "glm-5.3",
+    }
+
+    def _resolved(self, model):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_test_") as td:
+            lane = make_lane(Path(td))
+            lane["model"] = model
+            return oc_l1.validate_lane(lane, "l1test")
+
+    def _main(self, model):
+        with tempfile.TemporaryDirectory(prefix="oc_l1_test_") as td:
+            tmp = Path(td)
+            lane = make_lane(tmp)
+            lane["model"] = model
+            cfg = write_cfg(tmp, lane)
+            return run_main(["render", "--name", "l1test", "--config", str(cfg)])
+
+    def test_opencode_go_primary_is_accepted(self):
+        model = dict(self.GO_MODEL, options={"reasoning_effort": "high"})
+        resolved = self._resolved(model)
+        self.assertEqual(resolved["model"], model)
+        rc, _, err = self._main(model)
+        self.assertEqual(rc, 0, err)
+
+    def test_a_go_lane_without_a_fallback_is_accepted(self):
+        model = {"provider": "opencode-go", "key": "k",
+                 "modelID": "gemini-4-argon-contributor"}
+        resolved = self._resolved(model)
+        self.assertEqual(resolved["model"], model)
+        self.assertNotIn("fallback_modelID", resolved["model"])
+
+    def test_opencode_go_keeps_the_key_and_modelID_requirements(self):
+        for bad in (
+            {"provider": "opencode-go"},                        # both missing
+            {"provider": "opencode-go", "key": "k"},            # no modelID
+            {"provider": "opencode-go", "modelID": "some-id"},  # no key
+            {"provider": "opencode-go", "key": "", "modelID": "some-id"},
+            {"provider": "opencode-go", "key": "k", "modelID": ""},
+        ):
+            with self.assertRaises(oc_l1.LaneError, msg="model=%r" % (bad,)) as cm:
+                self._resolved(bad)
+            self.assertIn("l1test", str(cm.exception))
+
+    def test_unknown_provider_is_refused_naming_the_lane_and_both_choices(self):
+        for bad in ("openrouter", "anthropic", "opencode", "", 42, None, True):
+            with self.assertRaises(oc_l1.LaneError, msg="provider=%r" % (bad,)) as cm:
+                model = dict(self.GO_MODEL, provider=bad)
+                self._resolved(model)
+            msg = str(cm.exception)
+            self.assertIn("l1test", msg)
+            self.assertIn("omniroute", msg, "the refusal must list both providers")
+            self.assertIn("opencode-go", msg, "the refusal must list both providers")
+        # a missing provider is the same refusal
+        with self.assertRaises(oc_l1.LaneError) as cm:
+            model = dict(self.GO_MODEL)
+            del model["provider"]
+            self._resolved(model)
+        self.assertIn("l1test", str(cm.exception))
+
+    def test_unknown_provider_exits_2_via_main(self):
+        for bad in ("openrouter", None):
+            rc, out, err = self._main(dict(self.GO_MODEL, provider=bad))
+            self.assertEqual(rc, 2, "provider=%r must be refused" % (bad,))
+            self.assertIn("l1test", err)
+            self.assertIn("omniroute", err)
+            self.assertIn("opencode-go", err)
+            self.assertNotIn("Traceback", out + err)
+
+    def test_a_prefixed_go_model_id_is_refused(self):
+        for mid in ("opencode-go/gemini-4-argon-contributor",
+                    "opencode-go/some-id", "opencode-go/"):
+            model = dict(self.GO_MODEL, modelID=mid)
+            with self.assertRaises(oc_l1.LaneError, msg="modelID=%r" % (mid,)) as cm:
+                self._resolved(model)
+            msg = str(cm.exception)
+            self.assertIn("l1test", msg)
+            self.assertIn("modelID", msg)
+
+    def test_a_prefixed_go_model_id_exits_2_via_main(self):
+        model = dict(self.GO_MODEL, modelID="opencode-go/gemini-4-argon-contributor")
+        rc, _, err = self._main(model)
+        self.assertEqual(rc, 2)
+        self.assertIn("l1test", err)
+
+    def test_a_go_model_id_with_whitespace_is_refused(self):
+        for mid in ("gemini 4 argon", "gemini-4 argon", "gemini-4\n", "\t",
+                    " "):
+            model = dict(self.GO_MODEL, modelID=mid)
+            with self.assertRaises(oc_l1.LaneError, msg="modelID=%r" % (mid,)) as cm:
+                self._resolved(model)
+            self.assertIn("l1test", str(cm.exception))
+
+    def test_options_are_validated_for_opencode_go_too(self):
+        for bad in ({"reasoning_effort": "extreme"},   # not a level
+                    {"reasoning_effort": "HIGH"},      # case variant
+                    {"reasoning_effort": True},        # bool
+                    {"temperature": 0.2},              # unknown key
+                    "high"):                           # not a dict
+            with self.assertRaises(oc_l1.LaneError, msg="options=%r" % (bad,)) as cm:
+                self._resolved(dict(self.GO_MODEL, options=bad))
+            self.assertIn("l1test", str(cm.exception))
+            self.assertIn("options", str(cm.exception))
+        for value in ("low", "medium", "high"):
+            resolved = self._resolved(dict(self.GO_MODEL,
+                                           options={"reasoning_effort": value}))
+            self.assertEqual(resolved["model"]["options"],
+                             {"reasoning_effort": value})
+
+    def test_bad_go_options_exit_2_via_main(self):
+        rc, _, err = self._main(dict(self.GO_MODEL,
+                                     options={"reasoning_effort": "extreme"}))
+        self.assertEqual(rc, 2)
+        self.assertIn("l1test", err)
+        self.assertIn("options", err)
+
+    def test_the_fallback_pair_rule_applies_to_a_go_lane(self):
+        model = dict(self.GO_MODEL)
+        del model["fallback_modelID"]
+        with self.assertRaises(oc_l1.LaneError) as cm:
+            self._resolved(model)
+        self.assertIn("l1test", str(cm.exception))
+        self.assertIn("fallback", str(cm.exception))
+
+    def test_omniroute_validation_is_unchanged(self):
+        # the part-1 gateway lane, all its keys, validates exactly as before
+        model = {
+            "provider": "omniroute",
+            "key": "gateway model",
+            "modelID": "placeholderprovider/PlaceholderModel",
+            "fallback_key": "gateway fallback",
+            "fallback_modelID": "placeholderprovider/PlaceholderFallback",
+            "options": {"reasoning_effort": "high"},
+        }
+        self.assertEqual(self._resolved(model)["model"], model)
+        # today's rule kept: the prefix/whitespace refusals are Go-only, and a
+        # gateway modelID was always an opaque non-empty string
+        model = {"provider": "omniroute", "key": "k", "modelID": "vendor/Some Model"}
+        self.assertEqual(self._resolved(model)["model"], model)
+        rc, _, err = self._main(model)
+        self.assertEqual(rc, 0, err)
+
+
 class DefaultConfigPathTest(unittest.TestCase):
     def test_per_platform(self):
         d = oc_l1.default_config_path()

@@ -4134,10 +4134,12 @@ Test-Case 'the omnigraph user variable is set by name only, never PATH-style who
 Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)" {
     $realAppData = $env:APPDATA
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-agy-" + [Guid]::NewGuid().ToString('N'))
     try {
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
         Set-AutoOSAntigravityMcp 6>$null | Out-Null
         $cfg = Get-Content (Join-Path $scratch 'Antigravity\mcp_config.json') -Raw | ConvertFrom-Json
@@ -4145,6 +4147,7 @@ Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to 
     } finally {
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -4158,6 +4161,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
     $file = Join-Path $cfgDir 'mcp_config.json'
@@ -4176,6 +4180,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_TOKEN = $null
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         $null = & $run $log1
         $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
@@ -4200,6 +4205,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_TOKEN = $realToken
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $log1, $log2 -Force -ErrorAction SilentlyContinue
     }
@@ -4360,6 +4366,7 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
     $file = Join-Path $cfgDir 'mcp_config.json'
@@ -4371,6 +4378,7 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_TOKEN = $null
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         Initialize-AutoOSLog -Path $log
         while ((Get-Date).Millisecond -gt 250) { Start-Sleep -Milliseconds 20 }
@@ -4395,6 +4403,7 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_TOKEN = $realToken
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     }
@@ -4408,6 +4417,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs 
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
     $file = Join-Path $cfgDir 'mcp_config.json'
@@ -4417,13 +4427,14 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs 
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_TOKEN = $null
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         Initialize-AutoOSLog -Path $log
         # The entry the writer produces, except that the command is in capitals.
         $seedEntry = [ordered]@{
             command = 'NPX'
             args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
-            env     = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://localhost:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
+            env     = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
         }
         [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ omnigraph = $seedEntry } } | ConvertTo-Json -Depth 12))
         $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
@@ -4439,6 +4450,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs 
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_TOKEN = $realToken
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     }
@@ -4479,23 +4491,219 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer rewrites an entry th
 
 Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
     $realAppData = $env:APPDATA
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))
     try {
         $env:APPDATA = $scratch
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
         Set-AutoOSZedProxy 6>$null | Out-Null
         $s = Get-Content (Join-Path $scratch 'Zed\settings.json') -Raw | ConvertFrom-Json
         $e = $s.context_servers.omnigraph.env
         Assert-True ($null -ne $e) 'omnigraph context server has no env'
         Assert-Equal $e.OMNIGRAPH_GRAPH_ID 'autoos'
-        Assert-True ([bool]$e.OMNIGRAPH_BASE_URL) 'no base URL'
+        Assert-Equal $e.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the resolved URL did not reach the entry'
         Assert-True ($null -eq $e.PSObject.Properties['OMNIGRAPH_TOKEN']) 'a token landed in Zed settings'
     } finally {
         $env:APPDATA = $realAppData
+        if ($null -eq $realBase) { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
+        else { $env:OMNIGRAPH_BASE_URL = $realBase }
         Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
+# ─── OMNIGRAPH-URL-LOUD: a missing base URL fails loudly, it never defaults ──
+# Nothing listens on localhost:8080 on the server since D-1398, so the silent
+# default wrote a config that looked fine and failed at call time. The resolver
+# warns - naming the variable and every place it can be set - and returns $null;
+# a writer holding $null skips its omnigraph entry, never deleting the user's.
+
+function Invoke-OmnigraphBaseScratch {
+    # Run a body with every source the resolver reads under test control:
+    # USERPROFILE, HOME and APPDATA point into a temp dir (the real
+    # ~/.autoos-omnigraph.env is never read), the answer and the variable are set
+    # per case, all four names are restored, and the body's output is returned.
+    param(
+        [Parameter(Mandatory)][scriptblock]$Body,
+        [hashtable]$Answers = @{},
+        [string]$EnvUrl = '',
+        [string]$EnvFile = '',
+        # A writer that touches the checkout (project .claude\settings.local.json,
+        # the skill links) runs against a scratch tree, never this one.
+        [switch]$ScratchRepo
+    )
+    $names = @('USERPROFILE', 'HOME', 'APPDATA', 'OMNIGRAPH_BASE_URL')
+    $saved = @{}
+    foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-obase-$([Guid]::NewGuid().ToString('N'))"
+    $repo = if ($ScratchRepo) { (New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'repo')).FullName } else { $Root }
+    $result = $null
+    try {
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'AppData\Zed')
+        $env:USERPROFILE = $scratch
+        $env:HOME = $scratch
+        $env:APPDATA = Join-Path $scratch 'AppData'
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        if ($EnvFile) { [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), $EnvFile) }
+        if ($EnvUrl) { $env:OMNIGRAPH_BASE_URL = $EnvUrl } else { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
+        # The resolver runs in the module, which reads $HOME, not the test's.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun:$false -Answers $Answers -RepoRoot $repo
+        $result = & $Body $scratch $repo
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
+        Initialize-AutoOSInstaller -DryRun:$false -RepoRoot $Root
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $result
+}
+
+Test-Case 'omnigraph base URL: nothing configured warns naming the variable and yields no URL' {
+    Invoke-OmnigraphBaseScratch -Body {
+        $warnings = @(Get-AutoOSOmnigraphBaseUrl 3>&1 | Where-Object { $_ -is [Management.Automation.WarningRecord] })
+        Assert-Equal $warnings.Count 1 'the resolver did not warn exactly once'
+        $text = "$($warnings[0])"
+        Assert-True ($text -match 'OMNIGRAPH_BASE_URL' -and $text -match 'omnigraph_url' -and $text -match '\.autoos-omnigraph\.env') "the warning does not name the variable and where to set it: $text"
+        $got = Get-AutoOSOmnigraphBaseUrl 3>$null
+        Assert-True ($null -eq $got) "a localhost default leaked through: [$got]"
+    }
+}
+
+Test-Case 'omnigraph base URL: the answer beats OMNIGRAPH_BASE_URL beats the env file, slashes and quotes are stripped' {
+    $cases = @(
+        @{ Desc = 'environment variable'; Answers = @{}; EnvUrl = 'http://env.invalid:8080'; EnvFile = ''; Want = 'http://env.invalid:8080' }
+        @{ Desc = 'env file line'; Answers = @{}; EnvUrl = ''; EnvFile = 'OMNIGRAPH_BASE_URL=http://file.invalid'; Want = 'http://file.invalid' }
+        @{ Desc = 'environment beats env file'; Answers = @{}; EnvUrl = 'http://env.invalid'; EnvFile = 'OMNIGRAPH_BASE_URL=http://file.invalid'; Want = 'http://env.invalid' }
+        @{ Desc = 'answer beats environment'; Answers = @{ omnigraph_url = 'http://answer.invalid' }; EnvUrl = 'http://env.invalid'; EnvFile = 'OMNIGRAPH_BASE_URL=http://file.invalid'; Want = 'http://answer.invalid' }
+        @{ Desc = 'trailing slashes stripped'; Answers = @{ omnigraph_url = 'https://slash.invalid//' }; EnvUrl = 'http://env.invalid'; EnvFile = ''; Want = 'https://slash.invalid' }
+        @{ Desc = 'one pair of quotes stripped'; Answers = @{}; EnvUrl = ''; EnvFile = 'OMNIGRAPH_BASE_URL="http://quoted.invalid"'; Want = 'http://quoted.invalid' }
+        @{ Desc = 'a scheme-less env value is skipped'; Answers = @{}; EnvUrl = 'omnigraph.test.invalid:8080'; EnvFile = ''; Want = $null }
+        @{ Desc = 'a scheme-less env-file value is skipped'; Answers = @{}; EnvUrl = ''; EnvFile = 'OMNIGRAPH_BASE_URL=localhost:8080'; Want = $null }
+    )
+    foreach ($case in $cases) {
+        $got = Invoke-OmnigraphBaseScratch -Answers $case.Answers -EnvUrl $case.EnvUrl -EnvFile $case.EnvFile -Body {
+            Get-AutoOSOmnigraphBaseUrl 3>$null
+        }
+        if ($got -ne $case.Want) { throw "$($case.Desc): got [$got], want [$($case.Want)]" }
+    }
+    Pass
+}
+
+Test-Case 'omnigraph base URL: Zed with none configured writes no entry and keeps the user''s own, then the resolved value' {
+    $keepers = '{"theme":"mine","context_servers":{"omnigraph":{"command":"npx","args":["-y","user-pin"],"env":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}}}'
+    Invoke-OmnigraphBaseScratch -Body {
+        param($scratch)
+        $cfg = Join-Path $scratch 'AppData\Zed\settings.json'
+        $run = { Set-AutoOSZedProxy 6>$null | Out-Null; Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 | ConvertFrom-Json }
+        $s = & $run
+        Assert-True ($null -eq $s.context_servers.PSObject.Properties['omnigraph']) 'an omnigraph entry was written with no base URL'
+        [IO.File]::WriteAllText($cfg, $keepers)
+        $s = & $run
+        Assert-Equal $s.context_servers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://keep.invalid' "the user's omnigraph entry was rewritten"
+        Assert-True ((Get-Content -LiteralPath $cfg -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in Zed settings'
+        # The URL resolves from the env file while the variable stays absent:
+        # what lands in settings.json has to be the value, not a reference.
+        [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
+        $s = & $run
+        Assert-Equal $s.context_servers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
+    }
+}
+
+Test-Case 'omnigraph base URL: Antigravity with none configured writes no entry and keeps the user''s own, then the resolved value' {
+    $keepers = '{"mcpServers":{"other":{"command":"node","args":["srv.js"]},"omnigraph":{"command":"npx","args":["-y","user-pin"],"env":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}},"theme":"mine"}'
+    Invoke-OmnigraphBaseScratch -Body {
+        param($scratch)
+        $dir = Join-Path $scratch 'AppData\Antigravity'
+        $cfg = Join-Path $dir 'mcp_config.json'
+        $run = {
+            $log = Get-AutoOSConsoleCapture { Set-AutoOSAntigravityMcp 3>$null }
+            $s = $null
+            if (Test-Path -LiteralPath $cfg) { $s = Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 | ConvertFrom-Json }
+            @{ Log = $log; Cfg = $s }
+        }
+        $r = & $run
+        Assert-True ($null -eq $r.Cfg -or $null -eq $r.Cfg.mcpServers.PSObject.Properties['omnigraph']) 'an omnigraph entry was written with no base URL'
+        Assert-True ($r.Log -match 'OMNIGRAPH_BASE_URL is not set - skipping the omnigraph part') "the writer never said why it skipped: [$($r.Log)]"
+        Assert-True ($r.Log -notmatch 'localhost:8080') "a defaulted localhost:8080 was announced: [$($r.Log)]"
+        $null = New-Item -ItemType Directory -Force -Path $dir
+        [IO.File]::WriteAllText($cfg, $keepers)
+        $r = & $run
+        Assert-Equal $r.Cfg.mcpServers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://keep.invalid' "the user's omnigraph entry was rewritten"
+        Assert-Equal $r.Cfg.mcpServers.other.command 'node' 'the user''s other server was dropped'
+        Assert-True ($r.Cfg.theme -eq 'mine') "the user's own top-level key was dropped"
+        Assert-True ((Get-Content -LiteralPath $cfg -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in the Antigravity config'
+        # The URL resolves from the env file while the variable stays absent:
+        # what lands in mcp_config.json has to be the value, not a reference.
+        [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
+        $r = & $run
+        Assert-Equal $r.Cfg.mcpServers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
+        Assert-Equal $r.Cfg.mcpServers.omnigraph.env.OMNIGRAPH_GRAPH_ID 'autoos' 'the entry lost the graph id the bridge requires'
+        Assert-True ($r.Log -notmatch 'skipping the omnigraph part') "a configured URL still skipped: [$($r.Log)]"
+    }
+}
+
+function Invoke-WithModuleStub {
+    # Swap module-scope functions for the duration of one body and put the real
+    # ones back, so a test can run a whole installer function without its side
+    # effects. No test installs anything: the body of Install-AutoOSAgentSkills
+    # drives the claude CLI, docker and the user's skill links, while the part
+    # under test is only which base URL it hands to the omnigraph env writer -
+    # and whether it hands one over at all.
+    param(
+        [Parameter(Mandatory)][hashtable]$Stubs,
+        [Parameter(Mandatory)][scriptblock]$Body
+    )
+    $mod = Get-Module AutoOS.Install
+    $real = @{}
+    # Unqualified, from inside the module: a module's own functions are found
+    # there, while "function:script:<name>" resolves to nothing at all.
+    foreach ($n in $Stubs.Keys) { $real[$n] = & $mod { param($name) (Get-Item "function:$name").ScriptBlock } $n }
+    try {
+        foreach ($n in $Stubs.Keys) { $null = & $mod { param($name, $f) Set-Item "function:$name" $f } $n $Stubs[$n] }
+        & $Body
+    } finally {
+        foreach ($n in $Stubs.Keys) { $null = & $mod { param($name, $f) Set-Item "function:$name" $f } $n $real[$n] }
+    }
+}
+
+Test-Case 'omnigraph base URL: agent skills with none configured writes no omnigraph env, then the resolved value' {
+    $run = {
+        param($scratch, $repo)
+        $envCalls = New-Object System.Collections.ArrayList
+        $otherCalls = New-Object System.Collections.ArrayList
+        # The links, the pinned project server and the skills source are part of
+        # the rest of the function, so the scratch checkout has to carry the two
+        # files that make them happen.
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $repo '.agents\skills\alpha')
+        [IO.File]::WriteAllText((Join-Path $repo '.mcp.json'), '{"mcpServers":{"omnigraph":{"command":"npx"}}}')
+        $stubs = @{
+            'Set-AutoOSOmnigraphEnv'       = { param([string]$BaseUrl, [string]$EnvFile, [switch]$NoUserVariable) $null = $envCalls.Add($BaseUrl) }
+            'Install-AutoOSMcpGraphify'    = { $null = $otherCalls.Add('graphify') }
+            'Install-AutoOSMcpSerena'      = { $null = $otherCalls.Add('serena') }
+            'Install-AutoOSMcpPlaywright'  = { $null = $otherCalls.Add('playwright') }
+            'Install-AutoOSMcpContext7'    = { $null = $otherCalls.Add('context7') }
+            'Get-AutoOSMcpServerNames'     = { , @() }
+            'Enable-AutoOSProjectMcpServer'= { param($RepoPath, $Name) $null = $otherCalls.Add($Name) }
+            'Set-AutoOSAntigravityMcp'     = { $null = $otherCalls.Add('antigravity') }
+            'Sync-AutoOSAgentSkillTargets' = { param($Source) $null = $otherCalls.Add('skills') }
+            'Write-AutoOSOmnigraphReadiness' = { param($RepoRoot) $false }
+        }
+        $log = Invoke-WithModuleStub -Stubs $stubs -Body { Get-AutoOSConsoleCapture { Install-AutoOSAgentSkills 3>$null } }
+        @{ Log = "$log"; Env = @($envCalls); Other = @($otherCalls) }
+    }
+    $r1 = Invoke-OmnigraphBaseScratch -ScratchRepo -Body $run
+    Assert-Equal $r1.Env.Count 0 "an omnigraph env was written with no base URL: [$($r1.Env -join ', ')]"
+    Assert-True ($r1.Log -match 'OMNIGRAPH_BASE_URL is not set - skipping the omnigraph part') "the writer never said why it skipped: [$($r1.Log)]"
+    Assert-True ($r1.Log -notmatch 'localhost:8080') "a defaulted localhost:8080 was announced: [$($r1.Log)]"
+    foreach ($n in @('graphify', 'serena', 'playwright', 'context7', 'antigravity', 'skills', 'omnigraph')) {
+        Assert-True ($n -in $r1.Other) "skipping the omnigraph part also skipped $n"
+    }
+    $r2 = Invoke-OmnigraphBaseScratch -ScratchRepo -Answers @{ omnigraph_url = 'http://omnigraph.test.invalid:8080/' } -Body $run
+    Assert-Equal ($r2.Env -join ',') 'http://omnigraph.test.invalid:8080' 'the resolved URL did not reach the omnigraph env writer'
+    Assert-True ($r2.Log -notmatch 'skipping the omnigraph part') "a configured URL still skipped: [$($r2.Log)]"
+}
 
 # tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
 # YAML shapes both Set-AutoOSSerenaExclusions (here) and ensure_serena_exclusions
@@ -7952,11 +8160,15 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
     $realAppData = $env:APPDATA
     $realOmni = $env:AUTOOS_OMNIROUTE_KEY
     $realLit = $env:LITELLM_MASTER_KEY
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
     try {
         $env:APPDATA = $scratch
         $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
         $env:LITELLM_MASTER_KEY = 'test-lit-key'
+        # The omnigraph entry is only written when a base URL resolves (see
+        # Get-AutoOSOmnigraphBaseUrl), so this case supplies one.
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         $cfgDir = Join-Path $scratch 'Zed'
         New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
         '{"theme":"mine","language_models":{"openai":{"api_url":"https://x"}}}' |
@@ -8026,6 +8238,8 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         else { $env:AUTOOS_OMNIROUTE_KEY = $realOmni }
         if ($null -eq $realLit) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
         else { $env:LITELLM_MASTER_KEY = $realLit }
+        if ($null -eq $realBase) { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
+        else { $env:OMNIGRAPH_BASE_URL = $realBase }
     }
 }
 
@@ -8191,7 +8405,9 @@ function Invoke-OpenCodeScratch {
         [string]$OpenCodeVersion = '1.4.0',
         [string]$Seed = ''
     )
-    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY')
+    # OMNIGRAPH_BASE_URL belongs to the saved set: the writers resolve the
+    # omnigraph base URL from it, so a host that has one set must not tilt a run.
+    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY', 'OMNIGRAPH_BASE_URL')
     $savedEnv = @{}
     foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
     $savedHome = $HOME
@@ -8233,6 +8449,7 @@ function Invoke-OpenCodeScratch {
         $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
         $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
         Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue
         # The writer reads $HOME, which the environment does not set on every
         # host: prove the module sees the scratch home before it writes anything.
         if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
@@ -8393,6 +8610,30 @@ Test-Case 'opencode V2: a V1 CLI gets no providers block' {
         if ($null -eq $w.provider.PSObject.Properties['custom']) { throw 'a foreign V1 provider of the user was dropped' }
         if ($w.model -notlike 'ollama/*') { throw "a V1 CLI's default model is not the Ollama default: [$($w.model)]" }
         Pass
+    }
+}
+
+# The URL must reach the config as a resolved value, never as an {env:...}
+# reference: OMNIGRAPH_BASE_URL is absent from the environment below (the
+# scratch harness removes it), so a reference would read as empty - OpenCode
+# gives an MCP server its own environment, not the installer's.
+Test-Case 'omnigraph base URL: OpenCode with none configured writes no entry and keeps the user''s own, then the resolved value' {
+    $keepers = '{"theme":"mine","mcp":{"omnigraph":{"type":"local","command":["npx","-y","user-pin"],"enabled":true,"environment":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}}}'
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        $log = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True ($null -eq $w.mcp.PSObject.Properties['omnigraph']) 'an omnigraph entry was written with no base URL'
+        Assert-True ($log -match 'OMNIGRAPH_BASE_URL is not set') "the writer never said why it skipped: $log"
+        [IO.File]::WriteAllText($c.CfgFile, $keepers)
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Equal $w.mcp.omnigraph.environment.OMNIGRAPH_BASE_URL 'http://keep.invalid' "the user's omnigraph entry was rewritten"
+        Assert-True ((Get-Content -LiteralPath $c.CfgFile -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in the OpenCode config'
+        [IO.File]::WriteAllText((Join-Path $c.Scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Equal $w.mcp.omnigraph.environment.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
     }
 }
 
@@ -9919,10 +10160,11 @@ rendered = registry.render_omniroute(reg)
 routes = reg['routes']
 legless = sorted(rid for rid, r in routes.items()
                  if isinstance(r, dict) and not (r.get('legs') or []))
-print('%s|%s|%s' % (
+print('%s|%s|%s|%s' % (
     ','.join(c['name'] for c in rendered['combos']),
     ','.join(rendered.get('omitted') or []),
-    ','.join(legless)))
+    ','.join(legless),
+    ';'.join('%s=%s' % (c['name'], c['context']) for c in rendered['combos'])))
 '@
     $derivePath = Join-Path ([IO.Path]::GetTempPath()) "autoos-combos-derive-$PID.py"
     [IO.File]::WriteAllText($derivePath, $derive)
@@ -9933,6 +10175,17 @@ print('%s|%s|%s' % (
     Assert-Equal ($names -join ',') $parts[0] 'combos.json is not the registry render of servable tiers'
     $expectedOmitted = @($parts[1] -split ',' | Where-Object { $_ })
     $leglessRoutes = @($parts[2] -split ',' | Where-Object { $_ })
+    # The render's per-combo context, so a route the table below does not
+    # hand-pin is still checked against the registry rather than a literal here.
+    # OVH-REMOVE 2026-10-18 (D-1816(12)): the pinned ovh credit singles
+    # (ovh-qwen3.8-27b / ovh-gpt-oss-120b) left the table for this — they existed
+    # only while the registry carried them, and a removed route must not leave a
+    # stale expectation behind.
+    $renderedContexts = @{}
+    foreach ($kv in ($parts[3] -split ';' | Where-Object { $_ })) {
+        $k, $v = $kv -split '=', 2
+        $renderedContexts[$k] = $v
+    }
     # "retired" is the one home of the ids a rename left behind: apply prunes
     # them from the store, so a retired id must never also be a current combo.
     $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -9968,6 +10221,9 @@ print('%s|%s|%s' % (
         'l1-orchestrator' = '1M'
         'l1-orchestrator-free-only' = '1M'
         'l1-orchestrator-paid' = '1M'
+        # WIN-COMBOS-CONTEXT-PIN 2026-10-18: routes.l1-orchestrator-clean in
+        # catalog/ai-registry.json renders 1M (clamp = smallest servable leg window).
+        'l1-orchestrator-clean' = '1M'
         'spark-1.3-contributor' = '1M'
         'l2-worker' = '128k'
         'l2-worker-clean' = '128k'; 'l2-worker-free-only' = '128k'; 'l2-orchestrator' = '1M'; 'l3-driver' = '128k'; 'l3-driver-clean' = '128k'; 'l3-driver-free-only' = '128k'; 't4-rag' = '128k'
@@ -9977,6 +10233,17 @@ print('%s|%s|%s' % (
         # RENDERFIX 2026-10-01: the researcher-tier lane added this route; it is
         # the t4 tier like t4-rag, so it clamps to its lowest leg (128k).
         'l2-researcher' = '128k'
+        # WIN-COMBOS-CONTEXT-PIN round 2 2026-10-18: the rest of the routes the
+        # render serves, each read off `python3 tools/registry.py render
+        # omniroute` (combos[].context from catalog/ai-registry.json), which
+        # equals combos.json. The gate stays fail-fast: a served combo missing
+        # from this table still fails.
+        'l2-orchestrator-clean' = '1M'; 'l2-worker-1m' = '1M'
+        'l3-driver-1m' = '1M'; 'l3-driver-256k' = '256k'
+        'l3-implementer' = '128k'; 'l3-implementer-clean' = '128k'
+        'l3-researcher' = '1M'; 'l3-researcher-clean' = '1M'
+        'l3-review-codebase' = '1M'; 'l3-review-diff' = '128k'; 'l3-review-tests' = '1M'
+        'mimo-v2.6-flash' = '1M'; 'mimo-v2.6-pro' = '1M'
         'gemini-3.8-flash' = '1M'; 'opus-4-6' = '1M'
         # GLM55 wave 2026-10-05: new opus-5-5 single (antigravity opus, 1M).
         'opus-5-5' = '1M'
@@ -9984,19 +10251,42 @@ print('%s|%s|%s' % (
         # states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in / 384K
         # out, so the 128k clamp was stale data (models.deepseek-flash).
         'deepseek-v4.1-flash' = '1M'
-        # TORDER pinned singles: free :free 128k/256k, credit ovh/vertex.
+        # TORDER pinned singles: free :free 128k/256k, credit vertex. Other
+        # pinned singles come from the registry (see $renderedContexts).
         'groq-qwen3.8-27b' = '128k'; 'hf-glm-5.2' = '128k'; 'hf-qwen3.8-27b' = '128k'
         'or-nemotron-3-super-free' = '256k'
         'or-north-mini-code-free' = '256k'; 'or-laguna-s-2.1-free' = '256k'
-        'ovh-qwen3.8-27b' = '128k'; 'ovh-gpt-oss-120b' = '128k'
         'vertex-gemini-3.8-flash' = '1M'
+        # OCGO-PREFER 2026-10-18: the OpenCode Go pinned singles, each read off
+        # `python3 tools/registry.py render omniroute` (combos[].context from
+        # routes.* in catalog/ai-registry.json), which equals combos.json:
+        # glm-5.3-flash 1M, minimax-m3 128k (shared models.'MiniMax-M3' window,
+        # not the Go row's 1M), kimi-k3 128k (shared models.kimi-k3 window),
+        # qwen3.8-flash 200k.
+        'opencode-go/glm-5.3-flash' = '1M'
+        'opencode-go/minimax-m3' = '128k'
+        'opencode-go/kimi-k3' = '128k'
+        'opencode-go/qwen3.8-flash' = '200k'
+        # RT-P1-CLASS-COMBOS 2026-10-18: the three context-floored priority
+        # combos (routes.* declaring surfaces.omniroute.context_requirements),
+        # read off `python3 tools/registry.py render omniroute` (combos[].context
+        # from catalog/ai-registry.json), which equals combos.json: 128k/256k/1M.
+        # The native fields (contextRequirements/targetTimeoutMs) these three
+        # carry are pinned by ClassComboNativeFieldTests in
+        # tests/test_registry_render.py, not duplicated here.
+        'class-128k' = '128k'
+        'class-256k' = '256k'
+        'class-1m' = '1M'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
         foreach ($m in $c.models) {
             Assert-True ($m -match '^[A-Za-z0-9@._/:-]+$') "$($c.name): bad ref '$m'"
         }
-        Assert-Equal $c.context $contexts[$c.name]
+        $expectedContext = $contexts[$c.name]
+        if ($null -eq $expectedContext -and $c.name -like 'ovh-*') { $expectedContext = $renderedContexts[$c.name] }  # only the legacy ovh singles (gone with the registry removal) are exempt from the hand pin; any other unpinned combo still fails
+        Assert-True ($null -ne $expectedContext) "$($c.name): no expected context"
+        Assert-Equal $c.context $expectedContext
     }
     # Every route the render fails closed is named in "omitted" and is never a
     # combo (l1-orchestrator-clean since DSMAX 2026-09-27; deepseek-v4.1-flash
@@ -10017,9 +10307,11 @@ print('%s|%s|%s' % (
     # contract) is banned in l2-worker-clean/l3-driver-clean
     # (l1-orchestrator-clean is omitted, see above). Direct-key legs
     # (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
-    # on the same key, so they stay. L1-CLEAN 2026-10-05: ovhcloud is a
-    # metered credit-tier provider (providers.ovhcloud tier credit), not a
-    # free pool, so its Qwen leg is exempted from the /qwen free-pool ban.
+    # on the same key, so they stay. L1-CLEAN 2026-10-05: ovhcloud was a
+    # metered credit-tier provider (providers.ovhcloud tier credit), not a free
+    # pool, so its Qwen leg was exempted from the /qwen free-pool ban. The
+    # provider was removed (OVH-REMOVE 2026-10-18, D-1816(12)); the exemption
+    # stays so a stale combo carrying an ovh leg is still judged by the old rule.
     $freeRe = 'contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|(?<!ovh(cloud)?)/qwen'
     $noTrainRe = '-contributor$'
     foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {

@@ -44,9 +44,9 @@ class VerdictGrammarTests(unittest.TestCase):
     def test_markdown_on_the_first_line_is_normalised_and_countable(self):
         for text, want in (("VERDICT: ACCEPT", "ACCEPT"), ("**VERDICT:** ACCEPT", "ACCEPT"),
                            ("**VERDICT: ACCEPT**", "ACCEPT"), ("`VERDICT: accept`", "ACCEPT"),
-                           ("# VERDICT: REJECT", "REJECT"), ("> VERDICT: reject", "REJECT"),
+                           ("# VERDICT: REJECT", "REJECT"),
                            ("- VERDICT: HOLD", "HOLD"), ("VERDICT: ACCEPT.", "ACCEPT"),
-                           ("VERDICT: ACCEPT!", "ACCEPT"), ("> # VERDICT: ACCEPT", "ACCEPT"),
+                           ("VERDICT: ACCEPT!", "ACCEPT"),
                            ("1. VERDICT: ACCEPT", "ACCEPT"), ("1) VERDICT: REJECT", "REJECT"),
                            ("2. **VERDICT:** HOLD", "HOLD"), ("**VERDICT: ACCEPT.**", "ACCEPT")):
             got = v.parse_verdict(text + "\nfindings underneath it\n")
@@ -54,9 +54,39 @@ class VerdictGrammarTests(unittest.TestCase):
             self.assertEqual(want, got["verdict"], text)
             self.assertEqual(want != "HOLD", got["countable"], text)  # a HOLD is no seat
 
-    def test_anything_but_one_bare_word_on_line_one_is_invalid(self):
-        for text, why in (("I looked at the diff.\nVERDICT: ACCEPT\n", "first"),
-                          ("VERDICT: SHIP", "SHIP"), ("VERDICT: LGTM", "LGTM"),
+    def test_the_one_verdict_line_may_stand_anywhere(self):
+        # D-1515 (measured: qoder run eeaf50 l45, opencode muse run 403995 l55): seats that
+        # reviewed first and ended with `VERDICT: ACCEPT` were logged as no verdict. The
+        # line is read wherever it stands; zero or two of them stay invalid (fail closed).
+        for text, want in (("I looked at the diff.\nVERDICT: ACCEPT\n", "ACCEPT"),
+                           ("**Review**\n\n- (1) fine\n\n**VERDICT: REJECT**\n", "REJECT"),
+                           ("notes\n- VERDICT: HOLD\ntrailing prose\n", "HOLD"),
+                           # a fenced sample is quoted material, never the seat's own line
+                           ("quoted:\n```\nVERDICT: REJECT\n```\nVERDICT: ACCEPT\n", "ACCEPT"),
+                           ("> VERDICT: ACCEPT\nmine:\nVERDICT: REJECT\n", "REJECT")):
+            got = v.parse_verdict(text)
+            self.assertTrue(got["valid"], (text, got["reason"]))
+            self.assertEqual(want, got["verdict"], text)
+        for text, why in (("prose\nVERDICT: ACCEPT\nmore\nVERDICT: ACCEPT\n", "two"),
+                          ("prose only, the word verdict: accept inside a sentence\n",
+                           "no verdict line"),
+                          ("I reviewed it.\nVERDICT: SHIP\n", "SHIP"),
+                          # mimo seat d15v: a lone fenced verdict with no conclusion of the
+                          # seat's own is no verdict (fail closed), and an unclosed fence
+                          # swallows the rest, as in every other fenced reader (_Fences)
+                          ("the diff says:\n```text\nVERDICT: ACCEPT\n```\nthat is all\n",
+                           "no verdict line"),
+                          ("~~~\nVERDICT: ACCEPT\n", "no verdict line"),
+                          # seat qwen d15v r3: a blockquote is quoted material too (the spawner's
+                          # own verdict reader already ignores `> VERDICT:` echoes)
+                          ("> VERDICT: ACCEPT\nthe diff says so\n", "no verdict line"),
+                          ("> # VERDICT: ACCEPT\n", "no verdict line")):
+            got = v.parse_verdict(text)
+            self.assertFalse(got["valid"], text)
+            self.assertIn(why, got["reason"], text)
+
+    def test_anything_but_one_bare_word_on_the_verdict_line_is_invalid(self):
+        for text, why in (("VERDICT: SHIP", "SHIP"), ("VERDICT: LGTM", "LGTM"),
                           ("VERDICT: ACCEPT but the ref is unread", "words after"),
                           ("VERDICT: ACCEPT\nVERDICT: REJECT\n", "two"),
                           ("VERDICT: ACCEPT: sure", "colon"), ("", "no non-empty line")):
@@ -96,7 +126,7 @@ class VerdictGrammarTests(unittest.TestCase):
                 ("- ACCEPT", "- VERDICT: ACCEPT", "ACCEPT"),
                 ("1. ACCEPT", "1. VERDICT: ACCEPT", "ACCEPT"),
                 ("1) accept", "1) VERDICT: accept", "ACCEPT"),
-                ("> # ACCEPT", "> # VERDICT: ACCEPT", "ACCEPT"),
+                ("> # ACCEPT", "# VERDICT: ACCEPT", "ACCEPT"),
                 ("REJECT.", "VERDICT: REJECT.", "REJECT"),
                 ("**REJECT**", "**VERDICT: REJECT**", "REJECT"),
                 ("HOLD.", "VERDICT: HOLD", "HOLD")):

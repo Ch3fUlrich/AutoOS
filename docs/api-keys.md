@@ -194,7 +194,7 @@ never reads a keys file, and a missing key is exit 2 with
 `run me via autoos_gateway_key.py exec -- ...`:
 
 ```bash
-python3 tools/autoos_gateway_key.py exec -- python3 tools/review-call.py --model ovh/gpt-oss-120b --prompt-file prompt.md --out-dir out
+python3 tools/autoos_gateway_key.py exec -- python3 tools/review-call.py --model mimo/mimo-v2.6-pro --prompt-file prompt.md --out-dir out
 ```
 
 Optional: `--title <slug>` (the session tag becomes `review/<title>`, else

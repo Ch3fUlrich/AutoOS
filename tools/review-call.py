@@ -5,7 +5,7 @@ Run it ONLY through `exec`, the one form that puts the OmniRoute client key in
 this process's environment (D-370) and nowhere else:
 
     python3 tools/autoos_gateway_key.py exec -- python3 tools/review-call.py \
-        --model ovh/gpt-oss-120b --prompt-file prompt.md --out-dir out \
+        --model mimo/mimo-v2.6-flash --prompt-file prompt.md --out-dir out \
         [--title my-review] [--max-tokens 16000] [--gateway-url URL] \
         [--temperature 0.2]
 
@@ -28,7 +28,7 @@ NO `temperature` (unless `--temperature FLOAT` is given), `max_tokens`
 11k prompt, so 4096 cut the answer) and the prompt as one user message.
 temperature is OFF by
 default because of a MEASURED defect on the central OmniRoute 2026-10-02
-(ovh/gpt-oss-120b): a request carrying `"temperature": 0` is cut at 64
+(ovh/gpt-oss-120b, provider removed 2026-10): a request carrying `"temperature": 0` is cut at 64
 completion tokens (finish_reason 'length', content empty - the reasoning
 model spends them on reasoning) regardless of max_tokens /
 max_completion_tokens, while the SAME request WITHOUT temperature finishes
@@ -303,7 +303,7 @@ def request_body(model: str, prompt: str, max_tokens: int,
     unless the caller explicitly asked for one.
 
     temperature is deliberately absent by default: MEASURED on the central
-    OmniRoute 2026-10-02 (ovh/gpt-oss-120b), a request carrying
+    OmniRoute 2026-10-02 (ovh/gpt-oss-120b, provider removed 2026-10), a request carrying
     `"temperature": 0` is cut at 64 completion tokens (finish_reason 'length',
     content empty) regardless of max_tokens / max_completion_tokens, while the
     SAME request without temperature finishes normally - so the gateway would
@@ -616,7 +616,7 @@ def parse_args(argv) -> argparse.Namespace:
         description="One tool-less gateway review call; run it via "
                     "autoos_gateway_key.py exec -- ... (D-440).")
     parser.add_argument("--model", required=True,
-                        help="OmniRoute model id, e.g. ovh/gpt-oss-120b")
+                        help="OmniRoute model id, e.g. mimo/mimo-v2.6-flash")
     parser.add_argument("--prompt-file", required=True,
                         help="file whose contents (plus the mandatory "
                              "STANDING_QUESTION paragraph) are the single "

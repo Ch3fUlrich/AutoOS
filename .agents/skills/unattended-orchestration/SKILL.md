@@ -67,12 +67,13 @@ Binding on every level below; each line links its source — read the source, ne
 2. Evidence kinds: commit+ci (commit on main with Plan-Item trailer, newest CI run per check suite + name green), run-record, semaphore-task, decision. Done = merged to main + evidence attached + reviews passed; a claim is not evidence.
 3. Defining items: done_criteria max 600 chars, overflow goes in the description [routing docs/LESSONS.md D-1424]; a lone lane needs a path to a goal (unblocks/goal link) or define refuses "unreachable_goal".
 4. Planning method: plangraph repo skills/plangraph-planning/SKILL.md (layers, task contract, report schemas).
-5. L2 launch contract: L1 asks routing `"L2-LAUNCH <name> <brief path> <cwd>"`; router launches Sonnet, effort medium, slim MCP (routing ops/mcp-l2-slim.json); L2 never merges or pushes to main, runs no crons, keeps a status card <= 40 lines, and sends `"RECYCLE-READY <card path>"` before 230k context [routing ops/l2-rule.txt, D-716].
+5. L2 launch contract: L1 asks routing `"L2-LAUNCH <name> <brief path> <cwd>"`; router launches Sonnet, effort medium, slim MCP (routing ops/mcp-l2-slim.json); L2 never merges or pushes to main, runs no crons, keeps a status card <= 40 lines, and sends `"RECYCLE-READY <card path>"` before 270k context [routing ops/l2-rule.txt, D-716].
 6. Quiet fleet: messages only for BLOCKED/decision, DONE or MERGE-READY with sha, GO requests, incidents, launch/recycle; no acks, no ALIVE; no recurring crons, wait with one background command that exits [D-1364, D-1377; build-L1 beat exception D-1436].
 7. L1 and L2 Claude sessions run at effort medium [D-1390].
 8. CI runs only on the workstation or ci.vm; no GitHub billing [D-1436].
 9. Judge (server-L1-routing) reviews only HIGH risk: secrets/auth/access, keeper and plan-graph engine or live keeper changes, live deploys/migrations (D-825 GO steps), data-mutating live steps. Standard lanes merge on the L1's own approval with 1-2 non-Claude seats; the router samples [D-1442].
 10. A harness or classifier refusal is never worked around or relayed to another agent: stop and send the router the verbatim refusal; the router turns it into an OS-NN line the operator types in that session [routing DECISIONS 2.7].
+11. Model access paths: a named model runs ONLY over its own path, never a substitute model or route [D-1504]. qwen3.8-flash = qodercli ACP only; gemini-3.8-flash = antigravity (agy) ACP or Google AI Studio (both rate-limited: back off or send BLOCKED, never swap); muse-spark-1.3 = opencode ACP; mimo-v2.6-flash / mimo-v2.6-pro = the mimo provider. Path down = BLOCKED, not another model. Detail: `docs/agent-protocol.md` "Model access paths".
 
 ## Rules
 

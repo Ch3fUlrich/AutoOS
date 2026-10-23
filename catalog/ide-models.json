@@ -179,7 +179,7 @@
     {
       "id": "l3-driver",
       "name": "L3 · l3-driver · 128k",
-      "context": 128000,
+      "context": 131072,
       "output": 16384,
       "surfaces": {
         "omniroute": [
@@ -271,7 +271,7 @@
     {
       "id": "l3-implementer",
       "name": "L3 · l3-implementer · 128k",
-      "context": 128000,
+      "context": 131072,
       "output": 8192,
       "surfaces": {
         "omniroute": [
@@ -455,18 +455,6 @@
       }
     },
     {
-      "id": "ovh-qwen3.8-27b",
-      "name": "Qwen3.8-27B via OVH (credit)",
-      "context": 128000,
-      "output": 32768,
-      "surfaces": {
-        "omniroute": [
-          "opencode",
-          "zed"
-        ]
-      }
-    },
-    {
       "id": "vertex-gemini-3.8-flash",
       "name": "Gemini-3.8-Flash via Vertex (credit)",
       "context": 1048576,
@@ -506,6 +494,54 @@
           "opencode",
           "zed",
           "openhands"
+        ]
+      }
+    },
+    {
+      "id": "opencode-go/glm-5.3-flash",
+      "name": "OpenCode Go · glm-5.3-flash (subscription, 1M)",
+      "context": 1048576,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "opencode-go/minimax-m3",
+      "name": "OpenCode Go · minimax-m3 (subscription, 128k)",
+      "context": 131072,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "opencode-go/kimi-k3",
+      "name": "OpenCode Go · kimi-k3 (subscription, 128k)",
+      "context": 131072,
+      "output": 32768,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
+        ]
+      }
+    },
+    {
+      "id": "opencode-go/qwen3.8-flash",
+      "name": "OpenCode Go · qwen3.8-flash (subscription, 200k)",
+      "context": 200000,
+      "output": 16384,
+      "surfaces": {
+        "omniroute": [
+          "opencode",
+          "zed"
         ]
       }
     },

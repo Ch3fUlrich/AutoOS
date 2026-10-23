@@ -58,17 +58,102 @@ def card(spec="exact", kind="implement"):
     return {"spec": spec, "kind": kind}
 
 
-def clean_head_leg(registry):
-    """The leg `l2-worker-clean` heads with, read from the registry.
+# The `-clean` routes, in the order the head is read from.
+CLEAN_ROUTES = ("l2-worker-clean", "l1-orchestrator-clean", "l3-driver-clean",
+                "l3-implementer-clean", "l3-researcher-clean",
+                "l2-orchestrator-clean")
 
-    Three cases below need "a private-safe leg that a probe has proven
-    tool_calls on" without reading the git-ignored probe overlay, so they prove
-    this leg in an inline overlay instead of naming a model. MISTRALFIX
-    (2026-09-28) moved them off the old name: mistral/mistral-small-latest is
-    no longer a leg of any route (0 rpm on the measured plan), and since DSBACK
-    the native DeepSeek leg heads both -clean twins.
+
+# The seat built inline when the loaded registry has no clean head left to read
+# (OVH-REMOVE / D-1626, 2026-10-17). Not a vendor: a private-safe paid leg with no
+# cap and no probe history, so it exercises exactly the rules below.
+CLEAN_SEAT_LEG = "testclean/test-clean-seat"
+CLEAN_SEAT_ROUTE_ID = "test-clean-seat"
+CLEAN_SEAT_FIXTURE = {
+    "providers": {
+        "testclean": {"id": "testclean", "tier": "paid",
+                      "trains_on_prompts": False,
+                      "$comment": "test fixture: a private-safe paid pool, "
+                                  "declared inline so no gate depends on a "
+                                  "real credit provider surviving the lane"},
+    },
+    "models": {
+        "test-clean-seat": {
+            "id": "test-clean-seat", "family": "test",
+            "context_advertised": 1048576,
+            "context_usable": {"tokens": 1048576, "source": "default"},
+            "output_max": 65536, "effort_ladder": ["low", "medium", "high"],
+            "reasoning": True, "tool_calls": "unproven",
+            "price_in": 1.5e-06, "price_out": 7.5e-06},
+    },
+    "routes": {
+        CLEAN_SEAT_ROUTE_ID: {
+            "id": CLEAN_SEAT_ROUTE_ID, "class": "cheap",
+            "strategy": "priority", "legs": [CLEAN_SEAT_LEG],
+            "surfaces": {"omniroute": {
+                "clients": ["opencode", "zed", "openhands"],
+                "context": 1048576, "context_declared": "1M",
+                "display_name": "test · clean seat · 1M", "output": 32768}},
+        },
+    },
+}
+
+
+def clean_head(registry):
+    """(`registry to plan against`, `route id`, `head leg`) — a private-safe leg
+    a test can prove tool_calls on without reading the git-ignored probe overlay,
+    never named by the caller. MISTRALFIX (2026-09-28) moved it off
+    mistral/mistral-small-latest (0 rpm on the measured plan) and DSBACK onto the
+    native DeepSeek leg. OVH-REMOVE / D-1626 (2026-10-17): removing a credit
+    provider can empty every `-clean` route, so the head is read from whichever
+    one still carries a leg its own `unavailable_legs` does not gate out, and when
+    none does the seat above is injected into a deep copy. The caller plans
+    against the registry it read and gets that leg's route back, so the survival
+    claim stays about that leg's own chain.
     """
-    return registry["routes"]["l2-worker-clean"]["legs"][0]
+    for route_id in CLEAN_ROUTES:
+        route = registry["routes"].get(route_id) or {}
+        gated = route.get("unavailable_legs") or {}
+        for leg in route.get("legs") or []:
+            if (gated.get(leg) or {}).get("available", True) is False:
+                continue
+            return registry, route_id, leg
+    import copy
+    reg = copy.deepcopy(registry)
+    for section, entries in CLEAN_SEAT_FIXTURE.items():
+        reg[section].update(entries)
+    return reg, CLEAN_SEAT_ROUTE_ID, CLEAN_SEAT_LEG
+
+
+# The free google seat that heads policy.reviewers (client gemini, leg
+# `gemini/gemini-3.8-flash`). The model row that leg names is shared with a
+# credit provider's leg, so OVH-REMOVE (D-1816(12)) / D-1626 can retire the row
+# and the seat together — the reviewer walk's head is then another family.
+# Re-declared inline over the same leg when the loaded registry has no google
+# entry, so the gates that read "the free cross-family head wins" keep reading
+# a real two-pass walk instead of whatever survived the removal.
+GOOGLE_REVIEWER_MODEL = {"id": "gemini-3.8-flash", "family": "google",
+                         "context_usable": {"tokens": 1048576,
+                                            "source": "default"},
+                         "tool_calls": "proven"}
+GOOGLE_REVIEWER_SEAT = {"client": "gemini", "model": "gemini-3.8-flash",
+                        "family": "google", "leg": "gemini/gemini-3.8-flash",
+                        "paid": False,
+                        "source": "test fixture (row retired with its credit provider)"}
+
+
+def with_google_reviewer_seat(registry):
+    """`registry` untouched when it already carries a google reviewer, else a
+    deep copy with the seat and its model row re-declared inline at the head."""
+    if any(entry.get("family") == "google"
+           for entry in (registry.get("policy") or {}).get("reviewers") or []):
+        return registry
+    import copy
+    reg = copy.deepcopy(registry)
+    reg["models"].setdefault("gemini-3.8-flash",
+                             copy.deepcopy(GOOGLE_REVIEWER_MODEL))
+    reg["policy"]["reviewers"].insert(0, copy.deepcopy(GOOGLE_REVIEWER_SEAT))
+    return reg
 
 
 class TableTests(unittest.TestCase):
@@ -915,17 +1000,20 @@ class FallThroughTests(unittest.TestCase):
                                      "reason": ""}}
         # Every model in the real catalog is tool_calls unproven today (no
         # probe has proven one yet); marking the -clean routes' head leg
-        # proven in the overlay is enough to keep l2-worker-clean alive, even
+        # proven in the overlay is enough to keep that route alive, even
         # though its other legs (openrouter/deepseek, gated by its provider,
         # and opencode-zen/deepseek-v4.1-flash, gated on the route) stay
         # unproven. MISTRALFIX 2026-09-28: this used to prove
         # mistral/mistral-small-latest, which is no longer a leg of the route.
-        overlay = {"legs": {clean_head_leg(registry): {
+        # The route is the one clean_head read the leg off, so the claim
+        # is about that leg's own route in every registry state.
+        registry, route_id, head = clean_head(registry)
+        overlay = {"legs": {head: {
             "tool_calls": {"value": "proven", "source": "test"}}}}
         survivors, removed = r.filter_routes(card, features, client_state,
                                              registry, overlay)
-        self.assertIn("l2-worker-clean", survivors)
-        self.assertNotIn("l2-worker-clean", removed)
+        self.assertIn(route_id, survivors)
+        self.assertNotIn(route_id, removed)
 
 
 class ProviderLimitsFilterTests(unittest.TestCase):
@@ -2092,17 +2180,22 @@ class PlanTests(unittest.TestCase):
         tool_calls proven for at least one private-safe leg, but
         the real probe's overlay (tools/autoos_overlay.py) is never in
         git and absent on a fresh clone or in CI. Marks the -clean routes'
-        head leg (clean_head_leg: private-safe — paid tier,
+        head leg (clean_head: private-safe — paid tier,
         trains_on_prompts false, no model-level override) proven and every
         other leg in the registry explicitly unproven -- same shape
         tools/probe-toolcalls.py writes (``overlay["legs"][leg]["tool_calls"]
-        ["value"]``) -- so this test never depends on that file."""
+        ["value"]``) -- so this test never depends on that file. Returns
+        ``(registry, overlay, head)``: OVH-REMOVE / D-1626 can leave the lane
+        with no clean leg to prove, and then the inline seat is added to a
+        copy, so the caller must plan against the same registry the head came
+        from."""
+        registry, _route_id, head = clean_head(registry)
         overlay = {"legs": {}}
         for route in registry["routes"].values():
             for leg in route.get("legs") or []:
                 overlay["legs"].setdefault(leg, {"tool_calls": {"value": "unproven"}})
-        overlay["legs"][clean_head_leg(registry)] = {"tool_calls": {"value": "proven"}}
-        return overlay
+        overlay["legs"][head] = {"tool_calls": {"value": "proven"}}
+        return registry, overlay, head
 
     def test_real_registry_sensitive_implement_card_never_picks_an_unsafe_leg(self):
         # CIGREEN: expectation moved by 35148c5c (CLEAN put the unproven
@@ -2127,7 +2220,7 @@ class PlanTests(unittest.TestCase):
         registry_path = (Path(__file__).resolve().parent.parent
                          / "catalog" / "ai-registry.json")
         registry = json.loads(registry_path.read_text(encoding="utf-8"))
-        overlay = self._inline_toolcalls_overlay(registry)
+        registry, overlay, head = self._inline_toolcalls_overlay(registry)
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                "mode": "balanced", "privacy": "sensitive"}
         features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
@@ -2140,7 +2233,7 @@ class PlanTests(unittest.TestCase):
                          [], "muse-spark", self.dt(2026, 9, 29, 9, 0))
         self.assertIsNone(starved["route"], starved)
         self.assertEqual(starved["state"], "input_required", starved)
-        self.assertIn("%s: tool_calls" % clean_head_leg(registry),
+        self.assertIn("%s: tool_calls" % head,
                       starved["reason"], starved["reason"])
         result = r.plan(card, features, client_state, registry, overlay, [],
                         "muse-spark", self.dt(2026, 9, 29, 9, 0))
@@ -2246,6 +2339,50 @@ class GatewayOrderTests(unittest.TestCase):
                / "catalog" / "ai-registry.json")
         return json.loads(path.read_text(encoding="utf-8"))
 
+    # The chain l3-driver ships, in order: the probe-passed free band, then the
+    # priced tail — OVH-REPROBE 2026-10-08 put the re-probed OVH grant in the
+    # band's trial position and the vertex leg the D-657 probes confirmed closes
+    # the chain. Legs of RETIRED_PROVIDER below are the state-conditional ones:
+    # pinned against this chain while the provider still serves any route, and
+    # droppable from the first registry state in which OVH-REMOVE (D-1816(12))
+    # has taken them out of every route — a step ahead of the provider itself
+    # leaving, so their presence proves nothing about resolve_leg.
+    L3_DRIVER_CHAIN = (
+        "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
+        "cohere/command-a-03-2025",
+        "openrouter/poolside/laguna-s-2.1:free",
+        "cohere/command-a-plus-05-2026",
+        "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
+        "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
+        "openrouter/cohere/north-mini-code:free",
+        "ovhcloud/Qwen3.5-397B-A17B",
+        "vertex/gemini-3.8-flash",
+    )
+
+    # The provider OVH-REMOVE (D-1816(12)) retires. Its chain legs are the only
+    # droppable ones: pinned while the provider still serves, gone after it.
+    RETIRED_PROVIDER = "ovhcloud"
+
+    @staticmethod
+    def _resolvable(registry, leg):
+        """Is `leg` still a provider/model the loaded registry names?"""
+        try:
+            cc.resolve_leg(leg, registry)
+        except ValueError:
+            return False
+        return True
+
+    def _provider_serves_anything(self, registry):
+        """Does the retired provider still ride ANY declared route? Step A of
+        the removal takes its legs out of every route while the provider entry
+        itself survives until step B, so this — not resolve_leg, which stays
+        true through that intermediate state — is what says the removal has
+        landed. Today the provider's own ovh-* routes still carry it."""
+        wanted = self.RETIRED_PROVIDER
+        return any(str(leg).split("/", 1)[0] == wanted
+                   for route in registry["routes"].values()
+                   for leg in (route.get("legs") or []))
+
     def test_t3_driver_free_legs_rank_ahead_of_the_priced_tail(self):
         # D657-D2 (AO-DENYLEGS D2, 2026-10-08) re-cut l3-driver. The credit legs
         # this test used to rank — samba/gpt-oss-120b, samba/MiniMax-M3,
@@ -2259,21 +2396,72 @@ class GatewayOrderTests(unittest.TestCase):
         # 2026-10-08 (AO-DENYLEGS open item 1) widens that tail to two credit
         # legs — the re-probed OVH grant sits in the band's trial position and
         # the vertex leg the D-657 probes confirmed still closes the chain.
+        # OVH-REMOVE (D-1816(12)) and D-1626 retire the providers those two legs
+        # name, so the tail is not a fixed pair any more. The pin is restored at
+        # its full strength by naming the WHOLE chain and reading it against the
+        # registry that is actually loaded: one equality against the chain
+        # rebuilt for the state, which is leg-for-leg the nine of today in every
+        # state where the retired provider still serves a route. Only after the
+        # removal has withdrawn its legs from every route do they become
+        # droppable — and droppable, never reorderable: the expected list is
+        # rebuilt from L3_DRIVER_CHAIN, keeping a droppable leg only while the
+        # route still carries it, so the route must be that list exactly. A leg
+        # that moves, a leg of the retired provider re-added at the tail, a leg
+        # the chain does not name at all: each breaks the equality. Step A is
+        # what makes "still resolvable" an unusable gate — it takes the legs out
+        # of the chains while the provider entry survives until step B, so the
+        # intermediate registry resolves a leg no route carries any more, and the
+        # gate has to be the provider riding no route instead. A retired leg the
+        # registry does not resolve is never excused (the loop below fails on
+        # it), and the trial->free->credits->paid walk this order implies is
+        # checked on the tier sequence below rather than assumed.
         registry = self.registry()
         legs = self._legs(registry, "l3-driver")
+        # What the route does carry must name a provider/model the registry
+        # knows: read before the ordering pin, so a dead leg fails with a
+        # message instead of raising out of leg_tier.
+        for leg in legs:
+            try:
+                cc.resolve_leg(leg, registry)
+            except ValueError as exc:
+                self.fail("l3-driver carries a leg the loaded registry does not "
+                          "name: %s (%s)" % (leg, exc))
+        # A leg of the retired provider the registry no longer resolves is
+        # never droppable — the loop above already fails on such a dead leg.
+        retired = set(leg for leg in self.L3_DRIVER_CHAIN
+                      if leg.split("/", 1)[0] == self.RETIRED_PROVIDER)
+        droppable = retired if not self._provider_serves_anything(registry) else set()
+        expected = [leg for leg in self.L3_DRIVER_CHAIN
+                    if leg not in droppable or leg in legs]
+        self.assertEqual(
+            legs, expected,
+            "l3-driver must be the shipped chain - leg for leg while the "
+            "provider the removal retires still serves, its legs droppable "
+            "(never reordered, repeated or replaced) once it serves nothing")
+        self.assertEqual(len(set(legs)), len(legs),
+                         "l3-driver carries a leg twice: %s" % legs)
         tiers = [cc.leg_tier(registry, leg) for leg in legs]
         free = [i for i, t in enumerate(tiers) if t == "free"]
         priced = [i for i, t in enumerate(tiers) if t != "free"]
         self.assertTrue(free, legs)
-        self.assertEqual([legs[i] for i in priced],
-                         ["ovhcloud/Qwen3.5-397B-A17B", "vertex/gemini-3.8-flash"],
-                         "l3-driver must keep exactly two credit legs, the OVH "
-                         "grant ahead of the probe-confirmed vertex tail")
-        self.assertEqual(priced[-1], len(legs) - 1,
-                         "%s: a priced leg anywhere but last breaks the "
-                         "trial->free->credits->paid order" % tiers)
-        self.assertLess(max(free), min(priced),
-                        "free band %s must rank wholly ahead of %s" % (free, priced))
+        self.assertEqual([cc.TIER_ORDER[t] for t in tiers],
+                         sorted(cc.TIER_ORDER[t] for t in tiers),
+                         "%s: the chain breaks trial->free->credits->paid" % tiers)
+        for i in priced:
+            pid, _mid = cc.resolve_leg(legs[i], registry)
+            self.assertEqual(tiers[i], "credit", legs[i])
+            self.assertIn(pid, registry["providers"], legs[i])
+        if priced:
+            self.assertEqual(priced[-1], len(legs) - 1,
+                             "%s: a priced leg anywhere but last breaks the "
+                             "trial->free->credits->paid order" % tiers)
+            self.assertLess(max(free), min(priced),
+                            "free band %s must rank wholly ahead of %s" % (free, priced))
+        else:
+            # Every credit provider off the registry leaves the chain the free
+            # band alone — which is the removal's job, not this route's defect.
+            self.assertEqual(set(tiers), {"free"},
+                             "l3-driver lost a leg that was not a credit leg: %s" % tiers)
 
     def test_openrouter_qwen_legs_are_unreferenced_by_any_route(self):
         # 16:4xZ revision: OpenRouter has no shared credit (BYOK only) - the
@@ -2412,9 +2600,8 @@ class GatewayOrderTests(unittest.TestCase):
         # implement (agentic) card over the now-larger real registry, using
         # the same inline overlay shape PlanTests._inline_toolcalls_overlay
         # builds (every other real leg explicitly unproven).
-        registry = self.registry()
-        overlay = PlanTests._inline_toolcalls_overlay(registry)
-        proven_leg = clean_head_leg(registry)
+        registry, overlay, proven_leg = PlanTests._inline_toolcalls_overlay(
+            self.registry())
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                "mode": "balanced", "privacy": "public"}
         features = {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
@@ -2779,9 +2966,10 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # credit providers, so the cooled set names the providers that hold a
         # leg today -- bazaarlink, openrouter, vertex_ai, groq, cohere -- and
         # keeps the ones that still carry a gated or pinned-single leg
-        # (antigravity, google_ai_studio, meta_api, ovhcloud, deepseek). The
-        # vertex provider key is `vertex_ai` (its omniroute_id is `vertex`),
-        # which is the name the reason prints. Earliest return: bazaarlink.
+        # (antigravity, google_ai_studio, meta_api, deepseek). A provider a
+        # removal lane has already retired is not cooled and not claimed --
+        # real_registry() skips it and route_band() reads the cooled set off the
+        # route's own legs. Earliest return: bazaarlink.
         "bazaarlink": "2026-09-28T12:10:00Z",
         "openrouter": "2026-09-28T12:20:00Z",
         "vertex_ai": "2026-09-28T12:30:00Z",
@@ -2791,7 +2979,6 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         "google_ai_studio": "2026-09-28T13:00:00Z",
         "meta_api": "2026-09-28T14:00:00Z",
         "hugging_face": "2026-09-28T15:00:00Z",
-        "ovhcloud": "2026-09-28T20:00:00Z",
         "deepseek": "2026-09-28T21:00:00Z",
     }
 
@@ -2800,8 +2987,26 @@ class UnavailableUntilResolverTests(unittest.TestCase):
                 / "catalog" / "ai-registry.json")
         registry = json.loads(path.read_text(encoding="utf-8"))
         for provider_id, until in (untils or self.REAL_UNTILS).items():
-            registry["providers"][provider_id]["unavailable_until"] = until
+            provider = registry["providers"].get(provider_id)
+            # A removal lane that retires a provider takes its cooldown with it:
+            # there is no leg left to cool, so the entry is simply not applied.
+            if provider is not None:
+                provider["unavailable_until"] = until
         return registry
+
+    def route_band(self, route_id):
+        """{provider: unavailable_until} for the REAL_UNTILS providers that hold
+        a leg of `route_id` in the loaded registry — the band this test cools,
+        read from the route instead of named.
+        """
+        registry = self.real_registry({})
+        band = {}
+        for leg in registry["routes"][route_id]["legs"]:
+            provider_id, _model_id = registry_tool.resolve_leg(leg, registry)
+            if provider_id in self.REAL_UNTILS:
+                band[provider_id] = self.REAL_UNTILS[provider_id]
+        self.assertTrue(band, "route %s names no provider that can cool" % route_id)
+        return band
 
     def real_plan(self, card, untils=None):
         return r.plan(card,
@@ -2813,15 +3018,18 @@ class UnavailableUntilResolverTests(unittest.TestCase):
                       self.dt(2026, 9, 28, 12, 0, 0))
 
     def test_a_free_band_cooldown_sends_the_t2_worker_routes_away(self):
-        # D657-D2's chains put three providers behind the t2-worker combos:
-        # bazaarlink (the free head), openrouter (the free middle) and
-        # vertex_ai (the credit tail). Cooling exactly those is the shape this
+        # D657-D2's chains put the free head, the free middle and a priced tail
+        # behind the t2-worker combos. Cooling exactly those is the shape this
         # test was written for: the combos whose whole band cools stop being an
-        # answer, and the plan still serves from a legged, live route.
+        # answer, and the plan still serves from a legged, live route. The band
+        # is read off the route (route_band), so a provider that left the
+        # registry with its leg is not cooled and not claimed.
         cooled = {"l2-worker", "l2-worker-free-only", "l2-worker-clean"}
-        band = {"bazaarlink": "2026-09-28T12:10:00Z",
-                "openrouter": "2026-09-28T12:20:00Z",
-                "vertex_ai": "2026-09-28T12:30:00Z"}
+        band = self.route_band("l2-worker")
+        # Non-vacuity: the two free legs are what makes this a BAND rather than
+        # a one-leg route, and both stay whichever credit provider comes or goes.
+        self.assertIn("bazaarlink", band, band)
+        self.assertIn("openrouter", band, band)
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public"}
         result = self.real_plan(card, band)
@@ -2842,24 +3050,25 @@ class UnavailableUntilResolverTests(unittest.TestCase):
         # plan refuses, and the reason names the EARLIEST return as the retry --
         # a caller reading it must not wait for the last one. D657-D2 put
         # bazaarlink's free head at l2-worker's leg 1, so its 12:10 return is
-        # the earliest date the reason may print; the vertex credit tail is the
-        # same route's last leg, and the provider key is `vertex_ai`.
+        # the earliest date the reason may print. Every provider that holds a leg
+        # of the route must be named with its own date -- read from the route, so
+        # this holds whichever credit legs the loaded registry still carries.
         card = {"kind": "implement", "spec": "exact", "risk": "normal",
                 "mode": "balanced", "privacy": "public",
                 "override": {"route": "l2-worker"}}
+        band = self.route_band("l2-worker")
+        self.assertGreaterEqual(len(band), 2,
+                                "one cooling leg makes the min() below vacuous: %s" % band)
         result = self.real_plan(card)
         self.assertIsNone(result["route"], result["reason"])
         self.assertEqual(result["state"], "input_required")
         self.assertIn("l2-worker", result["reason"])
-        self.assertIn("unavailable: bazaarlink until 2026-09-28T12:10:00Z",
-                      result["reason"])
-        self.assertIn("unavailable: vertex_ai until 2026-09-28T12:30:00Z",
-                      result["reason"])
-        self.assertIn("unavailable: openrouter until 2026-09-28T12:20:00Z",
-                      result["reason"])
+        for provider_id, until in sorted(band.items()):
+            self.assertIn("unavailable: %s until %s" % (provider_id, until),
+                          result["reason"])
         dates = re.findall(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z",
                            result["reason"])
-        self.assertEqual(min(dates), "2026-09-28T12:10:00Z", result["reason"])
+        self.assertEqual(min(dates), min(band.values()), result["reason"])
 
 
 class MetaApiResolverTests(unittest.TestCase):
@@ -3450,18 +3659,24 @@ class PlanReviewCardTests(unittest.TestCase):
                 / "catalog" / "ai-registry.json")
         cls.registry = json.loads(path.read_text(encoding="utf-8"))
 
+    @classmethod
+    def registry_with_google_seat(cls):
+        """The loaded registry, with the free google reviewer seat re-declared
+        inline if a removal retired it (see with_google_reviewer_seat)."""
+        return with_google_reviewer_seat(cls.registry)
+
     def state(self):
         return {name: {"installed": True, "signed_in": True, "reason": ""}
                 for name in self.registry["clients"]}
 
-    def plan(self, **card_extra):
+    def plan(self, registry=None, **card_extra):
         card = {"kind": "review", "mode": "balanced", "risk": "normal",
                 "spec": "exact", "privacy": "public"}
         card.update(card_extra)
         return r.plan(card, {"files": 1, "modules": 1, "fanout": 4, "lines": 29,
                              "tests": True, "need_tokens": 1000},
-                      self.state(), self.registry, {}, [], "claude-opus-4-6",
-                      self.NOW)
+                      self.state(), registry or self.registry_with_google_seat(),
+                      {}, [], "claude-opus-4-6", self.NOW)
 
     def test_a_review_card_with_an_author_carries_the_review_decision(self):
         # T0-PAID-4 Q1 (D-212/D-219): a paid entry must not review a qwen card
@@ -3520,7 +3735,7 @@ class PlanReviewCardTests(unittest.TestCase):
         # head) must not crash every authored review card -- it reads as
         # unknown (a rejection naming the leg), never a crash.
         import copy
-        reg = copy.deepcopy(self.registry)
+        reg = copy.deepcopy(self.registry_with_google_seat())
         reg["policy"]["reviewers"].append(
             {"client": "opencode", "model": "ghost-model",
              "family": "ghostfam", "leg": "ghost-p/ghost-model"})
@@ -3541,7 +3756,7 @@ class PlanReviewCardTests(unittest.TestCase):
         # the two-pass walk pre-computes rejections for every entry, so the
         # crash fired before any reviewer was even considered.
         import copy
-        reg = copy.deepcopy(self.registry)
+        reg = copy.deepcopy(self.registry_with_google_seat())
         reg["policy"]["reviewers"].insert(
             0, {"client": "opencode", "model": "ghost-model",
                 "family": "ghostfam", "leg": "ghost-p/ghost-model"})
@@ -4381,9 +4596,17 @@ class ClaudeBudgetRealRegistryTests(unittest.TestCase):
             {"need_tokens": 1000}, state, on, {},
             "opencode", self.NOW,
             {r.CLAUDE_CRITICAL_ENV: "CI is red on main"})
-        self.assertIn(("vertex_ai", "gemini-3.8-flash"), kept)
         self.assertIn(("bazaarlink", "deepseek/deepseek-v4-flash-0731free:free"),
                       kept)
+        # The route holds nothing on it: every leg it still declares is kept, so
+        # a removal that leaves the chain with fewer legs cannot turn this into
+        # a claim about a leg that is no longer there. (OVH-REMOVE D-1816(12) /
+        # D-1626: the seat this test used to name by provider is read from the
+        # route now.)
+        declared = {tuple(registry_tool.resolve_leg(leg, on))
+                    for leg in on["routes"]["l2-orchestrator"]["legs"]}
+        self.assertEqual(declared, set(kept),
+                         "the orchestrator env benchs a leg of l2-orchestrator")
         self.assertEqual(
             [leg for leg, reasons in skipped.items()
              if any(x.startswith("claude_budget:") for x in reasons)], [])
@@ -4540,11 +4763,34 @@ class ComboFallthroughTests(unittest.TestCase):
     # the multi-provider pins below instead of passing as "single-provider".
     SINGLE_PROVIDER_EXEMPT = {"l1-orchestrator-free-only"}
 
+    # OVH-REMOVE (D-1816(12)) / D-1626: a chain whose second provider was a
+    # credit grant stops rendering a fall-through the moment that grant leaves
+    # the registry, and the exemption above is keyed on the ROUTE ID — so the
+    # multi-provider pins below would read a one-leg combo as a violation. When
+    # a non-exempt route has only one provider left, a leg the loaded registry
+    # serves in every state (the MiMo tail, same 1M window as the head it
+    # follows) is appended inline to the copy these tests render from. Nothing
+    # is appended when the shipped chain is already two providers deep, so the
+    # states that carry their credit legs are read exactly as shipped.
+    INLINE_TAIL_LEG = "xiaomi_mimo/mimo-v2.6-flash"
+
     @classmethod
     def setUpClass(cls):
         with (Path(__file__).resolve().parent.parent
               / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
             cls.reg = json.load(fh)
+        for route_id in cls.ROUTES:
+            if route_id in cls.SINGLE_PROVIDER_EXEMPT:
+                continue
+            legs = cls.reg["routes"][route_id].get("legs") or []
+            providers = set()
+            for leg in legs:
+                try:
+                    providers.add(registry_tool.resolve_leg(leg, cls.reg)[0])
+                except ValueError:
+                    continue
+            if len(providers) < 2 and cls.INLINE_TAIL_LEG not in legs:
+                legs.append(cls.INLINE_TAIL_LEG)
         cls.combos = {c["name"]: c
                       for c in registry_tool.render_omniroute(cls.reg)["combos"]}
 
@@ -4898,7 +5144,7 @@ class PaidLastResortTests(unittest.TestCase):
         import copy
         with (Path(__file__).resolve().parent.parent
               / "catalog" / "ai-registry.json").open(encoding="utf-8") as fh:
-            shipped = copy.deepcopy(json.load(fh))
+            shipped = with_google_reviewer_seat(copy.deepcopy(json.load(fh)))
         state = {client: {"installed": True, "signed_in": True, "reason": ""}
                  for client in ("opencode", "gemini", "qoder", "qwen",
                                 "claude", "codex")}
@@ -4939,8 +5185,15 @@ class PaidLastResortTests(unittest.TestCase):
         self.assertEqual(paid, [],
                          "§8 keeps a paid leg out of every chain: %s" % route["legs"])
         tiers = [r.leg_tier(leg, shipped) for leg in route["legs"]]
-        self.assertEqual(tiers, ["free", "credit"],
-                         "the chain is a free head and one priced tail: %s" % tiers)
+        # The chain is a free band and, behind it, only priced credit legs. The
+        # tail's length is read off the route rather than named: OVH-REMOVE
+        # (D-1816(12)) / D-1626 retire credit providers out from under the
+        # shipped chain, and a free head with nothing priced behind it is the
+        # removal's answer, not a licence to put a paid leg in the band.
+        n_free = tiers.count("free")
+        self.assertTrue(n_free, tiers)
+        self.assertEqual(tiers, ["free"] * n_free + ["credit"] * (len(tiers) - n_free),
+                         "the chain is a free band and one priced tail: %s" % tiers)
         overlay = {"legs": {leg: {"tool_calls": {"value": "proven"}}
                             for leg in route["legs"]}}
         legs, _skipped, _notes = r.usable_legs(
@@ -5894,6 +6147,61 @@ class QoderSigninProbeTests(unittest.TestCase):
         survivors, removed = self.run_qoder_filters(True)
         self.assertIn("r-qoder", survivors)
         self.assertNotIn("r-qoder", removed)
+
+
+class CaseFoldModelLookupTests(unittest.TestCase):
+    """OCGO-PREFER 1b: the resolver's model lookup folds case, matching
+    ``tools/registry.py``'s ``resolve_leg``.
+
+    The gateway serves ``opencode-go/minimax-m3`` while the registry keeps ONE
+    row keyed ``MiniMax-M3`` (rule 1b keeps model keys unique under folding, so
+    there is no second lowercase row). Indexing the literal leg half raised
+    ``KeyError: 'minimax-m3'`` on a leg the registry accepts. These pin the four
+    outcomes on synthetic registries -- no real Go data.
+    """
+
+    def reg(self, extra_models=None):
+        models = {
+            "MiniMax-M3": {"id": "MiniMax-M3", "family": "minimax",
+                           "context_usable": {"tokens": 131072,
+                                              "source": "default"}},
+        }
+        models.update(extra_models or {})
+        return {
+            "providers": {"go": {"id": "go", "tier": "subscription",
+                                 "trains_on_prompts": True}},
+            "models": models,
+            "routes": {},
+        }
+
+    def test_a_leg_differing_only_by_case_resolves_to_the_row(self):
+        reg = self.reg()
+        self.assertEqual(r._model_key("go/minimax-m3", reg), "MiniMax-M3")
+        self.assertEqual(r._model_family("go/minimax-m3", reg), "minimax")
+        self.assertEqual(r._model_entry("go/minimax-m3", reg)["family"],
+                         "minimax")
+
+    def test_the_exact_key_wins_when_both_an_exact_and_a_folded_row_exist(self):
+        # A row spelled exactly like the leg half must beat the case-fold row.
+        reg = self.reg(extra_models={
+            "minimax-m3": {"id": "minimax-m3", "family": "exact",
+                           "context_usable": {"tokens": 1, "source": "default"}}})
+        self.assertEqual(r._model_key("go/minimax-m3", reg), "minimax-m3")
+        self.assertEqual(r._model_family("go/minimax-m3", reg), "exact")
+
+    def test_an_ambiguous_fold_still_fails_loudly(self):
+        # 'MiniMax-M3' and 'minimax-m3' both fold to 'minimax-m3'; a leg spelled
+        # in a third casing matches neither exactly, so the fold is ambiguous.
+        reg = self.reg(extra_models={
+            "minimax-m3": {"id": "minimax-m3", "family": "twin",
+                           "context_usable": {"tokens": 1, "source": "default"}}})
+        with self.assertRaises(ValueError):
+            r._model_family("go/MINIMAX-M3", reg)
+
+    def test_a_hallucinated_leg_still_raises_keyerror_naming_the_id(self):
+        with self.assertRaises(KeyError) as ctx:
+            r._model_family("go/does-not-exist", self.reg())
+        self.assertIn("does-not-exist", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -204,10 +204,18 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   `~/.gitconfig` (`url.insteadOf`, `core.sshCommand`, `core.hooksPath`) is not
   what a worker's git reads — which is also why
   the parent's ssh state cannot ride along with a spawned run.
-- **`--free`** maps every tier to opencode's own free model (default
-  `opencode/muse-spark-1.3-contributor-free`) through `OPENCODE_CONFIG_CONTENT`. Use it to
-  exercise the chain and the fences before any provider key exists. Free
-  promo models may train on prompts, so `--free --clean` is refused.
+- **`--free`** maps every tier to a free seat through `OPENCODE_CONFIG_CONTENT`. A plain
+  `--free` run (no caller-typed `--free-model`) **starts** on the first OpenCode Go head
+  (`omniroute/opencode-go/glm-5.3-flash`) when a gateway key (`AUTOOS_OMNIROUTE_KEY`) is on the
+  machine, and falls through the rest of the Go heads (minimax-m3, kimi-k3, qwen3.8-flash) before
+  the keyless promo ids; without a key it starts on the keyless promo
+  `opencode/muse-spark-1.3-contributor-free` and the Go ids are dropped from the chain, so a
+  keyless run walks the promo ids alone — exactly as before. A caller-typed `--free-model` is
+  always the start, and a caller-typed `omniroute/` pin under `--free` is refused (the promoted
+  default is not a caller pin). Use `--free` without a key
+  to exercise the chain and the fences before any provider key exists. Both the promo models
+  and the Go seats train on prompts, so `--free` is public-only work — `--free --clean` and a
+  `privacy=sensitive` card are refused.
 
 ### Over MCP (OpenHands, Claude Code, opencode, Zed)
 
