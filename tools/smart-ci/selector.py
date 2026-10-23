@@ -35,6 +35,9 @@ BUILTIN_FULL = [
     ".github/actions/**",
     ".github/smart-ci.json",
     "tools/smart-ci/**",
+    "tests/ci-shards.py",
+    "tests/ci-shards.txt",
+    "tests/test_ci_shards.py",
     "**/requirements*.txt",
     "**/constraints*.txt",
     "**/pyproject.toml",
@@ -129,6 +132,8 @@ def validate_map(data) -> dict:
     for n, rule in enumerate(rules):
         if not isinstance(rule, dict) or not isinstance(rule.get("paths"), list) or not rule["paths"]:
             raise MapError("rule %d needs a non-empty paths list" % n)
+        if not all(isinstance(path, str) for path in rule["paths"]):
+            raise MapError("rule %d paths must be strings" % n)
         if set(rule) - {"paths", "tests", "jobs", "comment"}:
             raise MapError("rule %d has unknown keys" % n)
         for j in rule.get("jobs", []):
@@ -213,6 +218,8 @@ def select(files, cmap, force_full=False, force_reason="forced full run", exists
             return full_result(files, "planner failed: %s" % type(exc).__name__, job_names)
         if planned["terms"]:
             return full_result(files, "planner selected cases by filter terms, not runnable as parts", job_names)
+        if not planned["parts"]:
+            return full_result(files, "planner selected no CI part (pytest-only plan)", job_names)
         if planned["parts"]:
             if "shards" not in jobs:
                 return full_result(files, "planner failed: shards job not declared", job_names)

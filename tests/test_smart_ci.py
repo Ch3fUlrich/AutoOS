@@ -112,6 +112,11 @@ class FullFallbackTests(unittest.TestCase):
         self.assertFull(run([".github/smart-ci.json"]), "workflow/dependency/CI")
         self.assertFull(run(["tools/smart-ci/selector.py"]), "workflow/dependency/CI")
 
+    def test_shard_plan_inputs_and_validator_are_full(self):
+        for path in ("tests/ci-shards.py", "tests/ci-shards.txt", "tests/test_ci_shards.py"):
+            with self.subTest(path=path):
+                self.assertFull(run([path]), "workflow/dependency/CI")
+
     def test_unknown_path_is_full(self):
         self.assertFull(run(["src/api/a.py", "scripts/new-thing.sh"]), "unknown path")
 
@@ -174,11 +179,14 @@ class PlannerTests(unittest.TestCase):
             self.assertIn("planner failed", r["reason"])
         self.assertIn("planner failed", sel.select(["tools/x.py"], self.m)["reason"])
 
-    def test_pytest_only_keeps_rule_selection(self):
-        r = sel.select(["src/api/a.py", "tools/x.py"], self.m,
-                       plan=lambda: {"parts": [], "terms": "", "pytest": ["tests/test_x.py"]})
-        self.assertEqual((r["mode"], r["tests"]), ("selected", ["tests/test_api.py"]))
-        self.assertFalse(r["jobs"]["shards"])
+    def test_empty_parts_are_full_even_with_rule_selection(self):
+        for pytest in ([], ["tests/test_x.py"]):
+            with self.subTest(pytest=pytest):
+                r = sel.select(["src/api/a.py", "tools/x.py"], self.m,
+                               plan=lambda: {"parts": [], "terms": "", "pytest": pytest})
+                self.assertEqual((r["mode"], r["tests"]), ("full", []))
+                self.assertEqual(r["reason"], "planner selected no CI part (pytest-only plan)")
+                self.assertTrue(all(r["jobs"].values()))
 
     def test_parts_require_declared_shards_job(self):
         r = sel.select(["tools/x.py"], dict(self.m, jobs=MAP["jobs"]),
@@ -214,6 +222,9 @@ class MapValidationTests(unittest.TestCase):
         self.bad({"jobs": ["a"], "always_jobs": ["b"]})
         self.bad({"rules": [{"paths": []}]})
         self.bad([])
+
+    def test_rejects_non_string_rule_paths(self):
+        self.bad({"rules": [{"paths": [1]}]})
 
 
 class GlobTests(unittest.TestCase):

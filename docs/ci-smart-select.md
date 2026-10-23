@@ -172,14 +172,16 @@ Pass `results` as `name=result` pairs so the gate can tell which job it was.
 | `always_jobs` | jobs that run whenever anything non-ignorable changed (lint, secret scan) |
 | `ignore` | paths that need nothing (docs); all-ignored diff gives mode `none` |
 | `full_if` | extra patterns that force a full run, on top of the built-in ones |
+| `planner` | optional `{"argv":[...]}` command with `{base}` substitution; requires `--base`; consumed only for paths no rule names. Only `plan.parts` is used to select CI shards; non-empty terms, empty parts (including pytest-only plans), or any failure make the run full |
 | `rules[].paths` | globs a changed file must match |
 | `rules[].tests` | tests to run for it; `{path}` = the changed file itself; a caller-defined token such as `*` is passed through untouched |
 | `rules[].jobs` | jobs to turn on (must be in `jobs`) |
 
 Globs are anchored at the repo root: `**` crosses directories, `*` and `?` do not
-(no `[...]` classes). Every changed file must be ignored or match a rule: one
-unplaced file makes the run full, so a new directory is slow until it is mapped,
-never unchecked. Keep the map conservative: when unsure, leave the path out.
+(no `[...]` classes). Every changed file must be ignored or match a rule unless a
+planner is configured: without one, an unplaced file makes the run full, so a new
+directory is slow until it is mapped, never unchecked. Keep the map conservative:
+when unsure, leave the path out.
 
 Built-in full triggers (always on): `.github/workflows/**`, `.github/actions/**`,
 the map, `tools/smart-ci/**`, requirements / constraints / pyproject / setup /
