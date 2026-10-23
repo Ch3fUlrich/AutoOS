@@ -72,6 +72,12 @@ if it "tests: POSIX-only Python tests are guarded for Windows; every .ps1/.psm1 
     out="$(python3 tests/test_windows_portability.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/wsl-push.ps1 must never grow a --no-verify/override/force path; the
+# test skips where pwsh is absent.
+if it "tests: wsl-push route keeps the prepush gate and never forces"; then
+    out="$(python3 tests/test_wsl_push.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # The public-scrub gate existed with no caller before asm-a2, so a private
 # literal could reach a tracked file unscanned. Assert CI actually invokes the
 # scanner over the trees this repository publishes about a real machine, that
