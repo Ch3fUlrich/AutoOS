@@ -2,6 +2,7 @@
 import hashlib
 import os
 import re
+import stat
 
 API_MODELS = ('deepseek-v4.1-flash', 'ovh/gpt-oss-120b', 'qoder/glm-5.2')
 MAX_TOKENS_CAP = 8000
@@ -40,14 +41,19 @@ def confine(path, root):
     rel = os.path.relpath(path_abs, root_abs)
     if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
         raise ValueError('path outside root')
-    cur = root_abs
-    if rel != '.':
-        for part in rel.split(os.sep):
-            if part in ('', '.'):
-                continue
-            cur = os.path.join(cur, part)
-            if os.path.islink(cur):
-                raise ValueError('symlink component')
+    cur = path_abs
+    while True:
+        try:
+            info = os.lstat(cur)
+            if (stat.S_ISLNK(info.st_mode) or
+                    getattr(info, 'st_file_attributes', 0) & 0x400):
+                raise ValueError('symlink or junction component')
+        except FileNotFoundError:
+            pass
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
     real_root = os.path.realpath(root_abs)
     real_path = os.path.realpath(path_abs)
     try:
@@ -105,11 +111,14 @@ def build_command_api(task, model, env, now_hex=None):
     confine(out_dir, root)
     os.makedirs(prompt_dir, exist_ok=True)
     os.makedirs(out_dir, exist_ok=True)
-    flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC
+    flags = os.O_CREAT | os.O_WRONLY
     flags |= getattr(os, 'O_NOFOLLOW', 0)
     flags |= getattr(os, 'O_BINARY', 0)
     fd = os.open(prompt, flags, 0o600)
     try:
+        # O_NOFOLLOW protects only the leaf; a parent may have changed at open.
+        confine(prompt, root)
+        os.ftruncate(fd, 0)
         if hasattr(os, 'fchmod'):
             os.fchmod(fd, 0o600)
         data = task.encode('utf-8')
@@ -120,4 +129,3 @@ def build_command_api(task, model, env, now_hex=None):
     finally:
         os.close(fd)
     return build_argv(model, prompt, out_dir, root, title=ident)
-

@@ -4,12 +4,15 @@ import re
 from pathlib import Path
 
 import runner_pool_core as rpc
+from api_client import API_MODELS
 
 # --------------------------------------------------------------------
 # Constants
 # --------------------------------------------------------------------
 SLOT_STATES = ('idle', 'running', 'breaker-open')
 HEARTBEAT_T = 120
+RUNNER_POOL_FLOOR_MB = 6144
+RUNNER_POOL_SAMPLE_EVERY = 4
 
 # --------------------------------------------------------------------
 # Directory handling
@@ -53,8 +56,8 @@ def write_slot_state(
     Returns ``True`` on success.
     """
     # validate slot number
-    if not isinstance(n, int) or isinstance(n, bool) or n < 1 or n > 6:
-        raise ValueError("slot number must be an integer from 1 to 6")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1 or n > rpc.POOL_MAX_N:
+        raise ValueError(f"slot number must be an integer from 1 to {rpc.POOL_MAX_N}")
     # validate state
     if state not in SLOT_STATES:
         raise ValueError(f"invalid state: {state}")
@@ -155,11 +158,16 @@ def job_argv(job: dict, repo_root: Path, python: str):
     if not isinstance(job_id, str) or not _ID_RE.fullmatch(job_id):
         raise ValueError('invalid job id')
     card = job.get('card', {})
+    for field in ('paths', 'spec'):
+        if card.get(field):
+            raise ValueError(f'unsupported pool restriction: {field}')
     client = card.get('client')
     if not isinstance(client, str) or not client:
         raise ValueError('missing client')
     # Optional fields
     model = card.get('model')
+    if client == 'api' and 'model' in card and model not in API_MODELS:
+        raise ValueError('unsupported api model')
     title = card.get('title')
     if any(v is not None and not isinstance(v, str) for v in (model, title)):
         raise ValueError('model and title must be strings')
@@ -219,7 +227,8 @@ def default_risk_of(job):
     sampling -- an unclassified job is never reported as R0.
     """
     try:
-        if job['card']['client'] == 'api':
+        card = job['card']
+        if card['client'] == 'api' and ('model' not in card or card['model'] in API_MODELS):
             return 'R0'
     except (KeyError, TypeError):
         pass
@@ -227,8 +236,8 @@ def default_risk_of(job):
 
 class Deps:
     def __init__(self, *, spawn, admission_refusal=lambda: None, mem_mb=lambda: 99999,
-                 floor_mb=6144, breaker_open=lambda: False, risk_of=default_risk_of,
-                 diff_info=lambda job: (False, False), sample_every=4,
+                 floor_mb=RUNNER_POOL_FLOOR_MB, breaker_open=lambda: False, risk_of=default_risk_of,
+                 diff_info=lambda job: (False, False), sample_every=RUNNER_POOL_SAMPLE_EVERY,
                  now=time.time, pid=os.getpid(), filetime=0,
                  repo_root=Path(__file__).resolve().parent.parent, python=sys.executable,
                  sleep=time.sleep,
@@ -318,13 +327,13 @@ def run_one(root, n, deps):
     claimed_path = Path(claimed_path)
     try:
         return _run_claimed(root, n, deps, claimed_path, now)
-    except Exception:
+    except Exception as exc:
         # Quarantine before recording: a broken job must never poison a restart.
         failed_path = failed_dir / claimed_path.name
         if claimed_path.exists():
             os.replace(claimed_path, failed_path)
         rec = done_record({'id': claimed_path.stem}, 2, now, time.time(),
-                          {'reasons': ['exception']})
+                          {'reasons': [str(exc) if isinstance(exc, ValueError) else 'exception']})
         rpc.write_json_atomic(done_dir / claimed_path.name, rec)
         write_slot_state(root, n, 'idle', None, now, deps.pid, deps.filetime)
         return 'failed'
@@ -510,7 +519,15 @@ def _build_real_deps(root, n, env):
             spec = importlib.util.spec_from_file_location('autoos_agent_mod', path)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            return mod.host_admission_refusal()
+            kind = 'tool-using'
+            try:
+                queued = _oldest_queue_file(root / 'queue')
+                job = json.loads(queued.read_text(encoding='utf-8')) if queued else {}
+                kind = mod.host_run_kind(job['card']['client'],
+                                         mod.load_registry(mod.REGISTRY_PATH))
+            except Exception:
+                pass
+            return mod.host_admission_refusal(kind=kind)
         except Exception:
             return 'admission-unreadable'
     def breaker_open():
@@ -524,18 +541,22 @@ def _build_real_deps(root, n, env):
     )
 
 def _cmd_slot(args, env, stdin, stdout, deps):
+    # The in-process admission module reads the slot's environment, not the child's.
+    for key in list(os.environ):
+        if key.upper() == 'AUTOOS_ADMISSION_OFF':
+            del os.environ[key]
     n, once = _parse_slot_args(args)
     if n is None:
         return 2
-    raw = env.get('AUTOOS_POOL_N', '6')
+    raw = env.get('AUTOOS_POOL_N', str(rpc.POOL_MAX_N))
     try:
         requested = int(raw)
     except ValueError:
         return 2
     if requested < 1:
         return 2
-    used = min(requested, 6)
-    if requested > 6:
+    used = min(requested, rpc.POOL_MAX_N)
+    if requested > rpc.POOL_MAX_N:
         stdout.write('clamp requested=%d used=%d\n' % (requested, used))
     if n > used:
         return 3

@@ -18,6 +18,99 @@ import runner_pool as pool
 import runner_pool_proc as proc
 import runner_pool_core as rpc
 import runner_pool_gate as gate
+import api_client as api
+from types import SimpleNamespace
+
+class TestConsolidated(unittest.TestCase):
+    def test_admission_kind(self):
+        for client, expected in (('api', 'toolless'), ('other', 'tool-using')):
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                pool.ensure_dirs(root)
+                (root / 'queue' / 'a.json').write_text(json.dumps(
+                    {'id': 'a', 'card': {'client': client}}))
+                kinds = []
+                agent = SimpleNamespace(REGISTRY_PATH='registry', load_registry=lambda _: {},
+                    host_run_kind=lambda c, r: 'toolless' if c == 'api' else 'tool-using',
+                    host_admission_refusal=lambda **kw: kinds.append(kw['kind']) or 'full')
+                with patch('importlib.util.module_from_spec', return_value=agent), \
+                     patch('importlib.machinery.SourceFileLoader.exec_module'):
+                    deps = pool._build_real_deps(root, 1, {})
+                    deps.mem_mb = lambda: 99999
+                    self.assertEqual(pool.run_one(root, 1, deps), 'refused')
+                self.assertEqual(kinds, [expected])
+
+    def test_api_models(self):
+        for model in (None, *api.API_MODELS, 'unknown', ''):
+            job = {'id': 'a', 'card': {'client': 'api'}, 'brief': 'x'}
+            if model is not None:
+                job['card']['model'] = model
+            if model is None or model in api.API_MODELS:
+                self.assertEqual(pool.default_risk_of(job), 'R0')
+                pool.job_argv(job, TOOLS.parent, sys.executable)
+            else:
+                self.assertEqual(pool.default_risk_of(job), 'R2')
+                with self.assertRaises(ValueError):
+                    pool.job_argv(job, TOOLS.parent, sys.executable)
+            job['card']['client'] = 'other'
+            self.assertEqual(pool.default_risk_of(job), 'R2')
+
+    def test_slot_scrubs_process(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {'AutoOS_Admission_Off': '1'}):
+            consulted = []
+            def admission():
+                self.assertFalse(any(k.upper() == 'AUTOOS_ADMISSION_OFF' for k in os.environ))
+                consulted.append(True)
+                return 'full'
+            deps = pool.Deps(spawn=lambda *a: self.fail('spawn'), admission_refusal=admission)
+            pool.main(['slot', '--once'], {'LOCALAPPDATA': td}, io.BytesIO(),
+                      io.StringIO(), {'slot_deps': deps})
+            self.assertEqual(consulted, [True])
+
+    def test_restrictions_fail_with_reason(self):
+        for field, value in (('paths', ['src']), ('spec', 'spec.md')):
+            with tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                pool.ensure_dirs(root)
+                job = {'id': 'a', 'card': {'client': 'api', field: value}, 'brief': 'x'}
+                with self.assertRaisesRegex(ValueError, field):
+                    pool.job_argv(job, TOOLS.parent, sys.executable)
+                (root / 'queue' / 'a.json').write_text(json.dumps(job))
+                self.assertEqual(pool.run_one(root, 1, pool.Deps(
+                    spawn=lambda *a: self.fail('spawn'))), 'failed')
+                self.assertTrue((root / 'failed' / 'a.json').exists())
+                self.assertIn(field, str(json.loads((root / 'done' / 'a.json').read_text())))
+
+    def test_constants(self):
+        deps = pool.Deps(spawn=lambda *a: 0)
+        self.assertEqual(deps.floor_mb, pool.RUNNER_POOL_FLOOR_MB)
+        self.assertEqual(deps.sample_every, pool.RUNNER_POOL_SAMPLE_EVERY)
+        with tempfile.TemporaryDirectory() as td, patch.object(rpc, 'POOL_MAX_N', 2):
+            self.assertEqual(pool.main(['slot', '--n', '3', '--once'],
+                {'LOCALAPPDATA': td}, io.BytesIO(), io.StringIO()), 3)
+
+    def test_parent_swap_before_open(self):
+        with tempfile.TemporaryDirectory() as td:
+            root, outside = Path(td) / 'pool', Path(td) / 'outside'
+            parent = root / 'api-prompts'
+            parent.mkdir(parents=True)
+            outside.mkdir()
+            probe = root / 'probe'
+            try:
+                probe.symlink_to(outside, target_is_directory=True)
+            except OSError:
+                self.skipTest('directory symlinks not permitted')
+            probe.unlink()
+            real_open = os.open
+            def swapped(path, flags, mode=0o777):
+                parent.rmdir()
+                parent.symlink_to(outside, target_is_directory=True)
+                return real_open(path, flags, mode)
+            with patch.object(api, 'pool_root', return_value=str(root)), \
+                 patch.object(api.os, 'open', side_effect=swapped), \
+                 patch.object(api.os, 'write', side_effect=AssertionError('must not write')):
+                with self.assertRaises(ValueError):
+                    api.build_command_api('secret task', None, {})
 
 class FakeDeps:
     def __init__(self):
