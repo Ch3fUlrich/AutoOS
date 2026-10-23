@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -68,10 +67,10 @@ class SelectionTests(unittest.TestCase):
     def test_a_changed_test_file_selects_itself(self):
         self.assertEqual(run(["tests/test_new.py"])["tests"], ["tests/test_new.py"])
 
-    def test_docs_only_selects_nothing(self):
+    def test_docs_only_selects_only_always_jobs(self):
         r = run(["docs/a/b.md", "README.md"])
         self.assertEqual(r["mode"], "none")
-        self.assertFalse(any(r["jobs"].values()))
+        self.assertEqual(r["jobs"], {"lint": True, "pytest": False, "pg": False, "rust": False})
         self.assertEqual(r["tests"], [])
 
     def test_docs_plus_code_ignores_the_docs(self):
@@ -134,81 +133,6 @@ class FullFallbackTests(unittest.TestCase):
         m = dict(MAP, full_if=["src/core/**"])
         r = sel.select(["src/core/x.py"], sel.validate_map(m))
         self.assertEqual(r["mode"], "full")
-
-
-class PlannerTests(unittest.TestCase):
-    def setUp(self):
-        self.m = dict(MAP, jobs=MAP["jobs"] + ["shards"],
-                      planner={"argv": ["python3", "tools/affected-tests.py"]})
-
-    def test_unmapped_tool_selects_bare_parts_once(self):
-        r = sel.select(["tools/x.py"], sel.validate_map(self.m),
-                       plan=lambda: {"parts": ["17", "17"], "terms": "", "pytest": []})
-        self.assertEqual((r["mode"], r["tests"]), ("selected", ["17"]))
-        self.assertTrue(r["jobs"]["shards"])
-
-    def test_planner_failure_is_full(self):
-        def fail():
-            raise RuntimeError("broken")
-        r = sel.select(["tools/x.py"], self.m, plan=fail)
-        self.assertEqual(r["mode"], "full")
-        self.assertIn("planner failed", r["reason"])
-
-    def test_filter_terms_are_not_runnable_parts(self):
-        r = sel.select(["tools/x.py"], self.m,
-                       plan=lambda: {"parts": ["17"], "terms": "case", "pytest": []})
-        self.assertEqual(r["mode"], "full")
-        self.assertEqual(r["reason"], "planner selected cases by filter terms, not runnable as parts")
-
-    def test_without_planner_unknown_path_is_unchanged(self):
-        r = sel.select(["tools/x.py"], MAP)
-        self.assertEqual(r["mode"], "full")
-        self.assertIn("unknown path", r["reason"])
-
-    def test_invalid_planner_shapes_are_rejected(self):
-        for planner in ({}, None, [], {"argv": []}, {"argv": "python3"},
-                        {"argv": [1]}, {"argv": ["python3"], "extra": True}):
-            with self.subTest(planner=planner), self.assertRaises(sel.MapError):
-                sel.validate_map(dict(MAP, planner=planner))
-
-    def test_missing_or_malformed_plan_fails_closed(self):
-        for value in (None, {}, {"parts": [], "terms": ""},
-                      {"parts": "17", "terms": "", "pytest": []}):
-            r = sel.select(["tools/x.py"], self.m, plan=lambda: value)
-            self.assertEqual(r["mode"], "full")
-            self.assertIn("planner failed", r["reason"])
-        self.assertIn("planner failed", sel.select(["tools/x.py"], self.m)["reason"])
-
-    def test_empty_parts_are_full_even_with_rule_selection(self):
-        for pytest in ([], ["tests/test_x.py"]):
-            with self.subTest(pytest=pytest):
-                r = sel.select(["src/api/a.py", "tools/x.py"], self.m,
-                               plan=lambda: {"parts": [], "terms": "", "pytest": pytest})
-                self.assertEqual((r["mode"], r["tests"]), ("full", []))
-                self.assertEqual(r["reason"], "planner selected no CI part (pytest-only plan)")
-                self.assertTrue(all(r["jobs"].values()))
-
-    def test_parts_require_declared_shards_job(self):
-        r = sel.select(["tools/x.py"], dict(self.m, jobs=MAP["jobs"]),
-                       plan=lambda: {"parts": ["17"], "terms": "", "pytest": []})
-        self.assertEqual(r["mode"], "full")
-
-    def test_main_runs_planner_with_base_timeout_and_repo_cwd(self):
-        argv = ["python3", "tools/affected-tests.py", "--changed-files-from", "{base}", "--format", "plan"]
-        self.m["planner"]["argv"] = argv
-        output = json.dumps({"parts": ["17"], "terms": "", "pytest": []})
-        with mock.patch.object(sel, "load_map", return_value=self.m), \
-                mock.patch.object(sel.subprocess, "run", return_value=mock.Mock(stdout=output)) as proc, \
-                mock.patch("builtins.print") as printed:
-            sel.main(["--map", "unused", "--base", "base-sha", "--files", "tools/x.py"])
-            self.assertEqual(json.loads(printed.call_args.args[0])["tests"], ["17"])
-            proc.assert_called_once_with(
-                [a.replace("{base}", "base-sha") for a in argv], capture_output=True,
-                text=True, check=True, timeout=120, cwd=str(ROOT))
-            proc.reset_mock()
-            sel.main(["--map", "unused", "--files", "tools/x.py"])
-            self.assertIn("planner failed", json.loads(printed.call_args.args[0])["reason"])
-            proc.assert_not_called()
 
 
 class MapValidationTests(unittest.TestCase):
@@ -477,15 +401,15 @@ class RepoMapTests(unittest.TestCase):
     def test_library_change_is_full_by_unknown_path(self):
         self.assertEqual(sel.select(["lib/linux/ui.sh"], self.m)["mode"], "full")
 
+    def test_unmapped_library_plus_mapped_test_part_is_full(self):
+        r = sel.select(["lib/linux/ui.sh", "tests/linux/13-x.sh"], self.m)
+        self.assertEqual(r["mode"], "full")
+        self.assertEqual(r["reason"], "unknown path (no rule): lib/linux/ui.sh")
+        self.assertTrue(all(r["jobs"].values()))
+        self.assertEqual(r["tests"], [])
+
     def test_the_workflow_is_full(self):
         self.assertEqual(sel.select([".github/workflows/ci.yml"], self.m)["mode"], "full")
-
-    def test_selector_is_full_even_with_planner(self):
-        self.assertIn("planner", self.m)
-        r = sel.select(["tools/smart-ci/selector.py"], self.m,
-                       plan=lambda: self.fail("builtin full must not invoke planner"))
-        self.assertEqual(r["mode"], "full")
-        self.assertIn("workflow/dependency/CI", r["reason"])
 
 
 if __name__ == "__main__":

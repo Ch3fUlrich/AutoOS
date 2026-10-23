@@ -1,7 +1,6 @@
 {
   "version": 1,
-  "comment": "Smart CI map for AutoOS, format in docs/ci-smart-select.md. Unmapped paths use the affected-tests planner; filter-only plans fall back to full. The full suite still gates merge.",
-  "planner": {"argv": ["python3", "tools/affected-tests.py", "--changed-files-from", "{base}", "--format", "plan"]},
+  "comment": "Smart CI map for AutoOS, format in docs/ci-smart-select.md. Unmapped paths (lib/, catalog/, tools/, setup scripts...) run the full suite on purpose. The full suite still gates merge.",
   "jobs": ["shards", "lint", "ansible", "secrets", "scrub"],
   "always_jobs": ["lint", "secrets", "scrub"],
   "ignore": ["logs/**", "scratch/**", "LICENSE"],

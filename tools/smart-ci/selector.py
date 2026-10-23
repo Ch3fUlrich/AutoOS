@@ -106,16 +106,10 @@ def load_map(path: str) -> dict:
 def validate_map(data) -> dict:
     if not isinstance(data, dict):
         raise MapError("map is not an object")
-    allowed = {"version", "comment", "jobs", "always_jobs", "ignore", "full_if", "rules", "planner"}
+    allowed = {"version", "comment", "jobs", "always_jobs", "ignore", "full_if", "rules"}
     extra = set(data) - allowed
     if extra:
         raise MapError("unknown map keys: %s" % ", ".join(sorted(extra)))
-    if "planner" in data:
-        planner = data["planner"]
-        if (not isinstance(planner, dict) or set(planner) != {"argv"}
-                or not isinstance(planner["argv"], list) or not planner["argv"]
-                or not all(isinstance(arg, str) for arg in planner["argv"])):
-            raise MapError("planner needs a non-empty argv list of strings")
     jobs = data.get("jobs", [])
     if not isinstance(jobs, list) or not all(isinstance(j, str) and j for j in jobs):
         raise MapError("jobs must be a list of names")
@@ -154,7 +148,7 @@ def full_result(files, reason, job_names):
     }
 
 
-def select(files, cmap, force_full=False, force_reason="forced full run", exists=None, plan=None):
+def select(files, cmap, force_full=False, force_reason="forced full run", exists=None):
     """files: changed paths (posix, repo-relative). cmap: a validated map or None.
 
     exists: optional callable(path) -> bool. A test that came from a `{path}` token (the
@@ -176,7 +170,6 @@ def select(files, cmap, force_full=False, force_reason="forced full run", exists
 
     jobs = {j: False for j in job_names}
     tests = []
-    unplanned = []
     relevant = False
     for f in files:
         if matches(f, cmap.get("ignore", [])):
@@ -196,42 +189,12 @@ def select(files, cmap, force_full=False, force_reason="forced full run", exists
                     if t not in tests:
                         tests.append(t)
         if not hit:
-            if "planner" in cmap:
-                unplanned.append(f)
-            else:
-                return full_result(files, "unknown path (no rule): %s" % f, job_names)
+            return full_result(files, "unknown path (no rule): %s" % f, job_names)
 
-    if unplanned:
-        try:
-            if plan is None:
-                raise ValueError("planner unavailable (requires --base)")
-            planned = plan()
-            if not isinstance(planned, dict) or not {"parts", "terms", "pytest"} <= set(planned):
-                raise ValueError("expected plan object with parts, terms and pytest")
-            if (not isinstance(planned["parts"], list)
-                    or not all(isinstance(p, str) and re.fullmatch(r"[0-9]{2}", p)
-                               for p in planned["parts"])
-                    or not isinstance(planned["terms"], str)
-                    or not isinstance(planned["pytest"], list)):
-                raise ValueError("invalid plan parts, terms or pytest")
-        except Exception as exc:
-            return full_result(files, "planner failed: %s" % type(exc).__name__, job_names)
-        if planned["terms"]:
-            return full_result(files, "planner selected cases by filter terms, not runnable as parts", job_names)
-        if not planned["parts"]:
-            return full_result(files, "planner selected no CI part (pytest-only plan)", job_names)
-        if planned["parts"]:
-            if "shards" not in jobs:
-                return full_result(files, "planner failed: shards job not declared", job_names)
-            jobs["shards"] = True
-            for part in planned["parts"]:
-                if part not in tests:
-                    tests.append(part)
-
-    if not relevant:
-        return {"mode": "none", "reason": "only ignorable paths changed", "jobs": jobs, "tests": [], "changed": files}
     for j in cmap.get("always_jobs", []):
         jobs[j] = True
+    if not relevant:
+        return {"mode": "none", "reason": "only ignorable paths changed", "jobs": jobs, "tests": [], "changed": files}
     return {
         "mode": "selected",
         "reason": "%d file(s) mapped to %d job(s), %d test(s)" % (len(files), sum(jobs.values()), len(tests)),
@@ -281,15 +244,6 @@ def main(argv=None) -> int:
     except MapError as exc:
         err = str(exc)
     files = []
-    plan = None
-    if cmap is not None and "planner" in cmap and args.base:
-        def plan():
-            command = [arg.replace("{base}", args.base) for arg in cmap["planner"]["argv"]]
-            output = subprocess.run(
-                command, capture_output=True, text=True, check=True, timeout=120,
-                cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            ).stdout
-            return json.loads(output)
     if args.full:
         result = select([], cmap, True, args.full_reason)
     else:
@@ -300,7 +254,7 @@ def main(argv=None) -> int:
                 files = git_changed(args.base, args.head)
             else:
                 raise ValueError("no --base and no --files")
-            result = select(files, cmap, exists=os.path.exists, plan=plan)
+            result = select(files, cmap, exists=os.path.exists)
             if cmap is None:
                 result["reason"] = "map unusable: %s" % err
         except (subprocess.CalledProcessError, OSError, ValueError) as exc:
