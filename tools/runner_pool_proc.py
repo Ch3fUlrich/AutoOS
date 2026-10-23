@@ -367,10 +367,25 @@ def _nt_filetime(pid):
     finally:
         k32.CloseHandle(h)
 
+def _parse_proc_starttime(text):
+    """Return proc stat field 22, allowing spaces and parentheses in comm."""
+    end = text.rfind(')')
+    if end < 0:
+        return None
+    # The suffix starts at field 3 (state), so starttime is index 19.
+    fields = text[end + 1:].split()
+    try:
+        return int(fields[19])
+    except (IndexError, ValueError):
+        return None
+
 def filetime_of(pid):
     if os.name == 'nt':
         return _nt_filetime(pid)
-    return None
+    try:
+        return _parse_proc_starttime(_read_proc_stat(pid))
+    except OSError:
+        return None
 
 def pid_alive(pid):
     if os.name == 'nt':

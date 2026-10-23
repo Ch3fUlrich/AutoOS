@@ -4,11 +4,45 @@ import pathlib
 import json
 import os
 import sys
+import subprocess
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
 import runner_pool_proc as proc
 import runner_pool_core as rpc
+
+class TestProcStarttime(unittest.TestCase):
+    def test_parse_comm_with_spaces_and_parentheses(self):
+        # Field 3 is state; fields 4 through 21 precede starttime (22).
+        for comm in ['worker name', 'worker (nested) name)', '(worker) (name)']:
+            with self.subTest(comm=comm):
+                text = '123 (' + comm + ') S ' + ' '.join(
+                    str(n) for n in range(4, 22)) + ' 987654 23 24\n'
+                self.assertEqual(proc._parse_proc_starttime(text), 987654)
+
+    def test_parse_invalid_stat(self):
+        for text in ['', '123 (worker) S', '123 (worker) S ' + '0 ' * 18 + 'bad']:
+            with self.subTest(text=text):
+                self.assertIsNone(proc._parse_proc_starttime(text))
+
+    @unittest.skipUnless(os.name != 'nt' and pathlib.Path('/proc/self/stat').exists(),
+                         'requires POSIX procfs')
+    def test_self_identity_is_integer_and_stable(self):
+        identity = proc.filetime_of(os.getpid())
+        self.assertIsInstance(identity, int)
+        self.assertEqual(proc.filetime_of(os.getpid()), identity)
+
+    @unittest.skipUnless(os.name != 'nt' and pathlib.Path('/proc/self/stat').exists(),
+                         'requires POSIX procfs')
+    def test_dead_pid_has_no_identity(self):
+        child = subprocess.Popen([sys.executable, '-c', 'pass'])
+        child.wait(timeout=10)
+        self.assertIsNone(proc.filetime_of(child.pid))
+
+    def test_unavailable_procfs_has_no_identity(self):
+        with mock.patch.object(proc.os, 'name', 'posix'):
+            with mock.patch.object(proc, '_read_proc_stat', side_effect=FileNotFoundError):
+                self.assertIsNone(proc.filetime_of(123))
 
 class TestConstants(unittest.TestCase):
     def test_constant_values(self):
@@ -237,7 +271,8 @@ builtins.__import__ = guarded
 sys.path.insert(0, 'tools')
 import runner_pool_proc as p
 os.name = 'posix'
-assert p.filetime_of(123) is None
+p._read_proc_stat = lambda pid: '123 (worker) S ' + '0 ' * 18 + '456'
+assert p.filetime_of(123) == 456
 """
         subprocess.run([sys.executable, '-c', code], check=True)
 
