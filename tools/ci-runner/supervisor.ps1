@@ -112,7 +112,7 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
                 $a = @('-NoProfile', '-File', (Join-Path $dir 'runner-loop.ps1'), '-Repo', $r.repo, '-Name', $name, '-Memory', $r.memory, '-Labels', $cfg.labels)
                 if ($r.image) { $a += @('-Image', $r.image) }
                 if ($r.netns) { $a += '-NetNs' }
-                if ($r.cache) { $a += '-CacheVolumes' }
+                if ($r.cache) { $a += '-CacheVolumes', '-CacheScope', $r.prefix }
                 # D-1425: per-slot CPU cap (repo "cpus" > config "cpus_default" > 8); 0 = no cap.
                 $slotCpus = Get-CiSlotCpus -Repo $r -Config $cfg
                 if ($slotCpus -gt 0) { $a += @('-Cpus', $slotCpus) }

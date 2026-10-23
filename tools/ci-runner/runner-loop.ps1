@@ -13,7 +13,8 @@ param(
     [int]$Cpus = 0,                                # per-slot CPU cap (D-1425); 0 = no cap
     [switch]$NoDockerSocket,                       # jobs cannot reach the host Docker
     [switch]$NetNs,                                # caps for `sudo unshare --net` (AutoOS loopback-only suite)
-    [switch]$CacheVolumes                          # mount the shared cargo/sccache cache volumes
+    [switch]$CacheVolumes,                         # mount the shared cargo/sccache cache volumes
+    [string]$CacheScope = ''                          # slots.json repository prefix; required with -CacheVolumes
 )
 $ErrorActionPreference = "Stop"
 $dir = $PSScriptRoot
@@ -27,7 +28,7 @@ while (-not (Test-Path $stop)) {
         $env:RUNNER_TOKEN = (gh api -X POST "repos/$Repo/actions/runners/registration-token" --jq .token)
         if (-not $env:RUNNER_TOKEN) { throw "no registration token" }
         $inst = "$Name-$(Get-Date -Format yyyyMMddHHmmss)"
-        $dargs = Get-CiRunnerDockerArgs -Name $inst -Repo $Repo -Labels $Labels -Memory $Memory -Image $Image -DockerSocket:(-not $NoDockerSocket) -NetNs:$NetNs -CacheVolumes:$CacheVolumes -Cpus $Cpus
+        $dargs = Get-CiRunnerDockerArgs -Name $inst -Repo $Repo -Labels $Labels -Memory $Memory -Image $Image -DockerSocket:(-not $NoDockerSocket) -NetNs:$NetNs -CacheVolumes:$CacheVolumes -CacheScope $CacheScope -Cpus $Cpus
         Log "launch $inst"
         $env:MSYS_NO_PATHCONV = "1"
         & docker @dargs 2>&1 | ForEach-Object { "$_" } | Where-Object { $_ -notmatch 'token' } | Add-Content $log

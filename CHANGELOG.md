@@ -4,6 +4,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- AO-WORKST-RUNNER-POOL + CI-WORKST-RUNNER + CI-SPEED-WORKST (2026-10-23, lane `autoos:AO-WORKST-RUNNER-POOL`): tool-less runner pool (`tools/runner_pool*.py`), `api` client and host admission by kind layered on the per-platform admission (`host_admission.kinds.toolless`; cap and floor must be >= 1 per field); CI runner cache volumes are scoped per repository (`ci-cargo-registry-<prefix>`, `Get-CiCacheVolumes -Scope`, `-CacheScope` through `runner-loop.ps1`/`supervisor.ps1`), `restart-slot.ps1` only stops the slot and lets the supervisor restart it from `slots.json`, `tools/ci-runner/measure_speed.py` measures parallel-vs-single job time over >= 3 rounds, and the spawner CI section prints the failing test names.
 - RT-P1-CLASS-COMBOS evidence re-anchor (2026-10-23, D-2424): the D-2350 anchor 0388ba4e (main 1577ca64, CI 39949209775 green on attempt 2) predates the 11:52Z re-claim; this commit, merged with lane/ao-bus-contract-link, is the item's commit+ci evidence anchor.
 - docs/ai/opencode-fleet.md links the plangraph fleet-bus v2 wire contract (plangraph `docs/FLEET-BUS.md`, RT-P1-BUS-CONTRACT) after the cross-host relay section, marked as a separate format from the `X-Fleet-Sig` relay.
 - RT-P1-CLASS-COMBOS (2026-10-23): merged as 1f96b9d6; the main CI red it caused (audit-router IDE drift, run 39897765521) was fixed by 345e9dc6 (green run 39914728970). Evidence anchor per D-2350.
