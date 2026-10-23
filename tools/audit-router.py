@@ -205,6 +205,21 @@ def route_names_for_client(registry_doc: dict, client: str) -> set[str]:
     return out
 
 
+def ide_exempt(registry_doc: dict, client: str) -> set[str]:
+    """Exempt only routes explicitly excluding this IDE; unknowns stay required."""
+    out = set()
+    routes = registry_doc.get("routes") or {}
+    for rid, route in routes.items():
+        if not isinstance(route, dict):
+            continue
+        surfaces = route.get("surfaces")
+        omni = surfaces.get("omniroute") if isinstance(surfaces, dict) else None
+        clients = omni.get("clients") if isinstance(omni, dict) else None
+        if isinstance(clients, list) and client not in clients:
+            out.add(rid)
+    return out
+
+
 def openhands_route_names(registry_doc: dict) -> set[str]:
     """Only explicitly offered OpenHands routes need tier profiles."""
     return route_names_for_client(registry_doc, "openhands")
@@ -358,13 +373,12 @@ def main(argv=None) -> int:
     except (OSError, ValueError):
         reg_doc = None
     # Unreadable registry must not silently exempt any combo from IDE checks.
-    client_doc = reg_doc if isinstance(reg_doc, dict) and "routes" in reg_doc else {
-        "routes": {name: {} for name in names}}
-    oc_required = route_names_for_client(client_doc, "opencode")
-    zed_required = route_names_for_client(client_doc, "zed")
+    client_doc = reg_doc if isinstance(reg_doc, dict) else {}
+    oc_exempt = ide_exempt(client_doc, "opencode")
+    zed_exempt = ide_exempt(client_doc, "zed")
     oc = opencode_models()
     for c in names:
-        if c in oc_required and c not in oc:
+        if c not in oc_exempt and c not in oc:
             drift.append(f"opencode.jsonc lacks model '{c}'")
     psm = (ROOT / "lib" / "windows" / "AutoOS.Install.psm1").read_text(encoding="utf-8")
     sh = (ROOT / "lib" / "linux" / "install.sh").read_text(encoding="utf-8")
@@ -373,7 +387,7 @@ def main(argv=None) -> int:
     # --check covers the static copies).
     zed = ide_models("omniroute", "zed")
     for c in names:
-        if c in zed_required and c not in zed:
+        if c not in zed_exempt and c not in zed:
             drift.append(f"catalog/ide-models.json does not offer '{c}' to zed")
     for label, text in (("psm1", psm), ("install.sh", sh)):
         if "ide-models.json" not in text:

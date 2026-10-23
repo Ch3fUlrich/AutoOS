@@ -152,16 +152,20 @@ class OpenHandsTierProfileTests(unittest.TestCase):
 
 
 class ClientExposureTests(unittest.TestCase):
-    def audit_missing_clients(self, omni):
+    def audit_missing_clients(self, omni, routes=None):
         audit = _load_module()
         doc = {"routes": {"fixture-route": {
             "strategy": "priority", "legs": ["groq/openai/gpt-oss-120b"],
             "surfaces": {"omniroute": {"context_declared": "128k", **omni}}}}}
+        if routes is not None:
+            doc["routes"] = routes
         with tempfile.TemporaryDirectory(dir=ROOT / "logs") as tmp:
             path = Path(tmp) / "registry.json"
             path.write_text(json.dumps(doc), encoding="utf-8")
             output = io.StringIO()
             with patch.object(audit, "opencode_models", return_value=[]), \
+                    patch.object(audit, "repo_combos", return_value=[
+                        {"name": "fixture-route", "models": []}]), \
                     patch.object(audit, "ide_models", return_value=[]), \
                     contextlib.redirect_stdout(output):
                 audit.main(["--offline", "--json", "--registry", str(path)])
@@ -175,6 +179,17 @@ class ClientExposureTests(unittest.TestCase):
 
     def test_explicit_ide_clients_still_required(self):
         self.assert_client_drift({"clients": ["opencode", "zed"]}, True)
+
+    def assert_unknown_route_required(self, routes):
+        drift = self.audit_missing_clients({}, routes=routes)
+        self.assertIn("opencode.jsonc lacks model 'fixture-route'", drift)
+        self.assertIn("catalog/ide-models.json does not offer 'fixture-route' to zed", drift)
+
+    def test_combo_absent_from_registry_requires_both_ide_clients(self):
+        self.assert_unknown_route_required({})
+
+    def test_non_dict_route_requires_both_ide_clients(self):
+        self.assert_unknown_route_required({"fixture-route": "invalid"})
 
     def test_explicit_empty_clients_exempt_ide(self):
         self.assert_client_drift({"clients": []}, False)
