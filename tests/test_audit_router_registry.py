@@ -180,6 +180,23 @@ class ClientExposureTests(unittest.TestCase):
     def test_explicit_ide_clients_still_required(self):
         self.assert_client_drift({"clients": ["opencode", "zed"]}, True)
 
+    def test_unreadable_registry_requires_both_ide_clients(self):
+        audit = _load_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "missing-registry.json"
+            output = io.StringIO()
+            with patch.object(audit, "opencode_models", return_value=[]), \
+                    patch.object(audit, "repo_combos", return_value=[
+                        {"name": "fixture-route", "models": []}]), \
+                    patch.object(audit, "ide_models", return_value=[]), \
+                    contextlib.redirect_stdout(output):
+                result = audit.main(["--offline", "--json", "--registry", str(path)])
+            self.assertNotEqual(result, 0)
+            drift = json.loads(output.getvalue())["drift"]
+            self.assertIn("opencode.jsonc lacks model 'fixture-route'", drift)
+            self.assertIn("catalog/ide-models.json does not offer 'fixture-route' to zed",
+                          drift)
+
     def assert_unknown_route_required(self, routes):
         drift = self.audit_missing_clients({}, routes=routes)
         self.assertIn("opencode.jsonc lacks model 'fixture-route'", drift)

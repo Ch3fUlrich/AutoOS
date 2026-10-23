@@ -38,6 +38,11 @@ _spec = importlib.util.spec_from_file_location("affected_tests", str(SCRIPT))
 at = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(at)
 
+_audit_spec = importlib.util.spec_from_file_location(
+    "audit_router", ROOT / "tools" / "audit-router.py")
+audit = importlib.util.module_from_spec(_audit_spec)
+_audit_spec.loader.exec_module(audit)
+
 
 FIXTURE_SH = '''\
 # shellcheck shell=bash
@@ -645,6 +650,25 @@ class DiffTests(unittest.TestCase):
         terms = filter_terms(result.stdout)
         self.assertTrue(any(t in "route l1-orchestrator plans three legs" for t in terms),
                         result.stdout)
+
+
+class DeclarationSelectionTests(unittest.TestCase):
+    def test_routing_surfaces_select_the_declarations_audit(self):
+        for path in audit.DECLARATION_SURFACES:
+            with self.subTest(path=path):
+                result = at.map_changed_files([path])
+                self.assertIn("declarations", result["terms"].split(","))
+
+    def test_windows_surface_paths_select_the_declarations_audit(self):
+        for path in (r"catalog\ide-models.json",
+                     r"configuration\openhands\tier-profiles.json"):
+            with self.subTest(path=path):
+                result = at.map_changed_files([path])
+                self.assertIn("declarations", result["terms"].split(","))
+
+    def test_unrelated_docs_do_not_select_the_declarations_audit(self):
+        result = at.map_changed_files(["docs/models.md"])
+        self.assertNotIn("declarations", result["terms"].split(","))
 
 
 class RealRepoTests(unittest.TestCase):
