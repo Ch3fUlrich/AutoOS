@@ -121,7 +121,7 @@ class TestPoolBasics(unittest.TestCase):
 
             # slot 4 dead due to corrupt file
             s4 = status['slots'][3]
-            self.assertEqual(s4['state'], 'slot-dead')
+            self.assertEqual(s4['state'], 'slot-unreadable')
             self.assertIsNone(s4['job'])
 
             # queue depth and oldest wait
@@ -187,7 +187,7 @@ class TestPoolBasics(unittest.TestCase):
     def test_job_argv_too_long(self):
         repo_root = Path('/repo')
         python = '/usr/bin/python3'
-        long_brief = 'x' * 30000
+        long_brief = 'x' * 32000
         job = {'id': 'j', 'submitter': 'bob', 'card': {'client': 'c'}, 'brief': long_brief}
         with self.assertRaises(ValueError) as cm:
             pool.job_argv(job, repo_root, python)

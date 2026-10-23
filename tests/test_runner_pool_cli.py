@@ -328,7 +328,7 @@ class TestCli(unittest.TestCase):
     def test_ssh_gate_submit(self):
         with tempfile.TemporaryDirectory() as td:
             env = {'LOCALAPPDATA': td, 'SSH_ORIGINAL_COMMAND': 'submit'}
-            payload = {'card': {'client': 'opencode'}, 'brief': 'do x'}
+            payload = {'card': {'client': 'api'}, 'brief': 'do x'}
             stdin = io.BytesIO(json.dumps(payload).encode())
             out = io.StringIO()
             rc = pool.main(['ssh-gate', '--submitter', 'lane1'], env, stdin, out)
