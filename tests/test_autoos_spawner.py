@@ -26525,12 +26525,45 @@ class HostAdmissionWindowsTests(unittest.TestCase):
             self.assertIn("live-worker cap", self.agent.host_admission_refusal(
                 SHIPPED_REGISTRY, platform="win32", memstatus=lambda: (None, None)))
 
-    def test_malformed_worker_rows_are_ignored_by_both_counts(self):
+    def test_malformed_worker_rows_count_conservatively(self):
         with mock.patch.object(self.agent, "visible_workers", return_value=[None, [],
-                {"state": "running", "kind": "toolless"}]), \
+                {"state": "running", "kind": "toolless"},
+                {"state": "running", "kind": 3}]), \
                 mock.patch.object(self.agent, "_reservation_rows", return_value=([], [])):
-            self.assertEqual(self.agent.live_worker_count(self.workers), 1)
-            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "tool-using"), 0)
+            self.assertEqual(self.agent.live_worker_count(self.workers), 4)
+            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "toolless"), 1)
+            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "tool-using"), 3)
+
+    def test_commit_percentage_bounds(self):
+        for pct, expected in ((-1, None), (float("nan"), None), (0, 0), (100, 100)):
+            with self.subTest(pct=pct):
+                self.assertEqual(self.agent._sane_memstatus(16000, pct), (16000, expected))
+
+    def test_final_client_rechecks_admission_without_own_claim(self):
+        registry = {"clients": {"plain": {"capabilities": {"shell": False, "write": False}}}}
+        for initial, final in (("toolless", "opencode"), ("tool-using", "plain")):
+            for refusal in (None, "host admission: final kind refused"):
+                with self.subTest(initial=initial, refusal=refusal):
+                    token = self.agent._reserve_free_slot(self.workers, None, None,
+                        suffix=self.agent.ADMISSION_RESERVATION_SUFFIX, kind=initial)
+                    def check(**kwargs):
+                        self.assertEqual(kwargs["kind"], self.agent.host_run_kind(final, registry))
+                        self.assertEqual(self.agent.live_admission_reservations(self.workers), 0)
+                        return refusal
+                    with mock.patch.object(self.agent, "host_admission_refusal", side_effect=check) as gate:
+                        if refusal:
+                            with mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+                                with self.assertRaises(SystemExit) as raised:
+                                    self.agent._host_claim_kind({"client": final}, registry, token, self.workers)
+                            self.assertEqual(raised.exception.code, 13)
+                            self.assertEqual(stderr.getvalue(), "autoos-agent: %s\n" % refusal)
+                            self.assertFalse(os.path.exists(token))
+                        else:
+                            self.assertEqual(self.agent._host_claim_kind(
+                                {"client": final}, registry, token, self.workers),
+                                self.agent.host_run_kind(final, registry))
+                        gate.assert_called_once()
+                    self.agent.free_reservation_release(token)
 
     def test_final_client_retags_claim_before_record(self):
         registry = {"clients": {"plain": {"capabilities": {"shell": False, "write": False}}}}
@@ -26694,7 +26727,8 @@ class HostAdmissionTests(unittest.TestCase):
                 {"state": "running", "kind": 3}]
         with mock.patch.object(self.agent, "visible_workers", return_value=rows):
             self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "toolless"), 0)
-            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "tool-using"), 2)
+            self.assertEqual(self.agent.live_worker_count(self.workers), 3)
+            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "tool-using"), 3)
         for kind in ([], 3):
             self.agent._reserve_free_slot(self.workers, None, None,
                 suffix=self.agent.ADMISSION_RESERVATION_SUFFIX, kind=kind)

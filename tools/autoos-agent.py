@@ -13754,7 +13754,7 @@ def live_worker_count(directory=None) -> int:
     """Count running worker records plus live host-slot reservations."""
     directory = workers_dir() if directory is None else directory
     live = sum(1 for row in visible_workers(directory)
-               if isinstance(row, dict) and row.get("state") == "running")
+               if not isinstance(row, dict) or row.get("state") == "running")
     return live + live_admission_reservations(directory)
 
 
@@ -13820,7 +13820,7 @@ def _admission_text(live: int, cap: int, free_mb, floor: int, which: str) -> str
 
 
 def _host_claim_kind(plan, registry, claim, directory):
-    """Retag a held reservation before publishing the final client's record."""
+    """Recheck a changed kind before publishing the final client's record."""
     kind = host_run_kind(plan.get("client"), registry)
     if claim is not None:
         lock = free_slot_lock_take(directory)
@@ -13828,6 +13828,14 @@ def _host_claim_kind(plan, registry, claim, directory):
             with io.open(claim, encoding="utf-8") as fh:
                 record = json.load(fh)
             if record.get("kind") != kind:
+                # Exclude our own slot while checking, without opening a gap
+                # for another claimant: the host admission lock is still held.
+                free_reservation_release(claim)
+                refusal = host_admission_refusal(
+                    registry=registry, workers=directory, kind=kind)
+                if refusal is not None:
+                    print("autoos-agent: %s" % refusal, file=sys.stderr)
+                    raise SystemExit(13)
                 record["kind"] = kind
                 with io.open(claim, "w", encoding="utf-8") as fh:
                     json.dump(record, fh)
