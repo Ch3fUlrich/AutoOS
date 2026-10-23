@@ -14,6 +14,7 @@ Start here. Each page is short and answers one question.
 | [Replay, verification & undo](state-and-undo.md) | How do I repeat a setup, prove it worked, and get back? |
 | [Architecture](architecture.md) | How is it built, and why that way? |
 | [Testing](testing.md) | How do I check a change before shipping it? |
+| [Smart CI](ci-smart-select.md) | How do I make a repo run only the tests a change needs, and the full suite once before merge? |
 | [Remote provisioning](remote-provisioning.md) | How do I set up a machine that isn't this one? |
 | [Security](security.md) | What are the sharp edges, and what must never be committed? |
 | [Troubleshooting](troubleshooting.md) | It broke. Now what? |

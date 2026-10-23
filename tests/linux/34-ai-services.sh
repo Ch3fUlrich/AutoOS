@@ -3769,6 +3769,8 @@ _aistack() {
     local d="$1" extra=()
     shift
     while (( $# )) && [[ "$1" == [A-Z]*=* ]]; do extra+=("$1"); shift; done
+    # Expand the inner shell's PID, not this harness's.
+    # shellcheck disable=SC2016
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
         -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
@@ -3781,7 +3783,11 @@ _aistack() {
         AUTOOS_OPENHANDS_DIR="$d/home/.openhands" XDG_CONFIG_HOME="$d/home/.config" \
         AUTOOS_REGISTER_AUTOSTART="$d/bin/fake-register" AUTOOS_START_STACK="$d/bin/fake-start-stack" \
         AUTOOS_START_LITELLM="$d/bin/start-litellm" \
-        "${extra[@]}" bash "${_AISTACK_SH:-$AISTACK/ai-stack.sh}" "$@" 2>&1
+        "${extra[@]}" bash -c '
+            if [[ -e "$1/interrupt-probe" ]]; then printf "%s\n" "$$" >"$1/interrupt-pid"; fi
+            shift
+            exec bash "$@"
+        ' bash "$d" "${_AISTACK_SH:-$AISTACK/ai-stack.sh}" "$@" 2>&1
 }
 # _aistack_native <sandbox>: a host before the move - both units registered
 # and active, a gateway state dir, the firewall unit up, images present.
@@ -6223,18 +6229,19 @@ if it "aistack: failover on interrupted after the gateway stop hands the port ba
     # stopped with a stateless standby on its port (qoder review lstby).
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    touch "$d/failover-liveliness-fail" "$d/slow-sleep"   # the wait window is real (12 x 0.5 s)
+    touch "$d/failover-liveliness-fail" "$d/interrupt-probe"
     ( _aistack "$d" failover on >"$d/out.txt" 2>&1 ) &
     bg=$!
     p=""
-    for _ in $(seq 1 50); do
-        grep -q 'stop omniroute' "$d/docker.log" 2>/dev/null && p="$(pgrep -n -f "ai-stack.sh failover on" || true)" && [[ -n "$p" ]] && break
+    for _ in $(seq 1 600); do
+        [[ -s "$d/interrupt-ready" ]] && p="$(cat "$d/interrupt-pid")" && break
         sleep 0.1
     done
     ok=1
     if [[ -z "$p" ]]; then ok=0; echo "failover on never reached the gateway stop" >&2; else
-        sleep 1; kill -TERM "$p" 2>/dev/null || true
+        kill -TERM "$p" 2>/dev/null || { ok=0; echo "failover exited before TERM" >&2; }
     fi
+    touch "$d/interrupt-release"
     wait "$bg" 2>/dev/null || true
     _aistack_seq "$d/events.log" "stop omniroute" "up -d --no-deps omniroute" || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log")" >&2; }
     grep -q 'start omniroute' "$d/docker.log" 2>/dev/null && { ok=0; echo "the rollback used start instead of a recreate: $(cat "$d/docker.log")" >&2; }
@@ -6252,18 +6259,19 @@ if it "aistack: an interrupted failover on waits a short health window, not the 
     # the health probe runs a handful of times instead of 37 (review lstby2c).
     d="$(_aistack_sandbox)"
     _aistack_migrated "$d"
-    touch "$d/failover-liveliness-fail" "$d/slow-sleep" "$d/unhealthy-omniroute"
+    touch "$d/failover-liveliness-fail" "$d/interrupt-probe" "$d/unhealthy-omniroute"
     ( _aistack "$d" failover on >"$d/out.txt" 2>&1 ) &
     bg=$!
     p=""
-    for _ in $(seq 1 50); do
-        grep -q 'stop omniroute' "$d/docker.log" 2>/dev/null && p="$(pgrep -n -f "ai-stack.sh failover on" || true)" && [[ -n "$p" ]] && break
+    for _ in $(seq 1 600); do
+        [[ -s "$d/interrupt-ready" ]] && p="$(cat "$d/interrupt-pid")" && break
         sleep 0.1
     done
     ok=1
     if [[ -z "$p" ]]; then ok=0; echo "failover on never reached the gateway stop" >&2; else
-        sleep 1; kill -TERM "$p" 2>/dev/null || true
+        kill -TERM "$p" 2>/dev/null || { ok=0; echo "failover exited before TERM" >&2; }
     fi
+    touch "$d/interrupt-release"
     wait "$bg" 2>/dev/null || true
     out="$(cat "$d/out.txt" 2>/dev/null)"
     _aistack_seq "$d/events.log" "stop omniroute" "up -d --no-deps omniroute" || { ok=0; echo "the gateway was not recreated: $(cat "$d/docker.log" 2>/dev/null)" >&2; }
@@ -7414,4 +7422,3 @@ if it "gwkey: F6 the resolver shows the deprecation line naming old and new fiel
     rm -rf "$d"
     if (( ok )); then pass; else fail "F6: apply/start-stack deprecation not shown"; fi
 fi
-

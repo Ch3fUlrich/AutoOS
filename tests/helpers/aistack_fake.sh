@@ -348,6 +348,16 @@ fake_curl() {
     up() { [[ -e "$S/active-$1" ]] || { [[ -e "$S/run-$2" ]] && [[ ! -e "$S/unhealthy-$3" ]]; }; }
     case "$url" in
         *:20128/health/liveliness*)
+            # Hold the first probe until the test has signalled the recorded
+            # ai-stack PID. Bash defers its trap until this command returns.
+            if [[ -e "$S/interrupt-probe" && ! -e "$S/interrupt-release" ]]; then
+                printf '%s\n' "$PPID" >"$S/interrupt-ready"
+                for ((i=0; i<600; i++)); do
+                    [[ -e "$S/interrupt-release" ]] && break
+                    /bin/sleep 0.1
+                done
+                [[ -e "$S/interrupt-release" ]] || return 1
+            fi
             if [[ ! -e "$S/failover-liveliness-fail" ]] && standby_alive 20128; then code=200; fi ;;
         *:20128/api/health*) up autoos-omniroute autoos-omniroute omniroute && code=200 ;;
         *:20128/v1/*)        up autoos-omniroute autoos-omniroute omniroute && code=401 ;;
