@@ -156,14 +156,18 @@ def job_argv(job: dict, repo_root: Path, python: str):
         raise ValueError('invalid job id')
     card = job.get('card', {})
     client = card.get('client')
-    if not client:
+    if not isinstance(client, str) or not client:
         raise ValueError('missing client')
     # Optional fields
     model = card.get('model')
     title = card.get('title')
+    if any(v is not None and not isinstance(v, str) for v in (model, title)):
+        raise ValueError('model and title must be strings')
     if not title:
         title = job_id
     brief = job.get('brief', '')
+    if not isinstance(brief, str):
+        raise ValueError('brief must be a string')
 
     argv = [
         python,
@@ -178,7 +182,7 @@ def job_argv(job: dict, repo_root: Path, python: str):
     argv += ['--', brief]
 
     # Total command line length check
-    total = sum(len(a) for a in argv) + len(argv) - 1
+    total = sum(len(a.encode('utf-16-le')) // 2 for a in argv) + len(argv) - 1
     if total > 30000:
         raise ValueError('argv-too-long')
 
@@ -313,6 +317,22 @@ def run_one(root, n, deps):
         return 'claim-failed'
     claimed_path = Path(claimed_path)
     try:
+        return _run_claimed(root, n, deps, claimed_path, now)
+    except Exception:
+        # Quarantine before recording: a broken job must never poison a restart.
+        failed_path = failed_dir / claimed_path.name
+        if claimed_path.exists():
+            os.replace(claimed_path, failed_path)
+        rec = done_record({'id': claimed_path.stem}, 2, now, time.time(),
+                          {'reasons': ['exception']})
+        rpc.write_json_atomic(done_dir / claimed_path.name, rec)
+        write_slot_state(root, n, 'idle', None, now, deps.pid, deps.filetime)
+        return 'failed'
+
+def _run_claimed(root, n, deps, claimed_path, now):
+    queue_dir, done_dir, failed_dir, log_dir = (root / name for name in
+                                               ('queue', 'done', 'failed', 'log'))
+    try:
         job = json.loads(claimed_path.read_text(encoding='utf-8'))
         if (not isinstance(job, dict) or not isinstance(job.get('id'), str)
                 or not re.fullmatch(r'[A-Za-z0-9_.-]+', job['id'])
@@ -335,27 +355,7 @@ def run_one(root, n, deps):
         write_slot_state(root, n, 'idle', None, now, deps.pid, deps.filetime)
         return 'memory-recheck'
 
-    try:
-        argv = job_argv(job, deps.repo_root, deps.python)
-    except ValueError:
-        started = deps.now()
-        ended = deps.now()
-        deep = {'reasons': ['rc']}
-        rec = done_record(job, 2, started, ended, deep)
-        rpc.write_json_atomic(str(done_dir / f"{job['id']}.json"), rec)
-        if claimed_path.exists():
-            try:
-                claimed_path.unlink()
-            except OSError:
-                pass
-        qpath = queue_dir / f"{job['id']}.json"
-        if qpath.exists():
-            try:
-                qpath.unlink()
-            except OSError:
-                pass
-        write_slot_state(root, n, 'idle', None, now, deps.pid, deps.filetime)
-        return 'failed'
+    argv = job_argv(job, deps.repo_root, deps.python)
 
     log_path = log_dir / f"{job['id']}.log"
     env = rpc.strip_env(deps.environ)
@@ -439,19 +439,9 @@ def _parse_slot_args(args):
     return n, once
 
 def _cmd_status(args, env, stdout):
+    import runner_pool_proc as proc
     root = spool_root(env)
-    data = None
-    for call in (lambda: build_status(root), lambda: build_status()):
-        try:
-            data = call()
-            break
-        except Exception:
-            data = None
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault('slots', [])
-    data.setdefault('queue_depth', 0)
-    data.setdefault('oldest_wait_s', 0)
+    data = build_status(root, time.time(), proc.pid_alive, proc.filetime_of)
     stdout.write(json.dumps(data, sort_keys=True) + '\n')
     return 0
 
@@ -475,7 +465,8 @@ def _find_slot(root, jobid):
             data = json.loads(sf.read_text())
         except Exception:
             continue
-        if data.get('job') == jobid:
+        job = data.get('job')
+        if (job.get('id') if isinstance(job, dict) else job) == jobid:
             return d
     return None
 
@@ -500,7 +491,11 @@ def _cmd_kill(args, env, stdout, deps, proc):
         os_name = deps.get('os_name', 'nt')
     else:
         os_name = getattr(rpc, 'os_name', lambda: os.name)()
-    out = proc.kill_job(slot, filetime_of, kill_tree, os_name=os_name)
+    try:
+        out = proc.kill_job(slot, filetime_of, kill_tree, os_name=os_name)
+    except (ValueError, AttributeError, KeyError, TypeError, OSError):
+        stdout.write('refused: bad run.private\n')
+        return 1
     stdout.write(str(out) + '\n')
     return 0
 

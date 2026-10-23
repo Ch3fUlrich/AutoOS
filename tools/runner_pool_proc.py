@@ -62,7 +62,7 @@ def read_run_private(slot_dir):
     except Exception as exc:  # JSONDecodeError or OSError
         raise ValueError('cannot read run.private') from exc
 
-    if set(data.keys()) != _RUN_PRIVATE_KEYS:
+    if not isinstance(data, dict) or set(data.keys()) != _RUN_PRIVATE_KEYS:
         raise ValueError('unexpected keys in run.private')
     run_id = data['run_id']
     pid = data['pid']

@@ -125,6 +125,8 @@ class TestCli(unittest.TestCase):
     def test_status(self):
         with tempfile.TemporaryDirectory() as td:
             env = {'LOCALAPPDATA': td}
+            pool.write_slot_state(pool.spool_root(env), 1, 'running', {'id': 'job-7'},
+                                  time.time(), os.getpid(), proc.filetime_of(os.getpid()))
             out = io.StringIO()
             rc = pool.main(['status', '--json'], env, io.BytesIO(), out)
             self.assertEqual(rc, 0)
@@ -132,6 +134,64 @@ class TestCli(unittest.TestCase):
             self.assertIn('slots', data)
             self.assertIn('queue_depth', data)
             self.assertIn('oldest_wait_s', data)
+            self.assertEqual(len(data['slots']), 1)
+            self.assertEqual(data['slots'][0]['state'], 'running')
+
+    def test_argv_rejects_utf16_overflow_and_nonstring_fields(self):
+        for field in ('client', 'model', 'title', 'brief'):
+            with self.subTest(field=field):
+                job = {'id': 'job-7', 'card': {'client': 'opencode'}, 'brief': 'x'}
+                (job if field == 'brief' else job['card'])[field] = ['bad']
+                with self.assertRaises(ValueError):
+                    pool.job_argv(job, TOOLS.parent, sys.executable)
+        with self.assertRaises(ValueError):
+            pool.job_argv({'id': 'job-7', 'card': {'client': 'opencode'},
+                           'brief': '\U0001f600' * 20000}, TOOLS.parent, sys.executable)
+
+    def test_claimed_exceptions_fail_and_loop_continues(self):
+        for mode in ('spawn-os', 'spawn-type', 'risk', 'memory', 'argv'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as td:
+                env = {'LOCALAPPDATA': td}
+                root = pool.spool_root(env)
+                pool.ensure_dirs(root)
+                job = {'id': 'job-7', 'card': {'client': 'opencode'}, 'brief': 'x'}
+                if mode == 'argv':
+                    job['card']['client'] = ['bad']
+                (root / 'queue' / 'job-7.json').write_text(json.dumps(job))
+                def boom(*a):
+                    raise OSError('spawn failed') if mode == 'spawn-os' else TypeError('unexpected')
+                deps = pool.Deps(spawn=boom if mode.startswith('spawn') else lambda *a: 0)
+                if mode == 'risk':
+                    deps.risk_of = boom
+                if mode == 'memory':
+                    calls = []
+                    def mem():
+                        calls.append(1)
+                        return boom() if len(calls) == 2 else 99999
+                    deps.mem_mb = mem
+                self.assertEqual(pool.main(['slot'], env, io.BytesIO(), io.StringIO(),
+                    deps={'slot_deps': deps, 'max_iterations': 2, 'sleep': lambda _: None}), 0)
+                rec = json.loads((root / 'done' / 'job-7.json').read_text())
+                self.assertNotEqual(rec['rc'], 0)
+                self.assertTrue((root / 'failed' / 'job-7.json').exists())
+                self.assertFalse(list((root / 'queue').glob('*.json')))
+                self.assertFalse((root / 'slots' / '1' / 'job-7.json').exists())
+
+    def test_kill_real_slot_and_bad_private(self):
+        for private in ([], {'run_id': 'job-7'}):
+            with self.subTest(private=private), tempfile.TemporaryDirectory() as td:
+                env = {'LOCALAPPDATA': td}
+                root = pool.spool_root(env)
+                pool.write_slot_state(root, 1, 'running', {'id': 'job-7'}, 1, 1, 1)
+                slot = root / 'slots' / '1'
+                self.assertEqual(pool._find_slot(root, 'job-7'), slot)
+                (slot / 'run.private').write_text(json.dumps(private))
+                with self.assertRaises(ValueError):
+                    proc.kill_job(slot, lambda _: 1, lambda _: self.fail('must not kill'), os_name='nt')
+                out = io.StringIO()
+                self.assertEqual(pool.main(['kill', 'job-7'], env, io.BytesIO(), out,
+                                          deps={'os_name': 'nt'}), 1)
+                self.assertIn('refused: bad run.private', out.getvalue())
 
     def test_ssh_gate_submit(self):
         with tempfile.TemporaryDirectory() as td:
@@ -259,7 +319,7 @@ class TestCli(unittest.TestCase):
             root = pool.spool_root(env)
             slot = root / 'slots' / 'slot1'
             slot.mkdir(parents=True)
-            (slot / 'slot.json').write_text(json.dumps({'job': 'other'}))
+            (slot / 'slot.json').write_text(json.dumps({'job': {'id': 'other'}}))
             out = io.StringIO()
             rc = pool.main(['kill', 'job-123'], env, io.BytesIO(), out)
             self.assertEqual(rc, 1)
@@ -272,7 +332,7 @@ class TestCli(unittest.TestCase):
             slot = root / 'slots' / 'slot1'
             slot.mkdir(parents=True)
             jobid = 'job-abc'
-            (slot / 'slot.json').write_text(json.dumps({'job': jobid}))
+            (slot / 'slot.json').write_text(json.dumps({'job': {'id': jobid}}))
             (slot / 'run.private').write_text('{}')
             calls = []
             def fake_kill_job(slot_dir, filetime_of, kill_tree, os_name=None):
