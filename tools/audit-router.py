@@ -58,6 +58,19 @@ from registry_loader import load_registry_tool  # noqa: E402 - tools/ added abov
 
 ROOT = Path(__file__).resolve().parent.parent
 
+# Offline audit inputs; affected-tests imports this to keep pre-push in sync.
+DECLARATION_SURFACES = (
+    "opencode.jsonc",
+    "catalog/ide-models.json",
+    "lib/windows/AutoOS.Install.psm1",
+    "lib/linux/install.sh",
+    "configuration/openhands/tier-profiles.json",
+    "configuration/openhands/config.toml",
+    "configuration/litellm/config.yaml",
+    "catalog/ai-registry.json",
+    "configuration/omniroute/combos.json",
+)
+
 
 def litellm_key(env_path=None):
     """Return the LiteLLM master key from the environment or the .env file.
@@ -408,18 +421,11 @@ def main(argv=None) -> int:
         drift.extend(tier_profile_drift(names, tp, reg_doc))
 
     # 3. forbidden direct refs anywhere in our surfaces
+    cached = {"lib/windows/AutoOS.Install.psm1": psm, "lib/linux/install.sh": sh}
     surfaces = {
-        "opencode.jsonc": (ROOT / "opencode.jsonc").read_text(encoding="utf-8"),
-        "catalog/ide-models.json":
-            (ROOT / "catalog" / "ide-models.json").read_text(encoding="utf-8"),
-        "lib/windows/AutoOS.Install.psm1": psm,
-        "lib/linux/install.sh": sh,
-        "configuration/openhands/tier-profiles.json":
-            (ROOT / "configuration" / "openhands" / "tier-profiles.json").read_text(encoding="utf-8"),
-        "configuration/openhands/config.toml":
-            (ROOT / "configuration" / "openhands" / "config.toml").read_text(encoding="utf-8"),
-        "configuration/litellm/config.yaml":
-            (ROOT / "configuration" / "litellm" / "config.yaml").read_text(encoding="utf-8"),
+        path: cached[path] if path in cached else (ROOT / path).read_text(encoding="utf-8")
+        for path in DECLARATION_SURFACES
+        if path not in ("catalog/ai-registry.json", "configuration/omniroute/combos.json")
     }
     for ref in FORBIDDEN_DIRECT_REFS:
         # The phantom-leg test owns combos.json; these are the other surfaces.
