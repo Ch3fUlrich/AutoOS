@@ -26780,6 +26780,50 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual(popens, [], "a rejected spawn starts no runner")
         self.assertEqual(os.listdir(tmp), [], "a rejected spawn creates no run dir")
 
+    def test_mcp_spawn_admission_uses_the_requested_client_kind(self):
+        registry = {"clients": {
+            "api": {"capabilities": {"shell": False, "write": False}},
+            "opencode": {"capabilities": {"shell": True, "write": True}}},
+            "host_admission": {"max_live_workers": 10,
+                               "mem_available_floor_mb": 6144,
+                               "kinds": {"toolless": {"max_live_workers": 4,
+                                                       "mem_available_floor_mb": 1024}}}}
+        meminfo = self.meminfo(4000)
+
+        def refusal(**kwargs):
+            return self.agent.host_admission_refusal(
+                registry=registry, workers=self.workers, meminfo=meminfo,
+                platform="linux", **kwargs)
+
+        for worker_kind, client, expected_kind in (
+                ("toolless", "api", "toolless"),
+                ("tool-using", "api", "toolless"),
+                ("tool-using", "opencode", "tool-using"),
+                ("tool-using", "unknown", "tool-using"),
+                ("tool-using", None, "tool-using")):
+            with self.subTest(worker_kind=worker_kind, client=client):
+                for i in range(4):
+                    self.record("live%d" % i, os.getpid(), kind=worker_kind)
+                expected = refusal(kind=expected_kind)
+                request = {"task": "t", "cwd": str(ROOT)}
+                if client is not None:
+                    request["client"] = client
+                with mock.patch.object(mcp_server.agent, "load_registry", return_value=registry), \
+                        mock.patch.object(mcp_server.agent, "claude_spawn_refusal",
+                                          return_value=(None, None)), \
+                        mock.patch.object(mcp_server.agent, "host_admission_refusal",
+                                          side_effect=refusal) as gate, \
+                        mock.patch.object(mcp_server, "build_argv", return_value=([], {})), \
+                        mock.patch.object(mcp_server, "preflight",
+                                          return_value="reached preflight") as preflight, \
+                        mock.patch.object(mcp_server.subprocess, "Popen") as popen:
+                    out = mcp_server.spawn(request)
+                self.assertEqual(out["state"], "rejected")
+                self.assertEqual(out["error"], expected or "reached preflight")
+                gate.assert_called_once_with(kind=expected_kind)
+                self.assertEqual(preflight.called, expected is None)
+                popen.assert_not_called()
+
     def test_a_runner_refused_on_admission_reads_as_rejected_not_failed(self):
         # HOSTADMISSION-OFF: the pre-check and the runner's own gate are two
         # reads of one machine, and the machine may fill between them. When it
