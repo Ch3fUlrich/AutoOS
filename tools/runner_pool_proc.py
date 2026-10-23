@@ -2,6 +2,7 @@ import os
 import re
 import json
 import ctypes
+import subprocess
 from subprocess import list2cmdline
 
 import sys
@@ -38,7 +39,7 @@ def _validate_params(run_id, pid, filetime, mode):
         raise ValueError('invalid pid')
     if not isinstance(filetime, int) or isinstance(filetime, bool) or filetime < 0:
         raise ValueError('invalid filetime')
-    if mode not in _MODE_SET:
+    if not isinstance(mode, str) or mode not in _MODE_SET:
         raise ValueError('invalid mode')
 
 def write_run_private(slot_dir, run_id, pid, filetime, mode, write=None) -> bool:
@@ -57,7 +58,8 @@ def read_run_private(slot_dir):
     """Read run.private and validate its exact contents."""
     path = os.path.join(slot_dir, 'run.private')
     try:
-        raw = open(path, 'r', encoding='utf-8').read()
+        with open(path, 'r', encoding='utf-8') as stream:
+            raw = stream.read()
         data = json.loads(raw)
     except Exception as exc:  # JSONDecodeError or OSError
         raise ValueError('cannot read run.private') from exc
@@ -74,11 +76,16 @@ def read_run_private(slot_dir):
 # ----------------------------------------------------------------------
 # kill_job
 # ----------------------------------------------------------------------
-def kill_job(slot_dir, filetime_of, kill_tree, os_name=os.name):
+def kill_tree(argv, run=subprocess.run):
+    return run(argv).returncode == 0
+
+def kill_job(slot_dir, filetime_of, kill_tree, os_name=os.name, *, expect_run_id=None):
     """Terminate the job process according to stored metadata."""
     if os_name != 'nt':
         raise NotImplementedError
     info = read_run_private(slot_dir)  # may raise ValueError -> test expects
+    if expect_run_id is not None and info['run_id'] != expect_run_id:
+        return 'run-mismatch'
     pid = info['pid']
     stored_ft = info['filetime']
     cur_ft = filetime_of(pid)
@@ -86,14 +93,12 @@ def kill_job(slot_dir, filetime_of, kill_tree, os_name=os.name):
         return 'gone'
     if cur_ft != stored_ft:
         return 'filetime-mismatch'
-    kill_tree(['taskkill', '/T', '/F', '/PID', str(pid)])
-    return 'killed'
+    return 'killed' if kill_tree(['taskkill', '/T', '/F', '/PID', str(pid)]) else 'kill-failed'
 
 # ----------------------------------------------------------------------
 # job creation (Windows only)
 # ----------------------------------------------------------------------
 # ctypes structures
-import ctypes.wintypes as wintypes
 
 # Constants
 CREATE_SUSPENDED = 0x4
@@ -104,74 +109,23 @@ INFINITE = 0xFFFFFFFF
 JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
-class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
-    _fields_ = [
-        ('PerProcessUserTimeLimit', ctypes.c_longlong),
-        ('PerJobUserTimeLimit', ctypes.c_longlong),
-        ('LimitFlags', wintypes.DWORD),
-        ('MinimumWorkingSetSize', ctypes.c_size_t),
-        ('MaximumWorkingSetSize', ctypes.c_size_t),
-        ('ActiveProcessLimit', wintypes.DWORD),
-        ('Affinity', ctypes.c_size_t),
-        ('PriorityClass', wintypes.DWORD),
-        ('SchedulingClass', wintypes.DWORD),
-    ]
-
-class IO_COUNTERS(ctypes.Structure):
-    _fields_ = [
-        ('ReadOperationCount', ctypes.c_ulonglong),
-        ('WriteOperationCount', ctypes.c_ulonglong),
-        ('OtherOperationCount', ctypes.c_ulonglong),
-        ('ReadTransferCount', ctypes.c_ulonglong),
-        ('WriteTransferCount', ctypes.c_ulonglong),
-        ('OtherTransferCount', ctypes.c_ulonglong),
-    ]
-
-class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
-    _fields_ = [
-        ('BasicLimitInformation', JOBOBJECT_BASIC_LIMIT_INFORMATION),
-        ('IoInfo', IO_COUNTERS),
-        ('ProcessMemoryLimit', ctypes.c_size_t),
-        ('JobMemoryLimit', ctypes.c_size_t),
-        ('PeakProcessMemoryUsed', ctypes.c_size_t),
-        ('PeakJobMemoryUsed', ctypes.c_size_t),
-    ]
-
-class STARTUPINFOW(ctypes.Structure):
-    _fields_ = [
-        ('cb', wintypes.DWORD),
-        ('lpReserved', wintypes.LPWSTR),
-        ('lpDesktop', wintypes.LPWSTR),
-        ('lpTitle', wintypes.LPWSTR),
-        ('dwX', wintypes.DWORD),
-        ('dwY', wintypes.DWORD),
-        ('dwXSize', wintypes.DWORD),
-        ('dwYSize', wintypes.DWORD),
-        ('dwXCountChars', wintypes.DWORD),
-        ('dwYCountChars', wintypes.DWORD),
-        ('dwFillAttribute', wintypes.DWORD),
-        ('dwFlags', wintypes.DWORD),
-        ('wShowWindow', wintypes.WORD),
-        ('cbReserved2', wintypes.WORD),
-        ('lpReserved2', wintypes.LPVOID),
-        ('hStdInput', wintypes.HANDLE),
-        ('hStdOutput', wintypes.HANDLE),
-        ('hStdError', wintypes.HANDLE),
-    ]
-
-class PROCESS_INFORMATION(ctypes.Structure):
-    _fields_ = [
-        ('hProcess', wintypes.HANDLE),
-        ('hThread', wintypes.HANDLE),
-        ('dwProcessId', wintypes.DWORD),
-        ('dwThreadId', wintypes.DWORD),
-    ]
-
-class FILETIME(ctypes.Structure):
-    _fields_ = [
-        ('dwLowDateTime', wintypes.DWORD),
-        ('dwHighDateTime', wintypes.DWORD),
-    ]
+def _init_nt_types():
+    global wintypes, JOBOBJECT_BASIC_LIMIT_INFORMATION, IO_COUNTERS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, STARTUPINFOW, PROCESS_INFORMATION, FILETIME
+    if "wintypes" in globals():
+        return
+    import ctypes.wintypes as wintypes
+    class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [('PerProcessUserTimeLimit', ctypes.c_longlong), ('PerJobUserTimeLimit', ctypes.c_longlong), ('LimitFlags', wintypes.DWORD), ('MinimumWorkingSetSize', ctypes.c_size_t), ('MaximumWorkingSetSize', ctypes.c_size_t), ('ActiveProcessLimit', wintypes.DWORD), ('Affinity', ctypes.c_size_t), ('PriorityClass', wintypes.DWORD), ('SchedulingClass', wintypes.DWORD),]
+    class IO_COUNTERS(ctypes.Structure):
+        _fields_ = [('ReadOperationCount', ctypes.c_ulonglong), ('WriteOperationCount', ctypes.c_ulonglong), ('OtherOperationCount', ctypes.c_ulonglong), ('ReadTransferCount', ctypes.c_ulonglong), ('WriteTransferCount', ctypes.c_ulonglong), ('OtherTransferCount', ctypes.c_ulonglong),]
+    class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+        _fields_ = [('BasicLimitInformation', JOBOBJECT_BASIC_LIMIT_INFORMATION), ('IoInfo', IO_COUNTERS), ('ProcessMemoryLimit', ctypes.c_size_t), ('JobMemoryLimit', ctypes.c_size_t), ('PeakProcessMemoryUsed', ctypes.c_size_t), ('PeakJobMemoryUsed', ctypes.c_size_t),]
+    class STARTUPINFOW(ctypes.Structure):
+        _fields_ = [('cb', wintypes.DWORD), ('lpReserved', wintypes.LPWSTR), ('lpDesktop', wintypes.LPWSTR), ('lpTitle', wintypes.LPWSTR), ('dwX', wintypes.DWORD), ('dwY', wintypes.DWORD), ('dwXSize', wintypes.DWORD), ('dwYSize', wintypes.DWORD), ('dwXCountChars', wintypes.DWORD), ('dwYCountChars', wintypes.DWORD), ('dwFillAttribute', wintypes.DWORD), ('dwFlags', wintypes.DWORD), ('wShowWindow', wintypes.WORD), ('cbReserved2', wintypes.WORD), ('lpReserved2', wintypes.LPVOID), ('hStdInput', wintypes.HANDLE), ('hStdOutput', wintypes.HANDLE), ('hStdError', wintypes.HANDLE),]
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [('hProcess', wintypes.HANDLE), ('hThread', wintypes.HANDLE), ('dwProcessId', wintypes.DWORD), ('dwThreadId', wintypes.DWORD),]
+    class FILETIME(ctypes.Structure):
+        _fields_ = [('dwLowDateTime', wintypes.DWORD), ('dwHighDateTime', wintypes.DWORD),]
 
 _k32_instance = None
 
@@ -179,7 +133,10 @@ def _k32():
     global _k32_instance
     if _k32_instance is not None:
         return _k32_instance
+    _init_nt_types()
     k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = ctypes.c_void_p
     k32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
     k32.CreateJobObjectW.restype = wintypes.HANDLE
     k32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
@@ -390,7 +347,7 @@ def _nt_filetime(pid):
         return None
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     STILL_ACTIVE = 259
-    k32 = ctypes.windll.kernel32
+    k32 = _k32()
     h = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
     if not h:
         return None
@@ -400,8 +357,6 @@ def _nt_filetime(pid):
             return None
         if code.value != STILL_ACTIVE:
             return None
-        class FILETIME(ctypes.Structure):
-            _fields_ = [('dwLowDateTime', ctypes.c_ulong), ('dwHighDateTime', ctypes.c_ulong)]
         creation = FILETIME()
         exit_t = FILETIME()
         kernel = FILETIME()
@@ -415,15 +370,7 @@ def _nt_filetime(pid):
 def filetime_of(pid):
     if os.name == 'nt':
         return _nt_filetime(pid)
-    state, start = _posix_state_start(pid)
-    if start is None:
-        return None
-    if state == 'Z':
-        return None
-    try:
-        return int(start)
-    except ValueError:
-        return None
+    return None
 
 def pid_alive(pid):
     if os.name == 'nt':

@@ -135,7 +135,34 @@ class TestWriteReadRunPrivate(unittest.TestCase):
         with self.assertRaises(ValueError):
             proc.read_run_private(self.slot_dir)
 
+    def test_malformed_metadata_is_value_error(self):
+        cases = [[], 'text', 1, None, {}]
+        for key in self._valid_params():
+            for bad in ([], {}, None):
+                cases.append(dict(self._valid_params(), **{key: bad}))
+        for data in cases:
+            with self.subTest(data=data):
+                (self.slot_dir / 'run.private').write_text(json.dumps(data))
+                with self.assertRaises(ValueError):
+                    proc.read_run_private(self.slot_dir)
+
 class TestKillJob(unittest.TestCase):
+    def test_kill_tree_adapter(self):
+        self.assertTrue(hasattr(proc, 'kill_tree'))
+        for code in (0, 1):
+            run = mock.Mock(return_value=mock.Mock(returncode=code))
+            self.assertEqual(proc.kill_tree(['taskkill', '/PID', '42'], run=run), code == 0)
+            run.assert_called_once_with(['taskkill', '/PID', '42'])
+
+    def test_failed_kill_and_run_mismatch(self):
+        self._make_run_private(4242, 111)
+        kt = mock.Mock(return_value=False)
+        self.assertEqual(proc.kill_job(self.slot_dir, lambda _: 111, kt, os_name='nt'), 'kill-failed')
+        kt.reset_mock()
+        self.assertEqual(proc.kill_job(self.slot_dir, lambda _: 111, kt, os_name='nt',
+                                       expect_run_id='new-run'), 'run-mismatch')
+        kt.assert_not_called()
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.slot_dir = pathlib.Path(self.tmp.name)
@@ -197,6 +224,34 @@ class TestKillJob(unittest.TestCase):
         kt.assert_not_called()
 
 class TestCreateJobNt(unittest.TestCase):
+    def test_lazy_windows_types_and_non_nt_filetime(self):
+        import subprocess
+        code = """
+import builtins, os, sys
+original = builtins.__import__
+def guarded(name, *args, **kwargs):
+    if name == 'ctypes.wintypes':
+        raise AssertionError('eager Windows import')
+    return original(name, *args, **kwargs)
+builtins.__import__ = guarded
+sys.path.insert(0, 'tools')
+import runner_pool_proc as p
+os.name = 'posix'
+assert p.filetime_of(123) is None
+"""
+        subprocess.run([sys.executable, '-c', code], check=True)
+
+    def test_filetime_uses_typed_handle_and_closes(self):
+        k32 = mock.Mock()
+        k32.OpenProcess.return_value = 1 << 40
+        k32.GetExitCodeProcess.side_effect = lambda h, p: setattr(p._obj, 'value', 259) or 1
+        with mock.patch.object(proc, '_k32_instance', None), mock.patch.object(
+                proc.ctypes, 'WinDLL', return_value=k32, create=True):
+            with mock.patch.object(proc.os, 'name', 'nt'):
+                proc._nt_filetime(42)
+        self.assertEqual(k32.OpenProcess.restype, proc.ctypes.c_void_p)
+        k32.CloseHandle.assert_called_once_with(1 << 40)
+
     def test_posix_raises(self):
         with self.assertRaises(NotImplementedError):
             proc.create_job_nt(os_name="posix")
