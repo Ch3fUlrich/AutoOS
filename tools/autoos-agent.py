@@ -13327,7 +13327,7 @@ def _write_worker_record(path: str, record: dict) -> None:
     os.replace(tmp, path)
 
 
-def _worker_record_start(plan: dict, args, directory: str, attempt=None):
+def _worker_record_start(plan: dict, args, directory: str, attempt=None, *, kind=None):
     """Write the live record; return (id, record) for the ended rewrite.
 
     FLEETSPEC P0: the record's id IS the run id the plan minted (it used to be a
@@ -13357,9 +13357,10 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None):
     # D-807: one resolution for the record, read off the model the plan launched.
     plan_family, plan_family_source, plan_family_reason = run_model_family(
         plan.get("launched_model") or plan.get("model"), client=plan.get("client"))
-    # Derive admission kind from the plan's client (fail closed)
-    registry = load_registry(REGISTRY_PATH) if plan.get("client") else {}
-    kind = host_run_kind(plan.get("client"), registry)
+    # Preserve the claimed kind across handover, including --registry overrides.
+    if kind is None:
+        registry = load_registry(REGISTRY_PATH) if plan.get("client") else {}
+        kind = host_run_kind(plan.get("client"), registry)
     record = redact_record({
         "id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
         "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
@@ -13584,29 +13585,12 @@ def visible_workers(directory: str, include_ended: bool = False, now=None) -> li
             or (_parse_iso(r["ended"]) or cutoff) > cutoff]
 
 
-def host_admission_config(registry=None, platform=None) -> tuple:
-    """(max_live_workers, mem_available_floor_mb) - the host's own limits.
-
-    catalog/ai-registry.json's `host_admission` with platform overrides is the single source
-    (operator order 2026-10-08). A section that is absent, or a field that is not
-    a number, takes the documented default rather than no limit: an unparseable
-    cap must not read as an unbounded host. AUTOOS_ADMISSION_OFF=1 is the
-    test-only escape, honoured by `host_admission_refusal`, not by the numbers.
-
-    If ANY top-level field is invalid (< 1 or not an int), BOTH fall back to
-    code defaults (6, 6144) - fail closed for the entire section.
-    """
-    return tuple(_host_admission_value(registry, platform, field, default)
-                 for field, default in (
-                     ("max_live_workers", ADMISSION_MAX_LIVE_DEFAULT),
-                     ("mem_available_floor_mb", ADMISSION_MEM_FLOOR_MB_DEFAULT)))
-
-
 def host_admission_commit_max(registry=None, platform=None):
-    return _host_admission_value(registry, platform, "commit_charge_max_pct", None)
+    return _host_admission_value(registry, platform, "commit_charge_max_pct", None,
+                                 minimum=1, maximum=100)
 
 
-def _host_admission_value(registry, platform, field, default, minimum=None):
+def _host_admission_value(registry, platform, field, default, minimum=None, maximum=None):
     # `minimum`: a value below it is skipped (a cap of 0 would refuse every run, a
     # negative floor would disable the memory guard), so the next source wins.
     if registry is None:
@@ -13622,13 +13606,19 @@ def _host_admission_value(registry, platform, field, default, minimum=None):
     override = override if isinstance(override, dict) else {}
     for source in (override, section):
         value = source.get(field)
-        if isinstance(value, int) and not isinstance(value, bool)                 and (minimum is None or value >= minimum):
+        if (isinstance(value, int) and not isinstance(value, bool)
+                and (minimum is None or value >= minimum)
+                and (maximum is None or value <= maximum)):
             return value
     return default
 
 
 def host_admission_config(registry=None, platform=None) -> tuple:
-    """Host cap and memory floor, with per-platform overrides."""
+    """Host cap and memory floor, resolved independently per field.
+
+    Invalid values (below 1, bool, str, or other non-integers) are skipped:
+    try the platform override, then the top-level field, then the code default.
+    """
     return (
         _host_admission_value(
             registry, platform, "max_live_workers", ADMISSION_MAX_LIVE_DEFAULT, 1),
@@ -13813,8 +13803,8 @@ def host_admission_refusal(registry=None, workers=None, meminfo=None,
                            memstatus=None, platform=None, kind="tool-using"):
     """Return a refusal or None; total cap precedes kind cap and memory floor.
 
-    Unreadable meminfo stands down. An unreadable native Windows status
-    instead refuses when the applicable memory floor is positive.
+    Unreadable meminfo or native Windows status stands down the memory half;
+    the live-worker caps still bind.
     The platform-aware commit-charge ceiling applies to both kinds.
     """
     if os.environ.get(ADMISSION_OFF_ENV) == "1":
@@ -14681,7 +14671,8 @@ def cmd_run(args, cfg: dict) -> int:
             workers = workers_dir()
             env["AUTOOS_WORKERS_DIR"] = workers
             worker_id, worker_rec = _worker_record_start(plan, args, workers,
-                                                         attempt=fallthroughs + cooldown_retries + 1)
+                                                         attempt=fallthroughs + cooldown_retries + 1,
+                                                         kind=kind)
         except Exception as exc:  # noqa: BLE001
             print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
         scope_rec = (worker_rec or {}).get("scope") or scope_rec

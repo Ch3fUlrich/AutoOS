@@ -7446,9 +7446,9 @@ class FreeCooldownReclaimTests(unittest.TestCase):
         claims, launches = [], []
         real_record = self.agent._worker_record_start
 
-        def recording_record(plan, args, directory, attempt=None):
+        def recording_record(plan, args, directory, attempt=None, **kwargs):
             launches.append(attempt)
-            return real_record(plan, args, directory, attempt=attempt)
+            return real_record(plan, args, directory, attempt=attempt, **kwargs)
 
         def fake_wait(provider, cap, directory, **k):
             if len(claims) + 1 == refuse_claim_at:
@@ -26486,7 +26486,7 @@ class HostAdmissionWindowsTests(unittest.TestCase):
         self.assertIn("the memory floor", self.refusal((12287, 70)))
 
     def test_commit_ceiling_inclusive(self):
-        for pct in (80, 85):
+        for pct in (80.0, 85):
             text = self.refusal((12288, pct))
             for part in ("0 live workers, cap 20", "floor 12288 MB",
                          "commit charge %d%% >= max 80%%" % pct,
@@ -26525,6 +26525,18 @@ class HostAdmissionWindowsTests(unittest.TestCase):
         self.assertEqual(self.agent.host_admission_commit_max(registry, "win32"), 90)
         registry["host_admission"]["by_platform"]["win32"] = []
         self.assertEqual(self.agent.host_admission_config(registry, "win32"), (10, 1024))
+
+    def test_commit_max_bounds_and_fallback(self):
+        for value in (0, -1, 101, 800, True, "80", 80, 100):
+            with self.subTest(value=value):
+                section = {"commit_charge_max_pct": 90, "by_platform": {
+                    "win32": {"commit_charge_max_pct": value}}}
+                valid = type(value) is int and 1 <= value <= 100
+                self.assertEqual(self.agent.host_admission_commit_max(
+                    {"host_admission": section}, "win32"), value if valid else 90)
+                section["commit_charge_max_pct"] = value
+                self.assertEqual(self.agent.host_admission_commit_max(
+                    {"host_admission": section}, "win32"), value if valid else None)
 
 
 class HostAdmissionTests(unittest.TestCase):
@@ -26678,7 +26690,7 @@ class HostAdmissionTests(unittest.TestCase):
                                   free_model=self.agent.DEFAULT_FREE_MODEL,
                                   max_depth=None, allow_training=False, no_defer=False)
 
-    def run_cmd(self, dry_run, extra_env=None):
+    def run_cmd(self, dry_run, extra_env=None, registry_path=None):
         """cmd_run with the route settled (build_plan patched) and the client
         neutralised, so the only thing that can stop it is the host's own room."""
         started = []
@@ -26688,15 +26700,36 @@ class HostAdmissionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=False), \
                 mock.patch.object(self.agent, "build_plan", return_value=self.plan()), \
                 mock.patch.object(self.agent, "run_client",
-                                  side_effect=lambda *a, **k: started.append(1)), \
+                                  side_effect=lambda *a, **k: (started.append(1) or 0)), \
                 mock.patch.object(self.agent, "gateway_up", return_value=True), \
                 mock.patch.object(self.agent, "client_key", return_value="sk-test-key"), \
                 mock.patch.object(self.agent.clients, "signin_state",
                                   lambda client, env=None: (None, "")), \
                 mock.patch("shutil.which", return_value="/usr/bin/opencode"):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                rc = self.agent.cmd_run(self.args(dry_run), {})
+                args = self.args(dry_run)
+                args.registry = registry_path
+                if registry_path is not None:
+                    args.free = True
+                rc = self.agent.cmd_run(args, {})
         return rc, out.getvalue(), err.getvalue(), started
+
+    def test_cmd_run_alternate_registry_preserves_claim_kind_in_record(self):
+        registry = json.loads(json.dumps(SHIPPED_REGISTRY))
+        registry["clients"]["opencode"]["capabilities"] = {"shell": False, "write": False}
+        path = os.path.join(self.tmp, "alt.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(registry, fh)
+        with mock.patch.object(self.agent, "host_admission_claim",
+                               wraps=self.agent.host_admission_claim) as claim:
+            rc, out, err, started = self.run_cmd(
+                False, {"AUTOOS_MEMINFO_PATH": self.meminfo(32000)}, registry_path=path)
+        self.assertEqual(rc, 0, out + err)
+        self.assertTrue(started)
+        self.assertEqual(claim.call_args.kwargs["kind"], "toolless")
+        with open(os.path.join(self.workers, self.plan()["run_id"] + ".json"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["kind"], claim.call_args.kwargs["kind"])
 
     def test_cmd_run_refuses_for_admission_with_its_own_exit_code(self):
         # The shipped cap, the shipped floor, a host at both: the run ends before
@@ -27151,7 +27184,8 @@ class HostAdmissionTests(unittest.TestCase):
                                "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}}
         }
         args = argparse.Namespace(task="do it", title=None)
-        wid, rec = self.agent._worker_record_start(plan, args, self.workers)
+        wid, rec = self.agent._worker_record_start(
+            plan, args, self.workers, kind=self.agent.host_run_kind("api", registry))
         self.assertEqual(rec.get("kind"), "toolless")
 
     def test_kindless_record_counts_as_tool_using(self):
