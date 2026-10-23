@@ -13,7 +13,7 @@ answer. Nothing here runs a test; it only decides.
 | workflow, dependency or CI file changed | the **full** suite |
 | a path no map rule names (unknown) | the **full** suite |
 | map missing or broken, diff unreadable, selector failed | the **full** suite |
-| docs-only (all paths in `ignore`) | nothing |
+| docs-only (all paths in `ignore`) | only the map's `always_jobs` |
 
 There is no nightly run. Two checks are required for merge: the `CI merge gate` job
 (red only when a job failed or was cancelled) and the commit status
@@ -113,6 +113,7 @@ for any label; only `merge-ready` (input `merge_label`) makes the run full, and
 
 Outputs of `smart`: `mode` (`full`/`selected`/`none`), `full`, `reason`, `jobs`
 (JSON object, job name to bool), `tests` (space separated), `tests_json`.
+Mode `none` still runs `always_jobs`; it selects no tests or other jobs.
 
 For python, pytest-testmon is an alternative to the path map: it needs a cache that
 survives between runs, which self-hosted slots do not guarantee, so the committed
@@ -169,17 +170,16 @@ Pass `results` as `name=result` pairs so the gate can tell which job it was.
 | Key | Meaning |
 |---|---|
 | `jobs` | every job name the caller gates on |
-| `always_jobs` | jobs that run whenever anything non-ignorable changed (lint, secret scan) |
-| `ignore` | paths that need nothing (docs); all-ignored diff gives mode `none` |
+| `always_jobs` | jobs that run even for an all-ignored diff (lint, secret scan) |
+| `ignore` | paths that need no additional work (docs); all-ignored diff gives mode `none`, still running `always_jobs` |
 | `full_if` | extra patterns that force a full run, on top of the built-in ones |
-| `planner` | optional `{"argv":[...]}` command with `{base}` substitution; requires `--base`; consumed only for paths no rule names. Only `plan.parts` is used to select CI shards; non-empty terms, empty parts (including pytest-only plans), or any failure make the run full |
 | `rules[].paths` | globs a changed file must match |
 | `rules[].tests` | tests to run for it; `{path}` = the changed file itself; a caller-defined token such as `*` is passed through untouched |
 | `rules[].jobs` | jobs to turn on (must be in `jobs`) |
 
 Globs are anchored at the repo root: `**` crosses directories, `*` and `?` do not
-(no `[...]` classes). Every changed file must be ignored or match a rule unless a
-planner is configured: without one, an unplaced file makes the run full, so a new
+(no `[...]` classes). Every changed file must be ignored or match a rule: one
+unplaced file makes the run full, so a new
 directory is slow until it is mapped, never unchecked. Keep the map conservative:
 when unsure, leave the path out.
 

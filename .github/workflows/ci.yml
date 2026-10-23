@@ -314,7 +314,8 @@ jobs:
   # "Full suite (merge-ready)" PENDING, which blocks merge without a red cross; the
   # merge-ready label (or a dispatch with full=true) runs the full suite and turns
   # that status success. Make this status, plus "CI merge gate", the required checks.
-  # A fork PR has a read-only token: the status call is best effort there.
+  # A fork PR token is read-only: the gate cannot post the status, so the job is red.
+  # A maintainer re-pushes the branch from this repository to let the gate post it.
   merge-gate:
     name: CI merge gate
     if: always()
@@ -352,7 +353,7 @@ jobs:
               success) ;;
               skipped)
                 # the one allowed skip in a full run: Windows while it is switched off
-                if [ "$FULL" = true ] && ! { [ "$name" = windows ] && [ "$WINDOWS_ENABLED" != true ]; }; then
+                if [ "$FULL" = true ] && ! { [ "$name" = windows ] && [ "$(printf %s "$WINDOWS_ENABLED" | tr '[:upper:]' '[:lower:]')" != true ]; }; then
                   post failure "full run but $name was skipped"; echo "::error::full run but $name was skipped"; exit 1
                 fi ;;
               *) post failure "$name ended $r"; echo "::error::$name ended $r"; exit 1 ;;

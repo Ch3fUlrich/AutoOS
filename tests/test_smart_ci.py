@@ -299,6 +299,7 @@ class WorkflowShellTests(unittest.TestCase):
         self.assertEqual(self.gate("push", "true", self.OK + " windows=skipped"), (0, "success"))
 
     def test_full_run_requires_windows_once_it_is_enabled(self):
+        self.assertEqual(self.gate("push", "true", self.OK + " windows=skipped", "True"), (1, "failure"))
         self.assertEqual(self.gate("push", "true", self.OK + " windows=skipped", "true"), (1, "failure"))
         self.assertEqual(self.gate("push", "true", self.OK + " windows=failure", "true"), (1, "failure"))
         self.assertEqual(self.gate("push", "true", self.OK + " windows=success", "true"), (0, "success"))
@@ -375,6 +376,31 @@ class RepoMapTests(unittest.TestCase):
 
     def setUp(self):
         self.m = sel.load_map(str(ROOT / ".github" / "smart-ci.json"))
+
+    def test_smart_runner_uses_the_same_fork_guard_as_self_hosted_jobs(self):
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        smart = text.split("  smart:", 1)[1].split("\n  linux-plan:", 1)[0]
+        value = re.search(r"^      runs_on: \$\{\{ (.*) \}\}$", smart, re.MULTILINE).group(1)
+        self.assertTrue(value.startswith("toJSON(") and value.endswith(")"))
+        expression = value[len("toJSON("):-1]
+        runners = re.findall(r"^    runs-on: \$\{\{ (.*) \}\}$", text, re.MULTILINE)
+        linux_runners = [runner for runner in runners if "self-hosted" in runner and "ubuntu-latest" in runner]
+        self.assertTrue(linux_runners)
+        for runner in linux_runners:
+            with self.subTest(runner=runner):
+                self.assertEqual(expression, runner)
+                self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", runner)
+                self.assertIn("ubuntu-latest", runner)
+
+    def test_job_conditions_put_full_fallback_before_jobs_json(self):
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        conditions = [line for line in text.splitlines()
+                      if line.lstrip().startswith("if:") and "fromJSON(needs.smart.outputs.jobs)." in line]
+        self.assertTrue(conditions)
+        for line in conditions:
+            with self.subTest(condition=line):
+                prefix = line.split("fromJSON(needs.smart.outputs.jobs).", 1)[0]
+                self.assertIn("needs.smart.outputs.full == 'true' ||", prefix)
 
     def test_workflow_job_conditions_match_map_exactly(self):
         text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
