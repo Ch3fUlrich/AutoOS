@@ -22,6 +22,45 @@ import api_client as api
 from types import SimpleNamespace
 
 class TestConsolidated(unittest.TestCase):
+    def test_round3_kill_and_slot_shapes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            slot = root / 'slots' / '1'
+            slot.mkdir(parents=True)
+            for value in ([], 'x', None, {'job': []}):
+                (slot / 'slot.json').write_text(json.dumps(value))
+                self.assertIsNone(pool._find_slot(root, 'a'))
+            (slot / 'slot.json').write_text('{')
+            self.assertEqual(pool.build_status(root, 1, lambda _: True, lambda _: 1)
+                             ['slots'][0]['state'], 'slot-unreadable')
+            (slot / 'slot.json').write_text('{"job":"a"}')
+            for result in ('killed', 'kill-failed', 'run-mismatch', 'gone', 'filetime-mismatch'):
+                fake = SimpleNamespace(kill_job=lambda *a, **kw: (
+                    self.assertEqual(kw['expect_run_id'], 'a') or result))
+                out = io.StringIO()
+                with patch.object(pool, 'spool_root', return_value=root):
+                    rc = pool._cmd_kill(['a'], {}, out,
+                        {'kill_tree': lambda _: True, 'filetime_of': lambda _: 1}, fake)
+                self.assertEqual(out.getvalue(), result + '\n')
+                self.assertEqual(rc, 0 if result in ('killed', 'gone') else 1)
+
+    def test_round3_serialized_argv(self):
+        for brief in ('"' * 17000, '\U0001f600' * 20000, 'x' * 30001):
+            with self.assertRaises(ValueError):
+                pool.job_argv({'id': 'a', 'card': {'client': 'api'}, 'brief': brief}, TOOLS, 'py')
+        pool.job_argv({'id': 'a', 'card': {'client': 'api'}, 'brief': 'ordinary'}, TOOLS, 'py')
+
+    def test_round3_status_snapshot(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = {'LOCALAPPDATA': td}
+            pool.main(['slot', '--once'], env, io.BytesIO(), io.StringIO(),
+                      {'slot_deps': pool.Deps(spawn=lambda *a: 0)})
+            path = pool.spool_root(env) / 'status.json'
+            self.assertEqual(set(json.loads(path.read_text())), {'slots', 'queue_depth', 'oldest_wait_s'})
+            pool.write_slot_state(pool.spool_root(env), 1, 'running', {'brief': 'SECRET'}, 1, 1, 1)
+            pool.main(['status'], env, io.BytesIO(), io.StringIO())
+            self.assertNotIn('SECRET', path.read_text())
+
     def test_admission_kind(self):
         for client, expected in (('api', 'toolless'), ('other', 'tool-using')):
             with tempfile.TemporaryDirectory() as td:
@@ -283,7 +322,7 @@ class TestCli(unittest.TestCase):
                     proc.kill_job(slot, lambda _: 1, lambda _: self.fail('must not kill'), os_name='nt')
                 out = io.StringIO()
                 self.assertEqual(pool.main(['kill', 'job-7'], env, io.BytesIO(), out,
-                                          deps={'os_name': 'nt'}), 1)
+                                          deps={'os_name': 'nt', 'kill_tree': lambda _: True}), 1)
                 self.assertIn('refused: bad run.private', out.getvalue())
 
     def test_ssh_gate_submit(self):
@@ -428,7 +467,7 @@ class TestCli(unittest.TestCase):
             (slot / 'slot.json').write_text(json.dumps({'job': {'id': jobid}}))
             (slot / 'run.private').write_text('{}')
             calls = []
-            def fake_kill_job(slot_dir, filetime_of, kill_tree, os_name=None):
+            def fake_kill_job(slot_dir, filetime_of, kill_tree, os_name=None, expect_run_id=None):
                 calls.append((slot_dir, filetime_of, kill_tree, os_name))
                 return 'killed'
             orig = proc.kill_job

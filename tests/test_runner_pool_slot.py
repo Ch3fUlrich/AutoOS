@@ -3,6 +3,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -86,6 +87,50 @@ class TestSlot(unittest.TestCase):
         self.assertTrue((self.root / 'queue' / 'j1.json').exists())
         self.assertEqual(self._slot()['state'], 'breaker-open')
         self.assertEqual(self.spawn_calls, [])
+
+    def test_round3_failed_requeue_preserves_claim(self):
+        for mode in ('memory', 'rc13'):
+            self._q('j1')
+            mem = iter((99999, 0)) if mode == 'memory' else iter((99999, 99999))
+            with patch.object(rpc, 'write_json_atomic', return_value=False):
+                self.assertEqual(pool.run_one(self.root, 1, self._deps(
+                    mem_mb=lambda: next(mem), spawn=lambda *a: 13)), 'requeue-failed')
+            claim = self.root / 'slots' / '1' / 'j1.json'
+            self.assertTrue(claim.exists())
+            claim.unlink()
+
+    def test_round3_claimed_admission(self):
+        self._q('j1', card={'client': 'api'})
+        deps = self._deps()
+        clients = []
+        deps.claimed_admission = lambda job: clients.append(job['card']['client']) or 'full'
+        self.assertEqual(pool.run_one(self.root, 1, deps), 'requeued-refused')
+        self.assertEqual(clients, ['api'])
+        self.assertEqual(self.spawn_calls, [])
+
+    def test_round3_failed_done_write_preserves_claim(self):
+        self._q('j1')
+        real_write = rpc.write_json_atomic
+        def write(path, obj):
+            return False if Path(path).parent.name == 'done' else real_write(path, obj)
+        with patch.object(rpc, 'write_json_atomic', side_effect=write):
+            self.assertEqual(pool.run_one(self.root, 1, self._deps()), 'record-failed')
+        self.assertTrue((self.root / 'slots' / '1' / 'j1.json').exists())
+
+    def test_round3_live_and_stale_lock_and_done_recovery(self):
+        import runner_pool_proc as proc
+        slot = self.root / 'slots' / '1'
+        claim = slot / 'j1.json'
+        claim.write_text(json.dumps(self._q('j1')))
+        (slot / 'slot.lock').write_text(json.dumps({'pid': os.getpid(), 'filetime': proc.filetime_of(os.getpid())}))
+        for _ in range(2):
+            self.assertEqual(pool.run_one(self.root, 1, self._deps()), 'slot-busy')
+            self.assertTrue(claim.exists())
+        (slot / 'slot.lock').write_text('{"pid":99999999,"filetime":1}')
+        (self.root / 'done' / 'j1.json').write_text('{}')
+        self.assertEqual(pool.run_one(self.root, 1, self._deps()), 'recovered-done')
+        self.assertFalse(claim.exists())
+        self.assertFalse((slot / 'slot.lock').exists())
 
     def test_memory_none(self):
         self._q('j1')

@@ -119,7 +119,7 @@ def build_status(root: Path, now, pid_alive, filetime_of, *, T=HEARTBEAT_T):
             except Exception:
                 slot_rec = {
                     'slot': n,
-                    'state': 'slot-dead',
+                    'state': 'slot-unreadable',
                     'job': None,
                     'since': None,
                     'heartbeat': None,
@@ -190,8 +190,8 @@ def job_argv(job: dict, repo_root: Path, python: str):
     argv += ['--', brief]
 
     # Total command line length check
-    total = sum(len(a.encode('utf-16-le')) // 2 for a in argv) + len(argv) - 1
-    if total > 30000:
+    total = len(subprocess.list2cmdline(argv).encode('utf-16-le')) // 2
+    if len(brief) > 30000 or total > 32000:
         raise ValueError('argv-too-long')
 
     return argv
@@ -238,7 +238,7 @@ class Deps:
     def __init__(self, *, spawn, admission_refusal=lambda: None, mem_mb=lambda: 99999,
                  floor_mb=RUNNER_POOL_FLOOR_MB, breaker_open=lambda: False, risk_of=default_risk_of,
                  diff_info=lambda job: (False, False), sample_every=RUNNER_POOL_SAMPLE_EVERY,
-                 now=time.time, pid=os.getpid(), filetime=0,
+                  now=time.time, pid=os.getpid(), filetime=None,
                  repo_root=Path(__file__).resolve().parent.parent, python=sys.executable,
                  sleep=time.sleep,
                  environ=None):
@@ -252,6 +252,9 @@ class Deps:
         self.sample_every = sample_every
         self.now = now
         self.pid = pid
+        if filetime is None:
+            import runner_pool_proc as proc
+            filetime = proc.filetime_of(pid)
         self.filetime = filetime
         self.repo_root = repo_root
         self.python = python
@@ -277,6 +280,28 @@ def _merge_decision(deep, decision):
         deep.setdefault('reasons', []).append(decision)
 
 def run_one(root, n, deps):
+    import runner_pool_proc as proc
+    slot_dir = Path(root) / 'slots' / str(n)
+    slot_dir.mkdir(parents=True, exist_ok=True)
+    lock = slot_dir / 'slot.lock'
+    # Serialize stale-lock replacement; an incomplete owner record fails closed.
+    with rpc.locked(slot_dir / '.lock-guard'):
+        if lock.exists():
+            try:
+                owner = json.loads(lock.read_text())
+                if proc.pid_alive(owner['pid']) and proc.filetime_of(owner['pid']) == owner['filetime']:
+                    return 'slot-busy'
+            except (ValueError, TypeError, KeyError, OSError):
+                return 'slot-busy'
+            lock.unlink()
+        with lock.open('x', encoding='utf-8') as stream:
+            json.dump({'pid': deps.pid, 'filetime': deps.filetime}, stream)
+    try:
+        return _run_one_locked(root, n, deps)
+    finally:
+        lock.unlink()
+
+def _run_one_locked(root, n, deps):
     root = Path(root)
     ensure_dirs(root)
     queue_dir = root / 'queue'
@@ -304,6 +329,9 @@ def run_one(root, n, deps):
     claimed_files = [p for p in slot_dir.glob('*.json') if p.name != 'slot.json']
     if claimed_files:
         job_path = claimed_files[0]
+        if (done_dir / job_path.name).exists():
+            job_path.unlink()
+            return 'recovered-done'
         res = rpc.requeue_dead(str(job_path), str(queue_dir), str(failed_dir))
         if job_path.exists():
             try:
@@ -355,7 +383,8 @@ def _run_claimed(root, n, deps, claimed_path, now):
     mem2 = deps.mem_mb()
     if mem2 is None or mem2 < deps.floor_mb:
         qpath = queue_dir / claimed_path.name
-        rpc.write_json_atomic(str(qpath), job)
+        if not rpc.write_json_atomic(str(qpath), job):
+            return 'requeue-failed'
         if claimed_path.exists():
             try:
                 claimed_path.unlink()
@@ -364,6 +393,12 @@ def _run_claimed(root, n, deps, claimed_path, now):
         write_slot_state(root, n, 'idle', None, now, deps.pid, deps.filetime)
         return 'memory-recheck'
 
+    claimed_admission = getattr(deps, 'claimed_admission', lambda job: None)
+    if claimed_admission(job):
+        if not rpc.write_json_atomic(queue_dir / claimed_path.name, job):
+            return 'requeue-failed'
+        claimed_path.unlink()
+        return 'requeued-refused'
     argv = job_argv(job, deps.repo_root, deps.python)
 
     log_path = log_dir / f"{job['id']}.log"
@@ -375,7 +410,8 @@ def _run_claimed(root, n, deps, claimed_path, now):
 
     if rc == 13:
         qpath = queue_dir / f"{job['id']}.json"
-        rpc.write_json_atomic(str(qpath), job)
+        if not rpc.write_json_atomic(str(qpath), job):
+            return 'requeue-failed'
         if claimed_path.exists():
             try:
                 claimed_path.unlink()
@@ -395,7 +431,8 @@ def _run_claimed(root, n, deps, claimed_path, now):
     if risk != 'R0':
         deep.setdefault('reasons', []).append('risk')
     rec = done_record(job, rc, started, ended, deep)
-    rpc.write_json_atomic(str(done_dir / f"{job['id']}.json"), rec)
+    if not rpc.write_json_atomic(str(done_dir / f"{job['id']}.json"), rec):
+        return 'record-failed'
     if claimed_path.exists():
         try:
             claimed_path.unlink()
@@ -451,8 +488,17 @@ def _cmd_status(args, env, stdout):
     import runner_pool_proc as proc
     root = spool_root(env)
     data = build_status(root, time.time(), proc.pid_alive, proc.filetime_of)
+    _publish_status(root, data)
     stdout.write(json.dumps(data, sort_keys=True) + '\n')
     return 0
+
+def _publish_status(root, data=None):
+    import runner_pool_proc as proc
+    if data is None:
+        data = build_status(root, time.time(), proc.pid_alive, proc.filetime_of)
+    root.mkdir(parents=True, exist_ok=True)
+    rpc.write_json_atomic(root / 'status.json', dict(data, slots=[
+        {'n': s['slot'], 'state': s['state']} for s in data['slots']]))
 
 def _cmd_ssh_gate(args, env, stdin, stdout, deps, gate):
     if gate is None:
@@ -474,7 +520,11 @@ def _find_slot(root, jobid):
             data = json.loads(sf.read_text())
         except Exception:
             continue
+        if not isinstance(data, dict):
+            continue
         job = data.get('job')
+        if not isinstance(job, (dict, str)):
+            continue
         if (job.get('id') if isinstance(job, dict) else job) == jobid:
             return d
     return None
@@ -495,23 +545,24 @@ def _cmd_kill(args, env, stdout, deps, proc):
         filetime_of = proc.filetime_of
     kill_tree = deps.get('kill_tree') if deps else None
     if kill_tree is None:
-        kill_tree = getattr(proc, 'kill_tree', lambda argv: None)
+        kill_tree = proc.kill_tree
     if deps is not None:
         os_name = deps.get('os_name', 'nt')
     else:
         os_name = getattr(rpc, 'os_name', lambda: os.name)()
     try:
-        out = proc.kill_job(slot, filetime_of, kill_tree, os_name=os_name)
+        out = proc.kill_job(slot, filetime_of, kill_tree, os_name=os_name, expect_run_id=jobid)
     except (ValueError, AttributeError, KeyError, TypeError, OSError):
         stdout.write('refused: bad run.private\n')
         return 1
     stdout.write(str(out) + '\n')
-    return 0
+    return 0 if out in ('killed', 'gone') else 1
 
 def _build_real_deps(root, n, env):
+    import runner_pool_proc as proc
     def spawn(argv, log, e):
         return popen_spawn(argv, log, e, slot_dir=root / 'slots' / str(n))
-    def admission_refusal():
+    def admission_refusal(job=None):
         try:
             import importlib.util
             base = Path(__file__).resolve().parent
@@ -521,8 +572,9 @@ def _build_real_deps(root, n, env):
             spec.loader.exec_module(mod)
             kind = 'tool-using'
             try:
-                queued = _oldest_queue_file(root / 'queue')
-                job = json.loads(queued.read_text(encoding='utf-8')) if queued else {}
+                if job is None:
+                    queued = _oldest_queue_file(root / 'queue')
+                    job = json.loads(queued.read_text(encoding='utf-8')) if queued else {}
                 kind = mod.host_run_kind(job['card']['client'],
                                          mod.load_registry(mod.REGISTRY_PATH))
             except Exception:
@@ -532,13 +584,16 @@ def _build_real_deps(root, n, env):
             return 'admission-unreadable'
     def breaker_open():
         return (root / 'slots' / str(n) / '.tripped').exists()
-    return Deps(
+    deps = Deps(
         spawn=spawn,
         mem_mb=lambda: rpc.mem_available_mb(),
         admission_refusal=admission_refusal,
         breaker_open=breaker_open,
         environ=rpc.strip_env(env),
+        filetime=proc.filetime_of(os.getpid()),
     )
+    deps.claimed_admission = admission_refusal
+    return deps
 
 def _cmd_slot(args, env, stdin, stdout, deps):
     # The in-process admission module reads the slot's environment, not the child's.
@@ -570,6 +625,7 @@ def _cmd_slot(args, env, stdin, stdout, deps):
         slot_deps = _build_real_deps(root, n, env)
     if once:
         res = run_one(root, n, slot_deps)
+        _publish_status(root)
         stdout.write(str(res) + '\n')
         return 0
     max_iterations = deps.get('max_iterations') if deps else None
@@ -579,6 +635,7 @@ def _cmd_slot(args, env, stdin, stdout, deps):
     i = 0
     while True:
         run_one(root, n, slot_deps)
+        _publish_status(root)
         i += 1
         if max_iterations is not None and i >= max_iterations:
             break
