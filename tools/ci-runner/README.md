@@ -45,6 +45,10 @@ defaults `self-hosted`, `Linux`, `X64`).
 
 ## Caches
 
+The supervisor passes the slot prefix as the cache scope to runner-loop.ps1,
+which forwards it to the Docker arguments. Setting `"cache": true` therefore
+gives that repository its own three volumes.
+
 Three named Docker volumes are mounted into every slot whose repository entry
 has `"cache": true` (`-CacheVolumes -CacheScope <prefix>` on the docker run
 argv). The scope is the repository's `prefix` in `slots.json`, for example
