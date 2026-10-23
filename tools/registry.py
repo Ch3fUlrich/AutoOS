@@ -1742,7 +1742,6 @@ IDE_MODEL_ORDER = (
     "mimo-v2.6-flash", "mimo-v2.6-pro",
     # FAIK 2026-10-07: pinned single-provider credit singles (operator: usable
     # within the $6 grant; legs gated until per-token prices land).
-    "faik-gpt-6-sol",
     "cheaperinference/kimi-k3", "cheaperinference/glm-5.2",
     "samba/gpt-oss-120b", "samba/MiniMax-M3",
     # OCGO-PREFER 2026-10-18 (operator D-1840/D-1919): the OpenCode Go pinned
@@ -3887,9 +3886,40 @@ def _check_context_floors(registry) -> list:
     return problems
 
 
+def _check_codex_newest(registry):
+    """D-2148: one canonical subscription path, including future policy lists."""
+    policy = ((registry.get('providers') or {}).get('cx') or {}).get('model_policy', {})
+    current = policy.get('current', '')
+    if policy.get('newest_only') is not True or not re.fullmatch(r'gpt-\d+(?:\.\d+)*-sol', current):
+        return ['newest_only: providers.cx.model_policy must name the current sol model']
+    allowed = {current} | {current + '-' + effort for effort in
+                           ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')}
+    problems = []
+
+    def walk(value, path):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key not in COMMENT_KEYS:
+                    walk(key, path)
+                    walk(child, path + '.' + key)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, path)
+        elif isinstance(value, str):
+            sol = re.search(r'gpt-\d+(?:\.\d+)*-sol(?:-[a-z]+)?', value)
+            if (sol and (sol.group() not in allowed or
+                         ('/' in value and not value.startswith(('cx/', 'omniroute/cx/', 'omniroute/cx-'))))) or (
+                    value.startswith(('cx/', 'cxa/')) and value.split('/', 1)[1] not in allowed):
+                problems.append('newest_only: %s rejects %s' % (path, value))
+    for section in ('models', 'routes', 'pins', 'policy'):
+        walk(registry.get(section, {}), section)
+    return problems
+
+
 def check_registry(registry, today=None) -> list:
     """Return every spec 3.1 problem, in rule order; empty means the registry is clean."""
     problems = []
+    problems.extend(_check_codex_newest(registry))
     problems.extend(_check_legs(registry))
     problems.extend(_check_unique_ids(registry))
     problems.extend(_check_model_key_case(registry))

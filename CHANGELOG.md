@@ -1,5 +1,7 @@
 # Changelog
 
+- D-2148: enforce registry-owned newest-only Codex IDs; add read-only weekly bump proposals and align MCP availability. Remove superseded Sol credit route.
+
 All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 

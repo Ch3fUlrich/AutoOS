@@ -628,12 +628,15 @@ def list_clients() -> dict:
     except clients.DepthError as exc:
         depth = str(exc)
     rows = []
+    registry_clients = agent.load_registry(agent.REGISTRY_PATH).get('clients', {})
     for c in clients.CLIENTS.values():
         installed = shutil.which(c.binary) is not None
         ok, reason = clients.signin_state(c)
+        available = registry_clients.get(c.name, {}).get('available', True)
         rows.append({"name": c.name, "headless": c.headless, "gateway": c.gateway,
                      "native_subagents": c.subagents, "auth": c.auth, "promo": c.promo,
-                     "installed": installed, "usable": installed and ok is not False,
+                      "installed": installed, "available": available,
+                      "usable": available and installed and ok is not False,
                      "reason": reason if ok is False else ("" if installed else "not installed"),
                      "notes": c.notes})
     return {

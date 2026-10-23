@@ -1194,11 +1194,9 @@ class OpenRouterByokLegTests(unittest.TestCase):
         # D657-D2 2026-10-08: l2-worker's chain is re-cut to probe-acked legs, so
         # the morph/deepinfra provenance gates left with the legs it no longer
         # declares. The $comment-provenance rule is pinned on a gate that is still
-        # shipped: routes.faik-gpt-6-sol carries its price note.
-        gated = self.reg["routes"]["faik-gpt-6-sol"]["unavailable_legs"]
-        leg = "freeaiapikey/openai/gpt-6-sol"
-        self.assertIn(leg, gated)
-        self.assertIn("price", (gated[leg].get("$comment") or "").lower())
+        gates = [gate for route in self.reg['routes'].values()
+                 for gate in (route.get('unavailable_legs') or {}).values()]
+        self.assertTrue(all(gate.get('$comment') for gate in gates))
 
     def test_gated_leg_is_not_servable_in_any_route_listing_it(self):
         # TORDER-OR: paid leg removed from every route (except t1-clean kept
@@ -4022,6 +4020,12 @@ class ComboCrossProviderTests(unittest.TestCase):
         self.assertEqual(problems(self.reg), [])
         # the scan bites: a gate whose prose loses its reason is a defect
         mutated = copy.deepcopy(self.reg)
+        # Seed a priced-off credit gate: the production catalog may have none.
+        credit_leg = next(leg for route in mutated['routes'].values()
+                          for leg in route.get('legs', []) if leg_tier(mutated, leg) == 'credit')
+        mutated['routes']['synthetic-credit-gate'] = {
+            'legs': [credit_leg], 'unavailable_legs': {
+                credit_leg: {'available': False, '$comment': 'price unavailable'}}}
         for route in mutated["routes"].values():
             for entry in (route.get("unavailable_legs") or {}).values():
                 entry["$comment"] = "gated"

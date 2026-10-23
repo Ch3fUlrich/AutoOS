@@ -160,6 +160,7 @@
       "required": ["id", "omniroute_id", "litellm_env", "litellm_prefix", "trains_on_prompts", "tier"],
       "additionalProperties": false,
       "properties": {
+        "model_policy": {"type": "object", "additionalProperties": false, "required": ["newest_only", "current", "source"], "properties": {"newest_only": {"const": true}, "current": {"type": "string", "pattern": "^gpt-\\d+(\\.\\d+)*-sol$"}, "source": {"type": "string"}}},
         "id": { "type": "string" },
         "omniroute_id": { "type": ["string", "null"] },
         "key_name": {
