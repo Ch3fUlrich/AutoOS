@@ -4,12 +4,35 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled` re-runs CI when merge-ready is added: that run is the FULL suite.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
+    inputs:
+      full:
+        description: Run the full suite (a dispatch is always a full run; the input exists so callers can pass it through)
+        type: boolean
+        default: true
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
+  # CI-SMART-SELECT (D-1475): a PR push runs only what its diff needs (map:
+  # .github/smart-ci.json, format docs/ci-smart-select.md). The FULL suite runs on
+  # the merge-ready label, workflow_dispatch, every push to main, and whenever the
+  # selection is unknown or a workflow / dependency / CI file changed. The
+  # "CI merge gate" job at the bottom plus the "Full suite (merge-ready)" status are the required checks.
+  smart:
+    name: Smart CI select
+    uses: ./.github/workflows/smart-ci.yml
+    with:
+      runs_on: ${{ toJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest') }}
+      full: ${{ github.event_name == 'workflow_dispatch' && inputs.full }}
+
   # WS-CIPAR (2026-09-28): the Linux suite was one serial 11-16 min job. It now
   # runs as parallel shards (tests/ci-shards.txt, one line per shard) next to a
   # separate lint job. The plan job refuses a shard map that leaves a
@@ -18,23 +41,33 @@ jobs:
   # when the plan, every shard and the lint job passed.
   linux-plan:
     name: Linux suite plan
+    needs: smart
+    if: ${{ needs.smart.outputs.full == 'true' || fromJSON(needs.smart.outputs.jobs).shards }}
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
     steps:
       - uses: actions/checkout@v4
 
+      # Selected mode runs only the shards that hold a selected part (and only
+      # those parts); full mode, or a selection naming no part, runs them all.
       - name: Every part in exactly one shard
         id: plan
+        env:
+          FULL: ${{ needs.smart.outputs.full }}
+          SELECTED: ${{ needs.smart.outputs.tests }}
         run: |
           python3 tests/test_ci_shards.py
-          matrix="$(python3 tests/ci-shards.py)"  # its own line, so its exit code fails the step
+          only=()
+          if [ "$FULL" != "true" ] && [ -n "$SELECTED" ]; then only=(--only "$SELECTED"); fi
+          matrix="$(python3 tests/ci-shards.py "${only[@]}")"  # its own line, so its exit code fails the step
           test -n "$matrix"
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
 
   linux-shard:
     name: Linux suite shard ${{ matrix.shard }}
-    needs: linux-plan
+    needs: [smart, linux-plan]
+    if: ${{ needs.smart.outputs.full == 'true' || fromJSON(needs.smart.outputs.jobs).shards }}
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
@@ -77,6 +110,8 @@ jobs:
 
   linux-lint:
     name: Linux suite lint
+    needs: smart
+    if: ${{ needs.smart.outputs.full == 'true' || fromJSON(needs.smart.outputs.jobs).lint }}
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
@@ -115,21 +150,32 @@ jobs:
   linux:
     name: Linux suite
     if: always()
-    needs: [linux-plan, linux-shard, linux-lint]
+    needs: [smart, linux-plan, linux-shard, linux-lint]
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     steps:
       - name: All shards and lint passed
+        env:
+          WANT_SHARDS: ${{ needs.smart.outputs.full == 'true' || fromJSON(needs.smart.outputs.jobs).shards }}
+          WANT_LINT: ${{ needs.smart.outputs.full == 'true' || fromJSON(needs.smart.outputs.jobs).lint }}
         run: |
-          echo "plan=${{ needs.linux-plan.result }} shards=${{ needs.linux-shard.result }} lint=${{ needs.linux-lint.result }}"
-          test "${{ needs.linux-plan.result }}" = success
-          test "${{ needs.linux-shard.result }}" = success
-          test "${{ needs.linux-lint.result }}" = success
+          echo "smart=${{ needs.smart.result }} plan=${{ needs.linux-plan.result }} shards=${{ needs.linux-shard.result }} lint=${{ needs.linux-lint.result }}"
+          test "${{ needs.smart.result }}" = success
+          # skipped passes ONLY for a job the selector left out; a selected job
+          # that did not run to success fails here.
+          check() { if [ "$2" = true ]; then test "$1" = success; else test "$1" = skipped; fi; }
+          check "${{ needs.linux-plan.result }}" "$WANT_SHARDS"
+          check "${{ needs.linux-shard.result }}" "$WANT_SHARDS"
+          check "${{ needs.linux-lint.result }}" "$WANT_LINT"
 
   windows:
     name: Windows suite
-    # operator 2026-09-27: Windows CI paused until the Linux work is done.
-    if: false
-    # D-1349: no GitHub-hosted runners. Needs a windows fleet-ci runner before this job is un-gated; with if: false it is never queued.
+    # operator 2026-09-27: Windows CI paused until the Linux work is done. It stays
+    # off until the repository variable CI_WINDOWS_ENABLED is 'true' (needs a windows
+    # fleet-ci runner); the merge gate allows this one skip while it is off and
+    # requires success once it is on. Windows runs on full runs only.
+    needs: smart
+    if: ${{ vars.CI_WINDOWS_ENABLED == 'true' && needs.smart.outputs.full == 'true' }}
+    # D-1349: no GitHub-hosted runners. Full runs need CI_WINDOWS_ENABLED set to 'true' and an available windows fleet-ci runner.
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","windows","fleet-ci"]') || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4
@@ -163,6 +209,8 @@ jobs:
 
   ansible:
     name: Ansible lint
+    needs: smart
+    if: ${{ needs.smart.outputs.full == 'true' || fromJSON(needs.smart.outputs.jobs).ansible }}
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
@@ -190,6 +238,8 @@ jobs:
 
   secrets:
     name: Secret scan
+    needs: smart
+    if: ${{ needs.smart.outputs.full == 'true' || fromJSON(needs.smart.outputs.jobs).secrets }}
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
@@ -219,6 +269,8 @@ jobs:
 
   public-scrub:
     name: Public scrub scan
+    needs: smart
+    if: ${{ needs.smart.outputs.full == 'true' || fromJSON(needs.smart.outputs.jobs).scrub }}
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
@@ -256,3 +308,62 @@ jobs:
       # Run directly rather than through pytest — this job installs nothing.
       - name: Scanner rule tests
         run: python3 scripts/public-scrub/test_scan.py
+
+  # Merge gate. Red ONLY when a job failed or was cancelled. A selected-only PR run
+  # is green here (the fast loop worked) and instead leaves the commit status
+  # "Full suite (merge-ready)" PENDING, which blocks merge without a red cross; the
+  # merge-ready label (or a dispatch with full=true) runs the full suite and turns
+  # that status success. Make this status, plus "CI merge gate", the required checks.
+  # A fork PR token is read-only: the gate cannot post the status, so the job is red.
+  # A maintainer re-pushes the branch from this repository to let the gate post it.
+  merge-gate:
+    name: CI merge gate
+    if: always()
+    needs: [smart, linux, ansible, secrets, public-scrub, windows]
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      statuses: write
+    steps:
+      - name: Selected jobs passed; report whether the run was full
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+          FULL: ${{ needs.smart.outputs.full }}
+          REASON: ${{ needs.smart.outputs.reason }}
+          WINDOWS_ENABLED: ${{ vars.CI_WINDOWS_ENABLED }}
+          RESULTS: smart=${{ needs.smart.result }} linux=${{ needs.linux.result }} ansible=${{ needs.ansible.result }} secrets=${{ needs.secrets.result }} scrub=${{ needs.public-scrub.result }} windows=${{ needs.windows.result }}
+        run: |
+          echo "event=$EVENT full=$FULL results=$RESULTS reason=$REASON"
+          ctx="Full suite (merge-ready)"
+          # curl, not gh: the self-hosted runner image has no gh, and a status that is
+          # never posted would leave the full-suite requirement unenforced.
+          post() {
+            # the token goes in through stdin (-H @-), never into argv where ps could show it
+            printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -fsS -X POST -H @- -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL:-https://api.github.com}/repos/$REPO/statuses/$SHA" \
+              -d "{\"state\":\"$1\",\"context\":\"$ctx\",\"description\":\"$2\"}" >/dev/null \
+              || { echo "::error::could not set the $ctx status"; return 1; }
+          }
+          for pair in $RESULTS; do
+            name="${pair%%=*}"; r="${pair#*=}"
+            case "$r" in
+              success) ;;
+              skipped)
+                # the one allowed skip in a full run: Windows while it is switched off
+                if [ "$FULL" = true ] && ! { [ "$name" = windows ] && [ "$(printf %s "$WINDOWS_ENABLED" | tr '[:upper:]' '[:lower:]')" != true ]; }; then
+                  post failure "full run but $name was skipped"; echo "::error::full run but $name was skipped"; exit 1
+                fi ;;
+              *) post failure "$name ended $r"; echo "::error::$name ended $r"; exit 1 ;;
+            esac
+          done
+          if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then
+            post pending "selected-only run: add the merge-ready label for the full suite" || exit 1
+            echo "::notice::selected-only run passed; the full suite (label merge-ready or dispatch full=true) is still required before merge"
+          elif [ "$FULL" = true ]; then
+            post success "full suite passed" || exit 1
+          else
+            post failure "not a full run"; echo "::error::not a pull request and not a full run: refusing to report success"; exit 1
+          fi

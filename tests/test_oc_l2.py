@@ -80,8 +80,10 @@ sys.stderr.write("%s\\n"); sys.stderr.flush()
 kid = subprocess.Popen([sys.executable, "-c",
     "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
     "time.sleep(300)"])
-with open(os.environ["%s"], "w", encoding="utf-8") as f:
+child_file = os.environ["%s"]
+with open(child_file + ".tmp", "w", encoding="utf-8") as f:
     f.write(str(kid.pid))
+os.replace(child_file + ".tmp", child_file)
 time.sleep(300)
 """ % (RECORD_ENV, FAKE_STDERR_NOTE, CHILD_FILE_ENV)
 
@@ -215,8 +217,28 @@ class LaneTest(unittest.TestCase):
         mock.patch.object(oc_l1, "PORT_MIN", 1024).start()
         mock.patch.object(oc_l1, "PORT_MAX", 65535).start()
         self.addCleanup(mock.patch.stopall)
+        self._children = []
+        spawn = oc_l1_serve._spawn
+
+        def tracked_spawn(*args, **kwargs):
+            proc = spawn(*args, **kwargs)
+            self._children.append(proc)
+            return proc
+
+        mock.patch.object(oc_l1_serve, "_spawn", side_effect=tracked_spawn).start()
 
     def tearDown(self):
+        # The fake HTTP server is independent of the binary: start can return
+        # before that binary even opens bin_record.json. Reap every launch,
+        # including failed starts, before removing its writable tree.
+        for proc in self._children:
+            if proc.poll() is None:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                   check=True, capture_output=True, timeout=10)
+                else:
+                    os.killpg(proc.pid, signal.SIGKILL)
+            proc.wait(timeout=10)
         for k, v in self._envs.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -244,6 +266,19 @@ class LaneTest(unittest.TestCase):
                           .read_text(encoding="utf-8"))
 
     # (1) the rendered lane: model, spawner-only MCP, task deny, guard plugin
+    def test_teardown_reaps_a_binary_that_has_not_written_its_record(self):
+        # HTTP readiness is supplied by FakeServer, not by this delayed binary.
+        # It must be owned even when bin_record.json cannot identify it yet.
+        (self.td / "fake_opencode.py").write_text(
+            "import time; time.sleep(300)\n", encoding="utf-8")
+        result, rc = self._start()
+        self.assertEqual(rc, 0, result)
+        self.assertTrue(self._children)
+        # addCleanup runs after tearDown (and therefore after rmtree).
+        self.addCleanup(lambda: self.assertTrue(
+            all(proc.poll() is not None for proc in self._children),
+            "a fake binary survived fixture teardown"))
+
     def test_rendered_lane_is_the_l2_shape(self):
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
