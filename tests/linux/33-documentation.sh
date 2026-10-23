@@ -1032,6 +1032,9 @@ fi
 if it "autoos_oc_fallback_run: Claude limit switches to OpenCode fallback (integration tests)"; then
     out="$(python3 tests/test_oc_fallback_run.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
+if it "seat_free_opencode: free seat ids + direct MiMo pins keep their served model (unit tests)"; then
+    out="$(python3 tests/test_seat_free_opencode.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
 
 # OVERLAYHOME: the machine-wide tool_calls overlay (path resolution, legacy
 # fallback, locked merge-save) - temp dirs only, never the real state dir.

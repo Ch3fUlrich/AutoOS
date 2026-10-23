@@ -58,3 +58,7 @@ def test_unknown_zen_pin_still_refused():
 def test_mimo_evidence_rejects_combo_served_id():
     evidence = load("seat_evidence", "seat-model-evidence.py")
     assert evidence._served_model({"provider": "mimo", "model": "mimo-v2.6-flash"}) is None
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-q"]))
