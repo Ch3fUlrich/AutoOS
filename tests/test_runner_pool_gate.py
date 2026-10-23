@@ -61,6 +61,26 @@ class TestGate(unittest.TestCase):
         result = gate.read_capped(stream, cap=65536)
         self.assertEqual(result, data)
 
+    # ---------- path validation ----------
+    def test_path_plain_relative_paths(self):
+        for path in ('src/a.py', 'docs/x.md', './a'):
+            with self.subTest(path=path):
+                self.assertIsNone(gate._check_path(path))
+                card = {'paths': [path]}
+                self.assertEqual(gate.validate_card(card), card)
+
+    def test_path_invalid_windows_characters(self):
+        bad_paths = [
+            'src/a.py:stream', 'a/b:c', 'a/b:c/d', 'a:b',
+            'x\x00y', 'x\ny', 'a|b', 'a*b', 'a?b', 'a<b', 'a>b', 'a"b',
+        ] + ['x' + chr(code) + 'y' for code in (*range(32), 127)]
+        for path in bad_paths:
+            for validate in (gate._check_path,
+                             lambda value: gate.validate_card({'paths': [value]})):
+                with self.subTest(path=path, validate=validate):
+                    with self.assertRaisesRegex(gate.GateError, '^invalid path$'):
+                        validate(path)
+
     # ---------- validate_card ----------
     def test_validate_card_valid(self):
         card = {

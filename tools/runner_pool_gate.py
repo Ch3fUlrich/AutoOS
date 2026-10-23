@@ -74,8 +74,12 @@ _RESERVED_NT = {'CON', 'PRN', 'AUX', 'NUL', 'CLOCK$'} | \
 
 def _check_path(value):
     """A card path is a plain relative path inside the pool: no .., no anchor, no NT tricks."""
+    if isinstance(value, str) and any(
+            ord(char) < 32 or ord(char) == 127 or char in ':<>"|?*'
+            for char in value):
+        raise GateError('invalid path')
     _check_str(value)
-    if value == '' or value.startswith(('/', '\\', '~')) or re.match(r'^[A-Za-z]:', value):
+    if value == '' or value.startswith(('/', '\\', '~')):
         raise GateError('invalid path')
     for part in re.split(r'[\\/]', value):
         if part in ('', '..'):
