@@ -965,8 +965,16 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         # the day the gateway grows a per-effort parameter, this test fails and the
         # alias is rendered on that surface too.
         combos = real_combos()["combos"]
+        # RT-P1-CLASS-COMBOS (2026-10-18): the OmniRoute 3.8.51 native per-combo
+        # fields (contextRequirements, targetTimeoutMs) are the only keys the
+        # classic four may be joined by - still nothing that could carry an
+        # effort rung. The name check below keeps the original claim whole.
+        allowed = {"name", "strategy", "context", "models",
+                   "contextRequirements", "targetTimeoutMs"}
+        classic = {"name", "strategy", "context", "models"}
         for c in combos:
-            self.assertEqual(sorted(c), ["context", "models", "name", "strategy"], c["name"])
+            self.assertLessEqual(set(c), allowed, c["name"])
+            self.assertLessEqual(classic, set(c), c["name"])
         rungs = set()
         for model in real_registry()["models"].values():
             rungs.update(e for e in (model.get("effort_ladder") or [])
@@ -2386,6 +2394,214 @@ class CombosDeclaredAuthSkipTests(unittest.TestCase):
             combos = self.sync.combos_refs(path, registry=self.reg)
             self.assertEqual(combos, {})
             self.assertEqual(self.sync.unmanaged_skip_notices(combos), [])
+
+
+class ClassComboNativeFieldTests(unittest.TestCase):
+    """RT-P1-CLASS-COMBOS (2026-10-18): the three context-floored priority
+    routes - class-128k / class-256k / class-1m - carry OmniRoute 3.8.51's own
+    per-combo fields, declared snake_case on the registry surface
+    (`context_requirements`, `target_timeout_ms`) and emitted camelCase
+    (`contextRequirements`, `targetTimeoutMs`) into combos.json.
+
+    The second half of the contract is the one this lane owes the other
+    combos: render_omniroute() emits the native fields ONLY for a route that
+    declares them, so every pre-existing combo keeps exactly the four keys it
+    has today - no re-render of the file may touch a combo this change did not
+    add."""
+
+    CLASS_ROUTES = {
+        "class-128k": {"floor": 128000, "label": "128k", "timeout": 180000},
+        "class-256k": {"floor": 256000, "label": "256k", "timeout": 300000},
+        "class-1m": {"floor": 1000000, "label": "1M", "timeout": 600000},
+    }
+    PLAIN_COMBO_KEYS = ("name", "strategy", "context", "models")
+
+    def _combos(self, reg=None):
+        reg = real_registry() if reg is None else reg
+        return {c["name"]: c for c in registry.render_omniroute(reg)["combos"]}
+
+    def test_each_class_route_is_declared_and_renders_a_combo(self):
+        reg = real_registry()
+        combos = self._combos(reg)
+        for route_id in self.CLASS_ROUTES:
+            route = reg["routes"].get(route_id)
+            self.assertIsInstance(route, dict, "%s is not a declared route" % route_id)
+            self.assertIn(route_id, combos, "%s renders no combo" % route_id)
+
+    def test_class_routes_have_no_ide_exposure(self):
+        self.assertFalse(any(m["id"].startswith("class-")
+                             for m in registry.render_ide(real_registry())["models"]))
+
+    def test_each_class_combo_carries_the_native_fields(self):
+        combos = self._combos()
+        for route_id, want in self.CLASS_ROUTES.items():
+            combo = combos[route_id]
+            self.assertEqual(combo["strategy"], "priority", route_id)
+            self.assertEqual(combo["context"], want["label"], route_id)
+            self.assertEqual(combo["contextRequirements"],
+                             {"minContextWindow": want["floor"],
+                              "contextFilterMode": "strict"}, route_id)
+            self.assertEqual(combo["targetTimeoutMs"], want["timeout"], route_id)
+
+    def test_the_surface_declaration_is_the_source_of_the_rendered_fields(self):
+        # Read at render time, not copied into a constant: narrowing the floor
+        # and the timeout on the surface narrows the rendered combo, and
+        # dropping the declaration drops the field entirely.
+        reg = copy.deepcopy(real_registry())
+        surface = reg["routes"]["class-128k"]["surfaces"]["omniroute"]
+        surface["context_requirements"]["min_context_window"] = 512000
+        surface["target_timeout_ms"] = 42000
+        combo = self._combos(reg)["class-128k"]
+        self.assertEqual(combo["contextRequirements"]["minContextWindow"], 512000)
+        self.assertEqual(combo["targetTimeoutMs"], 42000)
+
+        del surface["context_requirements"]
+        del surface["target_timeout_ms"]
+        combo = self._combos(reg)["class-128k"]
+        self.assertNotIn("contextRequirements", combo)
+        self.assertNotIn("targetTimeoutMs", combo)
+
+    def test_no_pre_existing_combo_gained_a_field(self):
+        # The byte-identity gate: every combo this lane did not add still has
+        # exactly name/strategy/context/models and nothing else.
+        for name, combo in self._combos().items():
+            if name in self.CLASS_ROUTES:
+                continue
+            self.assertEqual(sorted(combo), sorted(self.PLAIN_COMBO_KEYS), name)
+
+    def test_the_committed_combos_file_carries_the_same_fields(self):
+        current = {c["name"]: c for c in real_combos()["combos"]}
+        for route_id, want in self.CLASS_ROUTES.items():
+            combo = current[route_id]
+            self.assertEqual(combo["contextRequirements"],
+                             {"minContextWindow": want["floor"],
+                              "contextFilterMode": "strict"}, route_id)
+            self.assertEqual(combo["targetTimeoutMs"], want["timeout"], route_id)
+
+
+class ClassComboFloorClampTests(unittest.TestCase):
+    """A class combo's floor is a promise: every leg it renders must advertise
+    at least `context_requirements.min_context_window`, or a client that sized
+    its request against the floor gets a mid-conversation 400 from the leg it
+    fell through to. render_omniroute() therefore drops a servable leg below
+    the floor from `models`, and a floor no leg reaches leaves the route with
+    no combo at all (named in `omitted`, exactly like a route whose legs are
+    all gated, so apply.sh/apply.ps1 prunes it rather than serving it)."""
+
+    FLOOR = 200000
+    # Gateway-unresolvable windows, measured with getModelContextLimit on fork feat/model-benchmarks-catalog: strict drops them; #8786 fail-open can resurrect them.
+    # Remove an entry only when the OmniRoute gateway knows its window.
+    GATEWAY_UNKNOWN_WINDOW_LEGS = ("xiaomi_mimo/mimo-v2.6-flash",)
+
+    def _gateway_unknown_window_legs(self, reg):
+        return [(route_id, leg)
+                for route_id in ClassComboNativeFieldTests.CLASS_ROUTES
+                for leg in reg["routes"][route_id]["legs"]
+                if leg in self.GATEWAY_UNKNOWN_WINDOW_LEGS]
+
+    def test_no_class_route_lists_a_leg_the_gateway_cannot_size(self):
+        reg = copy.deepcopy(real_registry())
+        self.assertEqual(self._gateway_unknown_window_legs(reg), [])
+
+    def test_adding_an_unsized_leg_back_is_caught(self):
+        reg = copy.deepcopy(real_registry())
+        leg = self.GATEWAY_UNKNOWN_WINDOW_LEGS[0]
+        reg["routes"]["class-1m"]["legs"].append(leg)
+        self.assertIn(("class-1m", leg), self._gateway_unknown_window_legs(reg))
+
+    def _reg(self):
+        reg = synthetic_gateway_registry()
+        surface = reg["routes"]["mix"]["surfaces"]["omniroute"]
+        surface["context_requirements"] = {
+            "min_context_window": self.FLOOR,
+            "context_filter_mode": "strict",
+        }
+        # surviving gateway legs are clean/first and clean/second (see
+        # synthetic_gateway_registry's docstring); give them real windows so
+        # one is above the floor and one below it.
+        reg["models"]["first"]["context_advertised"] = 1_048_576
+        reg["models"]["second"]["context_advertised"] = 131_072
+        return reg
+
+    def _combo(self, reg):
+        return {c["name"]: c for c in registry.render_omniroute(reg)["combos"]}["mix"]
+
+    def test_a_servable_leg_below_the_floor_never_reaches_the_combo(self):
+        self.assertEqual(self._combo(self._reg())["models"], ["clean/first"])
+
+    def test_a_leg_at_or_above_the_floor_is_kept(self):
+        reg = self._reg()
+        reg["models"]["second"]["context_advertised"] = self.FLOOR
+        self.assertEqual(self._combo(reg)["models"], ["clean/first", "clean/second"])
+
+    def test_a_route_no_leg_reaches_the_floor_for_renders_no_combo(self):
+        reg = self._reg()
+        reg["models"]["first"]["context_advertised"] = 1000
+        reg["models"]["second"]["context_advertised"] = 1000
+        rendered = registry.render_omniroute(reg)
+        self.assertNotIn("mix", {c["name"] for c in rendered["combos"]})
+        self.assertIn("mix", rendered["omitted"])
+
+    def test_a_route_without_a_floor_keeps_its_small_legs(self):
+        reg = self._reg()
+        del reg["routes"]["mix"]["surfaces"]["omniroute"]["context_requirements"]
+        self.assertEqual(self._combo(reg)["models"],
+                         ["clean/first", "clean/second"])
+
+    def test_a_leg_with_no_recorded_window_never_reaches_the_combo(self):
+        reg = self._reg()
+        del reg["models"]["second"]["context_advertised"]
+        self.assertIsNone(registry.leg_advertised_context("clean/second", reg))
+        self.assertEqual(self._combo(reg)["models"], ["clean/first"])
+
+    def test_no_real_class_combo_lists_a_leg_below_its_own_floor(self):
+        reg = real_registry()
+        rendered = registry.render_omniroute(reg)
+        combos = {c["name"]: c for c in rendered["combos"]}
+        for route_id, want in ClassComboNativeFieldTests.CLASS_ROUTES.items():
+            floor = want["floor"]
+            # combos.json carries gateway_ref() spellings (bzl/..., mimo/...),
+            # which resolve_leg() does not parse - map each rendered ref back
+            # to the declared leg it was rendered from before reading its
+            # window.
+            declared = {registry.gateway_ref(leg, reg): leg
+                        for leg in reg["routes"][route_id]["legs"]}
+            for ref in combos[route_id]["models"]:
+                leg = declared.get(ref)
+                self.assertIsNotNone(leg, "%s: %s is no declared leg"
+                                     % (route_id, ref))
+                window = registry.leg_advertised_context(leg, reg)
+                self.assertIsNotNone(window, "%s: %s records no window"
+                                     % (route_id, leg))
+                self.assertGreaterEqual(window, floor, "%s: %s" % (route_id, leg))
+
+    def test_validate_names_the_route_and_the_leg_of_a_hand_edit_below_the_floor(self):
+        reg = copy.deepcopy(real_registry())
+        # cohere/command-a-03-2025 advertises 131072 - below class-256k's floor.
+        reg["routes"]["class-256k"]["legs"].append("cohere/command-a-03-2025")
+        problems = registry.check_registry(reg)
+        named = [p for p in problems if "class-256k" in p]
+        self.assertTrue(named, "a below-floor leg passed validation silently: %s" % problems)
+        self.assertTrue(any("cohere/command-a-03-2025" in p for p in named), named)
+        self.assertTrue(any(str(256000) in p for p in named), named)
+
+    def test_validate_names_a_leg_with_no_recorded_window(self):
+        reg = copy.deepcopy(real_registry())
+        route_id = "class-256k"
+        leg = reg["routes"][route_id]["legs"][0]
+        _provider_id, model_id = registry.resolve_leg(leg, reg)
+        del reg["models"][model_id]["context_advertised"]
+        problems = registry.check_registry(reg)
+        self.assertTrue(any(route_id in p and leg in p
+                            and "records no context_advertised window" in p
+                            for p in problems), problems)
+
+    def test_validate_rejects_a_floor_that_is_not_a_positive_integer(self):
+        reg = copy.deepcopy(real_registry())
+        reg["routes"]["class-1m"]["surfaces"]["omniroute"][
+            "context_requirements"]["min_context_window"] = "1M"
+        problems = registry.check_registry(reg)
+        self.assertTrue(any("class-1m" in p for p in problems), problems)
 
 
 if __name__ == "__main__":

@@ -10264,6 +10264,16 @@ print('%s|%s|%s|%s' % (
         'opencode-go/minimax-m3' = '128k'
         'opencode-go/kimi-k3' = '128k'
         'opencode-go/qwen3.8-flash' = '200k'
+        # RT-P1-CLASS-COMBOS 2026-10-18: the three context-floored priority
+        # combos (routes.* declaring surfaces.omniroute.context_requirements),
+        # read off `python3 tools/registry.py render omniroute` (combos[].context
+        # from catalog/ai-registry.json), which equals combos.json: 128k/256k/1M.
+        # The native fields (contextRequirements/targetTimeoutMs) these three
+        # carry are pinned by ClassComboNativeFieldTests in
+        # tests/test_registry_render.py, not duplicated here.
+        'class-128k' = '128k'
+        'class-256k' = '256k'
+        'class-1m' = '1M'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"

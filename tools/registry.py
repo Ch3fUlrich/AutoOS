@@ -1325,6 +1325,18 @@ def render_omniroute(registry: dict) -> dict:
     *-paid and auto* routes - and is in neither `combos` nor `omitted` (OR1g).
     `omitted` is disjoint from "retired" by construction - `retired` is a
     fixed hand-maintained list of dead ids no route uses any more.
+
+    A route that declares a context floor (RT-P1-CLASS-COMBOS: the class-*
+    routes' `surfaces.omniroute.context_requirements.min_context_window`)
+    renders only legs that can keep that promise - floor_route_legs() drops a
+    servable leg advertising a smaller window, and a floor no leg reaches
+    leaves the route with no combo at all, which lands it in `omitted` like
+    any other route that declares legs and serves none. Such a route also
+    carries the two fields OmniRoute 3.8.51 reads per combo, emitted
+    camelCased and ONLY when the route declares them: `contextRequirements`
+    ({minContextWindow, contextFilterMode}) and `targetTimeoutMs`. Every other
+    combo keeps exactly name/strategy/context/models, which is what makes
+    re-rendering the file a no-op for the combos this change did not add.
     """
     routes = registry.get("routes")
     routes = routes if isinstance(routes, dict) else {}
@@ -1336,7 +1348,7 @@ def render_omniroute(registry: dict) -> dict:
         if not isinstance(route, dict):
             continue
         declared_legs = route.get("legs")
-        legs = gateway_legs(route, registry)
+        legs = floor_route_legs(route, gateway_legs(route, registry), registry)
         if not legs:
             if declared_legs:
                 omitted.append(route_id)
@@ -1347,13 +1359,25 @@ def render_omniroute(registry: dict) -> dict:
             raise ValueError(
                 "routes.%s has legs but no surfaces.omniroute.context_declared - "
                 "every omniroute combo needs a declared context string" % route_id)
-        combos.append({
+        combo = {
             "name": route_id,
             "strategy": route.get("strategy"),
             "context": clamp_route_context(
                 route, registry, omniroute_surface["context_declared"], legs),
             "models": [gateway_ref(leg, registry) for leg in legs],
-        })
+        }
+        requirements = omniroute_surface.get("context_requirements")
+        if isinstance(requirements, dict) and isinstance(
+                requirements.get("min_context_window"), int) \
+                and not isinstance(requirements.get("min_context_window"), bool):
+            combo["contextRequirements"] = {
+                "minContextWindow": requirements["min_context_window"],
+                "contextFilterMode": requirements.get("context_filter_mode", "strict"),
+            }
+        timeout = omniroute_surface.get("target_timeout_ms")
+        if timeout is not None:
+            combo["targetTimeoutMs"] = timeout
+        combos.append(combo)
 
     # AO-DENYLEGS D2 / operator D-657: the ids tools/combo-contract.py judges with
     # its (f)-(i) gates are registry data (policy.d657_combos), projected here so
@@ -1729,6 +1753,11 @@ IDE_MODEL_ORDER = (
     "opencode-go/glm-5.3-flash", "opencode-go/minimax-m3",
     "opencode-go/kimi-k3", "opencode-go/qwen3.8-flash",
     "auto/smart", "auto", "auto/cheap",
+    # RT-P1-CLASS-COMBOS (2026-10-18): the three context-floored class combos
+    # (omniroute-only surfaces carrying context_requirements/target_timeout_ms).
+    # Appended after every pre-existing id, so no existing picker position
+    # moves - the same rule OCGO-PREFER states above.
+    "class-128k", "class-256k", "class-1m",
 )
 
 
@@ -1797,6 +1826,9 @@ def render_ide(registry: dict) -> dict:
         if not gateways:
             raise ValueError(
                 "routes.%s has no omniroute/litellm surface with a clients list" % route_id)
+        if not any(surface.get("clients") for surface in gateways.values()):
+            # Gateway-only routes stay servable without advertising a client entry.
+            continue
         # NOLEGS-OFFER (2026-10-08, fix-ci-round2): a legless route is in no
         # combo - render_omniroute() gives `legs: []` no combo at all - so its
         # omniroute membership would advertise a picker entry the gateway cannot
@@ -2464,6 +2496,51 @@ def clamp_route_context(route: dict, registry: dict, value, legs=None):
     if isinstance(value, (int, float)):
         return value if value <= cap else cap
     return value
+
+
+def route_context_floor(route: dict):
+    """The context floor a route's `surfaces.omniroute.context_requirements`
+    puts on its legs (RT-P1-CLASS-COMBOS), or None when the route declares no
+    floor at all - which is every pre-existing route.
+
+    None also covers a malformed declaration (non-object requirements, a floor
+    that is not a positive integer): a floor this cannot be read is not a floor
+    to enforce here, `check_registry`'s own `_check_context_floors` is what
+    fails loudly on it."""
+    surfaces = route.get("surfaces")
+    omniroute = surfaces.get("omniroute") if isinstance(surfaces, dict) else None
+    if not isinstance(omniroute, dict):
+        return None
+    requirements = omniroute.get("context_requirements")
+    if not isinstance(requirements, dict):
+        return None
+    floor = requirements.get("min_context_window")
+    if isinstance(floor, bool) or not isinstance(floor, int) or floor <= 0:
+        return None
+    return floor
+
+
+def floor_route_legs(route: dict, legs, registry: dict):
+    """The legs of `routes.<id>` that can carry that route's declared context
+    floor, in the order they were given: a leg whose model advertises less than
+    `min_context_window` is dropped (RT-P1-CLASS-COMBOS, the class-* clamp).
+
+    A leg with NO recorded window is dropped too, which is the opposite of
+    clamp_route_context()/route_context_cap() ("no evidence never clamps").
+    Those narrow a promise toward what is proven; this one keeps a promise a
+    client is sizing its request against, and an unrecorded window cannot be
+    shown to keep it. check_registry's `_check_context_floors` reports the same
+    leg by name so a hand edit fails loudly rather than silently thinning a
+    combo."""
+    floor = route_context_floor(route)
+    if floor is None:
+        return legs
+    kept = []
+    for leg in legs:
+        window = leg_advertised_context(leg, registry)
+        if window is not None and window >= floor:
+            kept.append(leg)
+    return kept
 
 
 def servable_route_ids(registry: dict) -> set:
@@ -3750,6 +3827,66 @@ def _check_paid_local_cap(registry) -> list:
     return problems
 
 
+def _check_context_floors(registry) -> list:
+    """The context-floor contract of a route declaring
+    `surfaces.omniroute.context_requirements` (RT-P1-CLASS-COMBOS): the floor
+    is a promise every leg of that route must be able to keep, so a hand edit
+    that adds a leg under it fails `validate` with the route, the leg and both
+    numbers named - never silently, and never only at render time (render_omniroute
+    drops such a leg as a second line of defence, so combos.json can never ship
+    one). Also checks the shape of the declaration itself and of
+    `target_timeout_ms`; a route that declares neither key is checked by
+    nothing here, which is every pre-existing route."""
+    problems = []
+    routes = registry.get("routes")
+    routes = routes if isinstance(routes, dict) else {}
+    for route_id in sorted(routes):
+        route = routes[route_id]
+        if not isinstance(route, dict):
+            continue
+        surfaces = route.get("surfaces")
+        omniroute = surfaces.get("omniroute") if isinstance(surfaces, dict) else None
+        if not isinstance(omniroute, dict):
+            continue
+        requirements = omniroute.get("context_requirements")
+        if requirements is not None:
+            label = "routes.%s.surfaces.omniroute.context_requirements" % route_id
+            if not isinstance(requirements, dict):
+                problems.append("%s must be an object, got %r" % (label, requirements))
+            else:
+                floor = requirements.get("min_context_window")
+                if isinstance(floor, bool) or not isinstance(floor, int) or floor <= 0:
+                    problems.append(
+                        "%s.min_context_window must be a positive integer, got %r"
+                        % (label, floor))
+                elif requirements.get("context_filter_mode") != "strict":
+                    problems.append(
+                        "%s.context_filter_mode must be 'strict', got %r"
+                        % (label, requirements.get("context_filter_mode")))
+                else:
+                    for leg in route.get("legs") or []:
+                        window = leg_advertised_context(leg, registry)
+                        if window is None:
+                            problems.append(
+                                "routes.%s: leg %r records no context_advertised window, "
+                                "so it cannot be checked against the route's %d context "
+                                "floor (surfaces.omniroute.context_requirements."
+                                "min_context_window)" % (route_id, leg, floor))
+                        elif window < floor:
+                            problems.append(
+                                "routes.%s: leg %r advertises %d context, below the "
+                                "route's %d context floor (surfaces.omniroute."
+                                "context_requirements.min_context_window)"
+                                % (route_id, leg, window, floor))
+        timeout = omniroute.get("target_timeout_ms")
+        if timeout is not None and (
+                isinstance(timeout, bool) or not isinstance(timeout, int) or timeout <= 0):
+            problems.append(
+                "routes.%s.surfaces.omniroute.target_timeout_ms must be a positive "
+                "integer (milliseconds), got %r" % (route_id, timeout))
+    return problems
+
+
 def check_registry(registry, today=None) -> list:
     """Return every spec 3.1 problem, in rule order; empty means the registry is clean."""
     problems = []
@@ -3777,6 +3914,7 @@ def check_registry(registry, today=None) -> list:
     problems.extend(_check_claude_budget(registry))
     problems.extend(_check_risk_policy(registry))
     problems.extend(_check_handoff_caps(registry))
+    problems.extend(_check_context_floors(registry))
     return problems
 
 
