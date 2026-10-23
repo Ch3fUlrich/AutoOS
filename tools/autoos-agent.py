@@ -3519,8 +3519,8 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
     agent = TIERS[tier]
     model = override or cfg["agents"][agent]["model"]
     base, _, variant = model.partition("#")
-    if base in {"mimo-v2.6-flash", "mimo-v2.6-pro",
-                "omniroute/mimo-v2.6-flash", "omniroute/mimo-v2.6-pro"}:
+    # Prefix rule, not a list: same prefix as the seat-model-evidence check.
+    if re.match(r"(omniroute/)?mimo-v2\.6-", base):
         raise ValueError("D-2459: use direct provider ids mimo/mimo-v2.6-flash or "
                          "mimo/mimo-v2.6-pro; combo-routed and bare MiMo pins are refused")
     # T2-RECORD-PIN item 3: a bare pin is qualified before it is tested, so a

@@ -747,6 +747,7 @@
             { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
         },
+        // D-2459/D-2461: these keys keep their name, but serve the DIRECT mimo leg.
         "mimo-v2.6-flash": {
           "modelID": "mimo/mimo-v2.6-flash",
           "name": "Xiaomi MiMo v2.6 Flash · 1M",
