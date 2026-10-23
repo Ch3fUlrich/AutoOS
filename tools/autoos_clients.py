@@ -93,6 +93,9 @@ CLIENTS = {c.name: c for c in (
            # 2026-09-27). bypass_permissions is safe only because the spawner
            # forces an --isolate sandbox for every qoder writer (autoos-agent.py).
            modes={"read": ["--permission-mode", "dont_ask"], "edit": ["--permission-mode", "bypass_permissions"]}),
+    # D-1317: tool-less text-in/text-out leg (tools/review-call.py); shell/write false in the registry.
+    Client("api", "python", True, True, False, "AUTOOS_OMNIROUTE_KEY (review-call gateway)",
+           "tool-less: prompt file in, review.txt out; model allowlist in tools/api_client.py"),
 )}
 
 # AGYFIX item 2 (K3 CLI audit addendum 2026-09-27 08:1xZ): agy with no --model
@@ -453,6 +456,9 @@ def build_command(client: Client, task: str, combo: str | None, level: str,
                     ([] if not model else ["--model", model]) + deny + [task])
         return (["claude", "-p"] + mode + ([] if not model else ["--model", model]) +
                 session + deny + [task])
+    if client.name == "api":
+        import api_client
+        return api_client.build_command_api(task, model, os.environ)
     if client.name == "codex":
         inner = ["exec"] + mode + ["--skip-git-repo-check"] + deny + [task]
     elif client.name == "qoder":
@@ -520,6 +526,7 @@ MODEL_INPUT = {
     "codex":    (("flag", "--model"), ("route",)),
     "gemini":   (("flag", "--model"), ("route",)),
     "qwen":     (("flag", "--model"), ("route",)),
+    "api":      (("flag", "--model"),),
 }
 
 

@@ -45,21 +45,29 @@ defaults `self-hosted`, `Linux`, `X64`).
 
 ## Caches
 
-Three named Docker volumes are mounted into every slot whose repository entry
-has `"cache": true` (the `-CacheVolumes` switch on the docker run argv). They
-are shared by all slots and survive container restarts (and Docker Desktop
-restarts), so a cold cargo download or a Rust rebuild is paid once instead of
-on every job:
+The supervisor passes the slot prefix as the cache scope to runner-loop.ps1,
+which forwards it to the Docker arguments. Setting `"cache": true` therefore
+gives that repository its own three volumes.
 
-- `ci-cargo-registry` -> `/home/runner/.cargo/registry` - the crates.io index
+Three named Docker volumes are mounted into every slot whose repository entry
+has `"cache": true` (`-CacheVolumes -CacheScope <prefix>` on the docker run
+argv). The scope is the repository's `prefix` in `slots.json`, for example
+`workst-plangraph`. Volumes are shared only by slots of that repository;
+no volume is shared between repositories. They survive container and Docker
+Desktop restarts, so downloads and builds stay warm within each repository:
+
+- `ci-cargo-registry-<prefix>` -> `/home/runner/.cargo/registry` - the crates.io index
   and the downloaded crate tarballs.
-- `ci-cargo-git` -> `/home/runner/.cargo/git` - git dependencies.
-- `ci-sccache` -> `/home/runner/.cache/sccache` - the sccache compile cache
+- `ci-cargo-git-<prefix>` -> `/home/runner/.cargo/git` - git dependencies.
+- `ci-sccache-<prefix>` -> `/home/runner/.cache/sccache` - the sccache compile cache
   (sccache v0.18.0 is baked into the image and exported as `RUSTC_WRAPPER`).
 
-Clear a cache by stopping the slots and running
-`docker volume rm ci-cargo-registry ci-cargo-git ci-sccache`; the next job
-rebuilds it from scratch. The supervisor additionally runs `docker pull` for
+Clear a repository's cache only after stopping its slots, by removing its three
+scoped volumes; the next job rebuilds them from scratch. Missing or invalid
+`-CacheScope` with `-CacheVolumes` throws rather than using shared volumes.
+One-time migration cleanup: once no slot uses the old shared volumes, run
+`docker volume rm ci-cargo-registry ci-cargo-git ci-sccache`.
+The supervisor additionally runs `docker pull` for
 every image in the config's `"prepull"` array (for example `postgres:16`)
 once at startup, so the first job of the day does not pay for a cold pull
 either. Current runner image tag: `workst-runner:2.338.0-4`.

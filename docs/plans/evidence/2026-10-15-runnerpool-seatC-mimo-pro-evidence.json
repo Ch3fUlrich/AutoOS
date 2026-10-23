@@ -1,0 +1,48 @@
+{
+  "requested_model": "mimo/mimo-v2.6-pro",
+  "served_model": "mimo-v2.6-pro",
+  "status": 200,
+  "finish_reason": "stop",
+  "verdict": null,
+  "test_gaming": "no",
+  "correlation_id": "8e6dba08-6582-4775-bf60-36c8193b667e",
+  "response_header_names": [
+    "Content-Security-Policy",
+    "X-Frame-Options",
+    "X-Content-Type-Options",
+    "Referrer-Policy",
+    "Permissions-Policy",
+    "Strict-Transport-Security",
+    "access-control-allow-headers",
+    "access-control-allow-methods",
+    "access-control-allow-origin",
+    "vary",
+    "vary",
+    "x-omniroute-route-class",
+    "x-request-id",
+    "cache-control",
+    "connection",
+    "content-type",
+    "x-correlation-id",
+    "Date",
+    "Transfer-Encoding"
+  ],
+  "session_tag": "review/runnerpool-seatC",
+  "run_id": "20261015-203247-runnerpool-seatc-b8dc69",
+  "prompt_sha256": "b8d1607d43ddfc5042fafa101b30981d3a84b4f4f921b8c1f419cd09705aafb8",
+  "tokens": {
+    "completion_tokens": 22728,
+    "prompt_tokens": 8925,
+    "total_tokens": 31653,
+    "completion_tokens_details": {
+      "reasoning_tokens": 20193
+    },
+    "prompt_tokens_details": {
+      "cached_tokens": 0
+    }
+  },
+  "stream": true,
+  "failure": null,
+  "started": "2026-10-15T20:32:47Z",
+  "finished": "2026-10-15T20:44:02Z"
+}

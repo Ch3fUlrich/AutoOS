@@ -673,7 +673,30 @@ fi
 # ADR 0006 card resolver, the client adapters and the depth budget: one
 # unittest per routing-table row, all dry runs.
 if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
-    out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | grep -E '^(FAIL|ERROR):' | head -n 20; printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# AO-WORKST-RUNNER-POOL: runner pool core / gate / proc / slot loop / CLI unit tests
+# (pure stdlib, tempfile spools, no live host reads).
+if it "runner pool unit tests: core, gate, proc, slot loop, CLI"; then
+    out=""; rc=0
+    o="$(python3 tests/test_runner_pool.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_cli.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_core.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_core_b.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_core_c.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_gate.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_proc.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_slot.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_strict.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_seatc.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_runner_pool_e2e.py 2>&1)" || { rc=1; out="$out$o"; }
+    o="$(python3 tests/test_api_client.py 2>&1)" || { rc=1; out="$out$o"; }
+    [ "$rc" = 0 ] && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+if it "CI parallel-vs-single timing unit tests"; then
+    out="$(python3 tests/test_ci_measure_table.py 2>&1)" && pass || fail "$out"
 fi
 
 # AO-REDACT-SPAN (2026-10-09): tools/autoos_redact.py must mask the PEM *span*
