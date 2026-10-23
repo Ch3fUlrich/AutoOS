@@ -175,7 +175,7 @@ jobs:
     # requires success once it is on. Windows runs on full runs only.
     needs: smart
     if: ${{ vars.CI_WINDOWS_ENABLED == 'true' && needs.smart.outputs.full == 'true' }}
-    # D-1349: no GitHub-hosted runners. Needs a windows fleet-ci runner before this job is un-gated; with if: false it is never queued.
+    # D-1349: no GitHub-hosted runners. Full runs need CI_WINDOWS_ENABLED set to 'true' and an available windows fleet-ci runner.
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","windows","fleet-ci"]') || 'windows-latest' }}
     steps:
       - uses: actions/checkout@v4

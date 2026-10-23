@@ -91,7 +91,7 @@ jobs:
           post() {
             printf 'Authorization: Bearer %s\n' "$GH_TOKEN" | curl -fsS -X POST -H @- -H "Accept: application/vnd.github+json" \
               "${GITHUB_API_URL:-https://api.github.com}/repos/$REPO/statuses/$SHA" \
-              -d "{\"state\":\"$1\",\"context\":\"$ctx\",\"description\":\"$2\"}" >/dev/null || true
+              -d "{\"state\":\"$1\",\"context\":\"$ctx\",\"description\":\"$2\"}" >/dev/null || { echo "::error::could not set the $ctx status"; return 1; }
           }
           for pair in $RESULTS; do
             name="${pair%%=*}"; r="${pair#*=}"
@@ -101,8 +101,8 @@ jobs:
               *) post failure "$name ended $r"; exit 1 ;;
             esac
           done
-          if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then post pending "selected-only: add the merge-ready label"
-          elif [ "$FULL" = true ]; then post success "full suite passed"
+          if [ "$EVENT" = pull_request ] && [ "$FULL" != true ]; then post pending "selected-only: add the merge-ready label" || exit 1
+          elif [ "$FULL" = true ]; then post success "full suite passed" || exit 1
           else post failure "not a full run"; exit 1; fi
 ```
 

@@ -250,6 +250,24 @@ def run_block(workflow, header):
     return chr(10).join(out) + chr(10)
 
 
+class AdoptionTemplateTests(unittest.TestCase):
+    def test_status_posts_fail_closed(self):
+        doc = (ROOT / "docs" / "ci-smart-select.md").read_text(encoding="utf-8")
+        blocks = re.findall(r"^```[^\n]*\n(.*?)^```", doc, re.MULTILINE | re.DOTALL)
+        templates = [block for block in blocks if "post()" in block]
+        self.assertEqual(len(templates), 1)
+        template = templates[0]
+        post = template.split("post() {", 1)[1].split("\n          }", 1)[0]
+        self.assertIn("curl ", post)
+        self.assertNotIn("|| true", post)
+        self.assertIn("return 1", post)
+        for state in ("pending", "success"):
+            lines = [line for line in template.splitlines() if "post " + state in line]
+            self.assertTrue(lines, "missing post " + state)
+            for line in lines:
+                self.assertIn("|| exit 1", line)
+
+
 @unittest.skipUnless(os.name == "posix", "workflow shell blocks are bash")
 class WorkflowShellTests(unittest.TestCase):
     """The two shell blocks that guard correctness run for real, with a stub `gh`."""
