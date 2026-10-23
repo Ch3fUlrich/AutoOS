@@ -161,8 +161,8 @@ def job_argv(job: dict, repo_root: Path, python: str):
     for field in ('paths', 'spec'):
         if card.get(field):
             raise ValueError(f'unsupported pool restriction: {field}')
-    client = card.get('client')
-    if not isinstance(client, str) or not client:
+    client = card.get('client', 'api')
+    if 'client' not in card or not isinstance(client, str) or not client:
         raise ValueError('missing client')
     # Optional fields
     model = card.get('model')
@@ -228,9 +228,9 @@ def default_risk_of(job):
     """
     try:
         card = job['card']
-        if card['client'] == 'api' and ('model' not in card or card['model'] in API_MODELS):
+        if card.get('client', 'api') == 'api' and ('model' not in card or card['model'] in API_MODELS):
             return 'R0'
-    except (KeyError, TypeError):
+    except (KeyError, TypeError, AttributeError):
         pass
     return 'R2'
 
@@ -284,15 +284,18 @@ def run_one(root, n, deps):
     slot_dir = Path(root) / 'slots' / str(n)
     slot_dir.mkdir(parents=True, exist_ok=True)
     lock = slot_dir / 'slot.lock'
-    # Serialize stale-lock replacement; an incomplete owner record fails closed.
+    # Serialize replacement; incomplete writes get a bounded grace period.
     with rpc.locked(slot_dir / '.lock-guard'):
         if lock.exists():
             try:
                 owner = json.loads(lock.read_text())
-                if proc.pid_alive(owner['pid']) and proc.filetime_of(owner['pid']) == owner['filetime']:
+                current_ft = proc.filetime_of(owner['pid'])
+                if proc.pid_alive(owner['pid']) and (owner['filetime'] is None
+                        or current_ft is None or current_ft == owner['filetime']):
                     return 'slot-busy'
             except (ValueError, TypeError, KeyError, OSError):
-                return 'slot-busy'
+                if deps.now() - lock.stat().st_mtime < HEARTBEAT_T:
+                    return 'slot-busy'
             lock.unlink()
         with lock.open('x', encoding='utf-8') as stream:
             json.dump({'pid': deps.pid, 'filetime': deps.filetime}, stream)
@@ -322,7 +325,7 @@ def _run_one_locked(root, n, deps):
         return 'memory'
 
     refusal = deps.admission_refusal()
-    if refusal:
+    if refusal and refusal != 'admission-unreadable':
         write_slot_state(root, n, 'idle', None, now, deps.pid, deps.filetime)
         return 'refused'
 
@@ -394,11 +397,15 @@ def _run_claimed(root, n, deps, claimed_path, now):
         return 'memory-recheck'
 
     claimed_admission = getattr(deps, 'claimed_admission', lambda job: None)
-    if claimed_admission(job):
-        if not rpc.write_json_atomic(queue_dir / claimed_path.name, job):
+    refusal = claimed_admission(job)
+    if refusal == 'admission-unreadable':
+        raise ValueError('admission-unreadable')
+    if refusal:
+        if not rpc.write_json_atomic(str(queue_dir / claimed_path.name), job):
             return 'requeue-failed'
         claimed_path.unlink()
         return 'requeued-refused'
+    job['card'].setdefault('client', 'api')
     argv = job_argv(job, deps.repo_root, deps.python)
 
     log_path = log_dir / f"{job['id']}.log"
@@ -552,7 +559,10 @@ def _cmd_kill(args, env, stdout, deps, proc):
         os_name = getattr(rpc, 'os_name', lambda: os.name)()
     try:
         out = proc.kill_job(slot, filetime_of, kill_tree, os_name=os_name, expect_run_id=jobid)
-    except (ValueError, AttributeError, KeyError, TypeError, OSError):
+    except OSError:
+        stdout.write('kill-failed\n')
+        return 1
+    except (ValueError, AttributeError, KeyError, TypeError):
         stdout.write('refused: bad run.private\n')
         return 1
     stdout.write(str(out) + '\n')
@@ -570,15 +580,13 @@ def _build_real_deps(root, n, env):
             spec = importlib.util.spec_from_file_location('autoos_agent_mod', path)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            kind = 'tool-using'
-            try:
-                if job is None:
-                    queued = _oldest_queue_file(root / 'queue')
-                    job = json.loads(queued.read_text(encoding='utf-8')) if queued else {}
-                kind = mod.host_run_kind(job['card']['client'],
-                                         mod.load_registry(mod.REGISTRY_PATH))
-            except Exception:
-                pass
+            if job is None:
+                queued = _oldest_queue_file(root / 'queue')
+                if queued is None:
+                    return None
+                job = json.loads(queued.read_text(encoding='utf-8'))
+            kind = mod.host_run_kind(job['card'].get('client', 'api'),
+                                     mod.load_registry(mod.REGISTRY_PATH))
             return mod.host_admission_refusal(kind=kind)
         except Exception:
             return 'admission-unreadable'

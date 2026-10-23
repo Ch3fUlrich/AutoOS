@@ -152,6 +152,7 @@ def parse_submit(raw: bytes, *, submitter: str, now=None, rand=None):
         raise GateError('invalid submitter')
     # validate card
     card = validate_card(obj['card'])
+    card.setdefault('client', 'api')
     # generate id
     now = now if now is not None else int(time.time())
     rand = rand if rand is not None else secrets.token_hex(4)

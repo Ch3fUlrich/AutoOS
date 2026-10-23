@@ -22,6 +22,116 @@ import api_client as api
 from types import SimpleNamespace
 
 class TestConsolidated(unittest.TestCase):
+    def test_submit_defaults_client_in_queue(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = {'LOCALAPPDATA': td, 'SSH_ORIGINAL_COMMAND': 'submit'}
+            self.assertEqual(pool.main(['ssh-gate', '--submitter', 'lane1'], env,
+                io.BytesIO(b'{"card":{},"brief":"work"}'), io.StringIO()), 0)
+            job = json.loads(next((pool.spool_root(env) / 'queue').glob('*.json')).read_text())
+            self.assertEqual(job['card']['client'], 'api')
+
+    def test_claimed_default_client_and_unreadable_admission(self):
+        for card in ({}, [], None):
+            with self.subTest(card=card), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                pool.ensure_dirs(root)
+                (root / 'queue' / 'a.json').write_text(json.dumps(
+                    {'id': 'a', 'submitter': 'lane1', 'card': card, 'brief': 'work'}))
+                kinds, calls = [], []
+                agent = SimpleNamespace(REGISTRY_PATH='registry', load_registry=lambda _: {},
+                    host_run_kind=lambda c, r: kinds.append(c) or 'toolless',
+                    host_admission_refusal=lambda **kw: None)
+                with patch('importlib.util.module_from_spec', return_value=agent), \
+                     patch('importlib.machinery.SourceFileLoader.exec_module'):
+                    deps = pool._build_real_deps(root, 1, {})
+                    deps.mem_mb = lambda: 99999
+                    deps.spawn = lambda *a: calls.append(a) or 0
+                    self.assertEqual(pool.run_one(root, 1, deps), 'done' if card == {} else 'failed')
+                    self.assertEqual(pool.run_one(root, 1, deps), 'idle')
+                rec = json.loads((root / 'done' / 'a.json').read_text())
+                self.assertEqual(rec['rc'], 0 if card == {} else 2)
+                self.assertEqual(len(calls), 1 if card == {} else 0)
+                if card == {}:
+                    self.assertEqual(kinds[:2], ['api', 'api'])
+                    self.assertEqual(pool.default_risk_of({'card': {}}), 'R0')
+                else:
+                    self.assertTrue((root / 'failed' / 'a.json').exists())
+                    self.assertIn('admission-unreadable', rec['deep']['reasons'])
+                self.assertFalse(list((root / 'queue').glob('*.json')))
+
+    def test_slot_lock_owner_and_incomplete_age(self):
+        cases = [(None, None, True, 'slot-busy'), (None, 9, True, 'slot-busy'),
+                 (9, None, True, 'slot-busy'), (8, 9, True, 'idle'),
+                 (None, 9, False, 'idle'), ('empty', 119, False, 'slot-busy'),
+                 ('empty', 120, False, 'idle'), ('broken', 121, False, 'idle')]
+        for stored, current, alive, expected in cases:
+            with self.subTest(case=(stored, current, alive)), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                slot = root / 'slots' / '1'
+                slot.mkdir(parents=True)
+                lock = slot / 'slot.lock'
+                lock.write_text('' if stored == 'empty' else '{' if stored == 'broken'
+                                else json.dumps({'pid': 42, 'filetime': stored}))
+                os.utime(lock, (1000 - current, 1000 - current) if isinstance(stored, str) else (1, 1))
+                with patch.object(proc, 'pid_alive', return_value=alive), \
+                     patch.object(proc, 'filetime_of', return_value=current):
+                    self.assertEqual(pool.run_one(root, 1, pool.Deps(
+                        spawn=lambda *a: 0, now=lambda: 1000, filetime=1)), expected)
+
+    def test_unreadable_admission_is_terminal(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pool.ensure_dirs(root)
+            (root / 'queue/a.json').write_text('{"id":"a","card":{"client":"api"}}')
+            deps = pool.Deps(spawn=lambda *a: self.fail('spawn'),
+                             admission_refusal=lambda: 'admission-unreadable')
+            deps.claimed_admission = lambda job: 'admission-unreadable'
+            self.assertEqual(pool.run_one(root, 1, deps), 'failed')
+            self.assertEqual(pool.run_one(root, 1, deps), 'idle')
+            rec = json.loads((root / 'done/a.json').read_text())
+            self.assertEqual(rec['rc'], 2)
+            self.assertEqual(rec['deep']['reasons'], ['admission-unreadable'])
+            self.assertTrue((root / 'failed/a.json').exists())
+
+    def test_lock_creation_retains_pid_without_filetime(self):
+        with tempfile.TemporaryDirectory() as td, patch.object(proc, 'filetime_of', return_value=None):
+            root = Path(td)
+            deps = pool.Deps(spawn=lambda *a: 0, pid=42)
+            def inspect(*args):
+                self.assertEqual(json.loads((root / 'slots/1/slot.lock').read_text()),
+                                 {'pid': 42, 'filetime': None})
+                return 'idle'
+            with patch.object(pool, '_run_one_locked', side_effect=inspect):
+                self.assertEqual(pool.run_one(root, 1, deps), 'idle')
+
+    def test_claimed_refusal_writer_uses_string_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pool.ensure_dirs(root)
+            (root / 'queue/a.json').write_text('{"id":"a","card":{},"brief":"work"}')
+            deps = pool.Deps(spawn=lambda *a: self.fail('spawn'))
+            deps.claimed_admission = lambda job: 'full'
+            real_write = rpc.write_json_atomic
+            def write(path, data):
+                if Path(path).parent == root / 'queue':
+                    self.assertIsInstance(path, str)
+                return real_write(path, data)
+            with patch.object(rpc, 'write_json_atomic', side_effect=write):
+                self.assertEqual(pool.run_one(root, 1, deps), 'requeued-refused')
+
+    def test_kill_missing_taskkill_is_kill_failed(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = {'LOCALAPPDATA': td}
+            root = pool.spool_root(env)
+            pool.write_slot_state(root, 1, 'running', {'id': 'a'}, 1, 42, 9)
+            proc.write_run_private(root / 'slots/1', 'a', 42, 9, 'tooluse')
+            out = io.StringIO()
+            def missing(argv):
+                raise FileNotFoundError('taskkill')
+            self.assertEqual(pool.main(['kill', 'a'], env, io.BytesIO(), out,
+                {'os_name': 'nt', 'filetime_of': lambda _: 9, 'kill_tree': missing}), 1)
+            self.assertEqual(out.getvalue(), 'kill-failed\n')
+
     def test_round3_kill_and_slot_shapes(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
