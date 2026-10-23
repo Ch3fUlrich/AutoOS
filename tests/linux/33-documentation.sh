@@ -673,7 +673,7 @@ fi
 # ADR 0006 card resolver, the client adapters and the depth budget: one
 # unittest per routing-table row, all dry runs.
 if it "autoos-agent spawner unit tests: card routing, clients, depth"; then
-    out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    out="$(python3 tests/test_autoos_spawner.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | grep -E '^(FAIL|ERROR):' | head -n 20; printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # AO-WORKST-RUNNER-POOL: runner pool core / gate / proc / slot loop / CLI unit tests
