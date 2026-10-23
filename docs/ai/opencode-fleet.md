@@ -338,6 +338,8 @@ never blank out the gateway `baseURL`.
 
 `tools/fleet_bus.py` is a stdlib-only HTTP relay for tailnet-only cross-host messaging (`POST /inbox` + `GET /outbox?since=<cursor>`):
 
+The versioned fleet-bus v2 wire contract (signing, canonical form, cursors, validation, test vectors) is specified in plangraph's [`docs/FLEET-BUS.md`](https://github.com/Ch3fUlrich/plangraph/blob/main/docs/FLEET-BUS.md), implemented by `src/plangraph/fleet_bus/contract.py`.
+
 - **Authentication & bounds:** `POST /inbox` requires `X-Fleet-Sig` = hex `HMAC-SHA256(secret, "ts|nonce|from|to|sha256(text)")`
   using a 0600 `--secret-file` (value never printed), `|now - ts| <= 60` s skew check, 10 000-entry nonce LRU, and a 4096-byte
   body cap. Message text is scrubbed to a single line (`<= 2000` chars).
