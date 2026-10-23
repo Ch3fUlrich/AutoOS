@@ -13606,7 +13606,9 @@ def host_admission_commit_max(registry=None, platform=None):
     return _host_admission_value(registry, platform, "commit_charge_max_pct", None)
 
 
-def _host_admission_value(registry, platform, field, default):
+def _host_admission_value(registry, platform, field, default, minimum=None):
+    # `minimum`: a value below it is skipped (a cap of 0 would refuse every run, a
+    # negative floor would disable the memory guard), so the next source wins.
     if registry is None:
         try:
             registry = load_registry(REGISTRY_PATH)
@@ -13620,7 +13622,7 @@ def _host_admission_value(registry, platform, field, default):
     override = override if isinstance(override, dict) else {}
     for source in (override, section):
         value = source.get(field)
-        if isinstance(value, int) and not isinstance(value, bool):
+        if isinstance(value, int) and not isinstance(value, bool)                 and (minimum is None or value >= minimum):
             return value
     return default
 
@@ -13629,10 +13631,10 @@ def host_admission_config(registry=None, platform=None) -> tuple:
     """Host cap and memory floor, with per-platform overrides."""
     return (
         _host_admission_value(
-            registry, platform, "max_live_workers", ADMISSION_MAX_LIVE_DEFAULT),
+            registry, platform, "max_live_workers", ADMISSION_MAX_LIVE_DEFAULT, 1),
         _host_admission_value(
             registry, platform, "mem_available_floor_mb",
-            ADMISSION_MEM_FLOOR_MB_DEFAULT),
+            ADMISSION_MEM_FLOOR_MB_DEFAULT, 1),
     )
 
 
@@ -13824,12 +13826,10 @@ def host_admission_refusal(registry=None, workers=None, meminfo=None,
     directory = workers_dir() if workers is None else workers
     live = live_worker_count(directory)
     commit_pct = None
-    windows_unreadable = False
     if ((sys.platform if platform is None else platform) == "win32"
             and meminfo is None and not os.environ.get(ADMISSION_MEMINFO_ENV)):
         status = (memstatus or windows_memory_status)()
         free_mb, commit_pct = status if status is not None else (None, None)
-        windows_unreadable = status is None
     else:
         free_mb = mem_available_mb(meminfo)
 
@@ -13848,10 +13848,6 @@ def host_admission_refusal(registry=None, workers=None, meminfo=None,
                 applicable_live, kind_cap, free_mb, kind_floor,
                 "the toolless live-worker cap")
 
-    if windows_unreadable and applicable_floor > 0:
-        return _admission_text(
-            applicable_live, applicable_cap, free_mb, applicable_floor,
-            "the memory floor (unreadable on Windows)")
     if free_mb is not None and free_mb < applicable_floor:
         return _admission_text(
             applicable_live, applicable_cap, free_mb, applicable_floor,

@@ -27026,13 +27026,14 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertEqual((cap, floor), (6, 4608))
 
     def test_host_admission_config_top_level_invalid_falls_back_to_code_defaults(self):
-        # Top-level cap < 1 or floor < 1 falls back to code defaults (6, 6144)
+        # A top-level cap < 1 or floor < 1 is skipped per field (main's by_platform rule
+        # keeps a valid sibling): the code default fills only the invalid one.
         registry = {"host_admission": {"max_live_workers": 0, "mem_available_floor_mb": 4608}}
-        self.assertEqual(self.agent.host_admission_config(registry), (6, 6144))
+        self.assertEqual(self.agent.host_admission_config(registry, "linux"), (6, 4608))
         registry = {"host_admission": {"max_live_workers": 6, "mem_available_floor_mb": 0}}
-        self.assertEqual(self.agent.host_admission_config(registry), (6, 6144))
+        self.assertEqual(self.agent.host_admission_config(registry, "linux"), (6, 6144))
         registry = {"host_admission": {"max_live_workers": -1, "mem_available_floor_mb": -1}}
-        self.assertEqual(self.agent.host_admission_config(registry), (6, 6144))
+        self.assertEqual(self.agent.host_admission_config(registry, "linux"), (6, 6144))
 
     def test_5th_toolless_refused_when_4_live(self):
         # Toolless cap is 4; 5th toolless run is refused
@@ -27176,26 +27177,23 @@ class HostAdmissionTests(unittest.TestCase):
         self.assertIsNotNone(r)
         self.assertIn("cap 2", r)  # total cap binds first
 
-    def test_nt_unreadable_memory_refuses_when_floor_configured(self):
-        # On Windows (os.name == 'nt'), unreadable memory refuses when a floor
-        # is configured (fail closed). We inject a mock reader that returns None.
-        registry = {
-            "host_admission": {
-                "max_live_workers": 6,
-                "mem_available_floor_mb": 4608,
-                "kinds": {"toolless": {"max_live_workers": 4, "mem_available_floor_mb": 3072}}
-            }
-        }
-        # Mock os.name in the agent module to simulate Windows
-        # Also mock _nt_mem_available_mb to return None (unreadable)
-        with mock.patch.object(self.agent.os, "name", "nt"), \
-             mock.patch.object(self.agent, "_nt_mem_available_mb", return_value=None):
-            # The test is to verify that when mem_available_mb returns None on nt
-            # with a floor configured, it REFUSES (fail closed)
-            r = self.agent.host_admission_refusal(registry=registry, workers=self.workers,
-                                                   meminfo="/dev/null", kind="tool-using")
-            self.assertIsNotNone(r, "unreadable memory on nt with floor should refuse")
-            self.assertIn("MemAvailable unknown", r)
+    def test_win32_unreadable_memory_status_stands_down_but_the_cap_still_binds(self):
+        # D-2253 (main): an unmeasurable Windows host fails OPEN on the memory half;
+        # the live-worker cap, per kind, is the half that still binds.
+        registry = {"host_admission": {"max_live_workers": 6, "mem_available_floor_mb": 4608,
+                                       "kinds": {"toolless": {"max_live_workers": 4,
+                                                              "mem_available_floor_mb": 3072}}}}
+        for kind in ("tool-using", "toolless"):
+            self.assertIsNone(self.agent.host_admission_refusal(
+                registry=registry, workers=self.workers, memstatus=lambda: None,
+                platform="win32", kind=kind))
+        small = {"host_admission": {"max_live_workers": 1, "mem_available_floor_mb": 4608}}
+        self.agent._reserve_free_slot(self.workers, None, None,
+                                      suffix=self.agent.ADMISSION_RESERVATION_SUFFIX, prefix="host")
+        r = self.agent.host_admission_refusal(registry=small, workers=self.workers,
+                                              memstatus=lambda: None, platform="win32")
+        self.assertIsNotNone(r)
+        self.assertIn("cap 1", r)
 
 
 class P1ReviewBaseSeatTests(unittest.TestCase):
