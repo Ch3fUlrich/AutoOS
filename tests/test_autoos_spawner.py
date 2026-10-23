@@ -26486,10 +26486,10 @@ class HostAdmissionWindowsTests(unittest.TestCase):
         self.assertIn("the memory floor", self.refusal((12287, 70)))
 
     def test_invalid_memstatus_is_unknown(self):
-        for status in ((0, 99), (-1, 99), (16000, -1), (16000, 101)):
+        for status in ((16000, -1), (16000, 101), (None, None)):
             with self.subTest(status=status):
                 self.assertIsNone(self.refusal(status))
-        self.assertIsNone(self.agent._sane_memstatus(0, 50))
+        self.assertEqual(self.agent._sane_memstatus(0, 50), (0, 50))
         self.assertEqual(self.agent._sane_memstatus(16000, 101), (16000, None))
         self.assertEqual(self.agent._sane_memstatus(16000, 100), (16000, 100))
 
@@ -26498,12 +26498,58 @@ class HostAdmissionWindowsTests(unittest.TestCase):
         def read_status(pointer):
             stat = pointer._obj
             stat.ullTotalPhys, stat.ullAvailPhys = physical
+            stat.ullTotalPageFile, stat.ullAvailPageFile = pagefile
             return 1
         kernel = mock.Mock(GlobalMemoryStatusEx=read_status)
+        pagefile = (0, 0)
         with mock.patch.object(ctypes, "windll", mock.Mock(kernel32=kernel), create=True):
-            for physical in ((0, 0), (1024, 0), (1024, 2048)):
+            for physical, expected in (((0, 0), None), ((1024, 0), 0),
+                                       ((1024, 2048), None)):
                 with self.subTest(physical=physical):
-                    self.assertIsNone(self.agent.windows_memory_status())
+                    self.assertEqual(self.agent.windows_memory_status(), (expected, None))
+            pagefile = (100, 15)
+            physical = (1024, 2048)
+            self.assertEqual(self.agent.windows_memory_status(), (None, 85.0))
+            pagefile = (100, 101)
+            physical = (1024, 0)
+            self.assertEqual(self.agent.windows_memory_status(), (0, None))
+
+    def test_partial_memory_readings_bind_independently(self):
+        for status, reason in (((0, 10.0), "the memory floor"),
+                               ((0, None), "the memory floor"),
+                               ((None, 85.0), "the commit-charge ceiling")):
+            with self.subTest(status=status):
+                self.assertIn(reason, self.refusal(status))
+        with mock.patch.object(self.agent, "live_worker_count", return_value=20), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            self.assertIn("live-worker cap", self.agent.host_admission_refusal(
+                SHIPPED_REGISTRY, platform="win32", memstatus=lambda: (None, None)))
+
+    def test_malformed_worker_rows_are_ignored_by_both_counts(self):
+        with mock.patch.object(self.agent, "visible_workers", return_value=[None, [],
+                {"state": "running", "kind": "toolless"}]), \
+                mock.patch.object(self.agent, "_reservation_rows", return_value=([], [])):
+            self.assertEqual(self.agent.live_worker_count(self.workers), 1)
+            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "tool-using"), 0)
+
+    def test_final_client_retags_claim_before_record(self):
+        registry = {"clients": {"plain": {"capabilities": {"shell": False, "write": False}}}}
+        refusal, token = self.agent.host_admission_claim(
+            registry, workers=self.workers, memstatus=lambda: (16000, None), platform="win32",
+            kind="toolless")
+        self.assertIsNone(refusal)
+        kind = self.agent._host_claim_kind({"client": "opencode"}, registry, token, self.workers)
+        self.assertEqual(kind, "tool-using")
+        with open(token, encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["kind"], kind)
+
+    def test_test_escapes_are_read_from_spawner_environment(self):
+        with mock.patch.dict(os.environ, {"AUTOOS_ADMISSION_OFF": "1"}), \
+                mock.patch.object(self.agent, "live_worker_count", side_effect=AssertionError):
+            self.assertIsNone(self.agent.host_admission_refusal())
+        path = HostAdmissionTests.meminfo(self, 0)
+        with mock.patch.dict(os.environ, {"AUTOOS_MEMINFO_PATH": path}, clear=True):
+            self.assertEqual(self.agent.mem_available_mb(), 0)
 
     def test_commit_ceiling_inclusive(self):
         for pct in (80.0, 85):
@@ -26648,7 +26694,7 @@ class HostAdmissionTests(unittest.TestCase):
                 {"state": "running", "kind": 3}]
         with mock.patch.object(self.agent, "visible_workers", return_value=rows):
             self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "toolless"), 0)
-            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "tool-using"), 3)
+            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "tool-using"), 2)
         for kind in ([], 3):
             self.agent._reserve_free_slot(self.workers, None, None,
                 suffix=self.agent.ADMISSION_RESERVATION_SUFFIX, kind=kind)

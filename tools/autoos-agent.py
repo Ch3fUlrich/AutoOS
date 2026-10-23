@@ -13686,8 +13686,8 @@ def host_run_kind(client_name: str, registry: dict | None) -> str:
 def _sane_memstatus(avail_mb, commit_pct):
     """Discard unreadable physical memory and out-of-range commit readings."""
     if (not isinstance(avail_mb, (int, float)) or isinstance(avail_mb, bool)
-            or not 0 < avail_mb < float("inf")):
-        return None
+            or not 0 <= avail_mb < float("inf")):
+        avail_mb = None
     if (not isinstance(commit_pct, (int, float)) or isinstance(commit_pct, bool)
             or not 0 <= commit_pct <= 100):
         commit_pct = None
@@ -13717,14 +13717,15 @@ def windows_memory_status():
         stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
         if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
             return None
-        if not 0 < stat.ullAvailPhys <= stat.ullTotalPhys:
-            return None
+        avail_mb = (stat.ullAvailPhys // (1024 * 1024)
+                    if stat.ullTotalPhys and stat.ullAvailPhys <= stat.ullTotalPhys
+                    else None)
         commit_pct = (
             (stat.ullTotalPageFile - stat.ullAvailPageFile)
             / stat.ullTotalPageFile * 100
             if stat.ullTotalPageFile else None
         )
-        return _sane_memstatus(stat.ullAvailPhys // (1024 * 1024), commit_pct)
+        return _sane_memstatus(avail_mb, commit_pct)
     except Exception:
         return None
 
@@ -13753,7 +13754,7 @@ def live_worker_count(directory=None) -> int:
     """Count running worker records plus live host-slot reservations."""
     directory = workers_dir() if directory is None else directory
     live = sum(1 for row in visible_workers(directory)
-               if not isinstance(row, dict) or row.get("state") == "running")
+               if isinstance(row, dict) and row.get("state") == "running")
     return live + live_admission_reservations(directory)
 
 
@@ -13818,6 +13819,23 @@ def _admission_text(live: int, cap: int, free_mb, floor: int, which: str) -> str
             % (live, cap, free, floor, which))
 
 
+def _host_claim_kind(plan, registry, claim, directory):
+    """Retag a held reservation before publishing the final client's record."""
+    kind = host_run_kind(plan.get("client"), registry)
+    if claim is not None:
+        lock = free_slot_lock_take(directory)
+        try:
+            with io.open(claim, encoding="utf-8") as fh:
+                record = json.load(fh)
+            if record.get("kind") != kind:
+                record["kind"] = kind
+                with io.open(claim, "w", encoding="utf-8") as fh:
+                    json.dump(record, fh)
+        finally:
+            free_slot_lock_give(lock)
+    return kind
+
+
 def host_admission_refusal(registry=None, workers=None, meminfo=None,
                            memstatus=None, platform=None, kind="tool-using"):
     """Return a refusal or None; total cap precedes kind cap and memory floor.
@@ -13825,6 +13843,11 @@ def host_admission_refusal(registry=None, workers=None, meminfo=None,
     Unreadable meminfo or native Windows status stands down the memory half;
     the live-worker caps still bind.
     The platform-aware commit-charge ceiling applies to both kinds.
+    AUTOOS_ADMISSION_OFF=1 is a test-only escape read from the spawner's own
+    environment; the CLI forwards it to its child by design, and child worker
+    scrubbing is separate.
+    AUTOOS_MEMINFO_PATH is a test-only reader override from the spawner's own
+    environment; child worker scrubbing is separate.
     """
     if os.environ.get(ADMISSION_OFF_ENV) == "1":
         return None
@@ -14690,6 +14713,7 @@ def cmd_run(args, cfg: dict) -> int:
         try:
             workers = workers_dir()
             env["AUTOOS_WORKERS_DIR"] = workers
+            kind = _host_claim_kind(plan, registry, host_claim, workers)
             worker_id, worker_rec = _worker_record_start(plan, args, workers,
                                                          attempt=fallthroughs + cooldown_retries + 1,
                                                          kind=kind)
