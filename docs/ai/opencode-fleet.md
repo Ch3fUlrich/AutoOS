@@ -338,8 +338,6 @@ never blank out the gateway `baseURL`.
 
 `tools/fleet_bus.py` is a stdlib-only HTTP relay for tailnet-only cross-host messaging (`POST /inbox` + `GET /outbox?since=<cursor>`):
 
-The versioned fleet-bus v2 wire contract (signing, canonical form, cursors, validation, test vectors) is specified in plangraph's [`docs/FLEET-BUS.md`](https://github.com/Ch3fUlrich/plangraph/blob/main/docs/FLEET-BUS.md), implemented by `src/plangraph/fleet_bus/contract.py`.
-
 - **Authentication & bounds:** `POST /inbox` requires `X-Fleet-Sig` = hex `HMAC-SHA256(secret, "ts|nonce|from|to|sha256(text)")`
   using a 0600 `--secret-file` (value never printed), `|now - ts| <= 60` s skew check, 10 000-entry nonce LRU, and a 4096-byte
   body cap. Message text is scrubbed to a single line (`<= 2000` chars).
@@ -348,4 +346,6 @@ The versioned fleet-bus v2 wire contract (signing, canonical form, cursors, vali
 - **Binding:** `--bind` or `FLEET_BUS_BIND` names the tailnet address on the host that runs the relay. The public default is
   `127.0.0.1`: a site address is never a literal in this public repository (AutoOS Hard Rule 1). A host that needs the relay on
   the tailnet sets the variable in its own 0600 unit/config, never in a tracked file.
+
+The relay above uses its own `X-Fleet-Sig` format; the separate, versioned fleet-bus v2 wire contract (signing, canonical form, cursors, signed reads, validation, test vectors) is specified in plangraph's [`docs/FLEET-BUS.md`](https://github.com/Ch3fUlrich/plangraph/blob/main/docs/FLEET-BUS.md), implemented by plangraph `src/plangraph/fleet_bus/contract.py`.
 
