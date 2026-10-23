@@ -1,0 +1,11 @@
+# D-2346 / autoos:AO-OMNIROUTE-IMAGE-PIN: serve the gateway from the OmniRoute fork image
+# instead of the local build. Added after compose.yml by ai-stack.sh when stack.env sets
+# AUTOOS_OMNIROUTE_IMAGE=fork. The image is pulled BY DIGEST (a moved tag can never change
+# the gateway under the encrypted provider credentials) and already carries qodercli,
+# bcryptjs and the Vertex trailing-turn guard, so no local build, no tools context.
+# Source: Ch3fUlrich/OmniRoute tag v3.8.53-autoos1 (ff6bb37b78f4), CI run 39916465147.
+# Rollback = remove AUTOOS_OMNIROUTE_IMAGE from stack.env; compose.yml's autoos5 recipe is untouched.
+services:
+  omniroute:
+    image: ghcr.io/ch3fulrich/omniroute@sha256:9b92765b0c288a38dc266a4c4ff91f2c801fbc0c71734c979b67bb12f17d7172
+    build: !reset null

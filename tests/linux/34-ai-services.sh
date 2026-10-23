@@ -4843,6 +4843,31 @@ if it "aistack: the guard and compose agree on the bind when the shell exports A
     if (( ok )); then pass; else fail "the guarded bind and the published bind can differ"; fi
 fi
 
+if it "aistack: AUTOOS_OMNIROUTE_IMAGE=fork adds compose.fork-image.yml (digest-pinned fork image) and builds nothing; unset keeps the local build"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_OMNIROUTE_IMAGE=fork\n" >"$d/cfg/stack.env"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed (fork)" >&2; }
+    line="$(_aistack_compose_up "$d")"
+    grep -qE -- '-f .*/compose\.yml -f .*/compose\.fork-image\.yml' <<<"$line" \
+        || { ok=0; echo "the fork override did not follow compose.yml: [$line]" >&2; }
+    grep -qE '^build ' "$d/docker.log" 2>/dev/null && { ok=0; echo "fork mode built an image" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    : >"$d/image-exists"
+    _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed (default)" >&2; }
+    line="$(_aistack_compose_up "$d")"
+    [[ "$(_aistack_f_count "$line")" == 1 ]] || { ok=0; echo "default run is not a single -f: [$line]" >&2; }
+    rm -rf "$d"
+    f="$AISTACK/compose.fork-image.yml"
+    grep -qE '^    image: ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$' "$f" || { ok=0; echo "fork image is not digest-pinned" >&2; }
+    if (( ok )); then pass; else fail "the fork image override is wrong"; fi
+fi
+
 if it "aistack: every FROM in opencode.Dockerfile and omniroute.Dockerfile is digest-pinned, or the rebuild hash is blind"; then
     # The rebuild label hashes the Dockerfile text: a tag-only FROM could move
     # underneath an unchanged text and the stale layer would never rebuild.

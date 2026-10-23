@@ -448,9 +448,16 @@ zcode_decide() {
     ZCODE_DIR="$d"
 }
 
+# fork_image_active: stack.env AUTOOS_OMNIROUTE_IMAGE=fork selects compose.fork-image.yml
+# (the gateway pulled by digest from the OmniRoute fork instead of built locally).
+fork_image_active() {
+    [[ "$(env_value "$STACK_ENV" AUTOOS_OMNIROUTE_IMAGE)" == fork && -f "$HERE/compose.fork-image.yml" ]]
+}
+
 dc() {
     zcode_decide
     local args=(--project-name autoos-ai --env-file "$STACK_ENV" -f "$HERE/compose.yml")
+    fork_image_active && args+=(-f "$HERE/compose.fork-image.yml")
     if [[ -n "$ZCODE_DIR" ]]; then
         args+=(-f "$HERE/compose.zcode.yml")
         # Both variables are exported for this compose call only, so the
@@ -784,6 +791,10 @@ ensure_images() {
     for svc in "$@"; do
         img="$(compose_service_field "$svc" image)"
         dockerfile="$(compose_service_field "$svc" build dockerfile)"
+        if [[ "$svc" == omniroute ]] && fork_image_active; then
+            img="$(sed -n 's/^    image:[[:space:]]*//p' "$HERE/compose.fork-image.yml" | head -n1)"
+            dockerfile=""
+        fi
         if [[ -n "$dockerfile" ]]; then
             label="org.autoos.$svc.source"
             want="$(image_source_hash "$HERE/$dockerfile")"
