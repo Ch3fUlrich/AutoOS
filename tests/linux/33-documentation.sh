@@ -1130,6 +1130,13 @@ if it "affected-tests: registry ids reach every shell, Pester and pytest case na
     out="$(python3 tests/test_affected_tests.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# tools/smart-ci/selector.py (CI-SMART-SELECT): diff + per-repo map -> jobs/tests;
+# a workflow/dependency change, an unknown path, a broken map or a forced run is FULL.
+if it "smart-ci: the selector maps diffs to jobs/tests and falls back to full (unit tests)"; then
+    out="$(python3 tests/test_smart_ci.py 2>&1)" && pass || fail "$(printf '%s
+' "$out" | tail -n 20)"
+fi
+
 # tools/diff-guard.py: the report-only post-run diff guard (rules R0..R5) —
 # it compares a base..tip range against --scope globs and reports drift
 # (test files outside scope, lying builtin-tuple subclasses, framework

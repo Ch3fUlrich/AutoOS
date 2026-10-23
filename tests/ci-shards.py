@@ -3,6 +3,10 @@
 
     python3 tests/ci-shards.py            check, then print {"include": [...]} for CI
     python3 tests/ci-shards.py --check    check only
+    python3 tests/ci-shards.py --only "tests/linux/13-x.sh 33"
+                                          matrix of the shards holding those parts,
+                                          each trimmed to them (CI-SMART-SELECT);
+                                          a bare NN or a tests/linux/NN-*.sh path
 
 Every tests/linux/NN-*.sh part must appear in exactly one shard; a part that is
 missing, listed twice, or named but absent fails with exit 1 and names it. CI
@@ -57,6 +61,28 @@ def problems(shards, on_disk) -> list[str]:
     return out
 
 
+def matrix_for(shards, only=None) -> dict:
+    """The CI matrix; with `only` (parts as 'NN' or tests/linux/NN-*.sh paths) just those parts."""
+    if only is None:
+        return {"include": [{"shard": n, "parts": ",".join(p)} for n, p in shards]}
+    want = set()
+    for item in only.split():
+        m = re.search(r"(?:^|/)([0-9]{2})(?:-[^/]*\.sh)?$", item)
+        if not m:
+            raise ValueError("--only: %r is neither NN nor tests/linux/NN-*.sh" % item)
+        want.add(m.group(1))
+    # A selected part that is on no shard (a deleted or renamed part) cannot be
+    # trimmed to safely: run the whole matrix instead of an empty one.
+    if not want <= {p for _, parts in shards for p in parts}:
+        return matrix_for(shards)
+    rows = []
+    for n, parts in shards:
+        keep = [p for p in parts if p in want]
+        if keep:
+            rows.append({"shard": n, "parts": ",".join(keep)})
+    return {"include": rows}
+
+
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     try:
@@ -70,7 +96,12 @@ def main(argv=None) -> int:
     if found:
         return 1
     if "--check" not in argv:
-        print(json.dumps({"include": [{"shard": n, "parts": ",".join(p)} for n, p in shards]}))
+        only = argv[argv.index("--only") + 1] if "--only" in argv and argv.index("--only") + 1 < len(argv) else None
+        try:
+            print(json.dumps(matrix_for(shards, only)))
+        except ValueError as e:
+            print("ci-shards: %s" % e, file=sys.stderr)
+            return 1
     return 0
 
 

@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "comment": "Smart CI map for AutoOS, format in docs/ci-smart-select.md. Unmapped paths (lib/, catalog/, tools/, setup scripts...) run the full suite on purpose. The full suite still gates merge.",
+  "jobs": ["shards", "lint", "ansible", "secrets", "scrub"],
+  "always_jobs": ["lint", "secrets", "scrub"],
+  "ignore": ["logs/**", "scratch/**", "LICENSE"],
+  "rules": [
+    {
+      "comment": "Documentation: the scrub, link and lint jobs read it; part 33 is the suite part that tests docs.",
+      "paths": ["docs/**", "**/*.md"],
+      "tests": ["tests/linux/33-documentation.sh"],
+      "jobs": ["shards"]
+    },
+    {
+      "comment": "A changed suite part runs that part.",
+      "paths": ["tests/linux/??-*.sh"],
+      "tests": ["{path}"],
+      "jobs": ["shards"]
+    },
+    {
+      "paths": ["Windows/ansible/**"],
+      "jobs": ["ansible"]
+    },
+    {
+      "paths": ["scripts/public-scrub/**"],
+      "jobs": ["scrub"]
+    }
+  ]
+}
