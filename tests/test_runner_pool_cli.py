@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -16,6 +17,7 @@ sys.path.insert(0, str(TOOLS))
 import runner_pool as pool
 import runner_pool_proc as proc
 import runner_pool_core as rpc
+import runner_pool_gate as gate
 
 class FakeDeps:
     def __init__(self):
@@ -145,6 +147,94 @@ class TestCli(unittest.TestCase):
             self.assertEqual(len(files), 1)
             printed = out.getvalue().strip()
             self.assertIn(files[0].stem, printed)
+            job = json.loads(files[0].read_text())
+            self.assertEqual(job, gate.parse_submit(json.dumps(payload).encode(),
+                submitter='lane1', now=job['submitted_at'], rand=job['id'].rsplit('-', 1)[1]))
+
+    def test_ssh_gate_invalid_payloads(self):
+        for payload in ({'brief': 'x'}, {'id': 'chosen', 'brief': 'x'},
+                        {'card': {}, 'brief': 'x' * 65536}):
+            with self.subTest(payload_keys=list(payload)), tempfile.TemporaryDirectory() as td:
+                env = {'LOCALAPPDATA': td, 'SSH_ORIGINAL_COMMAND': 'submit'}
+                rc = pool.main(['ssh-gate', '--submitter', 'lane1'], env,
+                               io.BytesIO(json.dumps(payload).encode()), io.StringIO())
+                self.assertEqual(rc, 2)
+                self.assertFalse(list((pool.spool_root(env) / 'queue').glob('*.json')))
+
+    def test_ssh_gate_status_and_binary_buffer(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = {'LOCALAPPDATA': td, 'SSH_ORIGINAL_COMMAND': 'status --json'}
+            out = io.StringIO()
+            self.assertEqual(pool.main(['ssh-gate', '--submitter', 'lane1'], env,
+                                      io.BytesIO(), out), 0)
+            self.assertEqual(json.loads(out.getvalue())['queue_depth'], 0)
+            env['SSH_ORIGINAL_COMMAND'] = 'submit'
+            stdin = io.TextIOWrapper(io.BytesIO(b'{"card":{"client":"api"},"brief":"x"}'))
+            self.addCleanup(stdin.close)
+            self.assertEqual(pool.main(['ssh-gate', '--submitter', 'lane1'], env,
+                                      stdin, io.StringIO()), 0)
+
+    def test_claim_ownership(self):
+        for mode in ('none', 'fresh', 'other', 'memory', 'traversal', 'missing', 'list', 'mismatch'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                pool.ensure_dirs(root)
+                a = root / 'queue' / 'a.json'
+                job = {'id': 'a', 'submitter': 'lane1', 'card': {'client': 'api'}, 'brief': 'A'}
+                if mode == 'traversal':
+                    job['id'] = '../queue/victim'
+                if mode == 'missing':
+                    del job['id']
+                if mode == 'mismatch':
+                    job['id'] = 'wrong'
+                a.write_text(json.dumps([] if mode == 'list' else job))
+                victim = root / 'queue' / 'victim.json'
+                victim.write_text('{"untouched":true}')
+                os.utime(a, (1, 1))
+                calls = []
+                deps = pool.Deps(spawn=lambda *args: calls.append(args) or 0)
+                real_claim = rpc.claim
+                def claim(q, s):
+                    if mode == 'none':
+                        return None
+                    if mode in ('other', 'memory'):
+                        b = Path(q) / 'b.json'
+                        b.write_text(json.dumps(dict(job, id='b', brief='B')))
+                        dest = Path(s) / b.name
+                        os.replace(b, dest)
+                        return dest
+                    return real_claim(q, s)
+                if mode in ('other', 'memory'):
+                    (root / 'slots' / '1').mkdir()
+                if mode == 'memory':
+                    mem = iter((99999, 0))
+                    deps.mem_mb = lambda: next(mem)
+                with patch.object(rpc, 'claim', claim):
+                    result = pool.run_one(root, 1, deps)
+                self.assertEqual(victim.read_text(), '{"untouched":true}')
+                if mode == 'none':
+                    self.assertEqual(result, 'claim-failed')
+                    self.assertTrue(a.exists())
+                    self.assertEqual(calls, [])
+                elif mode in ('traversal', 'missing', 'list', 'mismatch'):
+                    self.assertEqual(result, 'bad-job')
+                    self.assertTrue((root / 'failed' / 'a.json').exists())
+                    self.assertEqual(calls, [])
+                    victim.unlink()
+                    self.assertEqual(pool.run_one(root, 1, deps), 'idle')
+                elif mode == 'memory':
+                    self.assertEqual(result, 'memory-recheck')
+                    self.assertEqual(json.loads((root / 'queue' / 'b.json').read_text())['brief'], 'B')
+                    self.assertTrue(a.exists())
+                else:
+                    self.assertEqual(result, 'done')
+                    self.assertEqual(len(calls), 1)
+                    self.assertEqual(calls[0][0][-1], 'B' if mode == 'other' else 'A')
+                    self.assertEqual(a.exists(), mode == 'other')
+                    if mode == 'fresh':
+                        victim.unlink()
+                        self.assertEqual(pool.run_one(root, 1, deps), 'idle')
+                        self.assertEqual(len(calls), 1)
 
     def test_ssh_gate_reject(self):
         with tempfile.TemporaryDirectory() as td:

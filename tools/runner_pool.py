@@ -268,6 +268,7 @@ def run_one(root, n, deps):
     ensure_dirs(root)
     queue_dir = root / 'queue'
     slot_dir = root / 'slots' / str(n)
+    slot_dir.mkdir(parents=True, exist_ok=True)
     done_dir = root / 'done'
     failed_dir = root / 'failed'
     log_dir = root / 'log'
@@ -306,25 +307,25 @@ def run_one(root, n, deps):
         write_slot_state(root, n, 'idle', None, now, deps.pid, deps.filetime)
         return 'idle'
 
+    claimed_path = rpc.claim(str(queue_dir), str(slot_dir))
+    if claimed_path is None:
+        write_slot_state(root, n, 'idle', None, now, deps.pid, deps.filetime)
+        return 'claim-failed'
+    claimed_path = Path(claimed_path)
     try:
-        job = json.loads(qfile.read_text(encoding='utf-8'))
-    except Exception:
-        dest = failed_dir / qfile.name
-        os.replace(str(qfile), str(dest))
+        job = json.loads(claimed_path.read_text(encoding='utf-8'))
+        if (not isinstance(job, dict) or not isinstance(job.get('id'), str)
+                or not re.fullmatch(r'[A-Za-z0-9_.-]+', job['id'])
+                or job['id'] != claimed_path.stem):
+            raise ValueError('invalid claimed job id')
+    except (ValueError, OSError):
+        os.replace(str(claimed_path), str(failed_dir / claimed_path.name))
         write_slot_state(root, n, 'idle', None, now, deps.pid, deps.filetime)
         return 'bad-job'
 
-    rpc.claim(str(queue_dir), str(slot_dir))
-    claimed_path = slot_dir / f"{job['id']}.json"
-    if not claimed_path.exists():
-        for p in slot_dir.glob('*.json'):
-            if p.name != 'slot.json':
-                claimed_path = p
-                break
-
     mem2 = deps.mem_mb()
     if mem2 is None or mem2 < deps.floor_mb:
-        qpath = queue_dir / f"{job['id']}.json"
+        qpath = queue_dir / claimed_path.name
         rpc.write_json_atomic(str(qpath), job)
         if claimed_path.exists():
             try:
@@ -455,38 +456,10 @@ def _cmd_status(args, env, stdout):
     return 0
 
 def _cmd_ssh_gate(args, env, stdin, stdout, deps, gate):
-    if env.get('SSH_ORIGINAL_COMMAND') != 'submit':
+    if gate is None:
         return 2
-    submitter = None
-    i = 0
-    while i < len(args):
-        if args[i] == '--submitter' and i + 1 < len(args):
-            submitter = args[i + 1]
-            i += 2
-        else:
-            i += 1
-    if not submitter:
-        return 2
-    try:
-        raw = stdin.read()
-        if isinstance(raw, bytes):
-            raw = raw.decode('utf-8')
-        payload = json.loads(raw)
-    except Exception:
-        return 2
-    if not isinstance(payload, dict):
-        return 2
-    root = spool_root(env)
-    queue = root / 'queue'
-    queue.mkdir(parents=True, exist_ok=True)
-    base = 'job-' + str(os.getpid()) + '-' + str(time.time_ns())
-    jobid = re.sub(r'[^A-Za-z0-9_.-]', '', base)
-    path = queue / (jobid + '.json')
-    payload = dict(payload)
-    payload['submitter'] = submitter
-    path.write_text(json.dumps(payload))
-    stdout.write(jobid + '\n')
-    return 0
+    return gate.run_gate(args, env, getattr(stdin, 'buffer', stdin), stdout,
+                         spool_root(env))
 
 def _find_slot(root, jobid):
     slots = root / 'slots'
