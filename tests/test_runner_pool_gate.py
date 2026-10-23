@@ -5,6 +5,8 @@ import os
 import tempfile
 import pathlib
 import sys
+import contextlib
+import threading
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'tools'))
 import runner_pool_gate as gate
@@ -61,6 +63,31 @@ class TestGate(unittest.TestCase):
         result = gate.read_capped(stream, cap=65536)
         self.assertEqual(result, data)
 
+    def test_read_capped_short_reads(self):
+        class PacketStream(io.BytesIO):
+            def read(self, n):
+                return super().read(min(n, 1))
+        body = b'{"card":{},"brief":"hello"}'
+        self.assertEqual(gate.read_capped(PacketStream(body), len(body)), body)
+        with self.assertRaisesRegex(gate.GateError, 'size limit'):
+            gate.read_capped(PacketStream(body + b'x'), len(body))
+
+    def test_read_capped_stalled_after_packet(self):
+        release = threading.Event()
+        class StalledStream:
+            calls = 0
+            def read(self, n):
+                self.calls += 1
+                if self.calls == 1:
+                    return b'x'
+                release.wait()
+                return b''
+        try:
+            with self.assertRaisesRegex(gate.GateError, 'read timeout'):
+                gate.read_capped(StalledStream(), 10, timeout=0.02)
+        finally:
+            release.set()
+
     # ---------- path validation ----------
     def test_path_plain_relative_paths(self):
         for path in ('src/a.py', 'docs/x.md', './a'):
@@ -84,7 +111,7 @@ class TestGate(unittest.TestCase):
     # ---------- validate_card ----------
     def test_validate_card_valid(self):
         card = {
-            'client': 'cli',
+            'client': 'api',
             'model': 'm',
             'kind': 'k',
             'task_type': 't',
@@ -93,6 +120,14 @@ class TestGate(unittest.TestCase):
             'spec': 'spec'
         }
         self.assertEqual(gate.validate_card(card), card)
+
+    def test_validate_card_pool_clients(self):
+        self.assertEqual(gate.validate_card({}), {})
+        self.assertEqual(gate.validate_card({'client': 'api'}), {'client': 'api'})
+        for client in ('claude', 'opencode', [], ['api'], ''):
+            with self.subTest(client=client):
+                with self.assertRaisesRegex(gate.GateError, '^invalid client$'):
+                    gate.validate_card({'client': client})
 
     def test_validate_card_invalid_key(self):
         bad = {'host': 'workstation'}
@@ -130,7 +165,7 @@ class TestGate(unittest.TestCase):
 
     # ---------- parse_submit ----------
     def test_parse_submit_success(self):
-        raw = json.dumps({'card': {'client': 'c'}, 'brief': 'hello'}).encode()
+        raw = json.dumps({'card': {'client': 'api'}, 'brief': 'hello'}).encode()
         result = gate.parse_submit(
             raw,
             submitter='lane',
@@ -225,7 +260,7 @@ class TestGate(unittest.TestCase):
         self.assertIn('rejected', out)
 
     def test_run_gate_submit_success(self):
-        card = {'client': 'c'}
+        card = {'client': 'api'}
         raw = json.dumps({'card': card, 'brief': 'hello'}).encode()
         env = {'SSH_ORIGINAL_COMMAND': 'submit'}
         with tempfile.TemporaryDirectory() as td:
@@ -247,6 +282,23 @@ class TestGate(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn('rejected', out)
             self.assertFalse(os.path.isdir(os.path.join(td, 'queue')))
+
+    def test_run_gate_failed_writer_has_no_receipt(self):
+        raw = b'{"card":{},"brief":"hello"}'
+        stdout, stderr = io.StringIO(), io.StringIO()
+        calls = []
+        def fail_writer(path, job):
+            calls.append((path, job))
+            return False
+        with tempfile.TemporaryDirectory() as td, contextlib.redirect_stderr(stderr):
+            code = gate.run_gate(['--submitter', 'lane'],
+                                 {'SSH_ORIGINAL_COMMAND': 'submit'},
+                                 io.BytesIO(raw), stdout, td, writer=fail_writer)
+            self.assertEqual(list((pathlib.Path(td) / 'queue').iterdir()), [])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(code, 2)
+        self.assertEqual(stdout.getvalue(), '')
+        self.assertEqual(stderr.getvalue().strip(), 'rejected: spool busy')
 
     def test_run_gate_submit_extra_key(self):
         raw = json.dumps({'card': {}, 'brief': 'hi', 'extra': 1}).encode()
@@ -273,6 +325,27 @@ class TestGate(unittest.TestCase):
             code, out = self.run_gate_helper(['--submitter', 'lane'], env, b'', td)
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(out), default)
+
+    def test_run_gate_status_untrusted_file(self):
+        default = {'slots': [], 'queue_depth': 0, 'oldest_wait_s': 0}
+        for raw in ('{', '[]', 'x' * 65537,
+                    json.dumps({'queue_depth': 9}) + ' ' * 65536):
+            with self.subTest(raw=raw[:20]), tempfile.TemporaryDirectory() as td:
+                (pathlib.Path(td) / 'status.json').write_text(raw)
+                code, out = self.run_gate_helper(
+                    ['--submitter', 'lane'], {'SSH_ORIGINAL_COMMAND': 'status --json'}, b'', td)
+                self.assertEqual(code, 0)
+                self.assertEqual(json.loads(out), default)
+
+    def test_run_gate_status_drops_private_keys(self):
+        status = {'slots': [], 'queue_depth': 2, 'oldest_wait_s': 3}
+        with tempfile.TemporaryDirectory() as td:
+            (pathlib.Path(td) / 'status.json').write_text(json.dumps(
+                dict(status, jobs=[{'brief': 'private'}], brief='private')))
+            code, out = self.run_gate_helper(
+                ['--submitter', 'lane'], {'SSH_ORIGINAL_COMMAND': 'status --json'}, b'', td)
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(out), status)
 
     def test_run_gate_autoos_off_ignored(self):
         env = {'SSH_ORIGINAL_COMMAND': 'submit', 'AUTOOS_ADMISSION_OFF': '1'}

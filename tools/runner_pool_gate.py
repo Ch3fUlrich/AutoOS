@@ -15,6 +15,8 @@ except ImportError:  # pragma: no cover
     _sys.path.insert(0, os.path.dirname(__file__))
     from runner_pool_core import strip_env, write_json_atomic
 
+POOL_CLIENTS = ('api',)
+
 class GateError(Exception):
     """Error that leads to a gate rejection."""
     exit_code = 2
@@ -41,14 +43,19 @@ def valid_id(s: str) -> bool:
 def read_capped(stream, cap: int, timeout: float = 30.0) -> bytes:
     """Read up to cap bytes; raise if more data is present or the channel stalls.
 
-    stream.read(cap + 1) blocks until cap + 1 bytes or EOF, so a client that
-    sends a little and holds the channel open would pin the gate: read in a
-    daemon thread and give up after `timeout` seconds.
+    Short reads need not mean EOF. Keep collecting in a daemon thread so a
+    client holding the channel open cannot pin the gate beyond `timeout`.
     """
     box = []
     def _read():
         try:
-            box.append(stream.read(cap + 1))
+            data = bytearray()
+            while len(data) < cap + 1:
+                chunk = stream.read(cap + 1 - len(data))
+                if not chunk:
+                    break
+                data.extend(chunk)
+            box.append(bytes(data))
         except Exception as exc:  # surfaced below
             box.append(exc)
     t = threading.Thread(target=_read, daemon=True)
@@ -97,6 +104,8 @@ def validate_card(card):
     unknown = set(card) - allowed
     if unknown:
         raise GateError('unknown card fields')
+    if card.get('client', 'api') not in POOL_CLIENTS:
+        raise GateError('invalid client')
     for k, v in card.items():
         if k == 'paths':
             if not isinstance(v, list):
@@ -173,7 +182,7 @@ def gate_env(env: dict) -> dict:
     """Return a copy of env with AUTOOS_ADMISSION_OFF stripped."""
     return strip_env(env)
 
-def run_gate(argv, env, stdin_buf, stdout_text, spool_dir):
+def run_gate(argv, env, stdin_buf, stdout_text, spool_dir, *, writer=write_json_atomic):
     try:
         # parse submitter
         if '--submitter' not in argv:
@@ -192,9 +201,14 @@ def run_gate(argv, env, stdin_buf, stdout_text, spool_dir):
         # status handling
         if base == 'status':
             status_path = Path(spool_dir) / 'status.json'
-            if status_path.is_file():
-                data = json.loads(status_path.read_text())
-            else:
+            try:
+                with status_path.open('rb') as stream:
+                    data = json.loads(read_capped(stream, cap=65536))
+                if not isinstance(data, dict):
+                    raise ValueError('status not an object')
+                data = {key: data[key] for key in
+                        ('slots', 'queue_depth', 'oldest_wait_s') if key in data}
+            except Exception:
                 data = {"slots": [], "queue_depth": 0, "oldest_wait_s": 0}
             json.dump(data, stdout_text)
             return 0
@@ -212,7 +226,9 @@ def run_gate(argv, env, stdin_buf, stdout_text, spool_dir):
         queue_dir = Path(spool_dir) / 'queue'
         queue_dir.mkdir(parents=True, exist_ok=True)
         path = queue_dir / f"{job['id']}.json"
-        write_json_atomic(path, job)
+        if not writer(path, job):
+            print('rejected: spool busy', file=sys.stderr)
+            return 2
         stdout_text.write(job['id'])
         return 0
     except GateError as e:
