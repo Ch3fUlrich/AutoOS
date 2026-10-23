@@ -29,8 +29,10 @@ reference it; they do not restate it.
 - **t2/t3 order = trial -> free -> credits -> paid, DEEPSEEK LAST; 128k clamp on the legacy bands only.**
   Free band head `gemini/gemini-3.8-flash`, then groq/huggingface/openrouter/
   free_ai legs; `scaleway/*` and `antigravity/*` kept but NEVER heads.
-  Credits after all free: `ovhcloud/*` x3 + `vertex/gemini-3.8-flash` (NEW to
-  t2/t3 full). Paid: `meta_api` then `deepseek` LAST. No free leg after a paid
+  Credits after all free: `vertex/gemini-3.8-flash` (NEW to
+  t2/t3 full). The `ovhcloud/*` credit legs are gone — the provider was removed
+  2026-10-18 (D-1816(12), credits empty), so no OVH leg may be curated anywhere.
+  Paid: `meta_api` then `deepseek` LAST. No free leg after a paid
   leg. `-free-only` twins take NO credit/paid leg. The legacy bands
   (`l2-worker`, `l2-worker-free-only`, `l3-driver`, `l3-driver-free-only`)
   render `128k` (lowest implementer window, do NOT raise); sub-1M legs
@@ -55,12 +57,14 @@ reference it; they do not restate it.
   stays `True` (gating paid models, not provider, so `:free` still routes).
   `l1-orchestrator-clean` keeps declared+gated paid leg so it stays `omitted`,
   not legless. Never set provider available:false (drops `:free` too).
-- **New credit singles (class credit).** `ovh-qwen3.8-27b`, `ovh-gpt-oss-120b`,
-  `vertex-gemini-3.8-flash`: single leg, strategy
-  priority, `surfaces.omniroute` (clients `[opencode, zed]`, context/declared,
-  display_name, output; no openhands_profile per groq/hf precedent).
-  (`ovh-qwen3-coder-30b` was the fourth until OVHCODER-DROP 2026-10-08 retired
-  it — OVH withdrew the model upstream, live 404.)
+- **New credit singles (class credit).** `vertex-gemini-3.8-flash`: single leg,
+  strategy priority, `surfaces.omniroute` (clients `[opencode, zed]`,
+  context/declared, display_name, output; no openhands_profile per groq/hf
+  precedent).
+  (`ovh-qwen3-coder-30b` was retired by OVHCODER-DROP 2026-10-08 — OVH withdrew
+  the model upstream, live 404 — and `ovh-qwen3.8-27b` and `ovh-gpt-oss-120b`
+  were removed with the whole `ovhcloud` provider 2026-10-18 (D-1816(12),
+  credits empty): no OVH credit single exists any more.)
 - **Every leg add/remove is reasoned and dated.** The reason lives in the
   route/model `$comment` (e.g. ORQWEN-DEAD, SCWREMOVAL) AND in the
   availability ledger (`python tools/probe-ledger.py record --leg P/M

@@ -108,9 +108,16 @@
     }
   },
   "host_admission": {
-    "$comment": "HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner's own room on the host it runs on, so a fan-out stops starting workers onto a machine that already has them. `max_live_workers` counts the records `ps` calls running (live pid, all lanes of this checkout); `mem_available_floor_mb` is the MemAvailable (kB in /proc/meminfo, MB here) a launch still wants. A refused spawn exits 13 and says 'queue or run on workstation' — queueing is the caller's job, the spawner never waits. Read by tools/autoos-agent.py host_admission_config(); AUTOOS_ADMISSION_OFF=1 is a test-only escape. D-1317 kinds: per-kind overrides under `kinds` (e.g. toolless: 4/1024; D-1349 2026-10-15: floors lowered to 1 GB MemAvailable on coding.vm).",
-    "max_live_workers": 6,
+    "$comment": "HOSTADMISSION (lane AO-ADMISSION, 2026-10-08): the spawner's own room on the host it runs on, so a fan-out stops starting workers onto a machine that already has them. `max_live_workers` counts the records `ps` calls running (live pid, all lanes of this checkout); `mem_available_floor_mb` is the MemAvailable (kB in /proc/meminfo, MB here) a launch still wants. A refused spawn exits 13 and says 'queue or run on workstation' — queueing is the caller's job, the spawner never waits. Read by tools/autoos-agent.py host_admission_config(); AUTOOS_ADMISSION_OFF=1 is a test-only escape. D-1349 2026-10-15: floor lowered to 1 GB MemAvailable on coding.vm. Platform overrides apply field by field; win32 requires 12 GiB available physical RAM and commit charge below 80 percent before admitting up to 20 workers. D-1317 kinds: per-kind overrides under `kinds` (toolless 4/1024); platform overrides apply to the top-level pair only.",
+    "max_live_workers": 10,
     "mem_available_floor_mb": 1024,
+    "by_platform": {
+      "win32": {
+        "max_live_workers": 20,
+        "mem_available_floor_mb": 12288,
+        "commit_charge_max_pct": 80
+      }
+    },
     "kinds": {
       "toolless": {
         "max_live_workers": 4,
@@ -119,8 +126,22 @@
     }
   },
   "models": {
+    "gpt-6.1-sol": {
+      "$comment": "AO-CX-GPT61-SOL: cx/gpt-6.1-sol only (D-2038, D-2148). Codex CLI 0.163.0 model catalog fetched 2026-10-22T12:31Z: context_window 500000, effective_context_window_percent 95, usable 475000. output_max 128000 is unsourced, conservative: no readable published output maximum. Gateway GET /api/models 2026-10-22 advertises supportsVision true and separate effort-suffixed ids low, medium, high, xhigh, max, ultra; these are not reasoningEffort settings on this bare id. Live probe 2026-10-22 served gpt-6.1-sol HTTP 200; tool calls and image input remain unproven. Prices 0 represent flat Codex subscription, not a per-token price.",
+      "id": "gpt-6.1-sol",
+      "family": "openai",
+      "context_advertised": 500000,
+      "context_usable": { "source": "default", "tokens": 475000 },
+      "output_max": 128000,
+      "reasoning": true,
+      "effort_ladder": [],
+      "tool_calls": "unproven",
+      "capabilities": { "text": "proven", "image_in": "unproven" },
+      "price_in": 0,
+      "price_out": 0
+    },
     "MiniMax-M3": {
-      "$comment": "samba's leg (extension item 1, operator priority 2026-09-26T15:54Z), exact operator-given spelling/casing preserved. tier paid, trains_on_prompts true (conservative default, providers.samba's own $comment) - NOT private-safe, never added to a -clean route. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror sibling minimax-m2.7 entry already in this registry; price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet).",
+      "$comment": "samba's leg (extension item 1, operator priority 2026-09-26T15:54Z), exact operator-given spelling/casing preserved. OCGO-PREFER 2026-10-18 (operator D-1840/D-1919): the OpenCode Go plan serves these weights under the lowercase id `opencode-go/minimax-m3` (200 on 3/3 probe calls, median 1.27 s, Go /v1/models row reports context 1048576). The leg keeps the spelling the gateway answers and resolve_leg() fold-matches it to THIS key — a second, lowercase model key would break rule 1b's case-fold uniqueness. context_advertised stays samba's 131072 (context is per model, not per provider — see models.'qwen/qwen3.8-27b'), so the Go route declares 128k rather than the Go row's wider number. tier paid, trains_on_prompts true (conservative default, providers.samba's own $comment) - NOT private-safe, never added to a -clean route. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror sibling minimax-m2.7 entry already in this registry; price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet).",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -658,7 +679,7 @@
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
     "kimi-k3": {
-      "$comment": "cheaperinference resale leg (own billing, NOT a free tier). vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
+      "$comment": "cheaperinference resale leg (own billing, NOT a free tier). OCGO-PREFER 2026-10-18 (operator D-1840/D-1919): the same weights answer the OpenCode Go plan as `opencode-go/kimi-k3` (200 on 3/3 probe calls, median 1.44 s) and the Go /v1/models row reports context 1048576 — wider than this row's 131072, which is cheaperinference's. context_advertised is per model, not per provider (no provider-scoped context field exists yet; the same gap models.'qwen/qwen3.8-27b' documents), so the row keeps 131072 and the Go route declares 128k rather than promising what only one of the two providers was measured answering. Go trains on request data (providers.opencode_go.trains_on_prompts true, operator D-1919), so that leg is never private-safe. vendor price not sourced in this migration (no figure in the old catalogs or docs/models.md); recorded as 0.0, not a real free-tier guarantee - do not use for cost math until priced (registry.py probe / promote, task A2's follow-ups).",
       "context_advertised": 131072,
       "context_usable": {
         "source": "default",
@@ -873,6 +894,50 @@
       "price_cache_read": 1e-08,
       "price_in": 1e-07,
       "price_out": 2e-07,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "muse-spark-1.3": {
+      "$comment": "D-1515 (2026-10-17): author/reviewer-only spelling of the pinned Muse seat (operator D-1504: muse-spark-1.3 runs over opencode ACP only). The seat reports its model as 'muse-spark-1.3' (opencode/, meta/ prefixes resolve to it), and the review gate read its family as unresolved, so a real Meta seat counted as no seat. Author-only, like claude-opus-5-5: no provider names it, no leg serves it, nothing routes to it. Window/output from models.muse-spark (same model family); $0 marginal is the opencode free tier.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "effort_ladder": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "family": "meta",
+      "id": "muse-spark-1.3",
+      "output_max": 131072,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
+    "muse-spark-1.3-free": {
+      "$comment": "D-1515 (2026-10-17): author/reviewer-only spelling of the pinned Muse seat (operator D-1504: muse-spark-1.3 runs over opencode ACP only). The seat reports its model as 'muse-spark-1.3-free' (opencode/, opencode-free/ prefixes resolve to it), and the review gate read its family as unresolved, so a real Meta seat counted as no seat. Author-only, like claude-opus-5-5: no provider names it, no leg serves it, nothing routes to it. Window/output from models.muse-spark (same model family); $0 marginal is the opencode free tier.",
+      "context_advertised": 1048576,
+      "context_usable": {
+        "source": "default",
+        "tokens": 524288
+      },
+      "effort_ladder": [
+        "minimal",
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "family": "meta",
+      "id": "muse-spark-1.3-free",
+      "output_max": 131072,
+      "price_in": 0.0,
+      "price_out": 0.0,
       "reasoning": true,
       "tool_calls": "unproven"
     },
@@ -1479,6 +1544,23 @@
       "reasoning": false,
       "tool_calls": "proven"
     },
+    "qwen3.8-flash": {
+      "$comment": "OCGO-PREFER (operator D-1840/D-1919, 2026-10-18 Go probe): the OpenCode Go copy, spelled exactly as the gateway serves it (`opencode-go/qwen3.8-flash`, answered 200 on 3/3 calls, median 1.54 s, /v1/models row reported context 200000). This is the bare key the Go leg resolves to; `qwen/qwen3.8-flash` above is OpenRouter's vendor-prefixed spelling of the same weights and stays untouched. context_advertised 200000 is the probe-measured gateway row; context_usable is the 50% default, not a measurement. output_max 16384 mirrors the sibling qwen rows (the probe reported none) — the registry's conservative unknown, not evidence the model stops there. reasoning false and effort_ladder empty follow the family's existing pattern and are unmeasured; tool_calls stays 'unproven' because no tool-call trial was answered for this id. Price 0.0 with a price_source: the plan is a flat subscription (providers.opencode_go.tier), so nothing is metered per token. trains_on_prompts inherits providers.opencode_go = true, which tools/registry.py private_safe() reads as never private-safe.",
+      "context_advertised": 200000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 100000
+      },
+      "effort_ladder": [],
+      "family": "qwen",
+      "id": "qwen3.8-flash",
+      "output_max": 16384,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "price_source": "OpenCode Go: a flat subscription seat, no per-token API price is metered (the providers.opencode_go shape) — 0.0 here means 'not metered', not 'free' (2026-10-18 Go probe)",
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
     "qwen7b": {
       "$comment": "Free.ai's model id (BRIEF FREEAI 2026-09-27), spelled exactly as served ('qwen7b'); it answers with Qwen/Qwen3-30B-A3B-Instruct (L0 measured 2026-09-27: POST https://api.free.ai/v1/chat/completions -> 200, OpenAI-compatible). context_advertised/output_max are a conservative SIBLING DEFAULT, not a live measurement - no context field was sourced from /v1/models, so 131072/16384 mirror the family's other entries (qwen-3.8-27b, qwen/qwen3.8-27b). price 0.0 is the free tier's real price, not an unsourced placeholder. tool_calls unproven (no probe run) and reasoning false match the Qwen family default; neither is evidence the model lacks reasoning.",
       "context_advertised": 131072,
@@ -1863,7 +1945,7 @@
       "tool_calls": "unproven"
     },
     "glm-5.3-flash": {
-      "$comment": "GLM55 2026-10-05 (operator): implementation/review leg via the OpenCode connection - live oc/glm-5.3-flash at context 1000000, thinking + tool_calling in the catalog's capabilities (2026-10-05). Front band in the worker/driver/researcher combos: an expiring grant is used up first (D-346 pattern). Site data: unmeasured - never referenced by a -clean route.",
+      "$comment": "GLM55 2026-10-05 (operator): implementation/review leg via the OpenCode connection - live oc/glm-5.3-flash at context 1000000, thinking + tool_calling in the catalog's capabilities (2026-10-05). Front band in the worker/driver/researcher combos: an expiring grant is used up first (D-346 pattern). Site data: unmeasured - never referenced by a -clean route. OCGO-PREFER 2026-10-18 (operator D-1840/D-1919): the preferred copy of these weights is now the OpenCode Go leg `opencode-go/glm-5.3-flash` — 200 on 3/3 probe calls, median 0.98 s (the fastest Go id answered), and its /v1/models row reports context 1000000, the window this row already records. Go trains on request data (providers.opencode_go.trains_on_prompts, operator D-1919), so the Go leg is never private-safe.",
       "context_advertised": 1048576,
       "context_usable": {
         "source": "default",
@@ -2109,9 +2191,13 @@
       "$comment": [
         "SPAWNFREE (S2) item 1: the ordered free-model list a --free run walks when its client prints a provider stop (tools/autoos-agent.py free_model_chain / _free_fallthrough_plan), keyed by client. The --free-model a caller gave goes first, these follow, and MAX_FALLTHROUGH bounds the re-runs.",
         "Why: a --free run's model is not a resolver route, so the SPAWNCAP route fallthrough never reached it and the first 'Rate limit exceeded' ended the run with exit 8 (inbox 2026-09-27T17:08:22Z and 17:19:45Z, work/L1-routing/T1FREE.r2.out).",
-        "The ids are opencode's own zen spellings (the client's built-in keyless provider), not registry leg ids - zen's leg ids are the 'opencode-zen/...' form used by routes."
+        "The chain mixes two spellings. The opencode/*-free ids are the client's own zen spellings (its built-in keyless provider), not registry leg ids - zen's leg ids are the 'opencode-zen/...' form used by routes. The omniroute/opencode-go/* heads (OCGO-PREFER, operator D-1840/D-1919 2026-10-18, go > free) are the CLI spelling that names a gateway route, so they ride the OmniRoute gateway and need AUTOOS_OMNIROUTE_KEY. tools/autoos-agent.py free_model_chain keeps them only when a gateway key is available; a --free run with no key walks onto the keyless ids alone. All of them are promo/trainable seats, so the --free run is still privacy=public only (resolve_route refuses privacy=sensitive regardless of the head)."
       ],
       "opencode": [
+        "omniroute/opencode-go/glm-5.3-flash",
+        "omniroute/opencode-go/minimax-m3",
+        "omniroute/opencode-go/kimi-k3",
+        "omniroute/opencode-go/qwen3.8-flash",
         "opencode/nemotron-3-ultra-free",
         "opencode/muse-spark-1.3-contributor-free",
         "opencode/mimo-v2.6-flash-free"
@@ -2875,6 +2961,38 @@
       },
       {
         "client": "opencode",
+        "model": "omniroute/opencode-go/glm-5.3-flash",
+        "family": "zhipu",
+        "leg": "opencode-go/glm-5.3-flash",
+        "paid": false,
+        "source": "operator D-1840/D-1919 2026-10-18 (OCGO-PREFER); Go probe 2026-10-18"
+      },
+      {
+        "client": "opencode",
+        "model": "omniroute/opencode-go/minimax-m3",
+        "family": "minimax",
+        "leg": "opencode-go/minimax-m3",
+        "paid": false,
+        "source": "operator D-1840/D-1919 2026-10-18 (OCGO-PREFER); Go probe 2026-10-18"
+      },
+      {
+        "client": "opencode",
+        "model": "omniroute/opencode-go/kimi-k3",
+        "family": "moonshot",
+        "leg": "opencode-go/kimi-k3",
+        "paid": false,
+        "source": "operator D-1840/D-1919 2026-10-18 (OCGO-PREFER); Go probe 2026-10-18"
+      },
+      {
+        "client": "opencode",
+        "model": "omniroute/opencode-go/qwen3.8-flash",
+        "family": "qwen",
+        "leg": "opencode-go/qwen3.8-flash",
+        "paid": false,
+        "source": "operator D-1840/D-1919 2026-10-18 (OCGO-PREFER); Go probe 2026-10-18"
+      },
+      {
+        "client": "opencode",
         "model": "opencode/muse-spark-1.3-contributor-free",
         "family": "meta",
         "leg": "opencode-zen/muse-spark-1.3-contributor-free",
@@ -3008,6 +3126,18 @@
     }
   },
   "providers": {
+    "cx": {
+      "$comment": "AO-CX-GPT61-SOL: Codex subscription via OmniRoute cx. Gateway GET /api/models 2026-10-22: provider cx, gpt-6.1-sol available true, supportsVision true; separate effort ids gpt-6.1-sol-{low,medium,high,xhigh,max,ultra}. Live probe 2026-10-22 served gpt-6.1-sol, HTTP 200. Flat subscription, no per-token price. Conservative trains_on_prompts:true follows the existing cxa subscription row. D-2148: newest sol only; D-2038: one provider path and one family per row.",
+      "id": "cx",
+      "api_base": null,
+      "provider_data": null,
+      "omniroute_id": "cx",
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "tier": "subscription",
+      "trains_on_prompts": true,
+      "available": true
+    },
     "SambaNova": {
       "$comment": [
         "Privacy research 2026-09-26 (Q1 lane): SambaNova's general Privacy Policy (https://sambanova.ai/privacy-policy) and Terms & Conditions (https://sambanova.ai/terms-and-conditions) were fetched and read; neither makes any statement about whether SambaNova Cloud API inference/prompts are used to train models, nor about opting out. Inconclusive research defaults conservative (trains_on_prompts: true, was unsourced 'false' before this migration) per operator policy 2026-09-26 ('default true / not private-safe unless the policy clearly says no training'). Distinct from the new 'samba' provider (a separately-funded paid credit tier) - see that entry's own $comment.",
@@ -3671,49 +3801,6 @@
       "monthly_cap_source": "operator 2026-09-28 Together AI USD vendor grant (brief FREEKEYS-1, D-132/D-141)",
       "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s; raw rows in logs/freekeys1-probe.jsonl, a sandbox work file): the OmniRoute connection 'together' is registered and active, its catalog exposes 277 canonical model id(s) under prefix 'together', 0 answered a tool-call trial end to end. Statuses measured: 403 x3. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
     },
-    "ovhcloud": {
-      "id": "ovhcloud",
-      "omniroute_id": "ovhcloud",
-      "model_prefix": "ovh",
-      "litellm_env": null,
-      "litellm_prefix": null,
-      "api_base": null,
-      "provider_data": null,
-      "tier": "credit",
-      "credit_usd": 200,
-      "trains_on_prompts": false,
-      "available": true,
-      "monthly_cap_usd": 200,
-      "monthly_warn_fraction": 0.8,
-      "monthly_cap_source": "operator 2026-09-30 OVH $200 trial credit (https://www.ovhcloud.com/en/public-cloud/free-trial/)",
-      "$comment": "OVH lane 2026-09-30 (measured: direct GET https://oai.endpoints.kepler.ai.cloud.ovh.net/v1/models -> 200, 24 models; gateway management API GET /api/providers/{connId}/models?refresh=true -> 24 models; tools/probe-toolcalls.py-style trial through the gateway at <= 1 request/3 s on 4 models spanning qwen/gpt-oss/mistral/llama families - ack chat 200 finish=stop, single tool call 200 finish=tool_calls, round trip 200 mentions18 noMoreCalls - all 4 proven 3/3): the OmniRoute connection 'ovhcloud' (built-in provider, alias 'ovh') was ALREADY registered and ACTIVE before this lane (connection id 2e7f59a9-8f9c-4431-b4ac-f4b72885a1af, name 'main') - contradicts the brief's 'NO ovhcloud connection' premise, reported verbatim; apply.ps1 would SKIP it. model_prefix is 'ovh' (the built-in provider's alias, matching the gateway's ovh/* spelling, same convention as scaleway -> scw). omniroute_id is 'ovhcloud' (the built-in provider id, not the alias). api_base is null (built-in convention - scaleway/deepinfra/nebius all use null for built-in providers). trains_on_prompts is false with a cited `privacy` block (OVH AI Endpoints terms, L1-CLEAN 2026-10-01), which is what tools/registry.py's private_safe() now requires of a credit leg (T1-CLEAN-4 K2, 2026-10-01) - a null would have kept it out of every -clean route. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. T1-CLEAN-4 K6: render_litellm_blocks() now drops a leg whose provider declares litellm_auth and names it in a rendered comment, so an OVH leg never reaches config.yaml under a guessed OVHCLOUD_API_KEY. Proven legs (gateway spelling): ovh/gpt-oss-120b, ovh/Qwen3-Coder-30B-A3B-Instruct, ovh/Mistral-Small-3.2-24B-Instruct-2506, ovh/Meta-Llama-3_3-70B-Instruct. gpt-oss-120b reuses the already-registered shared model row (id 'gpt-oss-120b') instead of writing a second row for the same model id; its OVH leg is gated/unpriced (the shared row carries price_in 0 / price_out 0, same as deepinfra's credit-tier legs that reuse it) until a per-leg price mechanism exists. The other 3 models use OVH's exact mixed-case gateway spelling (distinct from any lowercase sibling rows) and carry OVH's published per-token prices from the public pricing page, so their legs are un-gated. The $200 trial credit is a one-off vendor grant (https://www.ovhcloud.com/en/public-cloud/free-trial/), valid for 1 month from activation; monthly_cap_usd equals credit_usd (refuse at 100% of the grant), monthly_warn_fraction 0.8 (warn at 80%). OVH-GATE 2026-10-08 (AO-DENYLEGS D2, operator D-657 'only legs that acked ok'): available false - probe-d657-central.tsv and probe-d657-workstation.tsv answer HTTP 404 'no Route matched' for all six ovhcloud/ and ovh/ spellings of Qwen3.8-27B, gpt-oss-120b and Qwen3-Coder-30B-A3B-Instruct, so no render may carry an OVH leg and the three ovh-* single combos fall to `omitted`. spec combo-v2 §1 records the same break ('OVH served 1,253 calls OK this week -> recent break, autoos-L1 checking'); a re-probe 200 restores this flag. OVH-REPROBE 2026-10-08 (AO-DENYLEGS open item 1, operator brief): the flag is restored. `gpt-oss-120b`, `Qwen3.8-27B` and `Qwen3.5-397B-A17B` answer 200 again while `Qwen3-Coder-30B-A3B-Instruct` stays withdrawn upstream, so OVH rides L3 chains only (spec §2: no documented caching, so an L0–L2 chain on it is the cost leak rule (f) prices) and the two legs that must NOT ride are gated per-leg by the routes that declare them — the retired coder id, and ovhcloud/gpt-oss-120b whose shared model row is still unpriced (rule (h) fails an unpriced credit leg closed; no OVH price table is machine-readable: the catalogue and prices pages were fetched 2026-10-08 and return no per-token row for it). Provenance: the re-probe's own artifact is committed at `configuration/omniroute/probes/probe-d657-ovh-20261009.tsv` (2026-10-09) — `ovh/Qwen3.8-27B`, `ovh/Qwen3.5-397B-A17B` and `ovh/gpt-oss-120b` each record gateway `central`, tool ok, `served` = the requested id, no error (ack_ms 578 / 649 / 800); its `ack` column reads `empty` — not the `ok`/`fail` vocabulary the 10-04 TSVs use — so what the file records is a tool call and a served model, and it records no non-empty plain-completion ack. That file is the central gateway only: the workstation gateway is unreachable from the host that ran it, so it carries no workstation rows and no workstation verdict is claimed here. Stated plainly: the 2026-10-08 HTTP 200 verdict arrived by judge brief D-716 (autoos-L1-main) and is now backed by that committed TSV, and every leg that now rides a chain carries its own price row from the OVH pricing page. The older committed `configuration/omniroute/probes/probe-d657-{central,workstation}.tsv` (10-04) rows for ovh/Qwen3.8-27B (HTTP 404) and the absent Qwen3.5-397B row predate this re-probe and are stale — do not read a 200 or a tool-call verdict into them.",
-      "privacy": {
-        "trains_on_prompts": false,
-        "evidence": [
-          {
-            "url": "https://www.ovhcloud.com/en/public-cloud/ai-endpoints/",
-            "quote": "Your data will never be used to train or improve our AI models; one of our many security guarantees.",
-            "accessed": "2026-10-01"
-          },
-          {
-            "url": "https://docs.ovhcloud.com/en/guides/public-cloud/ai-machine-learning/ai-endpoints-capabilities",
-            "quote": "Data is not stored or shared during or after model use, providing users with peace of mind that their data is secure and protected.",
-            "accessed": "2026-10-01"
-          },
-          {
-            "url": "https://storage.gra.cloud.ovh.net/v1/AUTH_325716a587c64897acbef9a4a4726e38/contracts/043c367-Conditions_particulieres_OVH_Stack-IE-25.0.pdf",
-            "quote": "OVHcloud has no knowledge of Inputs and Outputs, and OVHcloud does not reuse them in any way. OVHcloud does not carry out any backups of Inputs or Outputs. This does not apply for the AI Endpoint Batch API Service.",
-            "accessed": "2026-10-01"
-          }
-        ],
-        "caveats": [
-          "abuse-monitoring log retention NOT VERIFIED",
-          "Batch API stores data: never use it for site data",
-          "authenticated key on a paid or credited Public Cloud project only (anonymous playground tier and Discovery-mode projects excluded)",
-          "EU region (Gravelines, France)"
-        ]
-      }
-    },
     "api_airforce": {
       "id": "api_airforce",
       "omniroute_id": "api-airforce",
@@ -3938,6 +4025,20 @@
       "available": true,
       "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'opencode' is registered and active, its catalog exposes 121 canonical model id(s) under prefix 'opencode', 0 answered a tool-call trial end to end. Statuses measured: 400 'not available in the active live catalog for provider opencode' x121 (the free noauth tier serves only the opencode client, not gateway chat completions). trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo. GLM55 2026-10-05 (operator): glm-5.3-flash is served through this connection; the live catalog's canonical spelling is oc/* (opencode/* is the alias row), so model_prefix 'oc' makes gateway_ref() emit oc/glm-5.3-flash. The ZCode provider stays a local-process spawn (not installed on the gateway host): the operator's 'ZCode glm-5.3-flash' grant lands through this OpenCode connection centrally; the workstation holds the ZCode connection. GLM55 2026-10-05 (operator): available:false LIFTED - the FREEKEYS-1 400s measured 2026-09-28 predate the connection's current catalog (live /v1/models now exposes 129 oc/* rows incl. oc/glm-5.3-flash, thinking + tool_calling). Only legs a route references become servable; glm-5.3-flash is the first and its tool_calls stay 'unproven' until a live seat quotes one."
     },
+    "opencode_go": {
+      "id": "opencode_go",
+      "omniroute_id": "opencode-go",
+      "model_prefix": null,
+      "litellm_env": null,
+      "litellm_prefix": null,
+      "litellm_auth": "gateway_connection",
+      "api_base": null,
+      "provider_data": null,
+      "tier": "subscription",
+      "trains_on_prompts": true,
+      "available": true,
+      "$comment": "OCGO-PREFER (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go plan is live and healthy on both gateways and is PREFERRED over the opencode free models for routes and seats — an operator decision, recorded here rather than measured. tier `subscription`, exactly like the other seat-metered providers (providers.cc / cxa / devin / xiaomi_mimo): a flat plan with no per-token API price, so no credit_usd/monthly_cap_usd row and its model rows carry 0.0 plus a price_source that says 'not metered'. model_prefix is null like providers.zen, so gateway_ref() returns the leg verbatim and the gateway sees the lowercase id the probe answered (`opencode-go/<model>`), not a canonicalised model key — which is why the MiniMax leg is `opencode-go/minimax-m3` and fold-resolves to models.'MiniMax-M3'. trains_on_prompts is TRUE by operator D-1919 ('Allow paid endpoints that train on request data', enabled in the Go workspace) — a decision, not a vendor term this lane read. No gate was changed to admit it: tools/registry.py private_safe() refuses any provider whose trains_on_prompts is not exactly false, so no `opencode-go/*` leg can enter a privacy=sensitive card's reviewer list or a -clean route, and the rule holds by construction rather than by this comment. The same fact answers from the other side: several Go models return 400 'This Go model trains on request data' to a plain chat completion. Evidence (2026-10-18 Go probe of the live connection: 77 ids listed, 39 answered 200 on 3/3 calls with cost 0; served id == requested id; best base ids by median latency): glm-5.3-flash 0.98 s, minimax-m3 1.27 s, kimi-k3 1.44 s, qwen3.8-flash 1.54 s. NOT registered here: deepseek-v4.1-flash — the Go copy answers 400 'requires Global regions', so the plan's DeepSeek id has no usable leg and the old `opencode-zen/deepseek-v4.1-flash` reviewer row keeps no Go replacement (the muse-spark contributor ids likewise 400 behind the training gate). litellm_env is null: the key lives in the gateway connection, so tools/mirror-litellm-env.py keeps no .env line for it. `litellm_auth` is declared for the same reason Vertex AI declares `service_account` (T1-CLEAN-4 K6): the credential is the OmniRoute connection's, so no `os.environ/OPENCODE_GO_API_KEY` exists to mirror, and tools/sync-router-tiers.py's no_litellm_key_providers() keeps every `opencode-go/*` leg out of a managed LiteLLM block instead of emitting an unset variable (the META_API_KEY startup hazard) — the data field does the work the older GATEWAY_ONLY list does by hand for cc and xiaomi_mimo."
+    },
     "ai_horde": {
       "id": "ai_horde",
       "omniroute_id": "aihorde",
@@ -4103,6 +4204,78 @@
           "context_declared": "128k",
           "display_name": "cheaperinference kimi-k3 (S1-S2 credit)",
           "output": 32768
+        }
+      }
+    },
+    "class-128k": {
+      "$comment": "RT-P1-CLASS-COMBOS: always-on 128k-floor priority combo. OmniRoute 3.8.51 native fields (context_requirements, target_timeout_ms) are declared snake_case here and rendered camelCase into combos.json only for routes that carry them; floor_route_legs() drops any servable leg advertising less than 128000. The legs are all providers LiteLLM cannot address (vertex service_account, opencode-go gateway_connection) so litellm_servable_refs() is empty and this route gets no AUTOOS-MANAGED block in configuration/litellm/config.yaml - omniroute-only. Kimi (131072) is the leg that makes the 128k floor real: it cannot ride class-256k. xiaomi_mimo/mimo-v2.6-flash was dropped (D-2207): the gateway reports no context window for it, so the strict filter cannot place it under the floor; restore when the gateway knows the mimo-v2.6-flash window (OMNI-BENCH-PREP adds it to the xiaomi-mimo model list). Omniroute-only in the RT-P1-CLASS-COMBOS lane (no IDE/opencode exposure yet): a cap on lane size moved the IDE/opencode.jsonc exposure to a follow-up under PH-AO-COMBOS.",
+      "id": "class-128k",
+      "class": "cheap",
+      "strategy": "priority",
+      "legs": [
+        "vertex/gemini-3.8-flash",
+        "opencode-go/kimi-k3"
+      ],
+      "surfaces": {
+        "omniroute": {
+          "context": 128000,
+          "context_declared": "128k",
+          "output": 16384,
+          "display_name": "Class · class-128k · 128k",
+          "clients": [],
+          "context_requirements": {
+            "min_context_window": 128000,
+            "context_filter_mode": "strict"
+          },
+          "target_timeout_ms": 180000
+        }
+      }
+    },
+    "class-256k": {
+      "$comment": "RT-P1-CLASS-COMBOS: always-on 256k-floor priority combo - only legs advertising >= 256000 (both are 1048576), so kimi (131072) rides class-128k only. Same omniroute-only leg rule as class-128k: vertex/opencode-go are all LiteLLM-unaddressable, so litellm_servable_refs() is empty and no managed block is owed. xiaomi_mimo/mimo-v2.6-flash was dropped (D-2207): the gateway reports no context window for it, so the strict filter cannot place it under the floor; restore when the gateway knows the mimo-v2.6-flash window (OMNI-BENCH-PREP adds it to the xiaomi-mimo model list). Omniroute-only in the RT-P1-CLASS-COMBOS lane (no IDE/opencode exposure yet): a cap on lane size moved the IDE/opencode.jsonc exposure to a follow-up under PH-AO-COMBOS.",
+      "id": "class-256k",
+      "class": "cheap",
+      "strategy": "priority",
+      "legs": [
+        "vertex/gemini-3.8-flash",
+        "opencode-go/glm-5.3-flash"
+      ],
+      "surfaces": {
+        "omniroute": {
+          "context": 256000,
+          "context_declared": "256k",
+          "output": 16384,
+          "display_name": "Class · class-256k · 256k",
+          "clients": [],
+          "context_requirements": {
+            "min_context_window": 256000,
+            "context_filter_mode": "strict"
+          },
+          "target_timeout_ms": 300000
+        }
+      }
+    },
+    "class-1m": {
+      "$comment": "RT-P1-CLASS-COMBOS: always-on 1M-floor priority combo - every declared leg advertises 1048576 >= 1000000, so no floor clamp fires here. Same two LiteLLM-unaddressable legs as class-256k (the only gateway-only/no-key providers with 1M windows); the floor that separates this route from class-256k is the native context_requirements, not the leg list. xiaomi_mimo/mimo-v2.6-flash was dropped (D-2207): the gateway reports no context window for it, so the strict filter cannot place it under the floor; restore when the gateway knows the mimo-v2.6-flash window (OMNI-BENCH-PREP adds it to the xiaomi-mimo model list). Omniroute-only in the RT-P1-CLASS-COMBOS lane (no IDE/opencode exposure yet): a cap on lane size moved the IDE/opencode.jsonc exposure to a follow-up under PH-AO-COMBOS.",
+      "id": "class-1m",
+      "class": "cheap",
+      "strategy": "priority",
+      "legs": [
+        "vertex/gemini-3.8-flash",
+        "opencode-go/glm-5.3-flash"
+      ],
+      "surfaces": {
+        "omniroute": {
+          "context": 1000000,
+          "context_declared": "1M",
+          "output": 16384,
+          "display_name": "Class · class-1m · 1M",
+          "clients": [],
+          "context_requirements": {
+            "min_context_window": 1000000,
+            "context_filter_mode": "strict"
+          },
+          "target_timeout_ms": 600000
         }
       }
     },
@@ -4740,7 +4913,6 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
-        "ovhcloud/Qwen3.5-397B-A17B",
         "vertex/gemini-3.8-flash"
       ],
       "strategy": "priority",
@@ -4914,27 +5086,6 @@
         }
       }
     },
-    "ovh-qwen3.8-27b": {
-      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/Qwen3.8-27B (live ovh/Qwen3.8-27B 128000; registry adv 262000 from OVH catalogue page, renders 256k; priced per OVH pricing page, proven). Class credit. opencode/zed only (no openhands_profile, the groq-qwen/hf-glm precedent). B2-OVH 2026-10-01: surfaces 256k->128k to match measured 128000 window; contract live check passes without exception.",
-      "class": "credit",
-      "id": "ovh-qwen3.8-27b",
-      "legs": [
-        "ovhcloud/Qwen3.8-27B"
-      ],
-      "strategy": "priority",
-      "surfaces": {
-        "omniroute": {
-          "clients": [
-            "opencode",
-            "zed"
-          ],
-          "context": 131072,
-          "context_declared": "128k",
-          "display_name": "Qwen3.8-27B via OVH (credit)",
-          "output": 32768
-        }
-      }
-    },
     "l2-researcher": {
       "class": "free",
       "id": "l2-researcher",
@@ -4963,33 +5114,6 @@
           "context_declared": "128k",
           "display_name": "L2 · l2-researcher · 128k",
           "output": 8192
-        }
-      }
-    },
-    "ovh-gpt-oss-120b": {
-      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for ovhcloud/gpt-oss-120b (live ovh/gpt-oss-120b 400000; registry shared model adv 131072, renders 128k; shared row price 0 = unpriced grant, unproven - renders but resolver refuses until priced, same stance as deepinfra credit tails). Class credit. opencode/zed only.",
-      "class": "credit",
-      "id": "ovh-gpt-oss-120b",
-      "legs": [
-        "ovhcloud/gpt-oss-120b"
-      ],
-      "strategy": "priority",
-      "surfaces": {
-        "omniroute": {
-          "clients": [
-            "opencode",
-            "zed"
-          ],
-          "context": 131072,
-          "context_declared": "128k",
-          "display_name": "GPT-OSS-120B via OVH (credit)",
-          "output": 32768
-        }
-      },
-      "unavailable_legs": {
-        "ovhcloud/gpt-oss-120b": {
-          "$comment": "OVH-REPROBE 2026-10-08: the leg answers 200 again, but it is gated because it is UNPRICED, not because it is dead. ovhcloud/gpt-oss-120b resolves to the shared models.gpt-oss-120b row (cerebras/sambanova's free spelling), whose price_in/price_out are 0.0 with no price_source — providers.ovhcloud is tier credit, so combo-contract rule (h) fails the closed: a credit leg with no price row bills $0 while it drains the $200 grant invisibly (§7b delta b). The per-leg mechanism exists now (models.<id>.provider_prices.<provider>, LANE-PRICE-GAP/T1-CREDIT-FIX-6), it only needs a cited OVH number — none is readable: the OVH catalogue and prices pages were fetched 2026-10-08 and carry no per-token row for gpt-oss-120b. Gap filed in logs/briefs/denylegs-gaps.md. Re-open by filing provider_prices.ovhcloud with price_source + price_as_of.",
-          "available": false
         }
       }
     },
@@ -5059,7 +5183,6 @@
         "openrouter/nvidia/nemotron-3-ultra-550b-a55b:free",
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/cohere/north-mini-code:free",
-        "ovhcloud/Qwen3.8-27B",
         "vertex/gemini-3.8-flash"
       ],
       "surfaces": {
@@ -5299,6 +5422,90 @@
             "max_output_tokens": 65536,
             "reasoning": true
           }
+        }
+      }
+    },
+    "opencode-go/glm-5.3-flash": {
+      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): OpenCode Go is preferred over the opencode free models for routes and seats. Exists so `--model omniroute/opencode-go/glm-5.3-flash` is addressable — declared_models() in tools/autoos-agent.py reads opencode.jsonc's modelIDs, and only a named route, never a bare leg, renders one (same mechanism as routes.'cheaperinference/kimi-k3' and routes.'samba/MiniMax-M3'). Leg is the probe-verified gateway spelling (providers.opencode_go carries model_prefix null, so gateway_ref() passes it through); context/output follow models.'glm-5.3-flash' (the Go /v1/models row reported context 1000000, 200 on 3/3, median 0.98 s — the fastest Go id answered). Not added to a tier band: an l2-* combo needs a measured prompt cache from every leg (tools/combo-contract.py rule (f)) and the Go probe measured none, and TIER_ORDER ranks subscription with paid, so a Go leg in a free-headed band would trail the free legs anyway (the routes.'l2-worker' MIMO note is the precedent). It is a seat and a reviewer, not a band. trains_on_prompts true (operator D-1919) keeps it off every -clean route and every privacy=sensitive card by tools/registry.py private_safe().",
+      "class": "cheap",
+      "id": "opencode-go/glm-5.3-flash",
+      "legs": [
+        "opencode-go/glm-5.3-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 1048576,
+          "context_declared": "1M",
+          "display_name": "OpenCode Go · glm-5.3-flash (subscription, 1M)",
+          "output": 32768
+        }
+      }
+    },
+    "opencode-go/minimax-m3": {
+      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go copy of MiniMax M3, preferred over the opencode free models for routes and seats. The leg is spelled as the gateway answers it (`opencode-go/minimax-m3`, lowercase, 200 on 3/3, median 1.27 s) and resolve_leg() fold-matches it to models.'MiniMax-M3' — the registry keeps ONE key per model (rule 1b case-fold uniqueness), so a second lowercase row is not added. Named route for the same reason as routes.'samba/MiniMax-M3': only a route renders an opencode.jsonc modelID, which is what makes `--model omniroute/opencode-go/minimax-m3` resolvable. Window is the shared model row's 131072 (samba's), not the Go row's measured 1048576, until a provider-scoped context field exists (see models.'MiniMax-M3' $comment). Not in a tier band: no measured prompt cache (rule (f)) and subscription ranks with paid (rule (b)). trains_on_prompts true (D-1919) keeps it off -clean routes and sensitive cards.",
+      "class": "cheap",
+      "id": "opencode-go/minimax-m3",
+      "legs": [
+        "opencode-go/minimax-m3"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "OpenCode Go · minimax-m3 (subscription, 128k)",
+          "output": 16384
+        }
+      }
+    },
+    "opencode-go/kimi-k3": {
+      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go copy of Kimi K3, preferred over the opencode free models for routes and seats (200 on 3/3, median 1.44 s; the Go /v1/models row reports 1048576 while the shared models.'kimi-k3' row records cheaperinference's 131072, so this surface declares 128k — the registry narrows promises to what every leg of it is measured taking, and there is no provider-scoped context field yet). Distinct from routes.'cheaperinference/kimi-k3', which is the same weights on a credit grant: two ids so a seat can name which bill it wants. Named route because only a route renders the opencode.jsonc modelID that makes `--model omniroute/opencode-go/kimi-k3` resolvable. Not in a tier band (no measured prompt cache for rule (f); subscription ranks with paid for rule (b)). trains_on_prompts true (D-1919) keeps it off -clean routes and sensitive cards.",
+      "class": "cheap",
+      "id": "opencode-go/kimi-k3",
+      "legs": [
+        "opencode-go/kimi-k3"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 131072,
+          "context_declared": "128k",
+          "display_name": "OpenCode Go · kimi-k3 (subscription, 128k)",
+          "output": 32768
+        }
+      }
+    },
+    "opencode-go/qwen3.8-flash": {
+      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go copy of Qwen3.8 Flash, preferred over the opencode free models for routes and seats (200 on 3/3, median 1.54 s, Go /v1/models row reports context 200000). Distinct from models.'qwen/qwen3.8-flash' (OpenRouter's vendor-prefixed spelling, referenced by no route since the 2026-09-26 BYOK withdrawal): this leg resolves to the new bare key models.'qwen3.8-flash'. Named route for the opencode.jsonc modelID, as in routes.'samba/MiniMax-M3'. tool_calls stays 'unproven' — the Go probe answered chat completions, not a tool-call trial — so a card that needs tools is not sent here on evidence it does not have. Not in a tier band (rule (f) cache gate; subscription ranks with paid under rule (b)). trains_on_prompts true (D-1919) keeps it off -clean routes and sensitive cards.",
+      "class": "cheap",
+      "id": "opencode-go/qwen3.8-flash",
+      "legs": [
+        "opencode-go/qwen3.8-flash"
+      ],
+      "strategy": "priority",
+      "surfaces": {
+        "omniroute": {
+          "clients": [
+            "opencode",
+            "zed"
+          ],
+          "context": 200000,
+          "context_declared": "200k",
+          "display_name": "OpenCode Go · qwen3.8-flash (subscription, 200k)",
+          "output": 16384
         }
       }
     },

@@ -59,6 +59,8 @@ _IDENT_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 _ROLE_RE = re.compile(r"[a-z][a-z0-9_-]*\Z")
 _PERMISSION_KEY_RE = re.compile(r"[a-z][a-z0-9_*]*\Z")
 PERMISSION_EFFECTS = ("allow", "deny", "ask")
+# OCGO-L1-FALLBACK: the only key a lane's model.options map may carry today.
+REASONING_EFFORTS = ("low", "medium", "high")
 ENV_GUARD_ROLE = "AUTOOS_GUARD_ROLE"
 ENV_L1_INBOX = "AUTOOS_L1_INBOX"
 ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
@@ -269,11 +271,23 @@ def validate_lane(lane, name):
     model = lane.get("model")
     if not isinstance(model, dict):
         raise LaneError("lane '%s': 'model' object is required" % name)
-    if model.get("provider") != "omniroute":
-        raise LaneError("lane '%s': model.provider must be 'omniroute'" % name)
+    provider = model.get("provider")
+    if provider not in ("omniroute", "opencode-go"):
+        raise LaneError(
+            "lane '%s': model.provider must be 'omniroute' (the gateway) or "
+            "'opencode-go' (opencode's built-in Go provider)" % name
+        )
     mkey, mid = model.get("key"), model.get("modelID")
     if not isinstance(mkey, str) or not mkey or not isinstance(mid, str) or not mid:
         raise LaneError("lane '%s': model.key and model.modelID are required" % name)
+    if provider == "opencode-go" and (
+        mid.startswith("opencode-go/") or any(ch.isspace() for ch in mid)
+    ):
+        raise LaneError(
+            "lane '%s': model.modelID must be the BARE id for provider "
+            "'opencode-go' (no 'opencode-go/' prefix, no whitespace; the "
+            "prefix is added by the renderer)" % name
+        )
     fkey, fid = model.get("fallback_key"), model.get("fallback_modelID")
     if (fkey is None) != (fid is None):
         raise LaneError(
@@ -287,6 +301,26 @@ def validate_lane(lane, name):
             "lane '%s': model.fallback_key and model.fallback_modelID must be "
             "non-empty strings when set" % name
         )
+    # OCGO-L1-FALLBACK: optional model.options; absent is unchanged, anything
+    # but the one known key with one of the three levels is a config error.
+    options = model.get("options")
+    if options is not None:
+        if not isinstance(options, dict):
+            raise LaneError(
+                "lane '%s': model.options must be an object (the only key "
+                "today is 'reasoning_effort')" % name
+            )
+        for okey, oval in options.items():
+            if okey != "reasoning_effort":
+                raise LaneError(
+                    "lane '%s': model.options key '%s' is unknown (the only "
+                    "key today is 'reasoning_effort')" % (name, okey)
+                )
+            if oval not in REASONING_EFFORTS:
+                raise LaneError(
+                    "lane '%s': model.options.reasoning_effort must be one "
+                    "of low|medium|high" % name
+                )
 
     mcp = lane.get("mcp", ["autoos-agent"])
     if (

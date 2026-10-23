@@ -348,9 +348,12 @@ class FleetSandboxAgentsTests(unittest.TestCase):
         `tag_matches(row, record_tag, run_id)`, with the record tag read back
         from a workers record as read_run_record_session_tag would read it.
         """
+        # OVH-REMOVE round 2: the model here is opaque header/tag fixture data
+        # (the stubbed route is never resolved), but it named the deleted
+        # `ovh-direct-*` hand entry; re-pinned to a shipped passthrough.
         plan = self._build(route=self._route(tier=3, review=True, read_only=True,
                                              combo="l3-driver",
-                                             model="omniroute/ovh-direct-gpt-oss-120b"))
+                                             model="omniroute/deepseek-direct-flash"))
         overlay = self._overlay(plan)
         headers = overlay["providers"]["omniroute"]["headers"]
         self.assertEqual(headers[self.agent.RUN_ID_HEADER], plan["run_id"])

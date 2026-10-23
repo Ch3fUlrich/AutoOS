@@ -82,9 +82,9 @@ read fail while the client still shows it connected:
 
 | Client | Where it is declared | Graph id / base URL | Token |
 |---|---|---|---|
-| Claude Code (this repo) | `.mcp.json`, project scope, approved via `.claude/settings.local.json` `enabledMcpjsonServers` | `autoos`, `${OMNIGRAPH_BASE_URL:-http://localhost:8080}` | `${OMNIGRAPH_TOKEN}` expanded from Claude's env |
-| opencode | `opencode.jsonc` `mcp.servers.omnigraph` | `autoos`, `http://localhost:8080` | inherited from the process that started the opencode service |
-| Zed | installer → `context_servers.omnigraph` in Zed settings | `autoos`, `http://localhost:8080` | inherited from the desktop session env |
+| Claude Code (this repo) | `.mcp.json`, project scope, approved via `.claude/settings.local.json` `enabledMcpjsonServers` | `autoos`, `${OMNIGRAPH_BASE_URL}` (no default: server start fails loudly if unset) | `${OMNIGRAPH_TOKEN}` expanded from Claude's env |
+| opencode | `opencode.jsonc` `mcp.servers.omnigraph` | `autoos`, `{env:OMNIGRAPH_BASE_URL}` (installers write the resolved URL into user config) | inherited from the process that started the opencode service |
+| Zed | installer → `context_servers.omnigraph` in Zed settings | `autoos`, resolved URL written by installer (or skips with a warning) | inherited from the desktop session env |
 | OpenHands | installer → `agent_settings.mcp_config.omnigraph` | `autoos`, `http://host.docker.internal:8080` (the app and its sandboxes run in Docker, where `localhost` is the container; the published server is reached through the host alias) | written into that (untracked) settings file from env or the env file |
 | Antigravity | installer → its `mcp_config.json` | `$OMNIGRAPH_GRAPH_ID` or `autoos` | written from env when set |
 | Neovim + sidekick | through the opencode CLI | as opencode | as opencode |
@@ -92,6 +92,21 @@ read fail while the client still shows it connected:
 Zed, OpenHands, Antigravity and a global opencode config are user-scope,
 so they pin `autoos` for every folder they open. The per-repo pin only
 exists for Claude Code and the repo's `opencode.jsonc`.
+
+### Where OMNIGRAPH_BASE_URL comes from
+
+The installers resolve `OMNIGRAPH_BASE_URL` in this order:
+
+1. The `omnigraph_url` answer.
+2. The `OMNIGRAPH_BASE_URL` environment variable.
+3. The `OMNIGRAPH_BASE_URL=` line of `~/.autoos-omnigraph.env` (Windows:
+   `%USERPROFILE%\.autoos-omnigraph.env`; parsed, never sourced; placeholder:
+   `OMNIGRAPH_BASE_URL=<omnigraph-url>`).
+
+If none of them is present, the installer prints a warning that names the
+variable and skips the omnigraph entry (it never writes a default and never
+deletes an existing entry). `tools/check-omnigraph.py` exits 2 with the same
+message (not with `--offline`).
 
 ### Where the token comes from
 

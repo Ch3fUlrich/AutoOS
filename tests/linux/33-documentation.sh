@@ -598,7 +598,7 @@ if it "autoos-agent: --clean picks the twin, undeclared models and --free --clea
     assert_eq "$rc" "2"
 fi
 
-if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never a worktree"; then
+if it "autoos-agent --free never prints a key value and --isolate plans a fenced clone, never a worktree"; then
     # SEAT-PYTEST (P4) exports PYTHONPATH only where the seat python3's own user site
     # exists under $HOME and passes the safety checks, so the real HOME would decide
     # the answer (D-852: keep it off the host). A fresh empty HOME has no user site on
@@ -632,8 +632,15 @@ if it "autoos-agent --free is keyless and --isolate plans a fenced clone, never 
     # ChildRuntimeDirTests asserts the private dirs are created 0700.
     assert_eq "$missing" ""
     assert_eq "$leaked" ""
-    if grep -q "worktree add\|never-print-this-key\|AUTOOS_OMNIROUTE_KEY" <<<"$out"; then
-        fail "free/isolated plan mentions a worktree or the gateway key"
+    # OCGO-PREFER 3 (D-1923): a plain --free run with a gateway key on the machine
+    # now STARTS on an OpenCode Go head, so the credential's NAME legitimately
+    # appears in the env line. What must never appear is its VALUE — the plan
+    # prints names only. This now matches the Windows twin, which bans only
+    # `worktree add|never-print-this-key` (tests/run-tests.ps1, "autoos-agent
+    # plans tier runs without spawning or leaking a key"). Key-free runs still
+    # carry neither, pinned in tests/test_autoos_spawner.py FreePreferredHeadTests.
+    if grep -q "worktree add\|never-print-this-key" <<<"$out"; then
+        fail "free/isolated plan mentions a worktree or prints the gateway key value"
     else pass; fi
 fi
 
@@ -987,10 +994,18 @@ if it "autoos-agent token-rate: orchestrator tokens per merge (unit tests)"; the
     out="$(python3 tests/test_autoos_tokenrate.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
-# tools/hooks/context_guard.py (P1.1): the PostToolUse hook that tells a session to hand off at 230k and
-# stop at 250k - fixture transcripts and a throwaway XDG state dir, never the live ones.
-if it "context_guard hook: 230k handoff / 250k hard cap, ready marker, tail read (unit tests)"; then
+# tools/hooks/context_guard.py (P1.1): the PostToolUse hook that tells a session to hand off at 270k and
+# stop at 300k - fixture transcripts and a throwaway XDG state dir, never the live ones.
+if it "context_guard hook: 270k handoff / 300k hard cap, ready marker, tail read (unit tests)"; then
     out="$(python3 tests/test_context_guard.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
+# tools/hooks/fleet_report.py + fleet_inject.py: the Stop report filed into the parent's inbox and the PostToolUse/UserPromptSubmit injector that feeds it back - temp FLEET_* dirs only.
+if it "fleet hooks: Stop report + inbox injector (unit tests)"; then
+    out="$(python3 tests/test_fleet_hook.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+if it "fleet_bus: HMAC, skew, nonce LRU, body cap, metadata-only jsonl log (unit tests)"; then
+    out="$(python3 tests/test_fleet_bus.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # tools/unit_breaker.py + tools/gateway_alerts.py (P1.2): the circuit breaker around agent-starting units and the
@@ -1006,6 +1021,12 @@ fi
 # unpushed/dirty branches, context fill - read-only, plus the run/spawn PAUSE refusal.
 if it "autoos-agent heartbeat: pause/unpushed/dirty/context, run+spawn PAUSE refusal (unit tests)"; then
     out="$(python3 tests/test_autoos_heartbeat.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+if it "autoos_oc_fallback: limit detection, fallback model, opencode health (unit tests)"; then
+    out="$(python3 tests/test_oc_fallback.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+if it "autoos_oc_fallback_run: Claude limit switches to OpenCode fallback (integration tests)"; then
+    out="$(python3 tests/test_oc_fallback_run.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # OVERLAYHOME: the machine-wide tool_calls overlay (path resolution, legacy

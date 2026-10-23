@@ -4131,10 +4131,12 @@ Test-Case 'the omnigraph user variable is set by name only, never PATH-style who
 Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)" {
     $realAppData = $env:APPDATA
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-agy-" + [Guid]::NewGuid().ToString('N'))
     try {
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
         Set-AutoOSAntigravityMcp 6>$null | Out-Null
         $cfg = Get-Content (Join-Path $scratch 'Antigravity\mcp_config.json') -Raw | ConvertFrom-Json
@@ -4142,6 +4144,7 @@ Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to 
     } finally {
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
@@ -4155,6 +4158,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
     $file = Join-Path $cfgDir 'mcp_config.json'
@@ -4173,6 +4177,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_TOKEN = $null
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         $null = & $run $log1
         $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'mcp_config.json.autoos-backup-*').Count
@@ -4197,6 +4202,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_TOKEN = $realToken
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $log1, $log2 -Force -ErrorAction SilentlyContinue
     }
@@ -4357,6 +4363,7 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
     $file = Join-Path $cfgDir 'mcp_config.json'
@@ -4368,6 +4375,7 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_TOKEN = $null
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         Initialize-AutoOSLog -Path $log
         while ((Get-Date).Millisecond -gt 250) { Start-Sleep -Milliseconds 20 }
@@ -4392,6 +4400,7 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_TOKEN = $realToken
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     }
@@ -4405,6 +4414,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs 
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
     $file = Join-Path $cfgDir 'mcp_config.json'
@@ -4414,13 +4424,14 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs 
         $env:APPDATA = $scratch
         $env:OMNIGRAPH_TOKEN = $null
         $env:OMNIGRAPH_GRAPH_ID = $null
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun $false -Answers @{} -RepoRoot $Root
         Initialize-AutoOSLog -Path $log
         # The entry the writer produces, except that the command is in capitals.
         $seedEntry = [ordered]@{
             command = 'NPX'
             args    = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
-            env     = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://localhost:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
+            env     = [ordered]@{ OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'; OMNIGRAPH_GRAPH_ID = 'autoos' }
         }
         [IO.File]::WriteAllText($file, ([ordered]@{ mcpServers = [ordered]@{ omnigraph = $seedEntry } } | ConvertTo-Json -Depth 12))
         $seedB64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($file))
@@ -4436,6 +4447,7 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs 
         $env:APPDATA = $realAppData
         $env:OMNIGRAPH_TOKEN = $realToken
         $env:OMNIGRAPH_GRAPH_ID = $realGraph
+        $env:OMNIGRAPH_BASE_URL = $realBase
         Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     }
@@ -4476,23 +4488,219 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer rewrites an entry th
 
 Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
     $realAppData = $env:APPDATA
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))
     try {
         $env:APPDATA = $scratch
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
         Set-AutoOSZedProxy 6>$null | Out-Null
         $s = Get-Content (Join-Path $scratch 'Zed\settings.json') -Raw | ConvertFrom-Json
         $e = $s.context_servers.omnigraph.env
         Assert-True ($null -ne $e) 'omnigraph context server has no env'
         Assert-Equal $e.OMNIGRAPH_GRAPH_ID 'autoos'
-        Assert-True ([bool]$e.OMNIGRAPH_BASE_URL) 'no base URL'
+        Assert-Equal $e.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the resolved URL did not reach the entry'
         Assert-True ($null -eq $e.PSObject.Properties['OMNIGRAPH_TOKEN']) 'a token landed in Zed settings'
     } finally {
         $env:APPDATA = $realAppData
+        if ($null -eq $realBase) { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
+        else { $env:OMNIGRAPH_BASE_URL = $realBase }
         Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
+# ─── OMNIGRAPH-URL-LOUD: a missing base URL fails loudly, it never defaults ──
+# Nothing listens on localhost:8080 on the server since D-1398, so the silent
+# default wrote a config that looked fine and failed at call time. The resolver
+# warns - naming the variable and every place it can be set - and returns $null;
+# a writer holding $null skips its omnigraph entry, never deleting the user's.
+
+function Invoke-OmnigraphBaseScratch {
+    # Run a body with every source the resolver reads under test control:
+    # USERPROFILE, HOME and APPDATA point into a temp dir (the real
+    # ~/.autoos-omnigraph.env is never read), the answer and the variable are set
+    # per case, all four names are restored, and the body's output is returned.
+    param(
+        [Parameter(Mandatory)][scriptblock]$Body,
+        [hashtable]$Answers = @{},
+        [string]$EnvUrl = '',
+        [string]$EnvFile = '',
+        # A writer that touches the checkout (project .claude\settings.local.json,
+        # the skill links) runs against a scratch tree, never this one.
+        [switch]$ScratchRepo
+    )
+    $names = @('USERPROFILE', 'HOME', 'APPDATA', 'OMNIGRAPH_BASE_URL')
+    $saved = @{}
+    foreach ($n in $names) { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
+    $savedHome = $HOME
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-obase-$([Guid]::NewGuid().ToString('N'))"
+    $repo = if ($ScratchRepo) { (New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'repo')).FullName } else { $Root }
+    $result = $null
+    try {
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'AppData\Zed')
+        $env:USERPROFILE = $scratch
+        $env:HOME = $scratch
+        $env:APPDATA = Join-Path $scratch 'AppData'
+        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
+        if ($EnvFile) { [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), $EnvFile) }
+        if ($EnvUrl) { $env:OMNIGRAPH_BASE_URL = $EnvUrl } else { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
+        # The resolver runs in the module, which reads $HOME, not the test's.
+        if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
+        Initialize-AutoOSInstaller -DryRun:$false -Answers $Answers -RepoRoot $repo
+        $result = & $Body $scratch $repo
+    } finally {
+        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
+        foreach ($n in $names) { [Environment]::SetEnvironmentVariable($n, $saved[$n]) }
+        Initialize-AutoOSInstaller -DryRun:$false -RepoRoot $Root
+        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    $result
+}
+
+Test-Case 'omnigraph base URL: nothing configured warns naming the variable and yields no URL' {
+    Invoke-OmnigraphBaseScratch -Body {
+        $warnings = @(Get-AutoOSOmnigraphBaseUrl 3>&1 | Where-Object { $_ -is [Management.Automation.WarningRecord] })
+        Assert-Equal $warnings.Count 1 'the resolver did not warn exactly once'
+        $text = "$($warnings[0])"
+        Assert-True ($text -match 'OMNIGRAPH_BASE_URL' -and $text -match 'omnigraph_url' -and $text -match '\.autoos-omnigraph\.env') "the warning does not name the variable and where to set it: $text"
+        $got = Get-AutoOSOmnigraphBaseUrl 3>$null
+        Assert-True ($null -eq $got) "a localhost default leaked through: [$got]"
+    }
+}
+
+Test-Case 'omnigraph base URL: the answer beats OMNIGRAPH_BASE_URL beats the env file, slashes and quotes are stripped' {
+    $cases = @(
+        @{ Desc = 'environment variable'; Answers = @{}; EnvUrl = 'http://env.invalid:8080'; EnvFile = ''; Want = 'http://env.invalid:8080' }
+        @{ Desc = 'env file line'; Answers = @{}; EnvUrl = ''; EnvFile = 'OMNIGRAPH_BASE_URL=http://file.invalid'; Want = 'http://file.invalid' }
+        @{ Desc = 'environment beats env file'; Answers = @{}; EnvUrl = 'http://env.invalid'; EnvFile = 'OMNIGRAPH_BASE_URL=http://file.invalid'; Want = 'http://env.invalid' }
+        @{ Desc = 'answer beats environment'; Answers = @{ omnigraph_url = 'http://answer.invalid' }; EnvUrl = 'http://env.invalid'; EnvFile = 'OMNIGRAPH_BASE_URL=http://file.invalid'; Want = 'http://answer.invalid' }
+        @{ Desc = 'trailing slashes stripped'; Answers = @{ omnigraph_url = 'https://slash.invalid//' }; EnvUrl = 'http://env.invalid'; EnvFile = ''; Want = 'https://slash.invalid' }
+        @{ Desc = 'one pair of quotes stripped'; Answers = @{}; EnvUrl = ''; EnvFile = 'OMNIGRAPH_BASE_URL="http://quoted.invalid"'; Want = 'http://quoted.invalid' }
+        @{ Desc = 'a scheme-less env value is skipped'; Answers = @{}; EnvUrl = 'omnigraph.test.invalid:8080'; EnvFile = ''; Want = $null }
+        @{ Desc = 'a scheme-less env-file value is skipped'; Answers = @{}; EnvUrl = ''; EnvFile = 'OMNIGRAPH_BASE_URL=localhost:8080'; Want = $null }
+    )
+    foreach ($case in $cases) {
+        $got = Invoke-OmnigraphBaseScratch -Answers $case.Answers -EnvUrl $case.EnvUrl -EnvFile $case.EnvFile -Body {
+            Get-AutoOSOmnigraphBaseUrl 3>$null
+        }
+        if ($got -ne $case.Want) { throw "$($case.Desc): got [$got], want [$($case.Want)]" }
+    }
+    Pass
+}
+
+Test-Case 'omnigraph base URL: Zed with none configured writes no entry and keeps the user''s own, then the resolved value' {
+    $keepers = '{"theme":"mine","context_servers":{"omnigraph":{"command":"npx","args":["-y","user-pin"],"env":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}}}'
+    Invoke-OmnigraphBaseScratch -Body {
+        param($scratch)
+        $cfg = Join-Path $scratch 'AppData\Zed\settings.json'
+        $run = { Set-AutoOSZedProxy 6>$null | Out-Null; Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 | ConvertFrom-Json }
+        $s = & $run
+        Assert-True ($null -eq $s.context_servers.PSObject.Properties['omnigraph']) 'an omnigraph entry was written with no base URL'
+        [IO.File]::WriteAllText($cfg, $keepers)
+        $s = & $run
+        Assert-Equal $s.context_servers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://keep.invalid' "the user's omnigraph entry was rewritten"
+        Assert-True ((Get-Content -LiteralPath $cfg -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in Zed settings'
+        # The URL resolves from the env file while the variable stays absent:
+        # what lands in settings.json has to be the value, not a reference.
+        [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
+        $s = & $run
+        Assert-Equal $s.context_servers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
+    }
+}
+
+Test-Case 'omnigraph base URL: Antigravity with none configured writes no entry and keeps the user''s own, then the resolved value' {
+    $keepers = '{"mcpServers":{"other":{"command":"node","args":["srv.js"]},"omnigraph":{"command":"npx","args":["-y","user-pin"],"env":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}},"theme":"mine"}'
+    Invoke-OmnigraphBaseScratch -Body {
+        param($scratch)
+        $dir = Join-Path $scratch 'AppData\Antigravity'
+        $cfg = Join-Path $dir 'mcp_config.json'
+        $run = {
+            $log = Get-AutoOSConsoleCapture { Set-AutoOSAntigravityMcp 3>$null }
+            $s = $null
+            if (Test-Path -LiteralPath $cfg) { $s = Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 | ConvertFrom-Json }
+            @{ Log = $log; Cfg = $s }
+        }
+        $r = & $run
+        Assert-True ($null -eq $r.Cfg -or $null -eq $r.Cfg.mcpServers.PSObject.Properties['omnigraph']) 'an omnigraph entry was written with no base URL'
+        Assert-True ($r.Log -match 'OMNIGRAPH_BASE_URL is not set - skipping the omnigraph part') "the writer never said why it skipped: [$($r.Log)]"
+        Assert-True ($r.Log -notmatch 'localhost:8080') "a defaulted localhost:8080 was announced: [$($r.Log)]"
+        $null = New-Item -ItemType Directory -Force -Path $dir
+        [IO.File]::WriteAllText($cfg, $keepers)
+        $r = & $run
+        Assert-Equal $r.Cfg.mcpServers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://keep.invalid' "the user's omnigraph entry was rewritten"
+        Assert-Equal $r.Cfg.mcpServers.other.command 'node' 'the user''s other server was dropped'
+        Assert-True ($r.Cfg.theme -eq 'mine') "the user's own top-level key was dropped"
+        Assert-True ((Get-Content -LiteralPath $cfg -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in the Antigravity config'
+        # The URL resolves from the env file while the variable stays absent:
+        # what lands in mcp_config.json has to be the value, not a reference.
+        [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
+        $r = & $run
+        Assert-Equal $r.Cfg.mcpServers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
+        Assert-Equal $r.Cfg.mcpServers.omnigraph.env.OMNIGRAPH_GRAPH_ID 'autoos' 'the entry lost the graph id the bridge requires'
+        Assert-True ($r.Log -notmatch 'skipping the omnigraph part') "a configured URL still skipped: [$($r.Log)]"
+    }
+}
+
+function Invoke-WithModuleStub {
+    # Swap module-scope functions for the duration of one body and put the real
+    # ones back, so a test can run a whole installer function without its side
+    # effects. No test installs anything: the body of Install-AutoOSAgentSkills
+    # drives the claude CLI, docker and the user's skill links, while the part
+    # under test is only which base URL it hands to the omnigraph env writer -
+    # and whether it hands one over at all.
+    param(
+        [Parameter(Mandatory)][hashtable]$Stubs,
+        [Parameter(Mandatory)][scriptblock]$Body
+    )
+    $mod = Get-Module AutoOS.Install
+    $real = @{}
+    # Unqualified, from inside the module: a module's own functions are found
+    # there, while "function:script:<name>" resolves to nothing at all.
+    foreach ($n in $Stubs.Keys) { $real[$n] = & $mod { param($name) (Get-Item "function:$name").ScriptBlock } $n }
+    try {
+        foreach ($n in $Stubs.Keys) { $null = & $mod { param($name, $f) Set-Item "function:$name" $f } $n $Stubs[$n] }
+        & $Body
+    } finally {
+        foreach ($n in $Stubs.Keys) { $null = & $mod { param($name, $f) Set-Item "function:$name" $f } $n $real[$n] }
+    }
+}
+
+Test-Case 'omnigraph base URL: agent skills with none configured writes no omnigraph env, then the resolved value' {
+    $run = {
+        param($scratch, $repo)
+        $envCalls = New-Object System.Collections.ArrayList
+        $otherCalls = New-Object System.Collections.ArrayList
+        # The links, the pinned project server and the skills source are part of
+        # the rest of the function, so the scratch checkout has to carry the two
+        # files that make them happen.
+        $null = New-Item -ItemType Directory -Force -Path (Join-Path $repo '.agents\skills\alpha')
+        [IO.File]::WriteAllText((Join-Path $repo '.mcp.json'), '{"mcpServers":{"omnigraph":{"command":"npx"}}}')
+        $stubs = @{
+            'Set-AutoOSOmnigraphEnv'       = { param([string]$BaseUrl, [string]$EnvFile, [switch]$NoUserVariable) $null = $envCalls.Add($BaseUrl) }
+            'Install-AutoOSMcpGraphify'    = { $null = $otherCalls.Add('graphify') }
+            'Install-AutoOSMcpSerena'      = { $null = $otherCalls.Add('serena') }
+            'Install-AutoOSMcpPlaywright'  = { $null = $otherCalls.Add('playwright') }
+            'Install-AutoOSMcpContext7'    = { $null = $otherCalls.Add('context7') }
+            'Get-AutoOSMcpServerNames'     = { , @() }
+            'Enable-AutoOSProjectMcpServer'= { param($RepoPath, $Name) $null = $otherCalls.Add($Name) }
+            'Set-AutoOSAntigravityMcp'     = { $null = $otherCalls.Add('antigravity') }
+            'Sync-AutoOSAgentSkillTargets' = { param($Source) $null = $otherCalls.Add('skills') }
+            'Write-AutoOSOmnigraphReadiness' = { param($RepoRoot) $false }
+        }
+        $log = Invoke-WithModuleStub -Stubs $stubs -Body { Get-AutoOSConsoleCapture { Install-AutoOSAgentSkills 3>$null } }
+        @{ Log = "$log"; Env = @($envCalls); Other = @($otherCalls) }
+    }
+    $r1 = Invoke-OmnigraphBaseScratch -ScratchRepo -Body $run
+    Assert-Equal $r1.Env.Count 0 "an omnigraph env was written with no base URL: [$($r1.Env -join ', ')]"
+    Assert-True ($r1.Log -match 'OMNIGRAPH_BASE_URL is not set - skipping the omnigraph part') "the writer never said why it skipped: [$($r1.Log)]"
+    Assert-True ($r1.Log -notmatch 'localhost:8080') "a defaulted localhost:8080 was announced: [$($r1.Log)]"
+    foreach ($n in @('graphify', 'serena', 'playwright', 'context7', 'antigravity', 'skills', 'omnigraph')) {
+        Assert-True ($n -in $r1.Other) "skipping the omnigraph part also skipped $n"
+    }
+    $r2 = Invoke-OmnigraphBaseScratch -ScratchRepo -Answers @{ omnigraph_url = 'http://omnigraph.test.invalid:8080/' } -Body $run
+    Assert-Equal ($r2.Env -join ',') 'http://omnigraph.test.invalid:8080' 'the resolved URL did not reach the omnigraph env writer'
+    Assert-True ($r2.Log -notmatch 'skipping the omnigraph part') "a configured URL still skipped: [$($r2.Log)]"
+}
 
 # tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
 # YAML shapes both Set-AutoOSSerenaExclusions (here) and ensure_serena_exclusions
@@ -7982,11 +8190,15 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
     $realAppData = $env:APPDATA
     $realOmni = $env:AUTOOS_OMNIROUTE_KEY
     $realLit = $env:LITELLM_MASTER_KEY
+    $realBase = $env:OMNIGRAPH_BASE_URL
     $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
     try {
         $env:APPDATA = $scratch
         $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
         $env:LITELLM_MASTER_KEY = 'test-lit-key'
+        # The omnigraph entry is only written when a base URL resolves (see
+        # Get-AutoOSOmnigraphBaseUrl), so this case supplies one.
+        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
         $cfgDir = Join-Path $scratch 'Zed'
         New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
         '{"theme":"mine","language_models":{"openai":{"api_url":"https://x"}}}' |
@@ -8056,6 +8268,8 @@ Test-Case 'zed routing merges one provider and keeps the rest' {
         else { $env:AUTOOS_OMNIROUTE_KEY = $realOmni }
         if ($null -eq $realLit) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
         else { $env:LITELLM_MASTER_KEY = $realLit }
+        if ($null -eq $realBase) { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
+        else { $env:OMNIGRAPH_BASE_URL = $realBase }
     }
 }
 
@@ -8221,7 +8435,9 @@ function Invoke-OpenCodeScratch {
         [string]$OpenCodeVersion = '1.4.0',
         [string]$Seed = ''
     )
-    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY')
+    # OMNIGRAPH_BASE_URL belongs to the saved set: the writers resolve the
+    # omnigraph base URL from it, so a host that has one set must not tilt a run.
+    $envNames = @('USERPROFILE', 'HOME', 'APPDATA', 'PATH', 'OLLAMA_BASE_URL', 'OPENROUTER_API_KEY', 'OMNIGRAPH_BASE_URL')
     $savedEnv = @{}
     foreach ($n in $envNames) { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
     $savedHome = $HOME
@@ -8263,6 +8479,7 @@ function Invoke-OpenCodeScratch {
         $env:PATH = "$bin$([IO.Path]::PathSeparator)$($savedEnv['PATH'])"
         $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434/v1'
         Remove-Item Env:OPENROUTER_API_KEY -ErrorAction SilentlyContinue
+        Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue
         # The writer reads $HOME, which the environment does not set on every
         # host: prove the module sees the scratch home before it writes anything.
         if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
@@ -8423,6 +8640,30 @@ Test-Case 'opencode V2: a V1 CLI gets no providers block' {
         if ($null -eq $w.provider.PSObject.Properties['custom']) { throw 'a foreign V1 provider of the user was dropped' }
         if ($w.model -notlike 'ollama/*') { throw "a V1 CLI's default model is not the Ollama default: [$($w.model)]" }
         Pass
+    }
+}
+
+# The URL must reach the config as a resolved value, never as an {env:...}
+# reference: OMNIGRAPH_BASE_URL is absent from the environment below (the
+# scratch harness removes it), so a reference would read as empty - OpenCode
+# gives an MCP server its own environment, not the installer's.
+Test-Case 'omnigraph base URL: OpenCode with none configured writes no entry and keeps the user''s own, then the resolved value' {
+    $keepers = '{"theme":"mine","mcp":{"omnigraph":{"type":"local","command":["npx","-y","user-pin"],"enabled":true,"environment":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}}}'
+    Invoke-OpenCodeScratch -Body {
+        param($c)
+        $log = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-True ($null -eq $w.mcp.PSObject.Properties['omnigraph']) 'an omnigraph entry was written with no base URL'
+        Assert-True ($log -match 'OMNIGRAPH_BASE_URL is not set') "the writer never said why it skipped: $log"
+        [IO.File]::WriteAllText($c.CfgFile, $keepers)
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Equal $w.mcp.omnigraph.environment.OMNIGRAPH_BASE_URL 'http://keep.invalid' "the user's omnigraph entry was rewritten"
+        Assert-True ((Get-Content -LiteralPath $c.CfgFile -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in the OpenCode config'
+        [IO.File]::WriteAllText((Join-Path $c.Scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
+        $null = & $c.Run
+        $w = Get-Content -LiteralPath $c.CfgFile -Raw -Encoding UTF8 | ConvertFrom-Json
+        Assert-Equal $w.mcp.omnigraph.environment.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
     }
 }
 
@@ -9949,10 +10190,11 @@ rendered = registry.render_omniroute(reg)
 routes = reg['routes']
 legless = sorted(rid for rid, r in routes.items()
                  if isinstance(r, dict) and not (r.get('legs') or []))
-print('%s|%s|%s' % (
+print('%s|%s|%s|%s' % (
     ','.join(c['name'] for c in rendered['combos']),
     ','.join(rendered.get('omitted') or []),
-    ','.join(legless)))
+    ','.join(legless),
+    ';'.join('%s=%s' % (c['name'], c['context']) for c in rendered['combos'])))
 '@
     $derivePath = Join-Path ([IO.Path]::GetTempPath()) "autoos-combos-derive-$PID.py"
     [IO.File]::WriteAllText($derivePath, $derive)
@@ -9963,6 +10205,17 @@ print('%s|%s|%s' % (
     Assert-Equal ($names -join ',') $parts[0] 'combos.json is not the registry render of servable tiers'
     $expectedOmitted = @($parts[1] -split ',' | Where-Object { $_ })
     $leglessRoutes = @($parts[2] -split ',' | Where-Object { $_ })
+    # The render's per-combo context, so a route the table below does not
+    # hand-pin is still checked against the registry rather than a literal here.
+    # OVH-REMOVE 2026-10-18 (D-1816(12)): the pinned ovh credit singles
+    # (ovh-qwen3.8-27b / ovh-gpt-oss-120b) left the table for this — they existed
+    # only while the registry carried them, and a removed route must not leave a
+    # stale expectation behind.
+    $renderedContexts = @{}
+    foreach ($kv in ($parts[3] -split ';' | Where-Object { $_ })) {
+        $k, $v = $kv -split '=', 2
+        $renderedContexts[$k] = $v
+    }
     # "retired" is the one home of the ids a rename left behind: apply prunes
     # them from the store, so a retired id must never also be a current combo.
     $doc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -9998,6 +10251,9 @@ print('%s|%s|%s' % (
         'l1-orchestrator' = '1M'
         'l1-orchestrator-free-only' = '1M'
         'l1-orchestrator-paid' = '1M'
+        # WIN-COMBOS-CONTEXT-PIN 2026-10-18: routes.l1-orchestrator-clean in
+        # catalog/ai-registry.json renders 1M (clamp = smallest servable leg window).
+        'l1-orchestrator-clean' = '1M'
         'spark-1.3-contributor' = '1M'
         'l2-worker' = '128k'
         'l2-worker-clean' = '128k'; 'l2-worker-free-only' = '128k'; 'l2-orchestrator' = '1M'; 'l3-driver' = '128k'; 'l3-driver-clean' = '128k'; 'l3-driver-free-only' = '128k'; 't4-rag' = '128k'
@@ -10007,6 +10263,17 @@ print('%s|%s|%s' % (
         # RENDERFIX 2026-10-01: the researcher-tier lane added this route; it is
         # the t4 tier like t4-rag, so it clamps to its lowest leg (128k).
         'l2-researcher' = '128k'
+        # WIN-COMBOS-CONTEXT-PIN round 2 2026-10-18: the rest of the routes the
+        # render serves, each read off `python3 tools/registry.py render
+        # omniroute` (combos[].context from catalog/ai-registry.json), which
+        # equals combos.json. The gate stays fail-fast: a served combo missing
+        # from this table still fails.
+        'l2-orchestrator-clean' = '1M'; 'l2-worker-1m' = '1M'
+        'l3-driver-1m' = '1M'; 'l3-driver-256k' = '256k'
+        'l3-implementer' = '128k'; 'l3-implementer-clean' = '128k'
+        'l3-researcher' = '1M'; 'l3-researcher-clean' = '1M'
+        'l3-review-codebase' = '1M'; 'l3-review-diff' = '128k'; 'l3-review-tests' = '1M'
+        'mimo-v2.6-flash' = '1M'; 'mimo-v2.6-pro' = '1M'
         'gemini-3.8-flash' = '1M'; 'opus-4-6' = '1M'
         # GLM55 wave 2026-10-05: new opus-5-5 single (antigravity opus, 1M).
         'opus-5-5' = '1M'
@@ -10014,19 +10281,42 @@ print('%s|%s|%s' % (
         # states MODEL deepseek-flash = DeepSeek-V4.1-Flash at 1M in / 384K
         # out, so the 128k clamp was stale data (models.deepseek-flash).
         'deepseek-v4.1-flash' = '1M'
-        # TORDER pinned singles: free :free 128k/256k, credit ovh/vertex.
+        # TORDER pinned singles: free :free 128k/256k, credit vertex. Other
+        # pinned singles come from the registry (see $renderedContexts).
         'groq-qwen3.8-27b' = '128k'; 'hf-glm-5.2' = '128k'; 'hf-qwen3.8-27b' = '128k'
         'or-nemotron-3-super-free' = '256k'
         'or-north-mini-code-free' = '256k'; 'or-laguna-s-2.1-free' = '256k'
-        'ovh-qwen3.8-27b' = '128k'; 'ovh-gpt-oss-120b' = '128k'
         'vertex-gemini-3.8-flash' = '1M'
+        # OCGO-PREFER 2026-10-18: the OpenCode Go pinned singles, each read off
+        # `python3 tools/registry.py render omniroute` (combos[].context from
+        # routes.* in catalog/ai-registry.json), which equals combos.json:
+        # glm-5.3-flash 1M, minimax-m3 128k (shared models.'MiniMax-M3' window,
+        # not the Go row's 1M), kimi-k3 128k (shared models.kimi-k3 window),
+        # qwen3.8-flash 200k.
+        'opencode-go/glm-5.3-flash' = '1M'
+        'opencode-go/minimax-m3' = '128k'
+        'opencode-go/kimi-k3' = '128k'
+        'opencode-go/qwen3.8-flash' = '200k'
+        # RT-P1-CLASS-COMBOS 2026-10-18: the three context-floored priority
+        # combos (routes.* declaring surfaces.omniroute.context_requirements),
+        # read off `python3 tools/registry.py render omniroute` (combos[].context
+        # from catalog/ai-registry.json), which equals combos.json: 128k/256k/1M.
+        # The native fields (contextRequirements/targetTimeoutMs) these three
+        # carry are pinned by ClassComboNativeFieldTests in
+        # tests/test_registry_render.py, not duplicated here.
+        'class-128k' = '128k'
+        'class-256k' = '256k'
+        'class-1m' = '1M'
     }
     foreach ($c in $combos) {
         Assert-True ($c.models.Count -ge 1) "$($c.name) has no models"
         foreach ($m in $c.models) {
             Assert-True ($m -match '^[A-Za-z0-9@._/:-]+$') "$($c.name): bad ref '$m'"
         }
-        Assert-Equal $c.context $contexts[$c.name]
+        $expectedContext = $contexts[$c.name]
+        if ($null -eq $expectedContext -and $c.name -like 'ovh-*') { $expectedContext = $renderedContexts[$c.name] }  # only the legacy ovh singles (gone with the registry removal) are exempt from the hand pin; any other unpinned combo still fails
+        Assert-True ($null -ne $expectedContext) "$($c.name): no expected context"
+        Assert-Equal $c.context $expectedContext
     }
     # Every route the render fails closed is named in "omitted" and is never a
     # combo (l1-orchestrator-clean since DSMAX 2026-09-27; deepseek-v4.1-flash
@@ -10047,9 +10337,11 @@ print('%s|%s|%s' % (
     # contract) is banned in l2-worker-clean/l3-driver-clean
     # (l1-orchestrator-clean is omitted, see above). Direct-key legs
     # (mistral-small, deepseek, openrouter paid, zen paid) bill past the pool
-    # on the same key, so they stay. L1-CLEAN 2026-10-05: ovhcloud is a
-    # metered credit-tier provider (providers.ovhcloud tier credit), not a
-    # free pool, so its Qwen leg is exempted from the /qwen free-pool ban.
+    # on the same key, so they stay. L1-CLEAN 2026-10-05: ovhcloud was a
+    # metered credit-tier provider (providers.ovhcloud tier credit), not a free
+    # pool, so its Qwen leg was exempted from the /qwen free-pool ban. The
+    # provider was removed (OVH-REMOVE 2026-10-18, D-1816(12)); the exemption
+    # stays so a stale combo carrying an ovh leg is still judged by the old rule.
     $freeRe = 'contributor-free|^(groq|cerebras|sambanova|gemini)/|mistral/mistral-code|(?<!ovh(cloud)?)/qwen'
     $noTrainRe = '-contributor$'
     foreach ($c in ($combos | Where-Object { $_.name -like '*-clean' })) {
@@ -11974,6 +12266,367 @@ Test-Case 'go-gate front: the gate script is imported, not restated' {
     # one, and a quantifier written into this file means a second copy of the rule.
     Assert-True ($text -notmatch 'd\{\d\}') 'the front restates the ref grammar'
     Assert-True ($text -notmatch 'def verify_go_ref|verify_go_ref\(') 'the front restates the verdict logic'
+}
+
+# ─── ci-runner (D-1380) ─────────────────────────────────────────────────────
+Import-Module (Join-Path $Root 'tools\ci-runner\CiRunner.psm1') -Force -DisableNameChecking
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs never puts the registration token in argv' {
+    $a = Get-CiRunnerDockerArgs -Name 'workst-a-1-20261016120000' -Repo 'example-owner/example' -Labels 'workst,workstation,fleet-ci' -Memory '8g' -Image 'workst-runner:2.338.0-2'
+    # T1: the function has no token parameter at all...
+    Assert-True (-not (@((Get-Command Get-CiRunnerDockerArgs).Parameters.Keys) -match 'Token')) 'Get-CiRunnerDockerArgs takes a token parameter'
+    # ...so argv carries only the ENV NAME, as the exact pair '-e','RUNNER_TOKEN'.
+    $pairs = 0
+    for ($k = 0; $k -lt $a.Count - 1; $k++) { if ($a[$k] -eq '-e' -and $a[$k + 1] -eq 'RUNNER_TOKEN') { $pairs++ } }
+    Assert-Equal $pairs 1
+    $tokenLike = 'ghs_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789'
+    $tokenPat = [regex]::Escape($tokenLike)
+    Assert-True (-not (@($a) -match $tokenPat)) 'a token value leaked into the docker args'
+    $m = [array]::IndexOf([string[]]$a, '--memory')
+    Assert-True ($m -ge 0) '--memory missing'
+    Assert-Equal $a[$m + 1] '8g'
+    Assert-Contains $a '--rm'
+    Assert-Contains $a 'workst-runner:2.338.0-2'
+    Assert-Contains $a 'REPO_URL=https://github.com/example-owner/example'
+    Assert-Contains $a 'RUNNER_LABELS=workst,workstation,fleet-ci'
+    $e = [array]::IndexOf([string[]]$a, '--entrypoint')
+    Assert-True ($e -ge 0) '--entrypoint missing'
+    Assert-Equal $a[$e + 1] 'bash'
+    Assert-Equal $a[$e + 2] 'workst-runner:2.338.0-2'
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs -DockerSocket mounts the host socket' {
+    $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
+    $with = Get-CiRunnerDockerArgs @base -DockerSocket
+    $g = [array]::IndexOf([string[]]$with, '--group-add')
+    Assert-True ($g -ge 0) '--group-add missing with -DockerSocket'
+    Assert-Equal $with[$g + 1] '0'
+    $v = [array]::IndexOf([string[]]$with, '-v')
+    Assert-True ($v -ge 0) '-v missing with -DockerSocket'
+    Assert-Equal $with[$v + 1] '/var/run/docker.sock:/var/run/docker.sock'
+    $without = Get-CiRunnerDockerArgs @base
+    Assert-True (-not ($without -contains '--group-add')) '--group-add without -DockerSocket'
+    Assert-True (-not ($without -contains '0')) 'group 0 without -DockerSocket'
+    Assert-True (-not ($without -contains '-v')) '-v without -DockerSocket'
+    Assert-True (-not ($without -contains '/var/run/docker.sock:/var/run/docker.sock')) 'socket mount without -DockerSocket'
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs -NetNs adds the caps it needs' {
+    $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
+    $net = Get-CiRunnerDockerArgs @base -NetNs
+    Assert-Contains $net '--cap-add'
+    Assert-Contains $net 'SYS_ADMIN'
+    Assert-Contains $net 'NET_ADMIN'
+    Assert-Contains $net '--security-opt'
+    Assert-Contains $net 'seccomp=unconfined'
+    $plain = Get-CiRunnerDockerArgs @base
+    Assert-True (-not ($plain -contains '--cap-add')) '--cap-add without -NetNs'
+    Assert-True (-not ($plain -contains 'SYS_ADMIN')) 'SYS_ADMIN without -NetNs'
+    Assert-True (-not ($plain -contains 'NET_ADMIN')) 'NET_ADMIN without -NetNs'
+    Assert-True (-not ($plain -contains 'seccomp=unconfined')) 'seccomp=unconfined without -NetNs'
+}
+
+Test-Case 'ci-runner: Get-CiSlotAction starts a slot whose loop is gone' {
+    # T4: loop dead => start, whatever the other signals say.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'start'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 99) 'start'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'start'
+}
+
+Test-Case 'ci-runner: Get-CiSlotAction leaves a live healthy slot alone' {
+    # T5: loop alive and online, or busy, or its container running => ok.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 0) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $true -UnhealthyMinutes 0) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 60) 'ok'
+}
+
+Test-Case 'ci-runner: Get-CiSlotAction waits, then restarts, never a busy runner' {
+    # T6: live + not online + not busy + no container: wait up to 5 min, then restart.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'wait'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5) 'wait'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5.5) 'restart'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'restart'
+    # T6: a running job must not be killed.
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 60) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 600) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 600) 'start'
+}
+
+Test-Case 'ci-runner: Test-CiOfflineExpired waits 3 minutes for a fresh runner' {
+    # T7: a fresh ephemeral runner shows offline until its session connects.
+    Assert-True (-not (Test-CiOfflineExpired -OfflineMinutes 0)) '0 min must not expire'
+    Assert-True (-not (Test-CiOfflineExpired -OfflineMinutes 2.9)) '2.9 min must not expire'
+    Assert-True (Test-CiOfflineExpired -OfflineMinutes 3) '3 min must expire'
+    Assert-True (Test-CiOfflineExpired -OfflineMinutes 42) '42 min must expire'
+}
+
+Test-Case 'ci-runner: Get-CiSlotNames expands every prefix into its slots' {
+    # T8
+    $cfg = [pscustomobject]@{ repos = @(
+        [pscustomobject]@{ prefix = 'workst-a'; slots = 2 },
+        [pscustomobject]@{ prefix = 'workst-b'; slots = 1 }) }
+    $names = @(Get-CiSlotNames -Config $cfg)
+    Assert-Equal $names.Count 3
+    Assert-Equal $names[0] 'workst-a-1'
+    Assert-Equal $names[1] 'workst-a-2'
+    Assert-Equal $names[2] 'workst-b-1'
+}
+
+Test-Case 'ci-runner: slots.example.json matches the live config shape' {
+    # T9
+    $ex = Get-Content -LiteralPath (Join-Path $Root 'tools\ci-runner\slots.example.json') -Raw | ConvertFrom-Json
+    $repos = @($ex.repos)
+    Assert-True ($repos.Count -ge 2) 'the example needs at least two repos'
+    $labels = @("$($ex.labels)" -split ',')
+    Assert-Contains $labels 'fleet-ci'
+    Assert-Contains $labels 'workstation'
+    foreach ($r in $repos) {
+        foreach ($prop in 'repo', 'prefix', 'slots', 'memory') {
+            Assert-True (@($r.PSObject.Properties.Name) -contains $prop) "repo entry lacks '$prop'"
+        }
+        Assert-True ($r.repo -like 'example-owner/*') "repo owner must be example-owner: $($r.repo)"
+        Assert-True ([int]$r.slots -ge 1) "slots must be >= 1 on $($r.prefix)"
+    }
+}
+
+Test-Case 'ci-runner: ci.yml keeps fork PRs off the self-hosted runners' {
+    # T10
+    $lines = @(Get-Content -LiteralPath (Join-Path $Root '.github\workflows\ci.yml'))
+    $runsOn = @($lines | Where-Object { $_ -match '^\s*runs-on:' })
+    Assert-True ($runsOn.Count -gt 0) 'no runs-on: lines in ci.yml'
+    # Every job, the Windows one included: a self-hosted Windows fleet-ci runner would otherwise
+    # take fork PRs (22aa4730 moved it to [self-hosted, windows, fleet-ci] without the guard).
+    foreach ($line in $runsOn) {
+        Assert-True ($line -like '*github.event.pull_request.head.repo.full_name == github.repository*') "fork guard missing: $($line.Trim())"
+        Assert-True (($line -like "*'ubuntu-latest'*") -or ($line -like "*'windows-latest'*")) "no GitHub-hosted fallback: $($line.Trim())"
+    }
+}
+
+Test-Case 'ci-runner: no file under tools/ci-runner hardcodes a host path' {
+    # T11: the install dir is $PSScriptRoot, so nothing names a drive or the install dir.
+    $ciDir = Join-Path $Root 'tools\ci-runner'
+    $files = @()
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $files = @(git -C $Root ls-files -- 'tools/ci-runner/' 2>$null | Where-Object { $_ })
+    }
+    if (-not $files) {
+        $files = @(Get-ChildItem -LiteralPath $ciDir -Recurse -File | ForEach-Object { $_.FullName })
+    }
+    Assert-True ($files.Count -gt 0) 'no files found under tools/ci-runner'
+    $drive = '(?<![A-Za-z])[A-Za-z]:[\\/]'
+    $install = 'fleet[\\/]ci-runner'
+    foreach ($f in $files) {
+        $path = if ([System.IO.Path]::IsPathRooted($f)) { $f } else { Join-Path $Root $f }
+        $name = Split-Path $path -Leaf
+        $text = Get-Content -LiteralPath $path -Raw
+        Assert-True ($text -notmatch $drive) "drive path in tools/ci-runner/$name"
+        Assert-True ($text -notmatch $install) "install dir in tools/ci-runner/$name"
+    }
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs -CacheVolumes adds the three cache mounts and sccache envs' {
+    $cbase = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
+    $cmounts = @('ci-cargo-registry:/home/runner/.cargo/registry',
+                 'ci-cargo-git:/home/runner/.cargo/git',
+                 'ci-sccache:/home/runner/.cache/sccache')
+    $cenvs = @('RUSTC_WRAPPER=/usr/local/bin/sccache',
+               'SCCACHE_DIR=/home/runner/.cache/sccache',
+               'SCCACHE_CACHE_SIZE=30G')
+    $cwant = $cmounts + $cenvs
+    $cwith = Get-CiRunnerDockerArgs @cbase -CacheVolumes
+    $cep = [array]::IndexOf([string[]]$cwith, '--entrypoint')
+    Assert-True ($cep -ge 0) '--entrypoint missing'
+    # each mount appears as the exact pair '-v','<volume>:<path>'
+    foreach ($cm in $cmounts) {
+        $cpair = $false
+        for ($k = 0; $k -lt $cwith.Count - 1; $k++) { if ($cwith[$k] -eq '-v' -and $cwith[$k + 1] -eq $cm) { $cpair = $true; break } }
+        Assert-True $cpair "mount pair '-v','$cm' missing with -CacheVolumes"
+    }
+    # each env appears as the exact pair '-e','<K>=<V>'
+    foreach ($ce in $cenvs) {
+        $cpair = $false
+        for ($k = 0; $k -lt $cwith.Count - 1; $k++) { if ($cwith[$k] -eq '-e' -and $cwith[$k + 1] -eq $ce) { $cpair = $true; break } }
+        Assert-True $cpair "env pair '-e','$ce' missing with -CacheVolumes"
+    }
+    # docker run options must all precede --entrypoint / the image
+    foreach ($cneedle in $cwant) {
+        $ci = [array]::IndexOf([string[]]$cwith, $cneedle)
+        Assert-True ($ci -ge 0) "$cneedle missing from the docker args"
+        Assert-True ($ci -lt $cep) "$cneedle must come before --entrypoint"
+    }
+    # without the switch none of them appear
+    $cwithout = Get-CiRunnerDockerArgs @cbase
+    foreach ($cneedle in $cwant) {
+        Assert-True (-not (@($cwithout) -contains $cneedle)) "$cneedle appears without -CacheVolumes"
+    }
+}
+
+Test-Case 'ci-runner: Get-CiCacheVolumes returns the three cache volume names in order' {
+    $cvols = @(Get-CiCacheVolumes)
+    Assert-Equal $cvols.Count 3
+    Assert-Equal $cvols[0] 'ci-cargo-registry'
+    Assert-Equal $cvols[1] 'ci-cargo-git'
+    Assert-Equal $cvols[2] 'ci-sccache'
+    # single source of truth: -CacheVolumes mounts exactly these volumes, in this order
+    $cargs = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -CacheVolumes
+    $cgot = @()
+    for ($k = 0; $k -lt $cargs.Count - 1; $k++) { if ($cargs[$k] -eq '-v') { $cgot += ($cargs[$k + 1] -split ':')[0] } }
+    Assert-Equal $cgot.Count 3
+    for ($k = 0; $k -lt 3; $k++) { Assert-Equal $cgot[$k] $cvols[$k] }
+}
+
+Test-Case 'ci-runner: Get-CiPrepullImages returns the config prepull array, empty when absent' {
+    $cpreCfg = [pscustomobject]@{ prepull = @('postgres:16', 'redis:7') }
+    $cpre = @(Get-CiPrepullImages -Config $cpreCfg)
+    Assert-Equal $cpre.Count 2
+    Assert-Equal $cpre[0] 'postgres:16'
+    Assert-Equal $cpre[1] 'redis:7'
+    $cpreNone = @(Get-CiPrepullImages -Config ([pscustomobject]@{ labels = 'x' }))
+    Assert-Equal $cpreNone.Count 0
+    $cex = Get-Content -LiteralPath (Join-Path $Root 'tools/ci-runner/slots.example.json') -Raw | ConvertFrom-Json
+    $cexPre = @(Get-CiPrepullImages -Config $cex)
+    Assert-True ($cexPre -contains 'postgres:16') 'slots.example.json has no postgres:16 in prepull'
+}
+
+Test-Case 'ci-runner: Dockerfile pins and verifies Temporal CLI 1.9.1, sccache 0.18.0 and the cache dirs' {
+    $cdf = Get-Content -LiteralPath (Join-Path $Root 'tools/ci-runner/Dockerfile') -Raw
+    Assert-True ($cdf -match 'v1\.9\.1') 'Temporal CLI v1.9.1 not pinned'
+    Assert-True ($cdf -match 'temporal_cli_1\.9\.1_linux_amd64\.tar\.gz') 'temporal 1.9.1 tarball name missing'
+    Assert-True ($cdf -match '09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5') 'Temporal CLI sha256 missing'
+    Assert-True ($cdf -match '/usr/local/bin/temporal') 'temporal install path missing'
+    Assert-True ($cdf -match 'v0\.18\.0') 'sccache v0.18.0 not pinned'
+    Assert-True ($cdf -match 'sccache-v0\.18\.0-x86_64-unknown-linux-musl\.tar\.gz') 'sccache musl tarball name missing'
+    Assert-True ($cdf -match '/usr/local/bin/sccache') 'sccache install path missing'
+    $cshaChecks = ([regex]::Matches($cdf, 'sha256sum -c')).Count
+    Assert-True ($cshaChecks -ge 2) "sha256sum -c appears $cshaChecks time(s); expected at least 2"
+    Assert-True ($cdf -match '--default-toolchain stable') 'rustup stable default toolchain missing'
+    Assert-True ($cdf -match 'mkdir -p /home/runner/\.cargo/registry /home/runner/\.cargo/git /home/runner/\.cache/sccache') 'cache dir mkdir missing'
+    Assert-True ($cdf -match '/home/runner/\.cargo/registry') 'cargo registry dir missing'
+    Assert-True ($cdf -match '/home/runner/\.cargo/git') 'cargo git dir missing'
+    Assert-True ($cdf -match '/home/runner/\.cache/sccache') 'sccache cache dir missing'
+}
+
+Test-Case 'ci-runner: Get-CiRunnerDockerArgs adds --cpus and --cpu-shares before --entrypoint' {
+    $c1on = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -Cpus 8
+    $c1cpu = -1
+    $c1shares = -1
+    $c1ep = -1
+    for ($c1k = 0; $c1k -lt $c1on.Count; $c1k++) {
+        if ($c1on[$c1k] -eq '--cpus') { $c1cpu = $c1k }
+        if ($c1on[$c1k] -eq '--cpu-shares') { $c1shares = $c1k }
+        if ($c1on[$c1k] -eq '--entrypoint') { $c1ep = $c1k }
+    }
+    Assert-True ($c1cpu -ge 0) '--cpus missing with -Cpus 8'
+    Assert-True ($c1shares -ge 0) '--cpu-shares missing with -Cpus 8'
+    Assert-True ($c1ep -ge 0) '--entrypoint missing'
+    $c1cpuNext = $c1cpu + 1
+    $c1sharesNext = $c1shares + 1
+    Assert-Equal $c1on[$c1cpuNext] '8'
+    Assert-Equal $c1on[$c1sharesNext] '1024'
+    Assert-True ($c1cpu -lt $c1ep) '--cpus must come before --entrypoint'
+    Assert-True ($c1shares -lt $c1ep) '--cpu-shares must come before --entrypoint'
+    # no -Cpus (default 0) and an explicit -Cpus 0 must add neither flag
+    $c1off = Get-CiRunnerDockerArgs -Name 'i2' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1'
+    Assert-True (-not ($c1off -contains '--cpus')) '--cpus must be absent without -Cpus'
+    Assert-True (-not ($c1off -contains '--cpu-shares')) '--cpu-shares must be absent without -Cpus'
+    $c1zero = Get-CiRunnerDockerArgs -Name 'i3' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -Cpus 0
+    Assert-True (-not ($c1zero -contains '--cpus')) '--cpus must be absent with -Cpus 0'
+    Assert-True (-not ($c1zero -contains '--cpu-shares')) '--cpu-shares must be absent with -Cpus 0'
+}
+
+Test-Case 'ci-runner: Get-CiSlotCpus prefers repo cpus, then cpus_default, then 8, zero = no cap' {
+    $c2cfg = [pscustomobject]@{ cpus_default = 6 }
+    $c2cfgNone = [pscustomobject]@{ labels = 'x' }
+    $c2cfgZero = [pscustomobject]@{ cpus_default = 0 }
+    $c2repo = [pscustomobject]@{ prefix = 'ga'; slots = 2; cpus = 4 }
+    $c2repoZero = [pscustomobject]@{ prefix = 'z'; slots = 1; cpus = 0 }
+    $c2repoBare = [pscustomobject]@{ prefix = 'pl'; slots = 1 }
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repo -Config $c2cfg) 4
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfg) 6
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfgNone) 8
+    # a resolved 0 means "no cap" and must survive instead of falling back to 8
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoZero -Config $c2cfg) 0
+    Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfgZero) 0
+}
+
+Test-Case 'ci-runner: Test-CiDiskFloor prunes below the floor and stays off when floor <= 0' {
+    Assert-True (Test-CiDiskFloor -FreeGB 4 -FloorGB 50) 'free below the floor must prune'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 60 -FloorGB 50)) 'free above the floor must not prune'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 50 -FloorGB 50)) 'free equal to the floor must not prune'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 1 -FloorGB 0)) 'a floor of 0 disables the check'
+    Assert-True (-not (Test-CiDiskFloor -FreeGB 1 -FloorGB (-1))) 'a negative floor disables the check'
+}
+
+Test-Case 'ci-runner: Get-CiPruneCommands returns only the dangling-image and build-cache prunes' {
+    $c4 = @(Get-CiPruneCommands)
+    Assert-Equal $c4.Count 2
+    $c4img = $c4[0]
+    $c4bld = $c4[1]
+    Assert-Equal $c4img.Count 3
+    Assert-Equal $c4img[0] 'image'
+    Assert-Equal $c4img[1] 'prune'
+    Assert-Equal $c4img[2] '-f'
+    Assert-Equal $c4bld.Count 5
+    Assert-Equal $c4bld[0] 'builder'
+    Assert-Equal $c4bld[1] 'prune'
+    Assert-Equal $c4bld[2] '-f'
+    Assert-Equal $c4bld[3] '--keep-storage'
+    Assert-Equal $c4bld[4] '20gb'
+    # the ci-cargo-registry / ci-cargo-git / ci-sccache caches are named volumes and the
+    # runner/job images are tagged: neither may ever appear in a prune
+    foreach ($c4outer in $c4) {
+        foreach ($c4inner in $c4outer) {
+            Assert-True ($c4inner -ne 'volume') "prune must never touch volumes: $c4inner"
+            Assert-True ($c4inner -ne '-a') "prune must never be all-inclusive: $c4inner"
+            Assert-True ($c4inner -ne '--all') "prune must never be all-inclusive: $c4inner"
+        }
+    }
+}
+
+Test-Case 'ci-runner: slots.example.json sets cpus_default 8 and disk_floor_gb 50' {
+    $c5roots = @()
+    if ($PSScriptRoot) { $c5roots += (Join-Path $PSScriptRoot '..') }
+    $c5cwd = (Get-Location).Path
+    $c5roots += $c5cwd
+    $c5roots += (Join-Path $c5cwd '..')
+    $c5file = $null
+    foreach ($c5root in $c5roots) {
+        $c5try = Join-Path $c5root 'tools/ci-runner/slots.example.json'
+        if (Test-Path -LiteralPath $c5try) { $c5file = $c5try; break }
+    }
+    if ($null -eq $c5file) {
+        Assert-True $false 'tools/ci-runner/slots.example.json not found'
+        return
+    }
+    $c5cfg = Get-Content -LiteralPath $c5file -Raw | ConvertFrom-Json
+    Assert-True ($null -ne $c5cfg.PSObject.Properties['cpus_default']) 'cpus_default missing from slots.example.json'
+    Assert-True ($null -ne $c5cfg.PSObject.Properties['disk_floor_gb']) 'disk_floor_gb missing from slots.example.json'
+    Assert-Equal ([int]($c5cfg.cpus_default)) 8
+    Assert-Equal ([int]($c5cfg.disk_floor_gb)) 50
+}
+
+Test-Case 'ci-runner: Dockerfile installs the Cyrillic-capable fonts and the Python build toolchain' {
+    $c6roots = @()
+    if ($PSScriptRoot) { $c6roots += (Join-Path $PSScriptRoot '..') }
+    $c6cwd = (Get-Location).Path
+    $c6roots += $c6cwd
+    $c6roots += (Join-Path $c6cwd '..')
+    $c6file = $null
+    foreach ($c6root in $c6roots) {
+        $c6try = Join-Path $c6root 'tools/ci-runner/Dockerfile'
+        if (Test-Path -LiteralPath $c6try) { $c6file = $c6try; break }
+    }
+    if ($null -eq $c6file) {
+        Assert-True $false 'tools/ci-runner/Dockerfile not found'
+        return
+    }
+    $c6raw = Get-Content -LiteralPath $c6file -Raw
+    Assert-True ($c6raw -match 'fonts-dejavu-core') 'fonts-dejavu-core missing from the Dockerfile'
+    Assert-True ($c6raw -match 'fonts-liberation') 'fonts-liberation missing from the Dockerfile'
+    Assert-True ($c6raw -match 'python3-venv') 'python3-venv missing from the Dockerfile'
+    Assert-True ($c6raw -match 'python3-dev') 'python3-dev missing from the Dockerfile'
+    Assert-True ($c6raw -match 'build-essential') 'build-essential missing from the Dockerfile'
 }
 
 # ─── Summary ────────────────────────────────────────────────────────────────

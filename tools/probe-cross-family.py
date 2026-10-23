@@ -166,8 +166,6 @@ def main():
         ("qwen", "openrouter/qwen/qwen3.8-27b:free", None),
         # Thinking Machines / Inkling — free tier, reasoning-capable
         ("thinkingmachines", "openrouter/thinkingmachines/inkling-small:free", None),
-        # Qwen via OVH (different backend, no openrouter credits needed)
-        ("qwen-ovh", "ovh/Qwen3.8-27B", None),
     ]
 
     results = []

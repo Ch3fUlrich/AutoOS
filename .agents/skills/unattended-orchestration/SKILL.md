@@ -59,6 +59,22 @@ work/L1-routing/FOLD4.common.md "Levels").
 `references/main-orchestrator.md` names a single top session "L1" in an older 3-level scheme (its
 L1 ≈ this table's L2) — read whichever your brief names.
 
+## Fleet rules in force (routing DECISIONS, 2026-10-16)
+
+Binding on every level below; each line links its source — read the source, never a copy.
+
+1. Plan graph = source of tasks. Keeper verbs (MCP server plangraph keeper, code: plangraph repo src/plangraph/keeper/mcp.py): ready, show, claim (lease), heartbeat (epoch), evidence {kind, ref}, submit, release, delegate; router-only: verdict, waive_second_family, withdraw_review, set_kind.
+2. Evidence kinds: commit+ci (commit on main with Plan-Item trailer, newest CI run per check suite + name green), run-record, semaphore-task, decision. Done = merged to main + evidence attached + reviews passed; a claim is not evidence.
+3. Defining items: done_criteria max 600 chars, overflow goes in the description [routing docs/LESSONS.md D-1424]; a lone lane needs a path to a goal (unblocks/goal link) or define refuses "unreachable_goal".
+4. Planning method: plangraph repo skills/plangraph-planning/SKILL.md (layers, task contract, report schemas).
+5. L2 launch contract: L1 asks routing `"L2-LAUNCH <name> <brief path> <cwd>"`; router launches Sonnet, effort medium, slim MCP (routing ops/mcp-l2-slim.json); L2 never merges or pushes to main, runs no crons, keeps a status card <= 40 lines, and sends `"RECYCLE-READY <card path>"` before 270k context [routing ops/l2-rule.txt, D-716].
+6. Quiet fleet: messages only for BLOCKED/decision, DONE or MERGE-READY with sha, GO requests, incidents, launch/recycle; no acks, no ALIVE; no recurring crons, wait with one background command that exits [D-1364, D-1377; build-L1 beat exception D-1436].
+7. L1 and L2 Claude sessions run at effort medium [D-1390].
+8. CI runs only on the workstation or ci.vm; no GitHub billing [D-1436].
+9. Judge (server-L1-routing) reviews only HIGH risk: secrets/auth/access, keeper and plan-graph engine or live keeper changes, live deploys/migrations (D-825 GO steps), data-mutating live steps. Standard lanes merge on the L1's own approval with 1-2 non-Claude seats; the router samples [D-1442].
+10. A harness or classifier refusal is never worked around or relayed to another agent: stop and send the router the verbatim refusal; the router turns it into an OS-NN line the operator types in that session [routing DECISIONS 2.7].
+11. Model access paths: a named model runs ONLY over its own path, never a substitute model or route [D-1504]. qwen3.8-flash = qodercli ACP only; gemini-3.8-flash = antigravity (agy) ACP or Google AI Studio (both rate-limited: back off or send BLOCKED, never swap); muse-spark-1.3 = opencode ACP; mimo-v2.6-flash / mimo-v2.6-pro = the mimo provider. Path down = BLOCKED, not another model. Detail: `docs/agent-protocol.md` "Model access paths".
+
 ## Rules
 
 One rule per line (a long rule wraps onto two-space continuation lines), grouped by level topic: `R-<topic>-NN: <imperative>. (why: <=12 words;
@@ -138,6 +154,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-coord-04: Hold headroom via `heartbeat`: ≤3 lanes + 3 readers, MemAvailable ≥3 GB, heavy suites 1/orchestrator, 2/host. (why: headroom keeps tests and builds alive; source: briefs/common.md)
 - R-coord-06: At cap (`autoos-agent.py context`, registry `handoff_caps`): rewrite state, brief successor, append handoff, stop. (why: successor resumes from state alone; source: common.md Context cap)
 - R-coord-07: Heartbeat: L1/L2 run a 10-min CronCreate beat from launch to stop, recreated after relaunch or clear. (why: an idle session is retired after 8 h; source: common.md Heartbeats never stop)
+- **Superseded by D-1364/D-1377:** no recurring cron beat; see "Fleet rules in force" item 6.
 - R-coord-08: Beat pushes, pongs pings, WIP-commits past-beat work, stamps status, reads inbox, relaunches a quiet child >25 min. (why: stale orders ran workers post-stop; source: common.md 15:3xZ)
 - R-coord-09: L3 spawns, routing, status: autoos-agent only, never hand-roll; L2 launches: the runner. (why: hand-rolls drift from gates; source: operator 04:50Z, REVGATE.record.md)
 - R-coord-10: After a cancel, `ps` the lane: no runner, client or reparented child may survive. (why: a runner-only kill orphans the client's ~480 MB serve; source: SB-A D-103 2026-09-28)

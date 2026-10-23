@@ -49,12 +49,19 @@ ephemeral — commit + push before you stop, see section 5.)
 
 ```bash
 ./configuration/omniroute/apply.sh --dry-run   # combos parse, registers nothing
-./configuration/omniroute/apply.sh --probe     # one live ack per combo (needs gateway)
+./configuration/omniroute/apply.sh --drift     # read-only: live combos vs the store snapshot
 AUTOOS_FULL_SUITE=1 bash tests/run-tests.sh    # full sh suite, must be green
 ```
 
 (Windows host runs `tests/run-tests.ps1` — same bar, other shell.
 `configuration/healthcheck.sh --fix` resumes gateway/container/serve.)
+
+`apply.sh --probe` is absent on purpose — it is not a check: per apply.sh's own header, any
+run that is neither `--dry-run` nor `--drift` MUTATES the live gateway (`--probe` included — a
+full apply plus one request per combo) and is refused with exit 2 without an explicit judge GO,
+`--go <ref> --go-sha <sha>` (fleet rule D-825; `<sha>` = `git rev-parse HEAD` of this checkout).
+`--dry-run` and `--drift` are the read-only store checks; to check ONE combo, send one tiny
+request to `<gateway>/v1/chat/completions` with that combo's name as the model (never print a key).
 
 ## 5. Finish like a t1: update, commit, push
 

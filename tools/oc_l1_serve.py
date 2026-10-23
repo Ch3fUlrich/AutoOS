@@ -314,6 +314,35 @@ def _child_env(lane, rendered, password):
     # silent timeout. Whitespace alone is just as unreachable.
     if not (env.get(oc_l1.ENV_URL) or "").strip():
         env[oc_l1.ENV_URL] = oc_l1.DEFAULT_BASE_URL
+    # D-2129-S4 (option i approved): plangraph/opencode.jsonc pins
+    # providers.omniroute.settings.baseURL to `{env:PLANGRAPH_REVIEW_URL}`,
+    # which overrides the scratch OPENCODE_CONFIG's literal baseURL at
+    # model-init time — and the variable is unset on this host, so every
+    # cwd=plangraph server resolved omniroute baseURL to "" and every model
+    # turn died with `provider.no-route ... requires an endpoint baseURL`.
+    # Forward the lane's own resolved gateway URL under that name (blank ->
+    # forward, never invent beyond the default above; an explicit value is
+    # kept, so read it from the launcher env even though the allowlist does
+    # not cover it): a project `{env:...}` reference then resolves to the
+    # same endpoint without editing the other checkout. A system endpoint
+    # alias, not a credential (WINDIR precedent in oc_l1.LANE_ENV_ALLOW).
+    explicit_review = (os.environ.get("PLANGRAPH_REVIEW_URL") or "").strip()
+    if explicit_review:
+        env["PLANGRAPH_REVIEW_URL"] = explicit_review
+    elif not (env.get("PLANGRAPH_REVIEW_URL") or "").strip():
+        env["PLANGRAPH_REVIEW_URL"] = env[oc_l1.ENV_URL]
+    # Windows server children need SystemRoot in their environment (see
+    # _needs_systemroot): the allowlist above drops it, and lanes that declare
+    # no child_env — every L2 lane, any L1 from the example config — could
+    # never start. Forwarded by presence only when the launcher has it; never
+    # invented. A system path, not a credential (WINDIR precedent in
+    # oc_l1.LANE_ENV_ALLOW). A lane that already names it keeps its own entry.
+    if _needs_systemroot() and not any(
+            n.upper() == "SYSTEMROOT" for n in env):
+        for _name, _value in os.environ.items():
+            if _name.upper() == "SYSTEMROOT" and _value:
+                env["SystemRoot"] = _value
+                break
     env["OPENCODE_CONFIG"] = str(rendered)
     env["OPENCODE_SERVER_PASSWORD"] = password  # child env ONLY
     # D-665 (AO-L2-LAUNCH): the bash-guard role, the L1 inbox and the agent layer
@@ -338,6 +367,17 @@ def _child_env(lane, rendered, password):
     else:
         env.pop(oc_l1.ENV_L2_LANE, None)
     return env
+
+
+def _needs_systemroot():
+    """Windows server children need SystemRoot to bind (measured 2026-10-19).
+
+    `opencode serve` (Bun) dies ~100ms after spawn with a bogus "port in use"
+    when SystemRoot is absent from its environment. Separated for tests: the
+    suite mocks this instead of os.name (pathlib breaks under a global
+    os.name mock on Windows).
+    """
+    return os.name == "nt"
 
 
 def _spawn(lane, rendered, password, port):

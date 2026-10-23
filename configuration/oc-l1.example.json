@@ -9,6 +9,8 @@
     "'plugins' must list the bash-guard plugin DIRECTORY: an unguarded lane has no plugin to deny the canary, so 'start' refuses it with exit 2 before spawning anything (D-665).",
     "The lane child's environment is an ALLOWLIST, never the launcher's own (D-665 fix 2): the child gets the names a session legitimately needs (PATH/HOME/locale/XDG/GIT/proxy-certificate, the AUTOOS_* and SESSION_* knobs, and the two gateway names the rendered config references as {env:...}) and no credential - anything whose name ends in _PW/_KEY/_TOKEN/_SECRET/_PASSWORD or contains PASSWORD/SECRET/TOKEN/CREDENTIAL/APIKEY stays with the launcher, and the server password reaches the child under OPENCODE_SERVER_PASSWORD only. 'child_env' is an optional list of extra variable NAMES (never values) a lane needs beyond that; a credential-shaped name there is refused, and AUTOOS_GUARD_ROLE, AUTOOS_L1_INBOX and AUTOOS_AGENT_LAYER can never be declared - they are set from the lane, not inherited.",
     "'agent_layer' (optional, an upper-case identifier such as 'L2') is exported to the child as AUTOOS_AGENT_LAYER; the autoos-agent MCP server reads it and refuses the lane-control tools (l2_start, l2_stop, l2_inbox, oc_start, oc_restart) inside an L2 lane, because only the L1 that owns lanes may steer them. An L1 lane marks nothing.",
+    "'model.options' (optional) holds exactly one key today: 'reasoning_effort' (low|medium|high), rendered as the PRIMARY model's reasoningEffort option so opencode sends the effort on every request; the fallback model never gets it.",
+    "'model.provider' is exactly 'omniroute' (the gateway) or 'opencode-go' (opencode's own built-in Go provider, direct login): for 'opencode-go' 'modelID' is the BARE id (no 'opencode-go/' prefix - the renderer adds it), no key or URL is ever written for it, and 'fallback_key'/'fallback_modelID' still name an OMNIROUTE gateway model (see the l1-direct-go lane below).",
     "Orchestrator-lane keys (D-665, all optional, all absolute-path-free except where noted): 'permission' is a map of OpenCode permission key -> allow|deny|ask merged OVER the rendered defaults (e.g. {\"task\": \"deny\"} for a lane that must only coordinate); the reserved key 'external_directory' is refused there - it has its own lane list. 'guard_role' is exported to the server child as AUTOOS_GUARD_ROLE, and the bash-guard plugin's orchestrator role answers to it. 'inbox_file' is exported as AUTOOS_L1_INBOX - the file the lane's own REPORT/DONE lines are told to append to. 'first_prompt_file' is posted VERBATIM as the pilot's first prompt instead of the handoff head; 'start' refuses (exit 2) before spawning if it is named and missing.",
     "All paths (cwd, handoff, opencode_bin, scratch_dir, state_file, plugins, instructions, heartbeat_file) must be absolute paths on the host that runs the config - opencode_bin must point at the explicit npm opencode binary, never a PATH-lookup name, never the desktop 'service'."
   ],
@@ -21,7 +23,8 @@
       "key": "placeholder-direct-model",
       "modelID": "placeholderprovider/PlaceholderModel",
       "fallback_key": "placeholder-direct-fallback",
-      "fallback_modelID": "placeholderprovider/PlaceholderFallback"
+      "fallback_modelID": "placeholderprovider/PlaceholderFallback",
+      "options": {"reasoning_effort": "high"}
     },
     "instructions": [
       "AGENTS.md",
@@ -40,5 +43,35 @@
     "scratch_dir": "/path/to/your/project/oc-l1-scratch",
     "canary_timeout_s": 120,
     "heartbeat_file": "/path/to/your/project/oc-l1-scratch/heartbeat.json"
+  },
+  "l1-direct-go": {
+    "name": "l1-direct-go",
+    "cwd": "/path/to/your/project",
+    "handoff": "/path/to/your/project/handoff.md",
+    "model": {
+      "provider": "opencode-go",
+      "key": "Go direct model",
+      "modelID": "gemini-4-argon-contributor",
+      "fallback_key": "gateway fallback",
+      "fallback_modelID": "glm-5.3",
+      "options": {"reasoning_effort": "high"}
+    },
+    "instructions": [
+      "AGENTS.md",
+      "/path/to/your/project/handoff.md"
+    ],
+    "mcp": [
+      "autoos-agent"
+    ],
+    "serve_port": 47251,
+    "password_env": "AUTOOS_OCL1_PLACEHOLDER_PW",
+    "plugins": [
+      "/path/to/your/AutoOS/configuration/opencode/plugins/bash-guard"
+    ],
+    "state_file": "/path/to/your/project/oc-l1-l1-direct-go.state.json",
+    "opencode_bin": "/path/to/opencode-binary",
+    "scratch_dir": "/path/to/your/project/oc-l1-scratch-go",
+    "canary_timeout_s": 120,
+    "heartbeat_file": "/path/to/your/project/oc-l1-scratch-go/heartbeat.json"
   }
 }

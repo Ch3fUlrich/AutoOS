@@ -2,10 +2,9 @@ name: Omnigraph images
 
 # SPEC-OMNI A6: the canonical build of the Omnigraph viewer image.
 #
-# GitHub-hosted runners build infra/mcp-servers/servers/omnigraph-viewer and
+# The fleet-ci self-hosted runners (workstation / ci.vm) build infra/mcp-servers/servers/omnigraph-viewer and
 # push SHA-tagged images to GHCR. Deployment pulls
-# ghcr.io/<owner>/omnigraph-viewer:<sha>. There is no LAN runner and no
-# operator-provided registry on this path: GHCR uses the automatic GITHUB_TOKEN
+# ghcr.io/<owner>/omnigraph-viewer:<sha>. There is no operator-provided registry on this path: GHCR uses the automatic GITHUB_TOKEN
 # (packages: write). Harbor and the local Forgejo runner remain available for
 # local test builds only.
 #
@@ -36,7 +35,7 @@ permissions:
 jobs:
   viewer:
     name: Build and push omnigraph-viewer
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, fleet-ci]
     steps:
       - uses: actions/checkout@v4
 

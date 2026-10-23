@@ -309,6 +309,8 @@ import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
 import autoos_overlay as overlay_mod  # noqa: E402
+import autoos_oc_fallback as oc_fallback  # noqa: E402
+from autoos_oc_fallback import EXIT_OC_FALLBACK_DOWN  # noqa: E402
 import autoos_inbox as inbox  # noqa: E402
 import autoos_measure as measure_mod  # noqa: E402
 import autoos_redact as redact  # noqa: E402
@@ -3629,17 +3631,80 @@ def free_overlay(model: str) -> dict:
 FREE_MODEL_POLICY_KEY = "free_client_models"
 
 
-def free_model_chain(policy: dict | None, client: str, first: str) -> list:
+def _spawn_needs_gateway_key(client, free: bool, model) -> bool:
+    """Whether this launch's child must be handed the gateway credential.
+
+    A gateway-client run does, always. A `--free` run does ONLY when the model it
+    is about to launch is a gateway id (an `omniroute/…` head of the free chain,
+    e.g. an OpenCode Go seat): the keyless promo ids (`opencode/…-free`) and every
+    own-account client need no key. `free_model_chain` keeps a gateway id out of the
+    `--free` chain when no gateway key is available, so a keyless `--free` run never
+    reaches the branch that would ask for one — and an authenticated gateway
+    (`--tier`/`--card`) run is unchanged (`not free` short-circuits).
+    """
+    return bool(getattr(client, "gateway", False)) and (
+        not free or str(model or "").startswith("omniroute/"))
+
+
+def free_model_chain(policy: dict | None, client: str, first: str,
+                     has_gateway_key: bool = False) -> list:
     """The free models to try in order: `first`, then the client's registry
     list that `first` did not already name. A missing policy section (an old
     registry, a registry that failed to load) leaves the single given model -
-    exactly today's one-shot --free run."""
+    exactly today's one-shot --free run.
+
+    `has_gateway_key` (OCGO-PREFER): the free list can hold gateway heads
+    (`omniroute/opencode-go/…`, an OpenCode Go seat that rides the gateway and
+    needs AUTOOS_OMNIROUTE_KEY) as fallthrough steps after `first`. The default
+    is False — fail safe: an unresolved key question must not hand a run a head
+    that dies on 'Authentication required', and a caller that means to allow the
+    Go seats passes the flag explicitly. When the run has no gateway key they are
+    dropped here, so a keyless `--free` run walks only onto the keyless promo ids
+    it can actually serve.
+    """
     chain = [first]
     listed = ((policy or {}).get(FREE_MODEL_POLICY_KEY) or {}).get(client) or []
     for model in listed:
-        if model and model not in chain:
-            chain.append(model)
+        if not model or model in chain:
+            continue
+        if not has_gateway_key and model.startswith("omniroute/"):
+            continue
+        chain.append(model)
     return chain
+
+
+def free_start_model(policy: dict | None, client: str, given,
+                     has_gateway_key: bool = False):
+    """The model a `--free` run STARTS on — the whole of the OCGO-PREFER choice.
+
+    Operator D-1923: "opencode go via OmniRoute before opencode free; free =
+    fallback only". A *plain* `--free` run (the caller typed no `--free-model`,
+    which the CLI spells as `None`, `""` or `DEFAULT_FREE_MODEL`) starts on the
+    first gateway head the client's registry list names — an OpenCode Go seat —
+    when a gateway key resolves on the machine. Every other case returns `given`
+    untouched: with no key the run starts on the keyless `DEFAULT_FREE_MODEL`
+    exactly as before, a caller-typed pin is never replaced (the caller's model
+    is what runs, and it may be a keyless one), and a list with no gateway head
+    has nothing to prefer. "Typed" is read the way the rest of this file reads
+    it — `--free-model` defaults to `DEFAULT_FREE_MODEL` in argparse, so a pin
+    that says the default's own words is indistinguishable from no pin, and
+    `model_mismatch_refusal` is what keeps the launch equal to it either way.
+
+    THIS IS THE DEFAULT PATH, NOT A CALLER PIN. The D-1214 guard in `cmd_run`
+    refuses an `omniroute/` spelling *the caller typed* under `--free`, and it
+    reads argv, which is settled before this is called: promoting the default
+    here does not slip past that guard and does not weaken it — a caller still
+    cannot ask for a gateway model by name and call it a keyless run.
+    """
+    if not has_gateway_key:
+        return given
+    if str(given or "") not in ("", DEFAULT_FREE_MODEL):
+        return given
+    listed = ((policy or {}).get(FREE_MODEL_POLICY_KEY) or {}).get(client) or []
+    for model in listed:
+        if str(model or "").startswith("omniroute/"):
+            return model
+    return given
 
 
 def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
@@ -7082,6 +7147,56 @@ def lane_diff_paths(repo, base, sha):
     return paths, _git_out(body.stdout, "replace"), None
 
 
+def lane_commits(repo, base, sha):
+    """``(commits, error)`` -- the lane's own commits and what each one changed.
+
+    The shape ``writer_trailer_refusal`` judges: one dict per commit from ``git log``
+    with ``\\x1f``/``\\x1e`` delimiters (a message carries colons, TABs and newlines, no
+    line-oriented split survives that) plus each non-merge's own added+deleted from
+    ``git show --numstat`` (a binary ``-`` counts 0; a merge's diff is its legs' work).
+    Bytes mode is P4b-fixes D3; fail closed like ``lane_diff_paths``, exit 2 at ready.
+    """
+    rng = "%s..%s" % (base, sha)
+    if _diff_range(base, sha) is None:
+        return [], "cannot read commits: %r and %r must be plain rev tokens" % (base, sha)
+    try:
+        log = subprocess.run(["git", "-C", repo, "log", "--format=%H%x1f%P%x1f%B%x1e",
+                              rng], capture_output=True, timeout=60,
+                             stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return [], "git log: %s" % exc
+    if log.returncode != 0:
+        return [], ((_git_out(log.stderr, "replace").strip())
+                    or "git log %s exited %d" % (rng, log.returncode))
+    commits = []
+    for record in _git_out(log.stdout, "replace").split("\x1e"):
+        # git appends its own newline AFTER the format's ``%x1e``, so it leads here.
+        record = record.lstrip("\n")
+        if not record:
+            continue
+        fields = record.split("\x1f", 2)
+        if len(fields) < 3 or not fields[0]:
+            return [], "git log answered with an unparsable record: %r" % record[:60]
+        commit = {"sha": fields[0], "parents": len(fields[1].split()),
+                  "message": fields[2], "lines": 0}
+        if commit["parents"] <= 1:
+            try:
+                stat = subprocess.run(["git", "-C", repo, "show", "--numstat",
+                                       "--format=", commit["sha"]], capture_output=True,
+                                      timeout=60, stdin=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError) as exc:
+                return [], "git show: %s" % exc
+            if stat.returncode != 0:
+                return [], ((_git_out(stat.stderr, "replace").strip())
+                            or "git show --numstat %s exited %d"
+                               % (commit["sha"][:12], stat.returncode))
+            commit["lines"] = sum(
+                int(value) for line in _git_out(stat.stdout, "replace").splitlines()
+                for value in line.split("\t")[:2] if value.isdigit())
+        commits.append(commit)
+    return commits, None
+
+
 def read_guards_text(path):
     """``(text, error)`` -- one brief or report file, read whole or refused.
 
@@ -7615,6 +7730,11 @@ def cmd_ready(args) -> int:
     appends no new field, and `preflight` (the same module's tool check, exit 3 on
     input_required) tells the operator whether the guard tools exist at all.
 
+    Ahead of that block sits GATE-WRITER-TRAILER: `lane_commits` and
+    `writer_trailer_refusal` refuse a commit whose last paragraph names no
+    `Writer: <model> <run id>` (merges exempt) or names a Claude writer over its line
+    cap, spelling out the D-1704 order.
+
     P12b (D-1116): that same diff decides the lane's CLASS for the review gate too —
     `required_r_level` rides into `review_status` as `r_level`, and an R3 (HIGH:
     privileged, installer, state-mutating, auth/access/secrets) lane is refused unless
@@ -7695,6 +7815,16 @@ def cmd_ready(args) -> int:
     if tip != args.sha:
         print("ready: not pushed -- %s is at %s on origin, not %s"
               % (args.branch, tip, args.sha))
+        return 1
+    # GATE-WRITER-TRAILER (D-1704/D-1714): every commit names the writer that wrote
+    # it before anything certifies the lane; a log git cannot answer is exit 2.
+    commits, commits_error = lane_commits(args.repo or os.getcwd(), base, args.sha)
+    if commits_error:
+        print("ready: cannot read lane commits: %s" % commits_error, file=sys.stderr)
+        return 2
+    trailer_refusal = ready_guards.writer_trailer_refusal(commits)
+    if trailer_refusal:
+        print("ready: not appended -- writer-trailer: %s" % trailer_refusal)
         return 1
     ci_field = ""
     # AO-WRITER-GUARDS P4b (writer-ops.md §4-5, helpers in
@@ -12853,10 +12983,15 @@ def cli_scope_unit(run_id, attempt) -> str:
     `autoos-worker-<run-id>.scope`, and the attempt number matters because the
     fallthrough loop re-starts the client in a new scope each time — a reused unit
     name is a `systemd-run` failure, not a no-op. A run with no id (a plain
-    `run …` from a terminal) is named by its own pid, which is unique per process.
+    `run …` from a terminal) is named by its own pid and a random suffix,
+    which is unique per call, not only per process (and across module copies).
     """
-    return scope_unit_name("cli-%s-a%s" % (run_id or "pid%d" % os.getpid(),
-                                           attempt or 1))
+    if run_id:
+        stem = "cli-%s-a%s" % (run_id, attempt or 1)
+    else:
+        # random, not a counter: the tests (and any caller) load this module more than once per process, and each copy would restart a counter at 1
+        stem = "cli-pid%d-%s-a%s" % (os.getpid(), uuid.uuid4().hex[:8], attempt or 1)
+    return scope_unit_name(stem)
 
 
 def run_client(cmd, cwd: str, env: dict, reap: bool = True, capture: bool = False,
@@ -13449,10 +13584,10 @@ def visible_workers(directory: str, include_ended: bool = False, now=None) -> li
             or (_parse_iso(r["ended"]) or cutoff) > cutoff]
 
 
-def host_admission_config(registry=None) -> tuple:
+def host_admission_config(registry=None, platform=None) -> tuple:
     """(max_live_workers, mem_available_floor_mb) - the host's own limits.
 
-    catalog/ai-registry.json's top-level `host_admission` is the single source
+    catalog/ai-registry.json's `host_admission` with platform overrides is the single source
     (operator order 2026-10-08). A section that is absent, or a field that is not
     a number, takes the documented default rather than no limit: an unparseable
     cap must not read as an unbounded host. AUTOOS_ADMISSION_OFF=1 is the
@@ -13461,82 +13596,78 @@ def host_admission_config(registry=None) -> tuple:
     If ANY top-level field is invalid (< 1 or not an int), BOTH fall back to
     code defaults (6, 6144) - fail closed for the entire section.
     """
+    return tuple(_host_admission_value(registry, platform, field, default)
+                 for field, default in (
+                     ("max_live_workers", ADMISSION_MAX_LIVE_DEFAULT),
+                     ("mem_available_floor_mb", ADMISSION_MEM_FLOOR_MB_DEFAULT)))
+
+
+def host_admission_commit_max(registry=None, platform=None):
+    return _host_admission_value(registry, platform, "commit_charge_max_pct", None)
+
+
+def _host_admission_value(registry, platform, field, default):
     if registry is None:
         try:
             registry = load_registry(REGISTRY_PATH)
         except (OSError, ValueError):
             registry = {}
-    section = (registry or {}).get("host_admission")
+    section = registry.get("host_admission") if isinstance(registry, dict) else {}
     section = section if isinstance(section, dict) else {}
-
-    # Validate both fields; if either is invalid, use code defaults for both
-    cap = section.get("max_live_workers")
-    floor = section.get("mem_available_floor_mb")
-
-    cap_valid = isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1
-    floor_valid = isinstance(floor, int) and not isinstance(floor, bool) and floor >= 1
-
-    if cap_valid and floor_valid:
-        return cap, floor
-    else:
-        return ADMISSION_MAX_LIVE_DEFAULT, ADMISSION_MEM_FLOOR_MB_DEFAULT
+    platforms = section.get("by_platform")
+    override = (platforms.get(sys.platform if platform is None else platform)
+                if isinstance(platforms, dict) else None)
+    override = override if isinstance(override, dict) else {}
+    for source in (override, section):
+        value = source.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return default
 
 
-def host_admission_kind_config(registry, kind: str) -> tuple:
-    """(max_live_workers, mem_available_floor_mb) for a specific admission `kind`.
+def host_admission_config(registry=None, platform=None) -> tuple:
+    """Host cap and memory floor, with per-platform overrides."""
+    return (
+        _host_admission_value(
+            registry, platform, "max_live_workers", ADMISSION_MAX_LIVE_DEFAULT),
+        _host_admission_value(
+            registry, platform, "mem_available_floor_mb",
+            ADMISSION_MEM_FLOOR_MB_DEFAULT),
+    )
 
-    Reads `host_admission.kinds.<kind>`. A missing/malformed/non-int/bool entry,
-    or cap < 1 or floor < 1, falls back to the TOP-LEVEL pair (never to 3072,
-    never to a smaller default). The top-level fields are also validated:
-    cap < 1 or floor < 1 falls back to code defaults (6, 6144).
+
+def host_admission_kind_config(registry, kind: str, platform=None) -> tuple:
+    """Kind cap/floor, falling back to the platform-aware host pair.
+
+    Only toolless has a separate pair. Both kind values must be integers
+    (not booleans) >= 1; otherwise the entire kind pair falls back.
+    Platform overrides apply to the host pair, not to the kind values.
     """
-    if kind != "toolless":
-        # Only 'toolless' kind is defined; any other kind uses top-level
-        return host_admission_config(registry)
-
     if registry is None:
         try:
             registry = load_registry(REGISTRY_PATH)
         except (OSError, ValueError):
             registry = {}
-    section = (registry or {}).get("host_admission")
+    top_pair = host_admission_config(registry, platform)
+    if kind != "toolless":
+        return top_pair
+    section = registry.get("host_admission") if isinstance(registry, dict) else {}
     section = section if isinstance(section, dict) else {}
-
-    # Get top-level (already validated)
-    top_cap, top_floor = host_admission_config(registry)
-
     kinds = section.get("kinds")
-    if not isinstance(kinds, dict):
-        return top_cap, top_floor
-
-    kind_cfg = kinds.get(kind)
+    kind_cfg = kinds.get(kind) if isinstance(kinds, dict) else None
     if not isinstance(kind_cfg, dict):
-        return top_cap, top_floor
-
+        return top_pair
     cap = kind_cfg.get("max_live_workers")
     floor = kind_cfg.get("mem_available_floor_mb")
-
-    # Validate kind-specific values: must be int (not bool) and >= 1
     if not (isinstance(cap, int) and not isinstance(cap, bool) and cap >= 1):
-        return top_cap, top_floor
+        return top_pair
     if not (isinstance(floor, int) and not isinstance(floor, bool) and floor >= 1):
-        return top_cap, top_floor
-
+        return top_pair
     return cap, floor
 
 
 def host_run_kind(client_name: str, registry: dict | None) -> str:
-    """Derive the admission kind from the resolved client.
-
-    Returns 'toolless' ONLY when:
-      - registry.clients[client_name] exists, AND
-      - its capabilities dict has explicit boolean `shell is False`, AND
-      - its capabilities dict has explicit boolean `write is False`
-
-    Anything else (unregistered client, missing capabilities, non-bool values)
-    returns 'tool-using'. Fail closed: we do NOT use client_capabilities()
-    (which defaults missing to False); we require explicit False booleans.
-    """
+    """Only explicit shell=False and write=False classify a client as toolless."""
     if registry is None:
         try:
             registry = load_registry(REGISTRY_PATH)
@@ -13551,18 +13682,13 @@ def host_run_kind(client_name: str, registry: dict | None) -> str:
     caps = client.get("capabilities")
     if not isinstance(caps, dict):
         return "tool-using"
-    shell = caps.get("shell")
-    write = caps.get("write")
-    if shell is False and write is False:
+    if caps.get("shell") is False and caps.get("write") is False:
         return "toolless"
     return "tool-using"
 
 
-def _nt_mem_available_mb() -> int | None:
-    """MemAvailable on Windows via ctypes GlobalMemoryStatusEx (ullAvailPhys).
-
-    Returns MB or None if the call fails. Used when os.name == 'nt'.
-    """
+def windows_memory_status():
+    """Return (available physical MB, commit-charge percent), or None."""
     try:
         import ctypes
         from ctypes import wintypes
@@ -13582,30 +13708,24 @@ def _nt_mem_available_mb() -> int | None:
 
         stat = MEMORYSTATUSEX()
         stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
-            # ullAvailPhys is in bytes; convert to MB
-            return int(stat.ullAvailPhys // (1024 * 1024))
+        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return None
+        commit_pct = (
+            (stat.ullTotalPageFile - stat.ullAvailPageFile)
+            / stat.ullTotalPageFile * 100
+            if stat.ullTotalPageFile else None
+        )
+        return stat.ullAvailPhys // (1024 * 1024), commit_pct
     except Exception:
-        pass
-    return None
+        return None
 
 
 def mem_available_mb(path=None):
     """MemAvailable in MB, or None where it cannot be read.
 
-    On Linux: reads /proc/meminfo (kB -> MB).
-    On Windows (os.name == 'nt'): uses ctypes GlobalMemoryStatusEx (ullAvailPhys).
-    On other platforms: returns None.
-
-    The fail-open behavior is now platform-aware:
-      - Linux: unreadable -> fail open (memory half stands down), as before.
-      - Windows (nt): unreadable -> fail CLOSED (refuses when a floor is configured).
-      - Other platforms: fail open ONLY when AUTOOS_MEMINFO_PATH is unset AND
-        the OS is not linux/nt (documented exception).
+    Reads the meminfo path (kB -> MB). HOSTADMISSION-FAILOPEN: when memory
+    cannot be read, the memory half of admission stands down.
     """
-    if os.name == "nt":
-        return _nt_mem_available_mb()
-
     path = path or os.environ.get(ADMISSION_MEMINFO_ENV) or MEMINFO_PATH
     try:
         with io.open(path, encoding="utf-8") as fh:
@@ -13621,18 +13741,7 @@ def mem_available_mb(path=None):
 
 
 def live_worker_count(directory=None) -> int:
-    """The workers this host is running now - the rows `ps` shows, not the files,
-    plus the host slots another spawner has claimed but not yet recorded.
-
-    Same directory (the checkout's git-common `logs/workers`, so every worktree
-    and every lane of it counts), same `died` verdict: a record whose pid is gone
-    is a crashed worker and must not keep its host closed.
-
-    HOSTADMISSION-RACE: a claim placeholder is a worker for this purpose and not
-    for `ps`. The count and the taking of a slot happen together in
-    `host_admission_claim`, so a spawner is never shown a slot another one has
-    already claimed - which is the difference between a cap and a suggestion.
-    """
+    """Count running worker records plus live host-slot reservations."""
     directory = workers_dir() if directory is None else directory
     live = sum(1 for row in visible_workers(directory)
                if row.get("state") == "running")
@@ -13640,12 +13749,7 @@ def live_worker_count(directory=None) -> int:
 
 
 def live_admission_reservations(directory: str) -> int:
-    """Host slots claimed in `directory` by a spawner that is still alive.
-
-    Reaps the stale ones on the way, exactly as the free-leg count does: a
-    spawner killed between its claim and its worker record leaves a placeholder
-    no one can release, and trusting it would keep the host closed forever.
-    """
+    """Count live host-slot reservations and reap stale placeholders."""
     live, stale = _reservation_rows(directory, None, ADMISSION_RESERVATION_SUFFIX)
     for path in stale:
         try:
@@ -13656,22 +13760,14 @@ def live_admission_reservations(directory: str) -> int:
 
 
 def live_worker_count_by_kind(directory: str, kind: str) -> int:
-    """Count live workers (records + reservations) of a specific `kind`.
-
-    A record or reservation WITHOUT a `kind` field (or any value except
-    'toolless') counts as 'tool-using'. Only records/reservations with
-    `kind == 'toolless'` are counted for the toolless kind.
-    """
+    """Count live records and reservations by kind; missing means tool-using."""
     if kind != "toolless":
-        # For tool-using, we count total - toolless
         total = live_worker_count(directory)
         toolless = live_worker_count_by_kind(directory, "toolless")
         return total - toolless
 
-    # Count toolless records
     live = sum(1 for row in visible_workers(directory)
                if row.get("state") == "running" and row.get("kind") == "toolless")
-    # Count toolless reservations
     live_res, _ = _reservation_rows(directory, None, ADMISSION_RESERVATION_SUFFIX)
     toolless_res = 0
     for path in live_res:
@@ -13685,125 +13781,88 @@ def live_worker_count_by_kind(directory: str, kind: str) -> int:
     return live + toolless_res
 
 
-def host_admission_claim(registry=None, workers=None, meminfo=None, kind: str = "tool-using"):
-    """Ask the host for a worker, and take the slot when it says yes.
-
-    Returns (refusal, claim-token). The two are one critical section: the same
-    fcntl lock the free leg uses, held only across the count and the write of
-    this run's placeholder — not across the clone or the client start, which are
-    minutes and belong to nobody's lock. N spawners that arrive at live=cap-1
-    therefore admit one, not N: each one after the first counts the placeholder
-    the one before wrote.
-
-    A lock that cannot be taken (an unwritable state dir, a spawner wedged for a
-    minute) degrades to today's best-effort count, as `free_slot_lock_take` does:
-    it never refuses a run and never hangs one. The token is released by
-    `free_reservation_release()` once this run's worker record exists — the
-    record is the same fact, and `ps` reads it — or when the run is over.
-
-    `kind` is the admission kind ('toolless' or 'tool-using'). It determines
-    which cap and floor apply, and is written into the reservation placeholder
-    and the worker record.
-    """
+def host_admission_claim(registry=None, workers=None, meminfo=None,
+                         memstatus=None, platform=None, kind="tool-using"):
+    """Check admission and reserve a kind-tagged host slot under one lock."""
     directory = workers_dir() if workers is None else workers
     lock = free_slot_lock_take(directory)
     try:
-        refusal = host_admission_refusal(registry=registry, workers=directory,
-                                         meminfo=meminfo, kind=kind)
+        refusal = host_admission_refusal(
+            registry=registry, workers=directory, meminfo=meminfo,
+            memstatus=memstatus, platform=platform, kind=kind)
         if refusal is not None:
             return refusal, None
-        return None, _reserve_free_slot(directory, None, None,
-                                        suffix=ADMISSION_RESERVATION_SUFFIX,
-                                        prefix="host", kind=kind)
+        return None, _reserve_free_slot(
+            directory, None, None, suffix=ADMISSION_RESERVATION_SUFFIX,
+            prefix="host", kind=kind)
     finally:
         free_slot_lock_give(lock)
 
 
 def _admission_text(live: int, cap: int, free_mb, floor: int, which: str) -> str:
-    """One shape for both halves, naming all four numbers: a caller that reads
-    "queue or run on workstation" has to be able to tell which of the two ran
-    out, and how far off it was, without a second command."""
+    """Name the count, cap, available memory, floor, and refusing constraint."""
     free = "unknown" if free_mb is None else "%d MB" % free_mb
     return ("host admission: %d live workers, cap %d; MemAvailable %s, floor %d MB: "
             "%s reached, queue or run on workstation"
             % (live, cap, free, floor, which))
 
 
-def host_admission_refusal(registry=None, workers=None, meminfo=None, kind: str = "tool-using"):
-    """Why this host cannot take another worker right now, or None to admit.
+def host_admission_refusal(registry=None, workers=None, meminfo=None,
+                           memstatus=None, platform=None, kind="tool-using"):
+    """Return a refusal or None; total cap precedes kind cap and memory floor.
 
-    Read-only, and it never waits (R-worker: queueing is the caller's job - the
-    CLI's caller decides whether to sleep and retry, or to route the task to a
-    different machine). `workers` and `meminfo` name the two sources for a
-    caller that has them (a test); otherwise the host's own are read.
-
-    `kind` is the admission kind ('toolless' or 'tool-using'). Toolless launch
-    is admitted iff: toolless-live < kind cap AND total-live < top-level cap
-    AND memory >= kind floor. Tool-using launch: total-live < top-level cap
-    AND memory >= top-level floor (unchanged semantics, toolless runs count
-    in the total). Memory is read inside the lock.
+    Unreadable meminfo stands down. An unreadable native Windows status
+    instead refuses when the applicable memory floor is positive.
+    The platform-aware commit-charge ceiling applies to both kinds.
     """
     if os.environ.get(ADMISSION_OFF_ENV) == "1":
         return None
 
-    # Top-level config (for total cap and tool-using floor)
-    top_cap, top_floor = host_admission_config(registry)
-
-    # Kind-specific config
-    kind_cap, kind_floor = host_admission_kind_config(registry, kind)
-
-    # Count live workers by kind
+    top_cap, top_floor = host_admission_config(registry, platform)
+    kind_cap, kind_floor = host_admission_kind_config(registry, kind, platform)
+    commit_max = host_admission_commit_max(registry, platform)
     directory = workers_dir() if workers is None else workers
-    live_total = live_worker_count(directory)
-    live_toolless = live_worker_count_by_kind(directory, "toolless")
-
-    free_mb = mem_available_mb(meminfo)
-
-    # Fail-closed on unreadable memory:
-    # - On Linux: fail open (memory half stands down) - existing behavior
-    # - On Windows (nt): fail CLOSED when a floor is configured
-    # - Other platforms: fail open ONLY when AUTOOS_MEMINFO_PATH is unset
-    #   AND OS is not linux/nt (documented exception)
-    mem_unreadable = free_mb is None
-    if mem_unreadable:
-        # Check if we're on Windows or if floor is configured
-        if os.name == "nt":
-            # Windows: fail closed when any floor applies
-            applicable_floor = kind_floor if kind == "toolless" else top_floor
-            if applicable_floor > 0:
-                return _admission_text(
-                    live_total if kind == "tool-using" else live_toolless,
-                    kind_cap if kind == "toolless" else top_cap,
-                    free_mb, applicable_floor, "the memory floor (unreadable on Windows)")
-        elif not os.environ.get(ADMISSION_MEMINFO_ENV) and os.name not in ("posix", "nt"):
-            # Documented exception: fail open on non-Linux/non-nt when env unset
-            pass
-        else:
-            # Linux: fail open - memory half stands down
-            mem_unreadable = False  # treat as not a memory constraint
-
-    if kind == "toolless":
-        # Toolless admission: check total cap first (overarching limit), then kind cap, then kind floor
-        if live_total >= top_cap:
-            return _admission_text(live_total, top_cap, free_mb, top_floor,
-                                   "the total live-worker cap")
-        if live_toolless >= kind_cap:
-            return _admission_text(live_toolless, kind_cap, free_mb, kind_floor,
-                                   "the toolless live-worker cap")
-        # Memory floor check: only if we have a readable value (not None)
-        # and we're not in the Linux fail-open case
-        if free_mb is not None and free_mb < kind_floor:
-            return _admission_text(live_toolless, kind_cap, free_mb, kind_floor,
-                                   "the toolless memory floor")
+    live = live_worker_count(directory)
+    commit_pct = None
+    windows_unreadable = False
+    if ((sys.platform if platform is None else platform) == "win32"
+            and meminfo is None and not os.environ.get(ADMISSION_MEMINFO_ENV)):
+        status = (memstatus or windows_memory_status)()
+        free_mb, commit_pct = status if status is not None else (None, None)
+        windows_unreadable = status is None
     else:
-        # Tool-using admission: check total cap and top-level floor
-        if live_total >= top_cap:
-            return _admission_text(live_total, top_cap, free_mb, top_floor,
-                                   "the live-worker cap")
-        if free_mb is not None and free_mb < top_floor:
-            return _admission_text(live_total, top_cap, free_mb, top_floor,
-                                   "the memory floor")
+        free_mb = mem_available_mb(meminfo)
 
+    if live >= top_cap:
+        return _admission_text(
+            live, top_cap, free_mb, top_floor,
+            "the total live-worker cap" if kind == "toolless"
+            else "the live-worker cap")
+
+    applicable_live, applicable_cap, applicable_floor = live, top_cap, top_floor
+    if kind == "toolless":
+        applicable_live = live_worker_count_by_kind(directory, "toolless")
+        applicable_cap, applicable_floor = kind_cap, kind_floor
+        if applicable_live >= kind_cap:
+            return _admission_text(
+                applicable_live, kind_cap, free_mb, kind_floor,
+                "the toolless live-worker cap")
+
+    if windows_unreadable and applicable_floor > 0:
+        return _admission_text(
+            applicable_live, applicable_cap, free_mb, applicable_floor,
+            "the memory floor (unreadable on Windows)")
+    if free_mb is not None and free_mb < applicable_floor:
+        return _admission_text(
+            applicable_live, applicable_cap, free_mb, applicable_floor,
+            "the toolless memory floor" if kind == "toolless"
+            else "the memory floor")
+    if (commit_pct is not None and commit_max is not None
+            and commit_pct >= commit_max):
+        return _admission_text(
+            live, top_cap, free_mb, top_floor,
+            "the commit-charge ceiling") + (
+                "; commit charge %g%% >= max %g%%" % (commit_pct, commit_max))
     return None
 
 
@@ -14176,7 +14235,26 @@ def cmd_run(args, cfg: dict) -> int:
             except (OSError, ValueError):
                 registry = None  # an unreadable registry leaves one free model
         free_policy = (registry or {}).get("policy") or {}
-        free_chain = free_model_chain(free_policy, client.name, args.free_model)
+        # OCGO-PREFER: the free chain can hold gateway heads (an OpenCode Go
+        # seat) as fallthrough steps after the run's first model. They ride the
+        # gateway and need AUTOOS_OMNIROUTE_KEY,
+        # so read whether a key is on this machine BEFORE choosing the chain:
+        # with no key, free_model_chain drops them and the run stays on the
+        # keyless promo ids it can serve. (client_key only reads env/file — it
+        # sends no request and prints no value.)
+        free_gateway_key_available = bool(client_key(ROOT)) if client.gateway else False
+        # OCGO-PREFER 3 (operator D-1923): the SAME read decides where the run
+        # STARTS. A plain `--free` run takes the first gateway head of the list;
+        # a caller-typed `--free-model` and a run with no key keep what they had.
+        # One place, before the chain is built, so the chain, the fence, the plan
+        # and the record all read the one value. This default is NOT the caller
+        # pin the D-1214 guard above refuses — that guard reads argv, which was
+        # settled before it, and a gateway head named here is the registry's
+        # preference, not a request for the authenticated gateway under `--free`.
+        args.free_model = free_start_model(free_policy, client.name, args.free_model,
+                                           has_gateway_key=free_gateway_key_available)
+        free_chain = free_model_chain(free_policy, client.name, args.free_model,
+                                      has_gateway_key=free_gateway_key_available)
         if fence["families"]:
             head = fence_free_head(free_chain, registry, fence)
             if head is None:
@@ -14270,7 +14348,7 @@ def cmd_run(args, cfg: dict) -> int:
         lean_note, lean_refusal = lean_decision(client.name, route)
         if lean_refusal is not None:
             return refuse(lean_refusal)
-    uses_key = client.gateway and not args.free
+    uses_key = _spawn_needs_gateway_key(client, args.free, plan["model"])
     # D-1214: the promo credential is decided per plan, before the dry run names
     # the env and before the first launch builds it. A `--free` run with no Zen
     # key on the machine proceeds anonymously as it always did, with one warning.
@@ -14447,6 +14525,7 @@ def cmd_run(args, cfg: dict) -> int:
     # the run's re-plan budget — but counted with it when a launch is numbered
     # below, because the kill store and the scope unit key on the attempt.
     cooldown_retries = 0
+    oc_fallbacks = 0
     # `free_policy` / `free_chain` were settled above, before the plan: FAMILYFENCE
     # trims the chain before the first model is picked, so a second copy of that
     # read here would be a fence applied too late to bind.
@@ -14716,6 +14795,18 @@ def cmd_run(args, cfg: dict) -> int:
         # test's own exit object) passes None and keeps the old merged scan.
         stop = provider_stop(check_tail, getattr(run_rc, "raw_err", None))
         rate_limited = stop is not None and rate_limit_stop(stop)
+        oc_switch = None
+        if client.name == "claude" and rc != 0 and not args.joinable and not getattr(args, "no_fallthrough", False) and not oc_fallbacks:
+            # Claude prints its limit as a bare last line (no "Error:" prefix), so provider_stop
+            # misses it: look at the last 3 non-empty lines of the tail directly.
+            last = " ".join([ln for ln in (check_tail or "").splitlines() if ln.strip()][-3:])
+            decision = oc_fallback.fallback_decision(client.name, "%s %s" % (stop or "", last), os.environ, rate_limit_stop)
+            if decision.get("refused"):
+                print(decision["message"], file=sys.stderr)
+                rc = decision["rc"]
+                break
+            if decision.get("switch"):
+                oc_switch = decision
         # AO-SPAWN-COOLDOWN-RETRY: its own class of stop, decided from the line
         # and not from the window it stated — a cooldown that states nothing is
         # still a cooldown, and still exits the run on the stop's rc.
@@ -14795,16 +14886,63 @@ def cmd_run(args, cfg: dict) -> int:
             print("autoos-agent: --no-fallthrough: the run ends on its pinned model "
                   "(%s), no re-plan" % (plan["model"] or plan["route"].get("combo")),
                   file=sys.stderr)
-        if (stop is not None and not args.joinable and not args.no_fallthrough
-                and fallthroughs < MAX_FALLTHROUGH):
+        if (((stop is not None and fallthroughs < MAX_FALLTHROUGH) or oc_switch)
+                and not args.joinable and not args.no_fallthrough):
             next_plan = None
             fell_from = fell_to = None
+            oc_refused = False
             try:
-                if args.free:
+                if oc_switch:
+                    saved_state = (args.client, args.free, args.model, client, uses_key, key, capture)
+                    try:
+                        args.client = "opencode"
+                        args.free = oc_switch["free"]
+                        args.model = oc_switch["opencode_model"]
+                        client = clients.CLIENTS["opencode"]
+                        uses_key = client.gateway and not args.free
+                        if uses_key and key is None:
+                            key = client_key(ROOT)
+                        elif not uses_key:
+                            key = None
+                        capture = client.name in CAPTURE_CLIENTS or (bool(plan["sandbox"]) and not args.joinable)
+                        print("autoos-agent: claude limit - switching to opencode %s" % oc_switch["model"], file=sys.stderr)
+                        next_plan = build_plan(args, cfg, sandbox=plan["sandbox"], fence=fence)
+                        if next_plan is None:
+                            raise RuntimeError("build_plan returned None")
+                        oc_fallbacks += 1
+                        fell_from = plan["route"].get("combo")
+                        fell_to = (next_plan["route"].get("combo") or args.model)
+                    except Exception as exc:
+                        args.client, args.free, args.model, client, uses_key, key, capture = saved_state
+                        reason = redact_output(str(exc) or type(exc).__name__)
+                        print("autoos-agent: opencode fallback refused: %s; Claude is rate-limited - not retrying Claude"
+                              % reason, file=sys.stderr)
+                        rc = EXIT_OC_FALLBACK_DOWN
+                        oc_refused = True
+                        next_plan = None
+                elif args.free:
                     next_plan, fell_from, fell_to = _free_fallthrough_plan(
                         args, cfg, plan, free_chain, excluded_free_models,
                         benched=set(provider_cooldown), fence=fence,
                         registry=live_registry or registry)
+                    # OCGO-PREFER: a later free model may be a gateway head (an
+                    # OpenCode Go seat — the chain's fallthrough steps, never its
+                    # first model). Landing on one makes this re-run a gateway
+                    # launch, so recompute the key decision the first launch made
+                    # and mint the credential lazily. free_model_chain only keeps a
+                    # gateway head in the chain when a key is on this machine, so
+                    # this finds one; a walk back onto a keyless promo id drops it
+                    # — the minted credential goes with `uses_key`, so no keyless
+                    # child is ever handed one (defense in depth beyond the
+                    # `key if uses_key else None` at the env site).
+                    if next_plan is not None:
+                        uses_key = _spawn_needs_gateway_key(
+                            client, args.free, next_plan["model"])
+                        if uses_key:
+                            if not key:
+                                key = client_key(ROOT)
+                        else:
+                            key = None
                 elif plan["route"].get("resolver") and plan["sandbox"]:
                     # RATELIMITRETRY: after a 429 the next leg is picked for a
                     # DIFFERENT provider, so walk past a candidate that every one of
@@ -14842,6 +14980,8 @@ def cmd_run(args, cfg: dict) -> int:
             except FamilyFenceRefused as exc:
                 fence_refused = exc
                 next_plan = None
+            if oc_refused:
+                break
             if next_plan is not None:
                 fell_through = True
                 fallthroughs += 1

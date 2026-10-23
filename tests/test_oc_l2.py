@@ -315,6 +315,35 @@ class LaneTest(unittest.TestCase):
         self.assertEqual(rec["agent_layer"], "L2")
         self.assertEqual(oc_l2.read_config(self._lane_name())["agent_layer"], "L2")
 
+    def test_start_with_direct_model_renders_and_spawns(self):
+        """Operator order 2026-10-19: combos bypassed, the L2 runs a named model.
+
+        The lane carries the exact model dict (no combo resolution), the
+        rendered provider block keys the direct model id, and the spawn
+        reaches a live session through the fakes.
+        """
+        model = {"provider": "omniroute", "key": "glm",
+                 "modelID": "opencode-go/muse-spark-1.3-contributor"}
+        result, rc = oc_l2.cmd_start(
+            self.proj, "ao-direct", self.brief, combo="l2-orchestrator",
+            l1_inbox=self.l1_inbox, opencode_bin=self.bin_,
+            password_env=PW_ENV, port=self.srv.port,
+            model=model, child_env=[RECORD_ENV])
+        self.assertEqual(rc, 0, result)
+        name = oc_l2.lane_name(self.proj, "ao-direct")
+        self.assertEqual(oc_l2.read_config(name)["model"], model)
+        rendered = json.loads(
+            (self.td / "state" / name / "opencode.json").read_text(encoding="utf-8"))
+        self.assertIn("opencode-go/muse-spark-1.3-contributor",
+                      rendered["provider"]["omniroute"]["models"])
+        # Release the fake server child before teardown: on Windows a live
+        # child holding cwd blocks rmtree (WinError 32); on POSIX the group
+        # kill is a no-op for an already-dead lane. Best-effort by design.
+        try:
+            oc_l2.cmd_stop(name)
+        except Exception:
+            pass
+
     def test_the_l2_child_env_carries_only_the_two_named_credentials(self):
         """AO-L2-LAUNCH merge criterion e: the L2 is handed the gateway key and
         nothing else that holds a credential.
@@ -2166,6 +2195,85 @@ class ForeignRepoFooterTests(unittest.TestCase):
         where = [self.text.index(p) for p in parts]
         self.assertEqual(where, sorted(where), self.text)
         self.assertIn(self.INBOX, self.text)
+
+
+class BuildLaneServePortTest(unittest.TestCase):
+    """build_lane must always carry serve_port (measured 2026-10-19).
+
+    build_lane set serve_port only when --port was passed; cmd_start,
+    _resolve_port and status all read lane["serve_port"] unconditionally, so
+    a lane started without --port died in cmd_start with KeyError before the
+    server even spawned. oc_l1 lanes default to the stable per-name hash
+    (derive_port); L2 lanes do the same now.
+    """
+
+    def _lane(self, **over):
+        kw = dict(repo=ROOT, phase="p1", brief=ROOT / "README.md",
+                  combo="l2-orchestrator",
+                  l1_inbox=ROOT / "HANDOFF.md",
+                  opencode_bin=str(ROOT / "fake_opencode"),
+                  password_env="PW_ENV_FOR_TEST",
+                  guard_dir=str(GUARD_DIR))
+        kw.update(over)
+        return oc_l2.build_lane("l2-proj-abcdef-p1", **kw)
+
+    def test_serve_port_defaults_to_the_derived_hash(self):
+        lane = self._lane()
+        self.assertEqual(lane["serve_port"],
+                         oc_l1.derive_port("l2-proj-abcdef-p1"))
+
+    def test_an_explicit_port_is_kept(self):
+        lane = self._lane(port=47280)
+        self.assertEqual(lane["serve_port"], 47280)
+
+
+class BuildLaneDirectModelTest(unittest.TestCase):
+    """build_lane carries an explicit model instead of a combo (operator order
+    2026-10-19: combos bypassed for this development, specific models used).
+
+    oc_l2 start only accepted --combo, and combo_model builds
+    provider/key/modelID all from the combo id — there was no path to run an
+    L2 lane on a named model such as opencode-go/muse-spark-1.3-contributor
+    (the operator-approved main driver, proven by the workst-L1-oc lane
+    itself). --model-id (+ optional key/provider) fills that path; the combo
+    is then never resolved.
+    """
+
+    def _lane(self, **over):
+        kw = dict(repo=ROOT, phase="p1", brief=ROOT / "README.md",
+                  combo="l2-orchestrator",
+                  l1_inbox=ROOT / "HANDOFF.md",
+                  opencode_bin=str(ROOT / "fake_opencode"),
+                  password_env="PW_ENV_FOR_TEST",
+                  guard_dir=str(GUARD_DIR))
+        kw.update(over)
+        return oc_l2.build_lane("l2-proj-abcdef-p1", **kw)
+
+    def test_direct_model_replaces_the_combo_model(self):
+        lane = self._lane(model={"provider": "omniroute", "key": "glm",
+                                 "modelID": "opencode-go/muse-spark-1.3-contributor"})
+        self.assertEqual(lane["model"],
+                         {"provider": "omniroute", "key": "glm",
+                          "modelID": "opencode-go/muse-spark-1.3-contributor"})
+
+    def test_combo_still_resolves_when_no_direct_model(self):
+        lane = self._lane()
+        self.assertEqual(lane["model"]["modelID"], "l2-orchestrator")
+
+    def test_direct_model_helper_builds_the_lane_dict(self):
+        self.assertIsNone(oc_l2.direct_model("omniroute", None, None))
+        self.assertEqual(
+            oc_l2.direct_model("omniroute", None,
+                               "opencode-go/muse-spark-1.3-contributor"),
+            {"provider": "omniroute",
+             "key": "opencode-go/muse-spark-1.3-contributor",
+             "modelID": "opencode-go/muse-spark-1.3-contributor"})
+        self.assertEqual(
+            oc_l2.direct_model("omniroute", "glm",
+                               "opencode-go/muse-spark-1.3-contributor")["key"],
+            "glm")
+        with self.assertRaises(oc_l2.L2Error):
+            oc_l2.direct_model("omniroute", None, "   ")
 
 
 if __name__ == "__main__":

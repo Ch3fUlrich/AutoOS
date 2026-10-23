@@ -305,5 +305,46 @@ class StrictGateTests(unittest.TestCase):
         self.assertIn("contract PASS", strict.stdout)
 
 
+class ResolveLegCaseFoldTests(unittest.TestCase):
+    """OCGO-PREFER 1b: this copy of resolve_leg now folds the model half like
+    tools/registry.py's authority.
+
+    The Go gateway serves the lowercase id `opencode-go/minimax-m3` while the
+    registry keeps ONE row keyed `MiniMax-M3` (rule 1b keeps model keys unique
+    under folding), so a leg resolved only by the exact key broke here too. The
+    copy must match exactly first, then the unique fold, and fail an ambiguous
+    fold or a no-match. Synthetic registries only — no real Go data.
+    """
+
+    def reg(self, models):
+        return {"providers": {"go": {"omniroute_id": "opencode-go",
+                                     "tier": "subscription"}},
+                "models": models}
+
+    def test_an_exact_model_key_resolves(self):
+        self.assertEqual(cc.resolve_leg("go/MiniMax-M3", self.reg({"MiniMax-M3": {}})),
+                         ("go", "MiniMax-M3"))
+
+    def test_a_unique_fold_resolves_to_the_one_row(self):
+        # The gateway spelling; the row keeps the samba casing.
+        self.assertEqual(cc.resolve_leg("go/minimax-m3", self.reg({"MiniMax-M3": {}})),
+                         ("go", "MiniMax-M3"))
+
+    def test_the_exact_key_wins_when_both_exist(self):
+        reg = self.reg({"MiniMax-M3": {}, "minimax-m3": {}})
+        self.assertEqual(cc.resolve_leg("go/minimax-m3", reg),
+                         ("go", "minimax-m3"))
+
+    def test_an_ambiguous_fold_fails(self):
+        reg = self.reg({"MiniMax-M3": {}, "minimax-m3": {}})
+        with self.assertRaises(ValueError):
+            cc.resolve_leg("go/MINIMAX-M3", reg)
+
+    def test_no_match_fails_naming_the_id(self):
+        with self.assertRaises(ValueError) as ctx:
+            cc.resolve_leg("go/nope-xyz", self.reg({"MiniMax-M3": {}}))
+        self.assertIn("nope-xyz", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
