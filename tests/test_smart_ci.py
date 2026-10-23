@@ -340,20 +340,31 @@ class WorkflowShellTests(unittest.TestCase):
         self.calls = os.path.join(self.tmp.name, "gh-calls")
         # the gate posts the status with curl (the runner image has no gh)
         curl = os.path.join(self.bin, "curl")
-        Path(curl).write_text(chr(10).join(["#!/bin/sh", 'echo "$@" >> "%s"' % self.calls, ""]))
+        Path(curl).write_text(chr(10).join(["#!/bin/sh", 'echo "$@" >> "%s"' % self.calls,
+                                              'exit "${CURL_EXIT_CODE:-0}"', ""]))
         os.chmod(curl, 0o755)
 
-    def gate(self, event, full, results, windows_enabled=""):
+    def gate(self, event, full, results, windows_enabled="", curl_exit_code=0):
         """results: 'name=result ...' as the workflow builds it."""
         script = run_block("ci.yml", "merge-gate:")
         env = dict(os.environ, PATH=self.bin + os.pathsep + os.environ["PATH"], GH_TOKEN="x", REPO="o/r", SHA="abc",
-                   EVENT=event, FULL=full, REASON="r", RESULTS=results, WINDOWS_ENABLED=windows_enabled)
+                   EVENT=event, FULL=full, REASON="r", RESULTS=results, WINDOWS_ENABLED=windows_enabled,
+                   CURL_EXIT_CODE=str(curl_exit_code))
         p = subprocess.run(["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, env=env)
         calls = Path(self.calls).read_text() if os.path.exists(self.calls) else ""
         state = re.findall(r'"state":"([a-z]+)"', calls)
         return p.returncode, (state[-1] if state else None)
 
     OK = "smart=success linux=success ansible=success secrets=success scrub=success"
+
+    def test_status_post_failure_fails_full_and_selected_only_runs(self):
+        for full, state in (("true", "success"), ("false", "pending")):
+            with self.subTest(full=full):
+                results = self.OK + " windows=skipped"
+                code, posted = self.gate("pull_request", full, results, curl_exit_code=22)
+                self.assertEqual(posted, state)
+                self.assertNotEqual(code, 0, "a failed status POST must fail the gate")
+                self.assertEqual(self.gate("pull_request", full, results), (0, state))
 
     def test_selected_only_pr_run_is_green_with_a_pending_status(self):
         r = "smart=success linux=success ansible=skipped secrets=success scrub=success windows=skipped"
@@ -440,6 +451,16 @@ class RepoMapTests(unittest.TestCase):
 
     def setUp(self):
         self.m = sel.load_map(str(ROOT / ".github" / "smart-ci.json"))
+
+    def test_workflow_job_conditions_match_map_exactly(self):
+        text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        workflow_jobs = set(re.findall(r"fromJSON\(needs\.smart\.outputs\.jobs\)\.([A-Za-z0-9_-]+)", text))
+        mapped_jobs = set(self.m["jobs"])
+        self.assertEqual(workflow_jobs, mapped_jobs,
+                         "job mismatch: only in ci.yml=%s; only in map=%s" %
+                         (sorted(workflow_jobs - mapped_jobs), sorted(mapped_jobs - workflow_jobs)))
+        self.assertTrue(set(self.m["always_jobs"]) <= mapped_jobs,
+                        "always_jobs missing from jobs: %s" % sorted(set(self.m["always_jobs"]) - mapped_jobs))
 
     def test_a_single_linux_part_selects_only_its_shard_work(self):
         r = sel.select(["tests/linux/13-end-to-end-dry-run-only.sh"], self.m)
