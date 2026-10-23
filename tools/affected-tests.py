@@ -93,6 +93,7 @@ run-tests.sh refuses an empty filter on its own - host OOM guard, R-host-08.
 import argparse
 import ast
 import bisect
+import importlib.util
 import json
 import re
 import signal
@@ -100,6 +101,13 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import NamedTuple, Optional
+
+# The audit defines its inputs without reading them or probing gateways at import.
+_audit_spec = importlib.util.spec_from_file_location(
+    "audit_router", Path(__file__).with_name("audit-router.py"))
+_audit = importlib.util.module_from_spec(_audit_spec)
+_audit_spec.loader.exec_module(_audit)
+DECLARATION_SURFACES = _audit.DECLARATION_SURFACES
 
 ROOT = Path(__file__).resolve().parent.parent
 REGISTRY = "catalog/ai-registry.json"
@@ -651,6 +659,8 @@ REGISTRY_TESTS = ("tests/test_registry_render.py",
                   "tests/test_sync_router_tiers_registry.py")
 REGISTRY_PART = "17"
 REGISTRY_TERMS = ("render", "apply")
+# CI 39897765521: routing surface changes missed the offline declarations audit.
+DECLARATIONS_TERM = "declarations"
 # A route, a router tier file, a combo map or a registry: any of them is answered
 # by the routing part, and every one of them is named with one of these words.
 REGISTRY_PATH = re.compile(r"(registry|route|router|combo)", re.IGNORECASE)
@@ -722,8 +732,11 @@ def map_changed_files(files, root: Path = ROOT, ids=()):
     py_names = set()
     for raw in files:
         path = str(raw).replace("\\", "/")
-        if REGISTRY_PATH.search(path):
+        registry_match = REGISTRY_PATH.search(path)
+        if registry_match:
             registry = True
+        if registry_match or path in DECLARATION_SURFACES:
+            terms.append(DECLARATIONS_TERM)
         if path.startswith(OMNIR_ROUTE_DIR):
             terms.append(APPLY_TERM)
         match = LINUX_PART.match(path)
