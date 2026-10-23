@@ -4,6 +4,8 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- RT-P1-CLASS-COMBOS evidence re-anchor (2026-10-23, D-2424): the D-2350 anchor 0388ba4e (main 1577ca64, CI 39949209775 green on attempt 2) predates the 11:52Z re-claim; this commit, merged with lane/ao-bus-contract-link, is the item's commit+ci evidence anchor.
+- docs/ai/opencode-fleet.md links the plangraph fleet-bus v2 wire contract (plangraph `docs/FLEET-BUS.md`, RT-P1-BUS-CONTRACT) after the cross-host relay section, marked as a separate format from the `X-Fleet-Sig` relay.
 - RT-P1-CLASS-COMBOS (2026-10-23): merged as 1f96b9d6; the main CI red it caused (audit-router IDE drift, run 39897765521) was fixed by 345e9dc6 (green run 39914728970). Evidence anchor per D-2350.
 - Pre-push selects the offline router declarations audit for every declared input, including installers and OpenHands/LiteLLM configuration, from the audit's shared surface tuple (CI 39897765521); regression coverage keeps unreadable registries fail-closed for both IDE clients.
 - Audit-router requires IDE exposure only for routes offered to that client by the registry; only explicit client lists exempt routes, keeping malformed or missing declarations fail-closed and OpenHands tier-profile checks unchanged.
