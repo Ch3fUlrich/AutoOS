@@ -26485,6 +26485,26 @@ class HostAdmissionWindowsTests(unittest.TestCase):
     def test_low_available_memory_refuses(self):
         self.assertIn("the memory floor", self.refusal((12287, 70)))
 
+    def test_invalid_memstatus_is_unknown(self):
+        for status in ((0, 99), (-1, 99), (16000, -1), (16000, 101)):
+            with self.subTest(status=status):
+                self.assertIsNone(self.refusal(status))
+        self.assertIsNone(self.agent._sane_memstatus(0, 50))
+        self.assertEqual(self.agent._sane_memstatus(16000, 101), (16000, None))
+        self.assertEqual(self.agent._sane_memstatus(16000, 100), (16000, 100))
+
+    def test_native_memory_physical_bounds(self):
+        import ctypes
+        def read_status(pointer):
+            stat = pointer._obj
+            stat.ullTotalPhys, stat.ullAvailPhys = physical
+            return 1
+        kernel = mock.Mock(GlobalMemoryStatusEx=read_status)
+        with mock.patch.object(ctypes, "windll", mock.Mock(kernel32=kernel), create=True):
+            for physical in ((0, 0), (1024, 0), (1024, 2048)):
+                with self.subTest(physical=physical):
+                    self.assertIsNone(self.agent.windows_memory_status())
+
     def test_commit_ceiling_inclusive(self):
         for pct in (80.0, 85):
             text = self.refusal((12288, pct))
@@ -26602,6 +26622,51 @@ class HostAdmissionTests(unittest.TestCase):
                                    "mem_available_floor_mb": floor}}
 
     # --- the rule itself --------------------------------------------------
+
+    def test_kind_malformed_inputs_fail_closed(self):
+        for name, registry in (("x", [1]), ("x", {"clients": []}),
+                               ([], {"clients": {}}),
+                               (1, {"clients": {1: {"capabilities": {
+                                   "shell": False, "write": False}}}}),
+                               ("x", {"clients": {"x": []}}),
+                               ("x", {"clients": {"x": {"capabilities": []}}})):
+            with self.subTest(name=name, registry=registry):
+                self.assertEqual(self.agent.host_run_kind(name, registry), "tool-using")
+
+    def test_kind_cap_clamped_to_platform_total(self):
+        registry = self.registry(10, 1024)
+        registry["host_admission"].update({
+            "kinds": {"toolless": {"max_live_workers": 50,
+                                    "mem_available_floor_mb": 512}},
+            "by_platform": {"win32": {"max_live_workers": 8}}})
+        for platform, cap in (("linux", 10), ("win32", 8)):
+            self.assertEqual(self.agent.host_admission_kind_config(
+                registry, "toolless", platform), (cap, 512))
+
+    def test_malformed_rows_and_reservation_kinds(self):
+        rows = [[], {"state": "running", "kind": []},
+                {"state": "running", "kind": 3}]
+        with mock.patch.object(self.agent, "visible_workers", return_value=rows):
+            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "toolless"), 0)
+            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "tool-using"), 3)
+        for kind in ([], 3):
+            self.agent._reserve_free_slot(self.workers, None, None,
+                suffix=self.agent.ADMISSION_RESERVATION_SUFFIX, kind=kind)
+        path = os.path.join(self.workers, "corrupt" + self.agent.ADMISSION_RESERVATION_SUFFIX)
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("[]")
+        self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "toolless"), 0)
+        self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "tool-using"), 2)
+        # A placeholder corrupted between discovery and reread cannot be toolless.
+        with io.open(path, "w", encoding="utf-8") as fh:
+            fh.write("[]")
+        with mock.patch.object(self.agent, "_reservation_rows", return_value=([path], [])):
+            self.assertEqual(self.agent.live_worker_count_by_kind(self.workers, "toolless"), 0)
+
+    def test_malformed_platform_key_uses_top_level(self):
+        registry = self.registry(10, 1024)
+        registry["host_admission"]["by_platform"] = {}
+        self.assertEqual(self.agent.host_admission_config(registry, []), (10, 1024))
 
     def test_host_admission_limits_come_from_the_shipped_registry(self):
         shipped = SHIPPED_REGISTRY.get("host_admission") or {}

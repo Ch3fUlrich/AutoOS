@@ -3929,6 +3929,7 @@ def _reservation_rows(directory: str, provider: str | None = None,
             stale.append(path)
             continue
         if not isinstance(record, dict):
+            stale.append(path)
             continue
         if provider is not None and record.get("provider") != provider:
             continue
@@ -13601,8 +13602,9 @@ def _host_admission_value(registry, platform, field, default, minimum=None, maxi
     section = registry.get("host_admission") if isinstance(registry, dict) else {}
     section = section if isinstance(section, dict) else {}
     platforms = section.get("by_platform")
-    override = (platforms.get(sys.platform if platform is None else platform)
-                if isinstance(platforms, dict) else None)
+    platform = sys.platform if platform is None else platform
+    override = (platforms.get(platform)
+                if isinstance(platforms, dict) and isinstance(platform, str) else None)
     override = override if isinstance(override, dict) else {}
     for source in (override, section):
         value = source.get(field)
@@ -13655,7 +13657,7 @@ def host_admission_kind_config(registry, kind: str, platform=None) -> tuple:
         return top_pair
     if not (isinstance(floor, int) and not isinstance(floor, bool) and floor >= 1):
         return top_pair
-    return cap, floor
+    return min(cap, top_pair[0]), floor
 
 
 def host_run_kind(client_name: str, registry: dict | None) -> str:
@@ -13665,7 +13667,9 @@ def host_run_kind(client_name: str, registry: dict | None) -> str:
             registry = load_registry(REGISTRY_PATH)
         except (OSError, ValueError):
             registry = {}
-    clients = (registry or {}).get("clients")
+    if not isinstance(registry, dict) or not isinstance(client_name, str):
+        return "tool-using"
+    clients = registry.get("clients")
     if not isinstance(clients, dict):
         return "tool-using"
     client = clients.get(client_name)
@@ -13677,6 +13681,17 @@ def host_run_kind(client_name: str, registry: dict | None) -> str:
     if caps.get("shell") is False and caps.get("write") is False:
         return "toolless"
     return "tool-using"
+
+
+def _sane_memstatus(avail_mb, commit_pct):
+    """Discard unreadable physical memory and out-of-range commit readings."""
+    if (not isinstance(avail_mb, (int, float)) or isinstance(avail_mb, bool)
+            or not 0 < avail_mb < float("inf")):
+        return None
+    if (not isinstance(commit_pct, (int, float)) or isinstance(commit_pct, bool)
+            or not 0 <= commit_pct <= 100):
+        commit_pct = None
+    return avail_mb, commit_pct
 
 
 def windows_memory_status():
@@ -13702,12 +13717,14 @@ def windows_memory_status():
         stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
         if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
             return None
+        if not 0 < stat.ullAvailPhys <= stat.ullTotalPhys:
+            return None
         commit_pct = (
             (stat.ullTotalPageFile - stat.ullAvailPageFile)
             / stat.ullTotalPageFile * 100
             if stat.ullTotalPageFile else None
         )
-        return stat.ullAvailPhys // (1024 * 1024), commit_pct
+        return _sane_memstatus(stat.ullAvailPhys // (1024 * 1024), commit_pct)
     except Exception:
         return None
 
@@ -13736,7 +13753,7 @@ def live_worker_count(directory=None) -> int:
     """Count running worker records plus live host-slot reservations."""
     directory = workers_dir() if directory is None else directory
     live = sum(1 for row in visible_workers(directory)
-               if row.get("state") == "running")
+               if not isinstance(row, dict) or row.get("state") == "running")
     return live + live_admission_reservations(directory)
 
 
@@ -13759,14 +13776,16 @@ def live_worker_count_by_kind(directory: str, kind: str) -> int:
         return total - toolless
 
     live = sum(1 for row in visible_workers(directory)
-               if row.get("state") == "running" and row.get("kind") == "toolless")
+               if isinstance(row, dict) and row.get("state") == "running"
+               and isinstance(row.get("kind"), str) and row["kind"] == "toolless")
     live_res, _ = _reservation_rows(directory, None, ADMISSION_RESERVATION_SUFFIX)
     toolless_res = 0
     for path in live_res:
         try:
             with io.open(path, encoding="utf-8") as fh:
                 record = json.load(fh)
-            if record.get("kind") == "toolless":
+            if (isinstance(record, dict) and isinstance(record.get("kind"), str)
+                    and record["kind"] == "toolless"):
                 toolless_res += 1
         except (OSError, ValueError):
             pass
@@ -13819,6 +13838,7 @@ def host_admission_refusal(registry=None, workers=None, meminfo=None,
     if ((sys.platform if platform is None else platform) == "win32"
             and meminfo is None and not os.environ.get(ADMISSION_MEMINFO_ENV)):
         status = (memstatus or windows_memory_status)()
+        status = _sane_memstatus(*status) if status is not None else None
         free_mb, commit_pct = status if status is not None else (None, None)
     else:
         free_mb = mem_available_mb(meminfo)
