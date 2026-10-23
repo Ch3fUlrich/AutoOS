@@ -12,10 +12,13 @@ network call is ever made.
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOL = ROOT / "tools" / "audit-router.py"
@@ -146,6 +149,75 @@ class OpenHandsTierProfileTests(unittest.TestCase):
         drift = audit.tier_profile_drift(
             ["route-opencode-only", "route-openhands"], set(), OPENHANDS_FIXTURE)
         self.assertEqual(drift, ["tier-profiles.json lacks 'route-openhands'"])
+
+
+class ClientExposureTests(unittest.TestCase):
+    def audit_missing_clients(self, omni, routes=None):
+        audit = _load_module()
+        doc = {"routes": {"fixture-route": {
+            "strategy": "priority", "legs": ["groq/openai/gpt-oss-120b"],
+            "surfaces": {"omniroute": {"context_declared": "128k", **omni}}}}}
+        if routes is not None:
+            doc["routes"] = routes
+        with tempfile.TemporaryDirectory(dir=ROOT / "logs") as tmp:
+            path = Path(tmp) / "registry.json"
+            path.write_text(json.dumps(doc), encoding="utf-8")
+            output = io.StringIO()
+            with patch.object(audit, "opencode_models", return_value=[]), \
+                    patch.object(audit, "repo_combos", return_value=[
+                        {"name": "fixture-route", "models": []}]), \
+                    patch.object(audit, "ide_models", return_value=[]), \
+                    contextlib.redirect_stdout(output):
+                audit.main(["--offline", "--json", "--registry", str(path)])
+            return json.loads(output.getvalue())["drift"]
+
+    def assert_client_drift(self, omni, required):
+        drift = self.audit_missing_clients(omni)
+        for line in ("opencode.jsonc lacks model 'fixture-route'",
+                     "catalog/ide-models.json does not offer 'fixture-route' to zed"):
+            self.assertEqual(line in drift, required, line)
+
+    def test_explicit_ide_clients_still_required(self):
+        self.assert_client_drift({"clients": ["opencode", "zed"]}, True)
+
+    def assert_unknown_route_required(self, routes):
+        drift = self.audit_missing_clients({}, routes=routes)
+        self.assertIn("opencode.jsonc lacks model 'fixture-route'", drift)
+        self.assertIn("catalog/ide-models.json does not offer 'fixture-route' to zed", drift)
+
+    def test_combo_absent_from_registry_requires_both_ide_clients(self):
+        self.assert_unknown_route_required({})
+
+    def test_non_dict_route_requires_both_ide_clients(self):
+        self.assert_unknown_route_required({"fixture-route": "invalid"})
+
+    def test_explicit_empty_clients_exempt_ide(self):
+        self.assert_client_drift({"clients": []}, False)
+
+    def test_missing_and_null_clients_fail_closed(self):
+        for omni in ({}, {"clients": None}):
+            with self.subTest(omni=omni):
+                self.assert_client_drift(omni, True)
+
+    def test_route_names_for_each_client(self):
+        audit = _load_module()
+        surfaces = {
+            "both": {"omniroute": {"clients": ["opencode", "zed"]}},
+            "oc": {"omniroute": {"clients": ["opencode"]}},
+            "oh": {"omniroute": {"clients": ["openhands"]}},
+            "empty": {"omniroute": {"clients": []}},
+            "missing": {"omniroute": {}},
+            "null": {"omniroute": {"clients": None}},
+            "invalid": {"omniroute": {"clients": "zed"}},
+            "no-omni": {}, "bad-omni": {"omniroute": []},
+        }
+        doc = {"routes": {rid: {"surfaces": s} for rid, s in surfaces.items()}}
+        doc["routes"]["no-surfaces"] = {}
+        fallback = {"missing", "null", "invalid", "no-omni", "bad-omni", "no-surfaces"}
+        self.assertEqual(audit.route_names_for_client(doc, "opencode"),
+                         fallback | {"both", "oc"})
+        self.assertEqual(audit.route_names_for_client(doc, "zed"), fallback | {"both"})
+        self.assertEqual(audit.route_names_for_client(doc, "openhands"), {"oh"})
 
 
 if __name__ == "__main__":
