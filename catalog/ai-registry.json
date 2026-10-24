@@ -2962,20 +2962,20 @@
     "paid_local_cap_usd": 20,
     "reviewers": [
       {
-        "client": "opencode",
-        "model": "omniroute/cx-gpt-6.1-sol",
-        "family": "openai",
-        "leg": "cx/gpt-6.1-sol",
-        "paid": false,
-        "source": "operator D-2148"
-      },
-      {
         "client": "gemini",
         "model": "gemini-3.8-flash",
         "family": "google",
         "leg": "gemini/gemini-3.8-flash",
         "paid": false,
         "source": "operator 2026-09-27T20:3xZ (REVROUTE)"
+      },
+      {
+        "client": "opencode",
+        "model": "omniroute/cx-gpt-6.1-sol",
+        "family": "openai",
+        "leg": "cx/gpt-6.1-sol",
+        "paid": false,
+        "source": "operator D-2148"
       },
       {
         "client": "opencode",
