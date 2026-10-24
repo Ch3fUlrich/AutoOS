@@ -1208,6 +1208,22 @@ class McpHeartbeatTests(unittest.TestCase):
             "client": "opencode", "model": "omniroute/cx-gpt-6.1-sol", "writer_skips": []})
         _pick.start()
         self.addCleanup(_pick.stop)
+        # The dry run also starts the child `autoos-agent.py run`, which re-picks
+        # in its own process: an inert opencode on PATH gives it the cx row.
+        bin_dir = os.path.join(self._tmp.name, "bin")
+        os.mkdir(bin_dir)
+        if os.name != "nt":
+            stub = os.path.join(bin_dir, "opencode")
+            with open(stub, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\nexit 0\n")
+            os.chmod(stub, 0o755)
+        else:
+            with open(os.path.join(bin_dir, "opencode.cmd"), "w", encoding="utf-8") as fh:
+                fh.write("@exit /b 0\r\n")
+        _path = mock.patch.dict(os.environ, {
+            "PATH": bin_dir + os.pathsep + os.environ.get("PATH", os.defpath)})
+        _path.start()
+        self.addCleanup(_path.stop)
         os.environ.pop("AUTOOS_AGENT_INBOX", None)
         self.addCleanup(self._restore_env)
 
