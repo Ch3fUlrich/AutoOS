@@ -943,7 +943,11 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         seen = set()
         for m in real_ide_models()["models"]:
             want = m.get("effort_ladder")
-            for provider in m.get("surfaces", {}):
+            for provider, clients in m.get("surfaces", {}).items():
+                # D-2590: a route may serve the gateway without an opencode
+                # entry (the mimo singles: opencode uses provider mimo only).
+                if "opencode" not in clients:
+                    continue
                 models = oc["providers"][provider]["models"]
                 got = [v["id"] for v in models[m["id"]].get("variants", [])]
                 if want is None:

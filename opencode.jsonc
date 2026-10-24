@@ -561,9 +561,11 @@
             { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } }
           ]
         },
-        // D-2459/D-2461: the two mimo entries below keep their key but serve
-        // the DIRECT mimo leg - they declare the SERVED gateway id
-        // (mimo/mimo-v2.6-flash / mimo/mimo-v2.6-pro) as their modelID.
+        // D-2589/D-2590: opencode has NO mimo entries in this block -
+        // omniroute/mimo-v2.6-* is the path D-2459/D-2461 forbade. opencode
+        // reaches MiMo only through providers.mimo (mimo/mimo-v2.6-flash |
+        // mimo/mimo-v2.6-pro); the registry's mimo routes leave opencode out
+        // of surfaces.omniroute.clients.
         // routes.<id>.surfaces.omniroute.gateway_model_id in
         // catalog/ai-registry.json is the source; this region regenerates from
         // it, so edit the registry, not these lines.
@@ -752,16 +754,6 @@
             { "id": "medium", "settings": { "reasoningEffort": "medium" } },
             { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
-        },
-        "mimo-v2.6-flash": {
-          "modelID": "mimo/mimo-v2.6-flash",
-          "name": "Xiaomi MiMo v2.6 Flash · 1M",
-          "limit": { "context": 1048576, "output": 65536 }
-        },
-        "mimo-v2.6-pro": {
-          "modelID": "mimo/mimo-v2.6-pro",
-          "name": "Xiaomi MiMo v2.6 Pro · 1M",
-          "limit": { "context": 1048576, "output": 65536 }
         },
         "opencode-go/glm-5.3-flash": {
           "modelID": "opencode-go/glm-5.3-flash",

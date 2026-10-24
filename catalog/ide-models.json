@@ -479,7 +479,6 @@
       "gateway_model_id": "mimo/mimo-v2.6-flash",
       "surfaces": {
         "omniroute": [
-          "opencode",
           "zed",
           "openhands"
         ]
@@ -493,7 +492,6 @@
       "gateway_model_id": "mimo/mimo-v2.6-pro",
       "surfaces": {
         "omniroute": [
-          "opencode",
           "zed",
           "openhands"
         ]

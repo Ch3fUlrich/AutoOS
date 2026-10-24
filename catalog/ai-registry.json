@@ -5402,7 +5402,7 @@
       "$comment": " D657-CLEAN 2026-10-08 (AO-DENYLEGS D2): spec 3.1 rule 3 (private_safe) admits only a paid/subscription/credit leg whose provider proves trains_on_prompts false, and the D-657 ack gate leaves exactly one gateway leg that is both: vertex/gemini-3.8-flash (vertex_ai tier credit, trains_on_prompts false, cache documented). Every free leg is therefore illegal here - tools/registry.py private_safe() rejects a free pool even when it declares no training (PRIV/PRIV2), and rule (b-or) forces every servable openrouter leg to be :free, so the openrouter band can never be clean. This chain is one leg and one provider by evidence, not by choice; the gap is in the lane REPORT (no invented legs). Layer twin of routes.l2-orchestrator for a privacy=sensitive card; it drops the bazaarlink free leg that route heads with."
     },
     "mimo-v2.6-flash": {
-      "$comment": "Xiaomi MiMo v2.6 Flash direct single-model route (1M context). D-2461: surfaces.omniroute.gateway_model_id carries the SERVED spelling - mimo/mimo-v2.6-flash, exactly gateway_ref() of the one leg through providers.xiaomi_mimo.model_prefix - while this route id and the combos.json combo of the same name stay bare; tools/sync-ide-models.py writes that served id as opencode's modelID and tests/linux/33-documentation.sh compares against it.",
+      "$comment": "Xiaomi MiMo v2.6 Flash direct single-model route (1M context). D-2461: surfaces.omniroute.gateway_model_id carries the SERVED spelling - mimo/mimo-v2.6-flash, exactly gateway_ref() of the one leg through providers.xiaomi_mimo.model_prefix - while this route id and the combos.json combo of the same name stay bare; tools/sync-ide-models.py writes that served id as opencode's modelID and tests/linux/33-documentation.sh compares against it. D-2589/D-2590 (MIMO-PROVIDER-PERMANENT): opencode is NOT a client of this surface - omniroute/mimo-v2.6-* is the path D-2459/D-2461 forbade; opencode reaches MiMo only through providers.mimo as mimo/mimo-v2.6-flash|pro.",
       "id": "mimo-v2.6-flash",
       "class": "cheap",
       "strategy": "priority",
@@ -5417,7 +5417,6 @@
           "display_name": "Xiaomi MiMo v2.6 Flash · 1M",
           "gateway_model_id": "mimo/mimo-v2.6-flash",
           "clients": [
-            "opencode",
             "zed",
             "openhands"
           ],
@@ -5430,7 +5429,7 @@
       }
     },
     "mimo-v2.6-pro": {
-      "$comment": "Xiaomi MiMo v2.6 Pro direct single-model route (1M context). D-2461: surfaces.omniroute.gateway_model_id carries the SERVED spelling - mimo/mimo-v2.6-pro, exactly gateway_ref() of the one leg through providers.xiaomi_mimo.model_prefix - while this route id and the combos.json combo of the same name stay bare; tools/sync-ide-models.py writes that served id as opencode's modelID and tests/linux/33-documentation.sh compares against it.",
+      "$comment": "Xiaomi MiMo v2.6 Pro direct single-model route (1M context). D-2461: surfaces.omniroute.gateway_model_id carries the SERVED spelling - mimo/mimo-v2.6-pro, exactly gateway_ref() of the one leg through providers.xiaomi_mimo.model_prefix - while this route id and the combos.json combo of the same name stay bare; tools/sync-ide-models.py writes that served id as opencode's modelID and tests/linux/33-documentation.sh compares against it. D-2589/D-2590 (MIMO-PROVIDER-PERMANENT): opencode is NOT a client of this surface - omniroute/mimo-v2.6-* is the path D-2459/D-2461 forbade; opencode reaches MiMo only through providers.mimo as mimo/mimo-v2.6-flash|pro.",
       "id": "mimo-v2.6-pro",
       "class": "mid",
       "strategy": "priority",
@@ -5445,7 +5444,6 @@
           "display_name": "Xiaomi MiMo v2.6 Pro · 1M",
           "gateway_model_id": "mimo/mimo-v2.6-pro",
           "clients": [
-            "opencode",
             "zed",
             "openhands"
           ],
