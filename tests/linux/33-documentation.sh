@@ -1257,6 +1257,10 @@ if it "autoos-agent seat prompts prepend the no-tools boundary once (unit tests)
     out="$(python3 tests/test_spawn_seat_prompt.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "autoos-agent seat clauses exclude the seat model family (unit tests)"; then
+    out="$(python3 tests/test_spawn_seat_clause.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "autoos-agent outside-path fence denies first and re-allows only opencode scratch"; then
     report="$(python3 - 2>&1 <<'PY'
 import importlib.util

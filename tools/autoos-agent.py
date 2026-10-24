@@ -9215,6 +9215,51 @@ def registry_family_names(registry):
     return out
 
 
+def _seat_clause_matches(text):
+    """Yield family and original clause text without reading host or registry state."""
+    counts = {str(n) for n in range(1, 10)} | {
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "both", "all"}
+    pattern = r"\b(?:non-|not\s+|no\s+)([a-z]+)\b"
+    for match in re.finditer(pattern, text or "", re.IGNORECASE):
+        after = list(re.finditer(r"\b\w+\b", text[match.end():]))[:4]
+        seat = next((word for word in after if re.fullmatch(
+            r"seats?|famil(?:y|ies)|reviewers?|verdicts?", word.group(), re.IGNORECASE)), None)
+        if seat is None:
+            continue
+        before = list(re.finditer(r"\b\w+\b", text[:match.start()]))[-3:]
+        count = next((word for word in reversed(before) if word.group().casefold() in counts), None)
+        end = match.end() + seat.end()
+        only = re.match(r"\s+only\b", text[end:], re.IGNORECASE)
+        if count is None and only is None and not match.group().lower().startswith("no "):
+            continue
+        name = resolver.family_key(match.group(1))
+        # Use the fence's vendor aliases, including Haiku/Sonnet/Opus -> Anthropic.
+        family = vendor_family_name_unique(name) or name
+        if family not in {resolver.family_key(fam) for fam, _ in FAMILY_VENDORS}:
+            continue
+        start = count.start() if count is not None else match.start()
+        yield family, text[start:end + (only.end() if only else 0)]
+
+
+def seat_clause_exclusions(text) -> list[str]:
+    """Family keys excluded by explicit seat clauses, in task order."""
+    return list(dict.fromkeys(family for family, _ in _seat_clause_matches(text)))
+
+
+def seat_clause_refusal(task, seat_family, excluded) -> str | None:
+    """Refuse an excluded (or unplaceable) seat, without any I/O."""
+    if not excluded:
+        return None
+    if not seat_family:
+        return "seat model family unknown, cannot satisfy the clause; pick a seat from another family"
+    family = resolver.family_key(seat_family)
+    if family not in excluded:
+        return None
+    phrase = next((phrase for fam, phrase in _seat_clause_matches(task) if fam == family), task)
+    return ("seat clause %r excludes family %s; pick a seat from another family"
+            % (phrase, family))
+
+
 def fence_name_refusal(unknown, known):
     """FAMILYFENCE-3 B2: a `--not-family` that names no family the registry
     carries excludes nothing, and the run reads as fenced while nothing is.
@@ -14254,6 +14299,19 @@ def cmd_run(args, cfg: dict) -> int:
     if any(not str(v).strip() for v in not_family_values(args)):
         return refuse(fence_blank_refusal(), 2)
     fence = family_fence(args)
+    if is_seat_run(args):
+        excluded = seat_clause_exclusions(args.task)
+        if excluded:
+            seat_model, _ = effective_spawn_model(
+                client.name, args.model, args.card, _avail_registry, cfg,
+                args.tier, bool(args.free), args.free_model, bool(args.clean))
+            seat_family = fence_family_of(seat_model, _avail_registry)
+            clause_refusal = seat_clause_refusal(args.task, seat_family, excluded)
+            if clause_refusal:
+                detail = "; the seat model is %s (%s); pick a seat from another family" % (
+                    seat_model, seat_family or "unknown")
+                return refuse(clause_refusal.replace(
+                    "; pick a seat from another family", detail), 2)
     # `--no-fallthrough` is read once, here, so the pin cannot be seen differently
     # by the branch that announces it and the branch that re-plans. The default is
     # False, which is what the flag's absence means to argparse too.
