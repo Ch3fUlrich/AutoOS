@@ -116,7 +116,7 @@ class OcFallbackRunTests(unittest.TestCase):
         oc_args = Path(d) / "oc_args.txt"
         assert oc_args.exists()
         with open(oc_args) as f:
-            assert "omniroute/mimo-v2.6-flash" in f.read()
+            assert "mimo/mimo-v2.6-flash" in f.read()
 
     def test_muse_spark_up(self):
         d, cnt = self.fake_claude(LIMIT, 1)

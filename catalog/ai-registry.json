@@ -772,6 +772,34 @@
         "xiaomi_mimo": "documented"
       }
     },
+    "deepseek-v4.1-flash-free": {
+      "$comment": "D-2449: exact opencode models id, verified 2026-10-23. Conservative unknown limits follow the existing Zen free row; not measured. Free client-bound review seat, tool use unproven.",
+      "client_bound": "opencode",
+      "context_advertised": 200000,
+      "context_usable": { "source": "default", "tokens": 100000 },
+      "effort_ladder": [],
+      "family": "deepseek",
+      "id": "deepseek-v4.1-flash-free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
+    "glm-5.3-flash-free": {
+      "$comment": "D-2450: exact opencode models id, verified 2026-10-23. Conservative unknown limits follow the existing Zen free row; not measured. Free client-bound review seat, tool use unproven.",
+      "client_bound": "opencode",
+      "context_advertised": 200000,
+      "context_usable": { "source": "default", "tokens": 100000 },
+      "effort_ladder": [],
+      "family": "zhipu",
+      "id": "glm-5.3-flash-free",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": false,
+      "tool_calls": "unproven"
+    },
     "mimo-v2.6-flash-free": {
       "$comment": "REVFREE (source: L2-general 2026-09-28T08:12:44Z): the row policy.reviewers' opencode-zen leg needs so a review record naming opencode/mimo-v2.6-flash-free resolves to a family; the spelling is the one policy.free_client_models already runs opencode on. Nothing about this leg is measured here: the numbers are the registry's conservative unknown (the same shape as models.'openrouter-free'), reasoning false and effort_ladder empty because no ladder was probed, tool_calls stays 'unproven'. trains_on_prompts unset (inherits providers.zen) — and a free tier is never private-safe anyway (tools/registry.py private_safe). client_bound 'opencode' is the documented Zen free-tier rule, not a probe of this model.",
       "client_bound": "opencode",
@@ -2988,6 +3016,24 @@
         "leg": "opencode-go/qwen3.8-flash",
         "paid": false,
         "source": "operator D-1840/D-1919 2026-10-18 (OCGO-PREFER); Go probe 2026-10-18"
+      },
+      {
+        "client": "opencode",
+        "model": "opencode/deepseek-v4.1-flash-free",
+        "family": "deepseek",
+        "leg": "opencode-zen/deepseek-v4.1-flash-free",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "operator D-2449 2026-10-23"
+      },
+      {
+        "client": "opencode",
+        "model": "opencode/glm-5.3-flash-free",
+        "family": "zhipu",
+        "leg": "opencode-zen/glm-5.3-flash-free",
+        "paid": false,
+        "first_pass_only": true,
+        "source": "operator D-2450 2026-10-23"
       },
       {
         "client": "opencode",
@@ -5356,7 +5402,7 @@
       "$comment": " D657-CLEAN 2026-10-08 (AO-DENYLEGS D2): spec 3.1 rule 3 (private_safe) admits only a paid/subscription/credit leg whose provider proves trains_on_prompts false, and the D-657 ack gate leaves exactly one gateway leg that is both: vertex/gemini-3.8-flash (vertex_ai tier credit, trains_on_prompts false, cache documented). Every free leg is therefore illegal here - tools/registry.py private_safe() rejects a free pool even when it declares no training (PRIV/PRIV2), and rule (b-or) forces every servable openrouter leg to be :free, so the openrouter band can never be clean. This chain is one leg and one provider by evidence, not by choice; the gap is in the lane REPORT (no invented legs). Layer twin of routes.l2-orchestrator for a privacy=sensitive card; it drops the bazaarlink free leg that route heads with."
     },
     "mimo-v2.6-flash": {
-      "$comment": "Xiaomi MiMo v2.6 Flash direct single-model route (1M context).",
+      "$comment": "Xiaomi MiMo v2.6 Flash direct single-model route (1M context). D-2461: surfaces.omniroute.gateway_model_id carries the SERVED spelling - mimo/mimo-v2.6-flash, exactly gateway_ref() of the one leg through providers.xiaomi_mimo.model_prefix - while this route id and the combos.json combo of the same name stay bare; tools/sync-ide-models.py writes that served id as opencode's modelID and tests/linux/33-documentation.sh compares against it.",
       "id": "mimo-v2.6-flash",
       "class": "cheap",
       "strategy": "priority",
@@ -5369,6 +5415,7 @@
           "context_declared": "1M",
           "output": 65536,
           "display_name": "Xiaomi MiMo v2.6 Flash · 1M",
+          "gateway_model_id": "mimo/mimo-v2.6-flash",
           "clients": [
             "opencode",
             "zed",
@@ -5383,7 +5430,7 @@
       }
     },
     "mimo-v2.6-pro": {
-      "$comment": "Xiaomi MiMo v2.6 Pro direct single-model route (1M context).",
+      "$comment": "Xiaomi MiMo v2.6 Pro direct single-model route (1M context). D-2461: surfaces.omniroute.gateway_model_id carries the SERVED spelling - mimo/mimo-v2.6-pro, exactly gateway_ref() of the one leg through providers.xiaomi_mimo.model_prefix - while this route id and the combos.json combo of the same name stay bare; tools/sync-ide-models.py writes that served id as opencode's modelID and tests/linux/33-documentation.sh compares against it.",
       "id": "mimo-v2.6-pro",
       "class": "mid",
       "strategy": "priority",
@@ -5396,6 +5443,7 @@
           "context_declared": "1M",
           "output": 65536,
           "display_name": "Xiaomi MiMo v2.6 Pro · 1M",
+          "gateway_model_id": "mimo/mimo-v2.6-pro",
           "clients": [
             "opencode",
             "zed",

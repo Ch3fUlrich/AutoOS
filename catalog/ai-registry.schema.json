@@ -406,6 +406,10 @@
       "properties": {
         "clients": { "type": "array", "items": { "type": "string" } },
         "display_name": { "type": "string" },
+        "gateway_model_id": {
+          "type": "string",
+          "description": "The model id the gateway actually serves for this route when it is not the route id. D-2459/D-2461: the two pinned MiMo singles are addressed by their DIRECT gateway leg (providers.xiaomi_mimo.model_prefix + model, i.e. mimo/mimo-v2.6-flash / mimo/mimo-v2.6-pro), while the route id - and the combos.json combo of the same name - stays bare, so an opencode entry keyed mimo-v2.6-flash must declare this as its modelID. Absent (every other route) the gateway serves the route id itself, and every consumer that reads it falls back to the id."
+        },
         "context": { "type": "integer", "minimum": 0 },
         "context_declared": {
           "type": ["string", "integer"],

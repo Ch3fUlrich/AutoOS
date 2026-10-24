@@ -11261,7 +11261,14 @@ Test-Case 'opencode tiers declare matching context limits' {
     foreach ($m in $offered) {
         $name = $m.id
         Assert-True ($null -ne $models.$name) "missing model $name"
-        Assert-Equal $models.$name.modelID $name
+        # The served gateway id, when the gateway does not serve the route id:
+        # D-2461's two pinned MiMo singles declare `gateway_model_id`
+        # (mimo/mimo-v2.6-*) while their key and the combo keep the bare route
+        # id. Every entry without one is served under its own id, so the
+        # modelID == id rule still covers every other model unchanged.
+        $gmid = $m.PSObject.Properties['gateway_model_id']
+        $served = if ($gmid -and $gmid.Value) { $gmid.Value } else { $name }
+        Assert-Equal $models.$name.modelID $served
         Assert-Equal $models.$name.limit.context $m.context
     }
     $combosDoc = Get-Content (Join-Path $Root 'configuration\omniroute\combos.json') -Raw -Encoding UTF8 | ConvertFrom-Json
