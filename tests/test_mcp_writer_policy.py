@@ -153,3 +153,8 @@ def test_spawn_policy_unavailable_is_structured(registered_spawn, monkeypatch):
     monkeypatch.setattr(mcp.agent, "pick_policy_writer", unavailable)
     result = registered_spawn(task="Fix a pure function", card={"role": "implement"})
     assert result == mcp._refused("no policy writer")
+
+
+if __name__ == "__main__":
+    # The suites run each test file as `python3 tests/<file>` (test_suite_wiring).
+    sys.exit(pytest.main([__file__, "-q"]))
