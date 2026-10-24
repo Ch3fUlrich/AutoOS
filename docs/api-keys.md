@@ -342,7 +342,7 @@ omniroute providers test claude                     # oauth connections" is
 Rules that bit us (2026-09-24): the OAuth allowlist uses canonical ids —
 `antigravity`, not the `agy` alias (`providers auth agy` → "Unknown OAuth
 provider"); **`qoder` has no CLI OAuth flow at all** (not in `oauth
-providers`) — connect it in the dashboard → Providers page instead. The
+providers`); D-2641 uses qodercli ACP instead, not a dashboard login. The
 trailing `Assertion failed ... UV_HANDLE_CLOSING` after any CLI error is a
 cosmetic Windows crash-on-exit, not a second failure. Proof pattern per
 connection: `providers list` (account-named row) → `models <provider>` →
@@ -350,18 +350,18 @@ one `ack` chat per leg before it enters `combos.json` (phantom-leg rule).
 
 ## Qoder PAT (CLI-only key, not a gateway provider)
 
+D-2641: Qoder is used through qodercli ACP only (`clients.qoder`,
+`gateway_mode: none`), with no gateway provider and no gateway or dashboard
+Qoder login (OS-QODER-PAT is withdrawn). The CLI's own PAT below is unaffected.
+
 `qoder_pat:` in `api-keys.yml` feeds `QODER_PERSONAL_ACCESS_TOKEN`, which the
-Qoder CLI reads at startup for headless/ACP use. There is no gateway
-provider id for it (the gateway `qoder` entry is OAuth/dashboard-only), so it
-never enters `catalog/ai-registry.json` or the LiteLLM `.env`. **Windows:**
-the `qodercli` catalog component appends `~/.qoder/bin` to User PATH (the
-dashboard error was precisely this: the binary lives beside the IDE install,
-not on PATH) and exports the PAT absent-only, same mechanism as
-`OMNIROUTE_API_KEY` above. Both writes broadcast `WM_SETTINGCHANGE`, so new
-terminals see them without sign-out — but long-running processes (including
-the OmniRoute server itself) keep their stale environment until restarted;
-if the dashboard still fails after setup, restart the gateway. **Linux/macOS:**
-install via the component, then
+Qoder CLI reads at startup for headless/ACP use. It never enters
+`catalog/ai-registry.json` or the LiteLLM `.env`. **Windows:** the `qodercli`
+catalog component appends `~/.qoder/bin` to User PATH and exports the PAT
+absent-only, same mechanism as `OMNIROUTE_API_KEY` above. Both writes
+broadcast `WM_SETTINGCHANGE`, so new terminals see them without sign-out, but
+long-running processes keep their stale environment until restarted.
+**Linux/macOS:** install via the component, then
 `export QODER_PERSONAL_ACCESS_TOKEN='<value of qoder_pat:>'` yourself.
 Warning from Qoder docs: an env PAT takes precedence over `/login`
 credentials — clear it before `/logout`, or the next start signs straight
