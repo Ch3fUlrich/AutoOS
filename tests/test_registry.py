@@ -79,6 +79,50 @@ class WriterOrderTests(unittest.TestCase):
         row = dict(client="x", model="x", family="x")
         self.reject([row, row], "duplicate")
 
+    def test_absent_order_is_not_a_problem(self):
+        # D-2540 round 2 ruling: policy.writers.order is OPTIONAL in the
+        # validator - absent means the registry simply carries no ranking (the
+        # refusal falls back to FALLBACK_WRITER_ORDER); present means it is
+        # validated in full, exactly as test_order_shape and friends do.
+        data = self.fixture()
+        del data["policy"]["writers"]["order"]
+        self.assertEqual(registry._check_writers(data), [])
+
+    def test_claude_guard_reads_every_row_field(self):
+        # D-2540 MED2: all three guards cover the SAME field set, so a forbidden
+        # family cannot hide in the fields the guard used to skip.
+        for field, value in (("client", "claude"), ("model", "sonnet-5"),
+                             ("leg", "claude/sonnet-5"), ("provider", "anthropic"),
+                             ("family", "anthropic")):
+            with self.subTest(field=field):
+                row = dict(client="x", model="x", family="x")
+                row[field] = value
+                self.reject([row], "Claude")
+
+    def test_stale_gpt_guard_reads_every_row_field(self):
+        for field in ("client", "model", "leg", "provider", "family"):
+            with self.subTest(field=field):
+                row = dict(client="x", model="x", family="x")
+                row[field] = "gpt-5.6-sol"
+                self.reject([row], "gpt-5.6-sol")
+
+    def test_ovh_guard_reads_every_row_field(self):
+        for field in ("client", "model", "leg", "provider", "family"):
+            with self.subTest(field=field):
+                row = dict(client="x", model="x", family="x")
+                row[field] = "prefix/OVH-model"
+                self.reject([row], "ovh")
+
+    def test_the_committed_catalog_carries_the_four_entry_d2148_order(self):
+        # The real registry - the one the refusal and the ranking read - must
+        # DECLARE the D-2148 order, four entries, first leg cx-gpt-6.1-sol.
+        rows = self.fixture()["policy"]["writers"]["order"]
+        self.assertEqual([(r["client"], r["model"]) for r in rows],
+                         [("opencode", "omniroute/cx-gpt-6.1-sol"),
+                          ("mimo", "mimo-v2.6-flash"),
+                          ("opencode", "omniroute/deepseek-direct-flash"),
+                          ("qoder", "qwen3.8-flash")])
+
     def test_real_order_and_fallback(self):
         import autoos_ready_guards as guards
         data = self.fixture()

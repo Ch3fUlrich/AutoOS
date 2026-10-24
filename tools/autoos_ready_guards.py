@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sys
 import unicodedata
 
 from autoos_blank import is_invisible_char as _is_invisible_char
@@ -489,6 +490,12 @@ def _load_writer_order():
         rows = json.loads(path.read_text(encoding="utf-8"))["policy"]["writers"]["order"]
         return tuple("%s %s" % (row["client"], row["model"]) for row in rows) or FALLBACK_WRITER_ORDER
     except (OSError, ValueError, KeyError, TypeError):
+        # MED1 (D-2540): the fallback must be visible, in exactly one line. No
+        # path and no exception detail - a registry path is machine detail a
+        # reader cannot act on, and a traceback says nothing about which writer
+        # leg to try next (that is the refusal's job, fed by the fallback below).
+        print("writer order unreadable; falling back to FALLBACK_WRITER_ORDER "
+              "(D-2148)", file=sys.stderr)
         return FALLBACK_WRITER_ORDER
 
 
@@ -529,7 +536,7 @@ def writer_trailer_refusal(commits):
         return ""
     order = "; ".join("%d) %s" % (n, leg) for n, leg in enumerate(WRITER_ORDER, 1))
     return ("; ".join(problems)
-            + " | no free writer leg? D-2148 order: %s. Next entry to try: 1) %s. "
+            + " | no usable writer leg? D-2148 order: %s. Next entry to try: 1) %s. "
               "Record skip + reason for each leg that was rate limited or down; "
               "Claude self-writes stay <= %d lines and are named in the trailer."
               % (order, WRITER_ORDER[0], CLAUDE_SELF_WRITE_MAX_LINES))
