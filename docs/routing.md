@@ -33,14 +33,20 @@ Exit 0 in sync, 1 on any `drift`/`missing`/`extra` line, 3 when the store cannot
 
 `catalog/ai-registry.json` → `policy.writers.order` is the source of truth for
 writer order: `cx/gpt-6.1-sol` (opencode `omniroute/cx-gpt-6.1-sol`) >
-`mimo/mimo-v2.6-flash` (API, client `mimo`) > `omniroute/deepseek-direct-flash`
+`mimo/mimo-v2.6-flash` (opencode with direct provider id
+`mimo/mimo-v2.6-flash`, D-2459) > `omniroute/deepseek-direct-flash`
 (opencode) > qodercli `qwen3.8-flash` (client `qoder`). Never use Sonnet/Claude
 for implementations, `cx/gpt-5.6-sol`, or OVH. Skip opencode while rate-limited;
 skip any rate-limited or down entry to the next eligible entry, recording each
 skip and its reason. Do not substitute another model behind a named access path.
+This writer pick applies to a pin-less, default-client write run (CLI and MCP
+spawn without `--client`); an explicit `--model` or `--client` pin wins.
 
-Review seats are separate from writer selection (D-1704/D-2449): choose the first
-available seats from families different from the writer and from each other.
+Review seats are separate from writer selection (D-1704/D-2449). The resolver
+provides `seats_for`: two seats from families different from the writer and from
+each other, with Anthropic never the first seat of a HIGH lane. Wiring this
+resolver into seat launch is part of `autoos:MODEL-ORDER-D1704`, not current
+seat-launch behaviour.
 
 ## Standby router (LiteLLM :4000)
 

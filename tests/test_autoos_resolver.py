@@ -3327,10 +3327,19 @@ class TwoSeatSelectionTests(unittest.TestCase):
                             for e in result["skipped"] for reason in e["reasons"]))
 
     def test_insufficient_distinct_families_is_not_resolved(self):
-        self.registry["policy"]["reviewers"] = self.entries[3:]
-        result = self.pick("qwen3.8-flash")
+        # Keep the writer registered, with two candidates from just one other
+        # family: the second qwen model must not count as an independent seat.
+        self.registry["policy"]["reviewers"] = self.entries[2:]
+        result = self.pick("cx/gpt-6.1-sol")
+        self.assertEqual(result["author_family"], "openai")
         self.assertEqual(result["state"], "unresolved")
-        self.assertEqual(result["seats"], [])
+        self.assertNotEqual(result["state"], "resolved")
+        self.assertEqual(result["seats"], [self.entries[3]])
+        self.assertIn("two reviewer seats required", result["reason"])
+        duplicate = next(e for e in result["skipped"]
+                         if e["model"] == "qwen-other")
+        self.assertIn("same family as selected seat (qwen)",
+                      duplicate["reasons"])
 
 
 class ReviewerSelectionTests(unittest.TestCase):
