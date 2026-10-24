@@ -1,5 +1,6 @@
 # Changelog
 
+- OPENCODE-HC (D-2634, incident): the opencode compose healthcheck wrote its shell variable as `$c`, which compose interpolates to an empty string, so the probe rendered `[ -n "" ]` and reported unhealthy for every answer. Escape it as `$$c`, repair the comment spliced in D-2549, and add two red-first tests: no unescaped compose variable in the probe, and the exact probe as `docker compose config` renders it.
 - D-2148: enforce registry-owned newest-only Codex IDs; add read-only weekly bump proposals and align MCP availability. Remove superseded Sol credit route.
   - CODEX-NEWEST-ONLY (D-2488): keep the Google review seat first and cx carried, not first (router option B), preserving the default cross-family seat; D-2148 writer order still names cx first.
 - SEAT-FREE-OPENCODE (D-2449/D-2450/D-2459): declare DeepSeek and GLM Zen free seats and direct MiMo flash/pro pins; reject ambiguous MiMo combo pins and served-model evidence, and repair the fallback pin.
