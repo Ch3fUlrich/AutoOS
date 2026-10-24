@@ -5680,7 +5680,34 @@ _NO_FREE_LEG_SPACES_RE = re.compile(r"[_\s]+")
 # P12b (D-1116): the two things a seat can have RUN. `ran=` is only asked for when the
 # lane is HIGH (R3), but a value outside this list is refused in every lane — a typo
 # would otherwise read as the evidence the gate exists to demand.
+SEAT_FIRST_LINE = ("You have NO tools and no repository access. Everything you need is below. "
+                   "Answer in plain text only.")
 SEAT_RAN_VALUES = ("tests", "live")
+
+
+def seat_prompt(task, is_seat):
+    """Add the seat's no-tools boundary once, preserving all existing text."""
+    if not is_seat:
+        return task, False
+    if task == SEAT_FIRST_LINE or task.startswith((SEAT_FIRST_LINE + "\n", SEAT_FIRST_LINE + "\r\n")):
+        return task, False
+    return SEAT_FIRST_LINE + "\n\n" + task, True
+
+
+def is_seat_run(args):
+    """Classify review seats without consulting repository or host state."""
+    try:
+        tier = int(getattr(args, "tier", None))
+    except (ValueError, TypeError):
+        tier = None
+    if (getattr(args, "review_base", None) or getattr(args, "review_of", None)
+            or tier == 3):
+        return True
+    try:
+        card = routing.parse_card(getattr(args, "card", None) or "")
+    except (ValueError, KeyError, TypeError):
+        card = {}
+    return bool(isinstance(card, dict) and _card_asks_review(card))
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
                      "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>] "
@@ -9189,6 +9216,64 @@ def registry_family_names(registry):
         if key and key not in out:
             out.append(key)
     return out
+
+
+def _seat_item_text(text):
+    """Keep item prose only: reviewed code is evidence, not seat instructions."""
+    lines = []
+    fenced = False
+    for line in (text or "").splitlines():
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            lines.append("")
+        else:
+            if not fenced and line.startswith(("diff --git", "--- a/", "+++ b/")):
+                break
+            lines.append("" if fenced else line)
+    return "\n".join(lines)
+
+
+def _seat_clause_matches(text):
+    """Yield family and original clause text without reading host or registry state."""
+    text = _seat_item_text(text)
+    count = r"(?:[0-9]*[1-9][0-9]*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|both|all|a|an|the)"
+    noun = r"(?:seats?|famil(?:y|ies)|reviewers?|verdicts?)"
+    negative = r"(?:non-|not-|not\s+)([a-z]+)\b"
+    # Match requirements, not nearby mentions of reviewers or vendor compatibility.
+    patterns = (
+        rf"\b(?:{count}\s+)?{negative}\s+(?:[a-z]+\s+)?{noun}\b(?:\s+only\b)?",
+        rf"^\s*(?:{count}\s+)?{noun}(?:\s+(?:clause|rule|requirement))?\s*(?::|=| - )\s*{negative}",
+        rf"(?:^\s*|:\s*|\b{count}\s+)no\s+([a-z]+)\s+{noun}\b",
+    )
+    known = {resolver.family_key(fam) for fam, _ in FAMILY_VENDORS}
+    for sentence in re.split(r"[.;\n]", text):
+        matches = sorted((match for pattern in patterns
+                          for match in re.finditer(pattern, sentence, re.IGNORECASE)),
+                         key=lambda match: match.start())
+        for match in matches:
+            name = resolver.family_key(match.group(1))
+            family = vendor_family_name_unique(name) or name
+            if family in known:
+                yield family, match.group().strip()
+
+
+def seat_clause_exclusions(text) -> list[str]:
+    """Family keys excluded by explicit seat clauses, in task order."""
+    return list(dict.fromkeys(family for family, _ in _seat_clause_matches(text)))
+
+
+def seat_clause_refusal(task, seat_family, excluded) -> str | None:
+    """Refuse an excluded (or unplaceable) seat, without any I/O."""
+    if not excluded:
+        return None
+    if not seat_family:
+        return "seat model family unknown, cannot satisfy the clause; pick a seat from another family"
+    family = resolver.family_key(seat_family)
+    if family not in excluded:
+        return None
+    phrase = next((phrase for fam, phrase in _seat_clause_matches(task) if fam == family), task)
+    return ("seat clause %r excludes family %s; pick a seat from another family"
+            % (phrase, family))
 
 
 def fence_name_refusal(unknown, known):
@@ -14032,6 +14117,9 @@ def cmd_run(args, cfg: dict) -> int:
     # a worker chatted twice before the route planner caught it).
     if not args.task or not args.task.strip():
         return refuse("task is empty or whitespace-only", 2)
+    args.task, changed = seat_prompt(args.task, is_seat_run(args))
+    if changed:
+        print("seat-prompt: prepended the no-tools first line", file=sys.stderr)
     # FLEETP0b: `--run-id` names a directory, a branch and a header, so a shape
     # that is not the canonical one is refused here - before any clone, record or
     # client start (and before the MCP server's own state dir is created for it).
@@ -14227,6 +14315,19 @@ def cmd_run(args, cfg: dict) -> int:
     if any(not str(v).strip() for v in not_family_values(args)):
         return refuse(fence_blank_refusal(), 2)
     fence = family_fence(args)
+    if is_seat_run(args):
+        excluded = seat_clause_exclusions(args.task)
+        if excluded:
+            seat_model, _ = effective_spawn_model(
+                client.name, args.model, args.card, _avail_registry, cfg,
+                args.tier, bool(args.free), args.free_model, bool(args.clean))
+            seat_family = fence_family_of(seat_model, _avail_registry)
+            clause_refusal = seat_clause_refusal(args.task, seat_family, excluded)
+            if clause_refusal:
+                detail = "; the seat model is %s (%s); pick a seat from another family" % (
+                    seat_model, seat_family or "unknown")
+                return refuse(clause_refusal.replace(
+                    "; pick a seat from another family", detail), 2)
     # `--no-fallthrough` is read once, here, so the pin cannot be seen differently
     # by the branch that announces it and the branch that re-plans. The default is
     # False, which is what the flag's absence means to argparse too.
