@@ -3272,6 +3272,67 @@ class FreeAiResolverTests(unittest.TestCase):
         self.assertIn("privacy:", " ".join(removed["l3-driver-free-only"]))
 
 
+class TwoSeatSelectionTests(unittest.TestCase):
+    NOW = datetime(2026, 10, 24, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.entries = [
+            {"client": "claude", "model": "sonnet", "family": "anthropic"},
+            {"client": "mimo", "model": "mimo-v2.6-flash", "family": "xiaomi"},
+            {"client": "opencode", "model": "cx/gpt-6.1-sol", "family": "openai"},
+            {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen"},
+            {"client": "qoder", "model": "qwen-other", "family": "qwen"},
+        ]
+        self.registry = {"policy": {"reviewers": self.entries}, "clients": {}}
+        self.state = {e["client"]: {"installed": True, "signed_in": True}
+                      for e in self.entries}
+
+    def pick(self, author, **kwargs):
+        return r.seats_for(author, self.registry, self.state, self.NOW, **kwargs)
+
+    def assert_independent(self, result, author_family):
+        self.assertEqual(result["state"], "resolved")
+        self.assertEqual(len(result["seats"]), 2)
+        families = {e["family"] for e in result["seats"]}
+        self.assertEqual(len(families), 2)
+        self.assertNotIn(author_family, families)
+
+    def test_cx_writer_gets_two_non_openai_families(self):
+        self.assert_independent(self.pick("cx/gpt-6.1-sol"), "openai")
+
+    def test_mimo_writer_gets_two_non_xiaomi_families(self):
+        self.assert_independent(self.pick("mimo-v2.6-flash"), "xiaomi")
+
+    def test_high_risk_anthropic_is_only_the_second_seat(self):
+        result = self.pick("cx/gpt-6.1-sol", risk="high")
+        self.assert_independent(result, "openai")
+        self.assertNotEqual(result["seats"][0]["family"], "anthropic")
+        self.assertEqual(result["seats"][1]["family"], "anthropic")
+
+    def test_rate_limited_seat_is_skipped_with_reason(self):
+        self.registry["clients"]["mimo"] = {
+            "available": False, "unavailable_until": "2026-10-25T00:00:00Z"}
+        result = self.pick("cx/gpt-6.1-sol", risk="high")
+        self.assert_independent(result, "openai")
+        skipped = next(e for e in result["skipped"] if e["client"] == "mimo")
+        self.assertIn("client: mimo unavailable until 2026-10-25T00:00:00Z",
+                      skipped["reasons"])
+        self.assertTrue(skipped["waiting"])
+
+    def test_high_risk_keeps_first_pass_only_rejection(self):
+        self.entries[0]["first_pass_only"] = True
+        result = self.pick("cx/gpt-6.1-sol", risk="high")
+        self.assertNotIn("anthropic", [e["family"] for e in result["seats"]])
+        self.assertTrue(any("first-pass only" in reason
+                            for e in result["skipped"] for reason in e["reasons"]))
+
+    def test_insufficient_distinct_families_is_not_resolved(self):
+        self.registry["policy"]["reviewers"] = self.entries[3:]
+        result = self.pick("qwen3.8-flash")
+        self.assertEqual(result["state"], "unresolved")
+        self.assertEqual(result["seats"], [])
+
+
 class ReviewerSelectionTests(unittest.TestCase):
     """Brief REVROUTE (S2) item 2: a review card carrying ``author`` resolves to
     the first entry of ``policy.reviewers`` whose family differs from the
