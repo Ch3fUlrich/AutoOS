@@ -348,11 +348,24 @@ cosmetic Windows crash-on-exit, not a second failure. Proof pattern per
 connection: `providers list` (account-named row) → `models <provider>` →
 one `ack` chat per leg before it enters `combos.json` (phantom-leg rule).
 
-## Qoder access (ACP only)
+## Qoder PAT (CLI-only key, not a gateway provider)
 
 D-2641: Qoder is used through qodercli ACP only (`clients.qoder`,
-`gateway_mode: none`), with no gateway provider or gateway PAT login.
-OS-QODER-PAT is withdrawn; the dashboard Qoder login is not used.
+`gateway_mode: none`), with no gateway provider and no gateway or dashboard
+Qoder login (OS-QODER-PAT is withdrawn). The CLI's own PAT below is unaffected.
+
+`qoder_pat:` in `api-keys.yml` feeds `QODER_PERSONAL_ACCESS_TOKEN`, which the
+Qoder CLI reads at startup for headless/ACP use. It never enters
+`catalog/ai-registry.json` or the LiteLLM `.env`. **Windows:** the `qodercli`
+catalog component appends `~/.qoder/bin` to User PATH and exports the PAT
+absent-only, same mechanism as `OMNIROUTE_API_KEY` above. Both writes
+broadcast `WM_SETTINGCHANGE`, so new terminals see them without sign-out, but
+long-running processes keep their stale environment until restarted.
+**Linux/macOS:** install via the component, then
+`export QODER_PERSONAL_ACCESS_TOKEN='<value of qoder_pat:>'` yourself.
+Warning from Qoder docs: an env PAT takes precedence over `/login`
+credentials — clear it before `/logout`, or the next start signs straight
+back in.
 
 ## CLI coding tools via the gateway
 
