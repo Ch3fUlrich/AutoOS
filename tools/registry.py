@@ -3886,12 +3886,66 @@ def _check_context_floors(registry) -> list:
     return problems
 
 
+# The one Codex sol-id grammar (D-2148 round 2, finding B5): this check,
+# catalog/ai-registry.schema.json's `model_policy.current` $comment and
+# tools/codex-newest-check.py's version() all read THIS - no second copy of
+# the regex may grow anywhere else.
+SOL_ID_RE = re.compile(
+    r'^(?P<prefix>(?:omniroute/)?(?:cxa|cx)[/-])?gpt-(?P<version>\d+(?:\.\d+)*)'
+    r'-sol(?P<effort>(?:-[a-z0-9]+)*)$', re.IGNORECASE)
+
+
+def parse_sol_id(value):
+    """Parse one Codex sol model id; None when `value` is not one.
+
+    The grammar covers every spelling the gateway and the registry give the
+    subscription model - bare ``gpt-6.1-sol``, ``cx/``, ``cxa/``,
+    ``omniroute/cx/`` and ``omniroute/cx-`` - plus an optional effort suffix
+    (``-low`` ... ``-ultra``, and any longer future one), case-insensitively:
+    ids are compared lower-cased everywhere the newest-only policy decides, so
+    case never carries meaning (B2).
+
+    Returns ``(prefix, version, effort)``:
+
+      * ``prefix`` - the codex spelling, lower-cased, '' for the bare id;
+      * ``version`` - the numeric version, zero-padded to eight parts so ``6``
+        and ``6.0`` compare equally (it is what the weekly probe ranks on);
+      * ``effort`` - the effort suffix without its leading dash, '' when absent.
+
+    ``catalog/ai-registry.schema.json``'s ``model_policy.current`` pattern is
+    the bare spelling of this expression - no prefix, no effort - and its
+    $comment points here; keep the two in step.
+    """
+    if not isinstance(value, str):
+        return None
+    match = SOL_ID_RE.match(value.lower())
+    if match is None:
+        return None
+    version = tuple((list(map(int, match.group('version').split('.'))) + [0] * 8)[:8])
+    return match.group('prefix') or '', version, match.group('effort').lstrip('-')
+
+
+# The codex spellings that carry a model id beside the bare one the policy
+# stores; an id on one of these must BE current, or an effort suffix of it.
+CODEX_ID_PREFIXES = ('omniroute/cx/', 'omniroute/cx-', 'cx/', 'cx-')
+
+
 def _check_codex_newest(registry):
-    """D-2148: one canonical subscription path, including future policy lists."""
+    """D-2148: one canonical subscription path, including future policy lists.
+
+    Every string the walk sees is decided against `parse_sol_id`'s grammar and
+    one allow-list - the current id plus its effort suffixes - on the WHOLE
+    value and lower-cased (round 2: A1 no partial match can ride an allowed
+    prefix, B1 no other model may ride a codex prefix, B2 case never carries
+    meaning).
+    """
     policy = ((registry.get('providers') or {}).get('cx') or {}).get('model_policy', {})
     current = policy.get('current', '')
-    if policy.get('newest_only') is not True or not re.fullmatch(r'gpt-\d+(?:\.\d+)*-sol', current):
+    parsed = parse_sol_id(current)
+    if (policy.get('newest_only') is not True or parsed is None
+            or parsed[0] or parsed[2]):
         return ['newest_only: providers.cx.model_policy must name the current sol model']
+    current = current.lower()
     allowed = {current} | {current + '-' + effort for effort in
                            ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')}
     problems = []
@@ -3906,10 +3960,21 @@ def _check_codex_newest(registry):
             for child in value:
                 walk(child, path)
         elif isinstance(value, str):
-            sol = re.search(r'gpt-\d+(?:\.\d+)*-sol(?:-[a-z]+)?', value)
-            if (sol and (sol.group() not in allowed or
-                         ('/' in value and not value.startswith(('cx/', 'omniroute/cx/', 'omniroute/cx-'))))) or (
-                    value.startswith(('cx/', 'cxa/')) and value.split('/', 1)[1] not in allowed):
+            lowered = value.lower()
+            body = next((lowered[len(prefix):] for prefix in CODEX_ID_PREFIXES
+                         if lowered.startswith(prefix)), None)
+            if body is not None:
+                # A codex-prefixed id: it must be the current id or an effort
+                # suffix of it, even when it never contains the word `sol` (B1).
+                ok = body in allowed
+            elif parse_sol_id(lowered) is not None or lowered.startswith('cxa/'):
+                # A sol id (or the fallback provider's spelling of one) anywhere
+                # else: the WHOLE value must be THE allowed id - one token, no
+                # trailing extra (A1), no case drift (B2), no foreign prefix.
+                ok = lowered in allowed
+            else:
+                return
+            if not ok:
                 problems.append('newest_only: %s rejects %s' % (path, value))
     for section in ('models', 'routes', 'pins', 'policy'):
         walk(registry.get(section, {}), section)

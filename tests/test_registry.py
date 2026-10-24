@@ -1193,10 +1193,21 @@ class OpenRouterByokLegTests(unittest.TestCase):
         # $comment + provider $comment (no credits -> :free only), not a gate.
         # D657-D2 2026-10-08: l2-worker's chain is re-cut to probe-acked legs, so
         # the morph/deepinfra provenance gates left with the legs it no longer
-        # declares. The $comment-provenance rule is pinned on a gate that is still
+        # declares. What the assertion below pins is the $comment-provenance rule:
+        # every gate that remains in the tree must say WHY it gates, so the
+        # provenance outlives whichever leg list happens to declare it next.
         gates = [gate for route in self.reg['routes'].values()
                  for gate in (route.get('unavailable_legs') or {}).values()]
         self.assertTrue(all(gate.get('$comment') for gate in gates))
+
+    def test_the_provenance_comment_is_not_left_dangling(self):
+        # A3 (round 2): the comment above must read as finished English - a
+        # comment that trails off mid-clause leaves the next reader to guess
+        # what the rule is pinned on.
+        source = (ROOT / 'tests' / 'test_registry.py').read_text(encoding='utf-8')
+        self.assertIsNone(re.search(r'#.*\bis still\s*$', source, re.M),
+                          'a comment may not end mid-sentence (rewrite it to say '
+                          'what the $comment-provenance rule is pinned on)')
 
     def test_gated_leg_is_not_servable_in_any_route_listing_it(self):
         # TORDER-OR: paid leg removed from every route (except t1-clean kept

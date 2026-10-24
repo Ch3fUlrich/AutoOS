@@ -3,21 +3,32 @@
 
 No model-catalog weekly timer exists in tools. Suggested cron (repo cwd):
 0 9 * * 1 python3 tools/codex-newest-check.py
-Exit 3 means review scratch/codex-newest-proposal.md; exit 1 means probe failed.
+
+Exit codes, kept distinct so a caller can act without parsing the text:
+  Exit 0  the gateway lists no sol id newer than
+          providers.cx.model_policy.current - already newest, nothing to do;
+  Exit 1  the gateway probe failed - nothing was decided and nothing was
+          proposed (no answer came back, not "no update exists");
+  Exit 3  a bump proposal was written for review (PROPOSAL_REL) - a human must
+          look. Exit 3 is not a failure: only 3 means a proposal exists, only
+          1 means no answer came back.
 """
 import json
 import os
-import re
-from pathlib import Path
 from urllib.request import Request, build_opener, HTTPRedirectHandler
 import autoos_gateway_key
 import registry
 
+# Review output, not a catalog change: printed to stdout AND written where
+# .gitignore covers it (finding B4), so no `git add -A` can sweep it into a
+# commit of somebody else's review queue.
+PROPOSAL_REL = 'scratch/codex-newest-proposal.md'
+
 
 def version(model):
-    """Numeric version tuple, padded so 6 and 6.0 compare equally."""
-    match = re.fullmatch(r'(?:cx/)?gpt-(\d+(?:\.\d+)*)-sol(?:-[a-z]+)?', model)
-    return tuple((list(map(int, match[1].split('.'))) + [0] * 8)[:8]) if match else ()
+    """Numeric version tuple from registry.parse_sol_id - the one sol-id grammar."""
+    parsed = registry.parse_sol_id(model)
+    return parsed[1] if parsed else ()
 
 
 def proposal(models, current):
@@ -49,7 +60,7 @@ def main():
     code, text = proposal(models, current)
     if text:
         print(text)
-        target = registry.ROOT / 'scratch/codex-newest-proposal.md'
+        target = registry.ROOT / PROPOSAL_REL
         target.parent.mkdir(exist_ok=True)
         target.write_text(text, encoding='utf-8')
     else:

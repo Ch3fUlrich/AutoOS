@@ -160,7 +160,7 @@
       "required": ["id", "omniroute_id", "litellm_env", "litellm_prefix", "trains_on_prompts", "tier"],
       "additionalProperties": false,
       "properties": {
-        "model_policy": {"type": "object", "additionalProperties": false, "required": ["newest_only", "current", "source"], "properties": {"newest_only": {"const": true}, "current": {"type": "string", "pattern": "^gpt-\\d+(\\.\\d+)*-sol$"}, "source": {"type": "string"}}},
+        "model_policy": {"type": "object", "additionalProperties": false, "required": ["newest_only", "current", "source"], "properties": {"newest_only": {"const": true}, "current": {"type": "string", "pattern": "^gpt-\\d+(\\.\\d+)*-sol$", "$comment": "Bare spelling of tools/registry.py parse_sol_id(), the one sol-id grammar (D-2148 round 2): current names the model itself - no cx/ prefix, no effort suffix; the newest-only walk allows those per id. Keep this pattern and parse_sol_id() in step."}, "source": {"type": "string"}}},
         "id": { "type": "string" },
         "omniroute_id": { "type": ["string", "null"] },
         "key_name": {

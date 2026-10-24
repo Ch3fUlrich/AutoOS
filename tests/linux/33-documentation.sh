@@ -1021,6 +1021,13 @@ if it "registry.py: check rules (unit tests) and the committed registry is valid
     out="$(python3 tests/test_registry.py 2>&1 && python3 tools/registry.py validate 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# CODEX-NEWEST-ONLY (D-2148 round 2): the newest-only contract's own unit
+# tests - whole-token ids, any codex-prefix id, case-insensitive comparison,
+# the one sol-id grammar, the probe's exit codes and proposal path.
+if it "codex newest-only: contract, sol-id grammar, probe exit codes (unit tests)"; then
+    out="$(python3 tests/test_codex_newest.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # registry renders (routing v2 spec 3.2 D11, task A5f): every generated file is
 # gated on a fresh render; ide-models.json is byte-exact, the rest semantic.
 if it "registry: no generated file drifts"; then

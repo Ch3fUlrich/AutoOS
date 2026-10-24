@@ -3114,7 +3114,7 @@
   },
   "providers": {
     "cx": {
-      "$comment": "AO-CX-GPT61-SOL: Codex subscription via OmniRoute cx. Gateway GET /api/models 2026-10-22: provider cx, gpt-6.1-sol available true, supportsVision true; separate effort ids gpt-6.1-sol-{low,medium,high,xhigh,max,ultra}. Live probe 2026-10-22 served gpt-6.1-sol, HTTP 200. Flat subscription, no per-token price. Conservative trains_on_prompts:true follows the existing cxa subscription row. D-2148: newest sol only; D-2038: one provider path and one family per row. Cheaper and smarter is operator-asserted (D-2148), not measured here. Separately served effort suffixes are allowed only for the current version.",
+      "$comment": "AO-CX-GPT61-SOL: Codex subscription via OmniRoute cx. Gateway GET /api/models 2026-10-22: provider cx, gpt-6.1-sol available true, supportsVision true; separate effort ids gpt-6.1-sol-{low,medium,high,xhigh,max,ultra}. Live probe 2026-10-22 served gpt-6.1-sol, HTTP 200. Flat subscription, no per-token price. Conservative trains_on_prompts:true follows the existing cxa subscription row. D-2148: newest sol only; D-2038: one provider path and one family per row. Cheaper and smarter is operator-asserted (D-2148), not measured here. Separately served effort suffixes are allowed only for the current version. The codex client is the OmniRoute provider cx: client codex (clients.codex) sends every model to provider cx, and the newest-only policy (newest_only/current) lives in providers.cx.model_policy on this same entry.",
       "id": "cx",
       "api_base": null,
       "provider_data": null,
