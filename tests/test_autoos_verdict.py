@@ -31,6 +31,19 @@ NOT_BLIND_LINES = ("the fixture cannot see the row",
 
 
 class VerdictGrammarTests(unittest.TestCase):
+    def test_harness_and_echoed_grammar_are_not_a_second_verdict(self):
+        harness = "\n".join(("route: review", "run-id: sample", "sandbox: isolated",
+                              "model: seat", "notice: starting", "client: ready",
+                              "mode: review", "status: running", "answer:"))
+        for word in v.VERDICTS:
+            for echo in ("", "VERDICT: ACCEPT|REJECT|HOLD\n",
+                         "  VERDICT: ACCEPT|REJECT|HOLD — that word alone, findings underneath.\n"):
+                with self.subTest(word=word, echo=echo):
+                    got = v.parse_verdict(harness + "\n" + echo + "VERDICT: " + word
+                                          + "\nFindings: reviewed the change.\nstatus: ended\n")
+                    self.assertTrue(got["valid"], got)
+                    self.assertEqual(word, got["verdict"])
+
     @classmethod
     def setUpClass(cls):
         spec = importlib.util.spec_from_file_location(

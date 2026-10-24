@@ -92,6 +92,10 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from autoos_verdict import TRANSCRIPT_VERDICTS  # noqa: E402
 
 GATEWAY_ENV_VAR = "AUTOOS_OMNIROUTE_URL"
 KEY_ENV_VAR = "AUTOOS_OMNIROUTE_KEY"
@@ -201,7 +205,7 @@ _VERDICT_LINE_RE = re.compile(
 # then says something else (`VERDICT: pass, but the ref is never read`) is a
 # reviewer *talking*, and grading it as pass merges the very review that
 # raised a finding.
-_VERDICT_VALUES = ("pass", "fail-with-findings")
+_VERDICT_VALUES = TRANSCRIPT_VERDICTS
 
 # A fence opener, at markdown's own indentation: up to 3 spaces of leading
 # space and then three or more ` or ~. A closing fence is the opener's OWN

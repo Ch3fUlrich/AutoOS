@@ -8,6 +8,11 @@ import re
 from autoos_ready_guards import _Fences  # the one markdown-fence rule (P4a fix 1)
 
 VERDICTS = ("ACCEPT", "REJECT", "HOLD")
+# Transcript readers retain their historical words, but never own a second seat grammar.
+LEGACY_AGENT_VERDICTS = ("ready", "fix-first", "not-ready")
+LEGACY_CALL_VERDICTS = ("pass", "fail-with-findings")
+TRANSCRIPT_VERDICTS = (tuple(word.lower() for word in VERDICTS)
+                      + LEGACY_AGENT_VERDICTS + LEGACY_CALL_VERDICTS)
 READY_TOKEN = "accept"        # the record gate's yes, lower-cased like its word list
 UNCOUNTABLE_TOKEN = "HOLD"    # a stated HOLD is honest, and reviews nothing
 
@@ -109,7 +114,11 @@ def parse_verdict(text):
     # A `>` blockquote is quoted material the same way (seat qwen d15v r3).
     own = [ln for ln in lines
            if not fences.feed(ln) and not _fold_invisible(ln).lstrip().startswith(">")]
-    found = [ln for ln in map(_normalise, own) if _VERDICT_RE.match(ln)]
+    # The harness can echo the prompt's grammar. It is a template, not a second
+    # decision; still reject two actual decisions and malformed non-template lines.
+    template = "VERDICT: " + "|".join(VERDICTS)
+    found = [ln for ln in map(_normalise, own) if _VERDICT_RE.match(ln)
+             and not (ln.upper() == template or ln.upper().startswith(template + " "))]
     if not found:
         return invalid("no verdict line in the answer: %s" % _normalise(lines[0])[:60])
     if len(found) > 1:
@@ -140,9 +149,6 @@ def parse_verdict(text):
     return out
 
 
-_VERDICT_RE = re.compile(r"(?i)^verdict:(?P<rest>.*)$")
-
-
 def seat_prompt(angle, criteria, base_line):
     """The review seat's brief: its angle, the criteria verbatim, the answer grammar.
 
@@ -154,7 +160,7 @@ def seat_prompt(angle, criteria, base_line):
     lines = ["You are an independent review seat. Your angle: %s." % angle,
              "Review criteria, verbatim:", criteria, "",
              "Answer with your verdict on the FIRST line of your reply, exactly:",
-             "  VERDICT: ACCEPT|REJECT|HOLD — that word alone, findings underneath.",
+             "  VERDICT: " + "|".join(VERDICTS) + " — that word alone, findings underneath.",
              "REJECT only for a finding of this severity: a secret or a path outside the"
              " sandbox in the change; a stamp mismatch, the sandbox base not what this"
              " prompt quoted; the change not visible to you; a crash where a clean refusal"

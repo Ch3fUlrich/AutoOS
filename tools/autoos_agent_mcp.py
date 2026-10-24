@@ -99,6 +99,7 @@ sys.path.insert(0, TOOLS_DIR)
 import autoos_clients as clients  # noqa: E402
 import autoos_recovery as recovery  # noqa: E402
 import autoos_report as report_parser  # noqa: E402
+from autoos_verdict import TRANSCRIPT_VERDICTS  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 from registry import resolve_leg, unavailable_now  # noqa: E402
 
@@ -1557,7 +1558,7 @@ _VERDICT_LINE_RE = re.compile(
 # then says something else (`VERDICT: ready, but the ref snapshot is never read`)
 # is a reviewer *talking*, and grading it as `ready` merges the very review that
 # said fix-first.
-_VERDICT_WORDS = ("ready", "fix-first", "not-ready")
+_VERDICT_WORDS = TRANSCRIPT_VERDICTS
 
 # The verdict scan reads the transcript up to a bound — a reviewer's verdict can
 # sit a hundred KB before the closing noise, so a tail is not the deliverable.

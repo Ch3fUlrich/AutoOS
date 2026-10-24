@@ -47,6 +47,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -667,6 +668,34 @@ class ReviewCallTests(unittest.TestCase):
 
 
 class VerdictParseTests(unittest.TestCase):
+    def test_seat_words_survive_harness_and_prompt_echo_in_both_readers(self):
+        sys.path.insert(0, str(TOOLS))
+        import autoos_agent_mcp as agent_mcp
+        harness = "\n".join(("route: review", "run-id: sample", "sandbox: isolated",
+                              "model: seat", "notice: starting", "client: ready",
+                              "mode: review", "status: running", "answer:"))
+        for reader in (review_call.review_verdict, agent_mcp.review_verdict):
+            for word in ("ACCEPT", "REJECT", "HOLD"):
+                with self.subTest(reader=reader.__module__, word=word):
+                    text = (harness + "\nVERDICT: ACCEPT|REJECT|HOLD\nVERDICT: "
+                            + word + "\nFindings: reviewed the change.\nstatus: ended\n")
+                    expected = word if reader is agent_mcp.review_verdict else word.lower()
+                    self.assertEqual(expected, reader(text))
+
+    def test_review_run_record_keeps_accept_and_reject_instead_of_no_verdict(self):
+        sys.path.insert(0, str(TOOLS))
+        import autoos_agent_mcp as agent_mcp
+        for word in ("ACCEPT", "REJECT"):
+            with self.subTest(word=word), mock.patch.object(
+                    agent_mcp, "_read_json", side_effect=lambda path:
+                    {"rc": 0} if path.endswith("exit.json") else {}), mock.patch.object(
+                    agent_mcp, "read_kill_record", return_value={"mode": "review"}), mock.patch.object(
+                    agent_mcp, "_stdout_channel", return_value={}), mock.patch.object(
+                    agent_mcp, "_read_tail", return_value="route: review\nVERDICT: " + word + "\nFindings.\n"):
+                result = agent_mcp._state("sample-review")
+                self.assertEqual("completed", result["state"])
+                self.assertNotEqual("no-verdict", result["detail"])
+
     """verdict_line() called DIRECTLY on the loaded module: the tolerant
     D-337 parse (copied from tools/autoos_agent_mcp.py's review_verdict /
     _verdict_value), no gateway, no subprocess.
