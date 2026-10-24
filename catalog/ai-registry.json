@@ -131,12 +131,18 @@
       "id": "gpt-6.1-sol",
       "family": "openai",
       "context_advertised": 500000,
-      "context_usable": { "source": "default", "tokens": 475000 },
+      "context_usable": {
+        "source": "default",
+        "tokens": 475000
+      },
       "output_max": 128000,
       "reasoning": true,
       "effort_ladder": [],
       "tool_calls": "unproven",
-      "capabilities": { "text": "proven", "image_in": "unproven" },
+      "capabilities": {
+        "text": "proven",
+        "image_in": "unproven"
+      },
       "price_in": 0,
       "price_out": 0
     },
@@ -1062,22 +1068,6 @@
       "price_in": 0,
       "price_out": 0,
       "reasoning": false,
-      "tool_calls": "unproven"
-    },
-    "openai/gpt-6-sol": {
-      "$comment": "FAIK 2026-10-07 (operator): freeaiapikey credit-pool leg, live 200 ack probe 2026-10-07 (16-token chat, usage counted). Context 128000 from the live catalog row. Per-token prices unsourced (price 0.0 = no price on file) so credit legs stay gated until priced. output_max 32768 is the registry's conservative unknown. tool_calls unproven (ack only, no tool-call trial yet). Operator: usable within the $6 grant.",
-      "context_advertised": 128000,
-      "context_usable": {
-        "source": "default",
-        "tokens": 64000
-      },
-      "effort_ladder": [],
-      "family": "openai",
-      "id": "openai/gpt-6-sol",
-      "output_max": 32768,
-      "price_in": 0.0,
-      "price_out": 0.0,
-      "reasoning": true,
       "tool_calls": "unproven"
     },
     "openai/gpt-oss-120b": {
@@ -2981,6 +2971,14 @@
       },
       {
         "client": "opencode",
+        "model": "omniroute/cx-gpt-6.1-sol",
+        "family": "openai",
+        "leg": "cx/gpt-6.1-sol",
+        "paid": false,
+        "source": "operator D-2148"
+      },
+      {
+        "client": "opencode",
         "model": "opencode/deepseek-v4.1-flash",
         "family": "deepseek",
         "leg": "opencode-zen/deepseek-v4.1-flash",
@@ -3158,6 +3156,14 @@
       ],
       "R2": [
         {
+          "client": "opencode",
+          "model": "omniroute/cx-gpt-6.1-sol",
+          "family": "openai",
+          "leg": "cx/gpt-6.1-sol",
+          "paid": false,
+          "source": "operator D-2148"
+        },
+        {
           "client": "qoder",
           "model": "qwen3.8-max",
           "available": false,
@@ -3173,7 +3179,7 @@
   },
   "providers": {
     "cx": {
-      "$comment": "AO-CX-GPT61-SOL: Codex subscription via OmniRoute cx. Gateway GET /api/models 2026-10-22: provider cx, gpt-6.1-sol available true, supportsVision true; separate effort ids gpt-6.1-sol-{low,medium,high,xhigh,max,ultra}. Live probe 2026-10-22 served gpt-6.1-sol, HTTP 200. Flat subscription, no per-token price. Conservative trains_on_prompts:true follows the existing cxa subscription row. D-2148: newest sol only; D-2038: one provider path and one family per row.",
+      "$comment": "AO-CX-GPT61-SOL: Codex subscription via OmniRoute cx. Gateway GET /api/models 2026-10-22: provider cx, gpt-6.1-sol available true, supportsVision true; separate effort ids gpt-6.1-sol-{low,medium,high,xhigh,max,ultra}. Live probe 2026-10-22 served gpt-6.1-sol, HTTP 200. Flat subscription, no per-token price. Conservative trains_on_prompts:true follows the existing cxa subscription row. D-2148: newest sol only; D-2038: one provider path and one family per row. Cheaper and smarter is operator-asserted (D-2148), not measured here. Separately served effort suffixes are allowed only for the current version. The codex client is the OmniRoute provider cx: client codex (clients.codex) sends every model to provider cx, and the newest-only policy (newest_only/current) lives in providers.cx.model_policy on this same entry.",
       "id": "cx",
       "api_base": null,
       "provider_data": null,
@@ -3182,7 +3188,12 @@
       "litellm_prefix": null,
       "tier": "subscription",
       "trains_on_prompts": true,
-      "available": true
+      "available": true,
+      "model_policy": {
+        "newest_only": true,
+        "current": "gpt-6.1-sol",
+        "source": "D-2148"
+      }
     },
     "SambaNova": {
       "$comment": [
@@ -3489,7 +3500,7 @@
       "trains_on_prompts": true
     },
     "freeaiapikey": {
-      "$comment": "FAIK 2026-10-07 (operator): freeaiapikey account holds $6 credit (operator-stated, per-token prices unsourced); gateway connection 'freeaiapikey/main' tested by operator, live 200 probes 2026-10-07 (freeaiapikey/anthropic/claude-sonnet-5, freeaiapikey/openai/gpt-6-sol). Tier credit with monthly_cap_usd 6 (refuse at 100% of the grant). Per-token prices are NOT on file, so credit_leg_priced() refuses legs fail-closed: legs stay gated (unavailable_legs) until priced, same stance as morph/deepinfra tails. trains_on_prompts null = UNVERIFIED; private_safe() fails closed, never a -clean leg. Gateway-served only (no litellm_env), like the other built-in connections.",
+      "$comment": "FAIK 2026-10-07 (operator): freeaiapikey account holds $6 credit (operator-stated, per-token prices unsourced); gateway connection 'freeaiapikey/main' tested by operator, live 200 probes 2026-10-07 (freeaiapikey/anthropic/claude-sonnet-5). Tier credit with monthly_cap_usd 6 (refuse at 100% of the grant). Per-token prices are NOT on file, so credit_leg_priced() refuses legs fail-closed: legs stay gated (unavailable_legs) until priced, same stance as morph/deepinfra tails. trains_on_prompts null = UNVERIFIED; private_safe() fails closed, never a -clean leg. Gateway-served only (no litellm_env), like the other built-in connections.",
       "api_base": null,
       "id": "freeaiapikey",
       "omniroute_id": "freeaiapikey",
@@ -4359,33 +4370,6 @@
         },
         "opencode-zen/deepseek-v4.1-flash": {
           "$comment": "Operator decision 2026-09-26: the tool-calling probe (tools/probe-toolcalls.py) got 402 payment required / 429 on this leg; marked available: false so the strict tool_calls filter and callers skip it.",
-          "available": false
-        }
-      }
-    },
-    "faik-gpt-6-sol": {
-      "$comment": "FAIK 2026-10-07 (operator): single for freeaiapikey/openai/gpt-6-sol (live 200 ack probe 2026-10-07). Operator: usable for implementation/review/research within the $6 grant. Per-token price unsourced so the leg stays gated (unavailable_legs, price reason) and the route renders omitted until priced - same stance as morph/deepinfra tails. opencode/zed only.",
-      "class": "credit",
-      "id": "faik-gpt-6-sol",
-      "legs": [
-        "freeaiapikey/openai/gpt-6-sol"
-      ],
-      "strategy": "priority",
-      "surfaces": {
-        "omniroute": {
-          "clients": [
-            "opencode",
-            "zed"
-          ],
-          "context": 128000,
-          "context_declared": "128k",
-          "display_name": "GPT-6 Sol via freeaiapikey (credit)",
-          "output": 32768
-        }
-      },
-      "unavailable_legs": {
-        "freeaiapikey/openai/gpt-6-sol": {
-          "$comment": "FAIK 2026-10-07: no per-token price on file (price 0.0); credit_leg_priced() refuses fail-closed. Lift by adding the measured price, then deleting this entry.",
           "available": false
         }
       }

@@ -1193,12 +1193,21 @@ class OpenRouterByokLegTests(unittest.TestCase):
         # $comment + provider $comment (no credits -> :free only), not a gate.
         # D657-D2 2026-10-08: l2-worker's chain is re-cut to probe-acked legs, so
         # the morph/deepinfra provenance gates left with the legs it no longer
-        # declares. The $comment-provenance rule is pinned on a gate that is still
-        # shipped: routes.faik-gpt-6-sol carries its price note.
-        gated = self.reg["routes"]["faik-gpt-6-sol"]["unavailable_legs"]
-        leg = "freeaiapikey/openai/gpt-6-sol"
-        self.assertIn(leg, gated)
-        self.assertIn("price", (gated[leg].get("$comment") or "").lower())
+        # declares. What the assertion below pins is the $comment-provenance rule:
+        # every gate that remains in the tree must say WHY it gates, so the
+        # provenance outlives whichever leg list happens to declare it next.
+        gates = [gate for route in self.reg['routes'].values()
+                 for gate in (route.get('unavailable_legs') or {}).values()]
+        self.assertTrue(all(gate.get('$comment') for gate in gates))
+
+    def test_the_provenance_comment_is_not_left_dangling(self):
+        # A3 (round 2): the comment above must read as finished English - a
+        # comment that trails off mid-clause leaves the next reader to guess
+        # what the rule is pinned on.
+        source = (ROOT / 'tests' / 'test_registry.py').read_text(encoding='utf-8')
+        self.assertIsNone(re.search(r'#.*\bis still\s*$', source, re.M),
+                          'a comment may not end mid-sentence (rewrite it to say '
+                          'what the $comment-provenance rule is pinned on)')
 
     def test_gated_leg_is_not_servable_in_any_route_listing_it(self):
         # TORDER-OR: paid leg removed from every route (except t1-clean kept
@@ -4022,6 +4031,12 @@ class ComboCrossProviderTests(unittest.TestCase):
         self.assertEqual(problems(self.reg), [])
         # the scan bites: a gate whose prose loses its reason is a defect
         mutated = copy.deepcopy(self.reg)
+        # Seed a priced-off credit gate: the production catalog may have none.
+        credit_leg = next(leg for route in mutated['routes'].values()
+                          for leg in route.get('legs', []) if leg_tier(mutated, leg) == 'credit')
+        mutated['routes']['synthetic-credit-gate'] = {
+            'legs': [credit_leg], 'unavailable_legs': {
+                credit_leg: {'available': False, '$comment': 'price unavailable'}}}
         for route in mutated["routes"].values():
             for entry in (route.get("unavailable_legs") or {}).values():
                 entry["$comment"] = "gated"

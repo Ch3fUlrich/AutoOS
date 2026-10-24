@@ -1,5 +1,7 @@
 # Changelog
 
+- D-2148: enforce registry-owned newest-only Codex IDs; add read-only weekly bump proposals and align MCP availability. Remove superseded Sol credit route.
+  - CODEX-NEWEST-ONLY (D-2488): keep the Google review seat first and cx carried, not first (router option B), preserving the default cross-family seat; D-2148 writer order still names cx first.
 - SEAT-FREE-OPENCODE (D-2449/D-2450/D-2459): declare DeepSeek and GLM Zen free seats and direct MiMo flash/pro pins; reject ambiguous MiMo combo pins and served-model evidence, and repair the fallback pin.
 
 All notable changes to AutoOS are recorded here, newest first.

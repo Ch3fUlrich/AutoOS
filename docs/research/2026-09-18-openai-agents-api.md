@@ -117,7 +117,7 @@ model tokens, OpenAI tools, and container time for hosted sandboxes [S 3,8].
 | Model, per 1M tokens (standard, short context) | Input | Cached input | Cache write | Output | Tag |
 |---|---|---|---|---|---|
 | gpt-6-astra | $10.00 | $1.00 | $12.50 | $50.00 | [S 14] |
-| gpt-5.6-sol (promo price until at least 2026-11-21) | $4.00 | $0.40 | $5.00 | $20.00 | [S 14,15] |
+| superseded Sol model (promo price until at least 2026-11-21) | $4.00 | $0.40 | $5.00 | $20.00 | [S 14,15] |
 | gpt-5.6-terra | $2.00 | $0.20 | $2.50 | $12.00 | [S 14] |
 | gpt-5.6-luna | $0.20 | $0.02 | $0.25 | $1.20 | [S 14] |
 
