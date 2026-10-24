@@ -4777,9 +4777,9 @@ def claude_plan_refusal(args, plan, env: dict | None = None, registry: dict | No
                 "and `list` prints the values a card may take)" % exc), None
     spends = []
     for value, source in pairs:
-        # No checked-in gateway definition establishes this alias's wire leg.
-        # Do not turn a missing price into a claim about Claude allowance.
-        if (source == "policy.writers.order" and value == "omniroute/deepseek-direct-flash"
+        # A policy alias without a declared leg has no registry price. Do not turn
+        # a missing price into a claim about Claude allowance.
+        if (source == "policy.writers.order" and value.startswith("omniroute/")
                 and not any(row.get("model") == value and row.get("leg")
                             for row in registry.get("policy", {}).get("writers", {}).get("order", []))):
             return ("pricing refusal: unverified policy alias %s has no declared leg; "

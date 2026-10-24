@@ -614,12 +614,18 @@ class WriterPolicyPickTests(unittest.TestCase):
             "opencode", "omniroute/cx-gpt-6.1-sol", self.registry,
             source="policy.writers.order", cfg={}), False)
 
+    def test_writer_policy_deepseek_row_prices_from_its_declared_leg(self):
+        # opencode.jsonc deepseek-direct-flash -> modelID deepseek/deepseek-flash
+        self.assertIs(self.agent.spawn_spends_claude(
+            "opencode", "omniroute/deepseek-direct-flash", self.registry,
+            source="policy.writers.order", cfg={}), False)
+
     def test_writer_policy_unverified_alias_pricing_refuses_honestly(self):
         agent = self.agent
         self.registry["policy"]["claude_budget"]["mode"] = "budget"
         plan = {"client": "opencode"}
         with mock.patch.object(agent, "plan_launch_models", return_value=[
-                ("omniroute/deepseek-direct-flash", "policy.writers.order")]), mock.patch.object(
+                ("omniroute/no-leg-alias", "policy.writers.order")]), mock.patch.object(
                 agent.resolver, "claude_allowed", return_value=(False, "held")):
             refusal, _ = agent.claude_plan_refusal(argparse.Namespace(), plan, {}, self.registry, {})
         self.assertIn("unverified policy alias", refusal)

@@ -3165,6 +3165,7 @@
           "client": "opencode",
           "model": "omniroute/deepseek-direct-flash",
           "family": "deepseek",
+          "leg": "deepseek/deepseek-flash",
           "source": "operator D-2148"
         },
         {
