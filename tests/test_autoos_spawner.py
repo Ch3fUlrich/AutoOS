@@ -570,6 +570,54 @@ def plan_of(*args, env=None):
     return r
 
 
+class WriterPolicyPickTests(unittest.TestCase):
+    def test_writer_policy_mapping(self):
+        agent = load_agent()
+        registry = agent.load_registry(str(ROOT / "catalog/ai-registry.json"))
+        rows = registry["policy"]["writers"]["order"]
+        self.assertEqual([agent.writer_launch_adapter(row, registry) for row in rows], [
+            ("opencode", "omniroute/cx-gpt-6.1-sol"),
+            ("opencode", "mimo/mimo-v2.6-flash"),
+            ("opencode", "omniroute/deepseek-direct-flash"),
+            ("qoder", "qwen3.8-flash")])
+        self.assertIsNone(agent.writer_launch_adapter({"client": "unknown", "model": "x"}, registry))
+
+    def test_writer_policy_default_dry_run(self):
+        result = plan_of("implement a small fix")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("omniroute/cx-gpt-6.1-sol", result.stdout)
+
+    def test_writer_policy_cooldown_records_skip(self):
+        agent = load_agent()
+        until = (datetime.datetime.now(datetime.timezone.utc)
+                 + datetime.timedelta(hours=1)).isoformat()
+        args = argparse.Namespace(
+            client="opencode", default_client=True, tier=None, card=None,
+            task="implement a fix", free=False, model=None, clean=False,
+            allow_training=False, max_depth=None, title=None, isolate=False,
+            auto=True, lean=False, joinable=False)
+        cfg = {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
+               "providers": {"omniroute": {"models": {"l2-worker": {}}}}}
+        plan = agent.build_plan(args, cfg, provider_cooldown={
+            "cx": {"unavailable_until": until}})
+        decision = plan["writer_decision"]
+        self.assertEqual((decision["client"], decision["model"]),
+                         ("opencode", "mimo/mimo-v2.6-flash"))
+        self.assertEqual(decision["writer_skips"][0]["entry"]["model"],
+                         "omniroute/cx-gpt-6.1-sol")
+        self.assertIn("unavailable", decision["writer_skips"][0]["reason"])
+        self.assertIn("mimo/mimo-v2.6-flash", plan["cmd"])
+        self.assertEqual(plan["writer_skips"], decision["writer_skips"])
+        self.assertEqual(agent.plan_launch_models(plan, args, cfg),
+                         [("mimo/mimo-v2.6-flash", "policy.writers.order")])
+
+    def test_writer_policy_model_pin_unaffected(self):
+        result = plan_of("--model", "omniroute/l2-worker", "implement a fix")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("omniroute/l2-worker", result.stdout)
+        self.assertNotIn("omniroute/cx-gpt-6.1-sol", result.stdout)
+
+
 class InProcessEquivalenceTests(unittest.TestCase):
     """FASTLANE guard (2026-10-14): run_agent's in-process path must print
     exactly what the old subprocess path printed. Each case runs both ways;
@@ -22066,7 +22114,7 @@ class FreeOnlyComboTests(unittest.TestCase):
         out = self._route_line("--card",
                                "complexity=hard,ctx=128k,privacy=public,"
                                "role=implement,spend=free-ok", "t")
-        self.assertRegex(out, r"route: l1-orchestrator reason=")
+        self.assertRegex(out, r"route: cx-gpt-6.1-sol reason=policy.writers.order")
         self.assertNotIn("free-only", out)
 
     def test_the_build_plan_route_combo_is_the_free_only_one_too(self):

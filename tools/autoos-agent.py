@@ -324,7 +324,7 @@ import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
 import autoos_verdict as seat_verdict  # noqa: E402  (AO-SEAT-VERDICT-GRAMMAR)
 import autoos_writer_ledger as writer_ledger  # noqa: E402  (AO-LEDGER-WRITE P6)
-from registry import private_safe, registry_ref, resolve_leg, unavailable_now  # noqa: E402
+from registry import private_safe, registry_ref, resolve_leg, unavailable_now, rank_candidates  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "l1-orchestrator", 2: "l2-worker", 3: "t3-reviewer"}
@@ -4656,6 +4656,10 @@ def plan_launch_models(plan, args=None, cfg: dict | None = None,
     source, so a default compiled into the adapter is still read by name; every
     other value is priced as a caller-named model, the strict reading.
     """
+    decision = (plan or {}).get("writer_decision")
+    if decision:
+        # The explicit policy argv overrides the tier-agent's configured default.
+        return [(decision["model"], "policy.writers.order")]
     client = (plan or {}).get("client") or getattr(args, "client", None) or ""
     eff, eff_source = effective_spawn_model(
         client, getattr(args, "model", None), getattr(args, "card", None),
@@ -8489,6 +8493,50 @@ def model_mismatch_refusal(plan) -> str | None:
     return model_mismatch_text(requested, launched)
 
 
+def writer_launch_adapter(entry, registry):
+    """Translate a policy identity into its supported spawner launch path."""
+    name, model = entry["client"], entry["model"]
+    if name in clients.CLIENTS:
+        return name, model
+    if any(provider.get("model_prefix") == name
+           for provider in registry.get("providers", {}).values()):
+        return "opencode", name + "/" + model
+    return None
+
+
+def pick_policy_writer(provider_cooldown=None):
+    """Pick once using the resolver's live availability, preserving skipped rows."""
+    now = datetime.datetime.now(datetime.timezone.utc)
+    registry = load_live_registry()
+    if provider_cooldown:
+        registry = apply_provider_state(registry, {"providers": provider_cooldown}, now)
+    rows = registry.get("policy", {}).get("writers", {}).get("order", [])
+    skips = []
+    for entry in rank_candidates("writer", rows, registry):
+        launch = writer_launch_adapter(entry, registry)
+        reason = None
+        if launch is None:
+            reason = "no launch adapter for " + entry["client"]
+        else:
+            client, model = launch
+            client_entry = registry.get("clients", {}).get(client, {})
+            if unavailable_now(client_entry, now):
+                reason = resolver._unavailable_reason(client_entry, client)
+            leg = model.removeprefix("omniroute/")
+            for provider_id, provider in registry.get("providers", {}).items():
+                prefix = provider.get("model_prefix") or provider_id
+                if leg.startswith(prefix + "/") or leg.startswith(prefix + "-"):
+                    provider_reason, _ = resolver._leg_availability(
+                        leg, provider_id, registry.get("unavailable_legs", {}), registry, now)
+                    reason = reason or provider_reason
+                    break
+            if reason is None:
+                return {"entry": entry, "client": client, "model": model,
+                        "writer_skips": skips}
+        skips.append({"entry": entry, "reason": reason})
+    raise ValueError("no available policy writer: %s" % skips)
+
+
 def build_plan(args, cfg: dict, exclude_routes: set | None = None,
                sandbox: dict | None = None,
                provider_cooldown: dict | None = None,
@@ -8506,6 +8554,17 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     """
     client = clients.CLIENTS[args.client]
     route = resolve_route(args, cfg, client, exclude_routes, provider_cooldown, fence)
+    writer_decision = None
+    if (getattr(args, "default_client", False) and not args.model
+            and not args.free and args.tier is None and not route["review"]
+            and not route.get("read_only")):
+        writer_decision = pick_policy_writer(provider_cooldown)
+        client = clients.CLIENTS[writer_decision["client"]]
+        picked = writer_decision["model"]
+        if fence_blocks_model(picked, load_live_registry(), fence):
+            raise FamilyFenceRefused(fence_refusal(fence))
+        route = dict(route, model=picked, combo=model_route_id(picked),
+                     reason="policy.writers.order", writer_decision=writer_decision)
     if not client.gateway:
         # FAMILYFENCE-3 N4: an own-account run answers on the client's OWN model -
         # `build_command` hands it the pin or the registry default and never names a
@@ -8599,7 +8658,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # the checks above acted on is the one they were read from.
         level = clients.seat_level(client, level, isolate=bool(args.isolate),
                                    read_only=bool(route.get("read_only")))
-        model = args.model if not client.gateway else None
+        model = (writer_decision["model"] if writer_decision else
+                 args.model if not client.gateway else None)
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         # KEYDENY3g item 3: a leaf that runs on a CLI with its own spawn gate has
         # that gate denied in argv; opencode's gate is the overlay below.
@@ -8810,6 +8870,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     _free_model = getattr(args, "free_model", None)
     requested_model = args.model or (_free_model if args.free and _free_model else None) or ""
     return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
+            "writer_decision": writer_decision,
+            "writer_skips": writer_decision["writer_skips"] if writer_decision else [],
             # FAMILYFENCE-b: the ask and its witness, kept beside the ask so a
             # reader never has to re-derive one from the other. `client_session_id`
             # is the join key into the client's own transcript; `model_source` is
@@ -14066,6 +14128,7 @@ def cmd_run(args, cfg: dict) -> int:
             registry = load_registry(REGISTRY_PATH)
         except (OSError, ValueError) as exc:
             return refuse("cannot load client capabilities: %s" % exc)
+    args.default_client = args.client is None
     if args.client is None:
         args.client = choose_client(required, registry)
         if args.client is None:
