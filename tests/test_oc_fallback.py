@@ -78,7 +78,7 @@ class OcFallbackTests(unittest.TestCase):
             "switch": True,
             "client": "opencode",
             "model": "mimo-v2.6-flash",
-            "opencode_model": "omniroute/mimo-v2.6-flash",
+            "opencode_model": "mimo/mimo-v2.6-flash",
             "free": False,
             "url": "http://127.0.0.1:4096",
         }

@@ -259,7 +259,11 @@ class WriteTests(SandboxCase):
             self.assertEqual(got, want, gateway)
             for mid in want:
                 entry = oc["providers"][gateway]["models"][mid]
-                self.assertEqual(entry["modelID"], mid)
+                # modelID is the id the gateway actually serves: the route id
+                # itself, or its gateway_model_id override when the surface
+                # declares one (D-2472).
+                served = model(doc, mid).get("gateway_model_id") or mid
+                self.assertEqual(entry["modelID"], served)
                 self.assertEqual(entry["name"], model(doc, mid)["name"])
 
     def test_variants_blocks_are_generated_from_effort_ladder(self):

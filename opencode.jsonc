@@ -463,6 +463,22 @@
     }
   },
   "providers": {
+    "opencode": {
+      "models": {
+        "deepseek-v4.1-flash-free": { "modelID": "deepseek-v4.1-flash-free" },
+        "glm-5.3-flash-free": { "modelID": "glm-5.3-flash-free" }
+      }
+    },
+    "mimo": {
+      "package": "@opencode/ai/providers/openai-compatible",
+      "name": "MiMo direct gateway legs (D-2459)",
+      "env": ["AUTOOS_OMNIROUTE_KEY"],
+      "settings": { "baseURL": "http://127.0.0.1:20128/v1" },
+      "models": {
+        "mimo-v2.6-flash": { "modelID": "mimo/mimo-v2.6-flash" },
+        "mimo-v2.6-pro": { "modelID": "mimo/mimo-v2.6-pro" }
+      }
+    },
     "omniroute": {
       "name": "AutoOS OmniRoute gateway",
       "env": ["AUTOOS_OMNIROUTE_KEY"],
@@ -545,6 +561,12 @@
             { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } }
           ]
         },
+        // D-2459/D-2461: the two mimo entries below keep their key but serve
+        // the DIRECT mimo leg - they declare the SERVED gateway id
+        // (mimo/mimo-v2.6-flash / mimo/mimo-v2.6-pro) as their modelID.
+        // routes.<id>.surfaces.omniroute.gateway_model_id in
+        // catalog/ai-registry.json is the source; this region regenerates from
+        // it, so edit the registry, not these lines.
         // AUTOOS-MANAGED-START omniroute
         "l1-orchestrator": {
           "modelID": "l1-orchestrator",
@@ -732,12 +754,12 @@
           ]
         },
         "mimo-v2.6-flash": {
-          "modelID": "mimo-v2.6-flash",
+          "modelID": "mimo/mimo-v2.6-flash",
           "name": "Xiaomi MiMo v2.6 Flash · 1M",
           "limit": { "context": 1048576, "output": 65536 }
         },
         "mimo-v2.6-pro": {
-          "modelID": "mimo-v2.6-pro",
+          "modelID": "mimo/mimo-v2.6-pro",
           "name": "Xiaomi MiMo v2.6 Pro · 1M",
           "limit": { "context": 1048576, "output": 65536 }
         },
