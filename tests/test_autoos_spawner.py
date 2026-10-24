@@ -105,12 +105,38 @@ def allow_in_place(case, agent):
 _WORKERS_TMP = None
 _MEMINFO_TMP = None
 _HOST_PINS = None
+_WRITER_PROBE = None
+_CLIENT_BIN = None
+_CLIENT_PATH_PATCH = None
+
+
+def writer_fixture_state():
+    """D-2148: unrelated tests have one writer, regardless of host installs."""
+    return {name: {"installed": name == "opencode", "signed_in": True,
+                   "reason": "test fixture"} for name in clients.CLIENTS}
 
 
 def setUpModule():
-    global _WORKERS_TMP, _MEMINFO_TMP, _HOST_PINS
+    global _WORKERS_TMP, _MEMINFO_TMP, _HOST_PINS, _WRITER_PROBE, _CLIENT_BIN
+    global _CLIENT_PATH_PATCH
     _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-workers-test-")
     os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
+    # Patch the shared probe (fresh agents and MCP's cached agent both use it).
+    # Policy tests can still replace the probe or pass an explicit snapshot.
+    import autoos_measure
+    _WRITER_PROBE = mock.patch.object(autoos_measure, "client_state",
+                                      side_effect=lambda *a, **k: writer_fixture_state())
+    _WRITER_PROBE.start()
+    # Subprocess CLI tests cannot inherit mocks. Shadow only opencode; it has
+    # no sign-in probe, so an inert executable supplies the same availability.
+    _CLIENT_BIN = os.path.join(_WORKERS_TMP, "bin")
+    os.mkdir(_CLIENT_BIN)
+    stub = Path(_CLIENT_BIN, "opencode")
+    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    stub.chmod(0o755)
+    _CLIENT_PATH_PATCH = mock.patch.dict(os.environ, {
+        "PATH": _CLIENT_BIN + os.pathsep + os.environ.get("PATH", os.defpath)})
+    _CLIENT_PATH_PATCH.start()
     # HOSTADMISSION reads the host's MemAvailable, and a runner with less free
     # memory than the floor would refuse every real-launch test in this file for
     # a reason none of them is about. Pin the source to a healthy fake; the
@@ -137,6 +163,10 @@ def setUpModule():
 
 
 def tearDownModule():
+    if _WRITER_PROBE is not None:
+        _WRITER_PROBE.stop()
+    if _CLIENT_PATH_PATCH is not None:
+        _CLIENT_PATH_PATCH.stop()
     # `uninstall` first: it puts back what `install` found, which includes the two
     # names this module set before it, so the pops below have to come after it or
     # it would put them back and leave the next test file pointing at this dir.
@@ -159,6 +189,7 @@ def pinned_env(**extra):
     fixtures itself; this is the one place that says what they are (AO-ADMISSION-2).
     """
     env = dict(_host_env_pins())
+    env["PATH"] = _CLIENT_BIN + os.pathsep + os.defpath
     env.update(extra)
     return env
 
@@ -195,6 +226,8 @@ def clean_env(**extra):
     dropped = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_SESSION_TAG")
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k not in dropped}
+    if _CLIENT_BIN is not None:
+        env["PATH"] = _CLIENT_BIN + os.pathsep + env.get("PATH", os.defpath)
     env.update(extra)
     return env
 
@@ -1161,14 +1194,23 @@ class ClientCapabilityTests(unittest.TestCase):
         self.assertIn("qodercli", r.stdout)
 
     def test_an_isolated_run_without_a_client_auto_picks_a_capable_one(self):
-        r = plan_of("--isolate", "edit README.md")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("would run: opencode", r.stdout)
+        # No installed writer is a refusal, not an implicit opencode default.
+        runner = _runner_agent()
+        absent = {name: {"installed": False, "signed_in": None}
+                  for name in clients.CLIENTS}
+        with mock.patch.object(runner, "writer_client_state", return_value=absent):
+            r = plan_of("--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no available policy writer", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertNotIn("would run:", r.stdout)
 
     def test_the_no_client_default_is_still_opencode(self):
         r = plan_of("t")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("would run: opencode", r.stdout)
+        self.assertIn("omniroute/cx-gpt-6.1-sol", r.stdout)
+        self.assertIn("policy.writers.order", r.stdout)
 
 
 class ReviewFindingTests(unittest.TestCase):
