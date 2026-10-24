@@ -132,7 +132,8 @@ untested and use `--dry-run`.
 
 [MIT](LICENSE). Vendored third-party code under `third_party/` keeps its own
 licence.
-# Qoder review seats
+
+## Qoder review seats
 
 `python3 tools/qoder-seat.py --prompt-file brief.txt --out-dir seat --item example-item --head example-head`
 runs only the qodercli client, never a gateway. The prompt's first line must be
@@ -143,7 +144,11 @@ and `--qodercli` (resolved executable, otherwise PATH/runtime installation).
 Windows batch wrappers are refused unless a sibling executable exists: direct
 execution preserves the empty `--tools ""` argument without shell re-quoting.
 Evidence records argv, persistence probe status, usage, and client fields;
-review bytes are unchanged UTF-8. A missing final verdict refuses publication;
-unknown verdict vocabulary is marked `verdict_parse: unknown`.
-Both files publish by directory rename. Move a reported `.partial-*` directory
-or incomplete previous seat aside before retrying; existing output is never overwritten.
+review bytes are unchanged UTF-8. Publication refuses (exit 3) on a missing
+final verdict, an unknown verdict word, or a truncated reply (`stop_reason`
+other than `end_turn`/`stop`), with the verbatim reason in the non-published
+failure note; a failed session-persistence probe or a leftover `.partial-*`
+refuses before the client runs, and a client still alive 10 s after the kill
+fails without writing evidence. Both files publish by directory rename. Move a
+reported `.partial-*` directory or incomplete previous seat aside before
+retrying; existing output is never overwritten.

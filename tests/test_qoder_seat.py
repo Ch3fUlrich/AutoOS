@@ -30,7 +30,9 @@ Run from the repo root (no pytest needed):
 
     python3 tests/test_qoder_seat.py
 """
+import contextlib
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -126,6 +128,10 @@ def main(argv):
     if chosen == "nonzero":
         sys.stderr.write("Bearer " + "x" * 40)
         return 7
+    if chosen == "stderr-secrets":
+        sys.stderr.write("login to https://alice:hunter2@example.invalid failed; "
+                         "api_key=sk-or-v1-0123456789abcdef; Authorization: Bearer tok-abc123def456\n")
+        return 7
     if chosen in ("empty", "noise", "truncated"):
         sys.stdout.write({"empty": "", "noise": "not json", "truncated": '{"result":'}[chosen])
         return 0
@@ -146,6 +152,12 @@ def main(argv):
         result = "verdict: pass"
     if chosen == "unknown-verdict":
         result = "VERDICT: MAYBE"
+    if chosen == "gaming-echo":
+        result = ("Reviewed the change.\nTEST-GAMING: no\n"
+                  "echoed brief example above; own answer below\n"
+                  "TEST-GAMING: yes\nVERDICT: ACCEPT")
+    if chosen == "surrogate":
+        result = "Reviewed the change. \ud800\nVERDICT: ACCEPT"
     kind = "result"
     is_error = False
     models = {"efficient": {"inputTokens": 3, "outputTokens": 7}}
@@ -159,15 +171,23 @@ def main(argv):
         models = {"efficient": {}, "qwen3.8-flash": {}}
     elif chosen == "no-gaming":
         result = RESULT_NO_GAMING
+    # The canned stop_reason, so a truncation refusal can be driven end to end:
+    # "stop"/"length" are truncated replies, "stopped" is the allowed "stop".
+    stop_reason = {"stop": "max_tokens", "length": "length",
+                   "stopped": "stop"}.get(chosen, "end_turn")
+    usage = {"input_tokens": 10, "output_tokens": 20,
+             "request_id": "req-fake-0001"}
+    if chosen == "no-request-id":
+        # A client that carries no request id anywhere: the field must stay null.
+        usage = {"input_tokens": 10, "output_tokens": 20}
     payload = {
         "type": kind,
         "subtype": "success",
         "is_error": is_error,
         "num_turns": 1,
         "result": result,
-        "stop_reason": "max_tokens" if chosen == "stop" else "end_turn",
-        "usage": {"input_tokens": 10, "output_tokens": 20,
-                  "request_id": "req-fake-0001"},
+        "stop_reason": stop_reason,
+        "usage": usage,
         "modelUsage": models,
         "session_id": "sess-fake-0001",
         "uuid": "uuid-fake-0001",
@@ -175,7 +195,6 @@ def main(argv):
     sys.stdout.write(NOISE + "\n")
     sys.stdout.write(json.dumps(payload) + "\n")
     return 0
-
 
 
 if __name__ == "__main__":
@@ -387,8 +406,6 @@ class QoderSeatCase(unittest.TestCase):
         self.assertNotIn("--no-session-persistence", self.record()["argv"])
         self.assertEqual(self.evidence(out)["session_id"], "sess-fake-0001")
 
-
-
     def test_failure_shapes_exact_codes(self):
         for mode, code in (("nonzero", 1), ("empty", 3), ("noise", 3), ("truncated", 3), ("missing-verdict", 3), ("nonfinal-verdict", 3)):
             with self.subTest(mode=mode):
@@ -406,13 +423,40 @@ class QoderSeatCase(unittest.TestCase):
         ev = self.evidence(out)
         self.assertEqual(ev["usage"], {"input_tokens": 10, "output_tokens": 20, "request_id": "req-fake-0001"})
         self.assertEqual(ev["modelUsage"], {"efficient": {"inputTokens": 3, "outputTokens": 7}})
-        self.assertEqual(ev["argv"][-len(EXPECTED_ARGV):], EXPECTED_ARGV)
+        # The FULL argv, not a tail of it: spawn prefix and every flag, verbatim.
+        self.assertEqual(ev["argv"], [sys.executable, str(self.client)] + EXPECTED_ARGV)
         self.assertIs(ev["no_session_persistence"], True)
         self.assertNotIn(PROMPT, json.dumps(ev))
         self.assertNotIn("x" * 40, json.dumps(ev))
 
-    def test_verbatim_result_stop_and_verdict_vocabulary(self):
-        for mode in ("crlf", "stop", "lower-verdict", "unknown-verdict"):
+    def test_evidence_keys_and_missing_client_fields_are_pinned(self):
+        """The evidence contract: the exact key set, fallbacks, null-not-defaulted."""
+        out, argv = self.seat()
+        proc = self.run_tool(argv)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        ev = self.evidence(out)
+        self.assertEqual(sorted(ev), sorted([
+            "argv", "client", "created", "finish_reason", "head", "item",
+            "modelUsage", "no_session_persistence", "num_turns", "prompt_bytes",
+            "prompt_sha256", "request_id", "requested_model", "review_bytes",
+            "review_sha256", "secs", "served_model", "session_id", "subtype",
+            "test_gaming", "usage", "verdict_line", "verdict_parse",
+        ]))
+        # Verbatim client fields: finish_reason is the client's own stop_reason.
+        self.assertEqual(ev["finish_reason"], "end_turn")
+        # The fake's top level carries no request_id, so this proves the fallback
+        # to the usage envelope rather than a top-level read.
+        self.assertEqual(ev["request_id"], "req-fake-0001")
+        # A field absent from the client's reply stays null, never defaulted.
+        self.set_mode("no-request-id")
+        out2, argv2 = self.seat("seat-no-rid")
+        proc2 = self.run_tool(argv2)
+        self.assertEqual(proc2.returncode, 0, proc2.stderr)
+        self.assertIsNone(self.evidence(out2)["request_id"],
+                          "a missing client field must stay null, not be invented")
+
+    def test_verbatim_result_crlf_and_known_verdict_vocabulary(self):
+        for mode in ("crlf", "lower-verdict"):
             with self.subTest(mode=mode):
                 self.set_mode(mode)
                 out, argv = self.seat(mode)
@@ -421,20 +465,155 @@ class QoderSeatCase(unittest.TestCase):
                 ev = self.evidence(out)
                 if mode == "crlf":
                     self.assertEqual((out / "review.txt").read_bytes(), b"Review\r\nTEST-GAMING: no\rVERDICT: ACCEPT")
-                if mode == "stop":
-                    self.assertEqual(ev["finish_reason"], "max_tokens")
-                if mode == "unknown-verdict":
-                    self.assertEqual(ev["verdict_parse"], "unknown")
                 if mode == "lower-verdict":
                     self.assertEqual(ev["verdict_line"], "verdict: pass")
 
-    def test_probe_failure_warns_and_records_null(self):
-        self.set_mode("help-fail")
+    def test_a_truncated_stop_reason_refuses_with_the_verbatim_reason(self):
+        """A truncated reply never publishes: non-zero, reason in the note (r3)."""
+        for mode, reason, code in (("stop", "max_tokens", 3), ("length", "length", 3),
+                                   ("stopped", "stop", 0)):
+            with self.subTest(mode=mode):
+                self.set_mode(mode)
+                out, argv = self.seat("seat-" + mode)
+                proc = self.run_tool(argv)
+                self.assertEqual(proc.returncode, code,
+                                 "%s: rc=%d stderr=%s" % (mode, proc.returncode, proc.stderr))
+                if code == 0:
+                    # "end_turn" and "stop" are the two completed reasons.
+                    self.assertEqual(self.evidence(out)["finish_reason"], "stop")
+                    continue
+                # The refusal note carries the client's own reason, verbatim,
+                # and no seat directory is published.
+                self.assertIn(reason, proc.stderr)
+                self.assert_no_seat(out)
+                self.assertFalse(out.exists(),
+                                 "a truncated reply must publish no seat directory")
+
+    def test_an_unknown_verdict_word_refuses_with_the_verbatim_line(self):
+        """An unknown verdict word never publishes: non-zero, line in the note (r3)."""
+        self.set_mode("unknown-verdict")
+        out, argv = self.seat()
+        proc = self.run_tool(argv)
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertIn("VERDICT: MAYBE", proc.stderr,
+                      "the refusal note must quote the client's verdict line verbatim")
+        self.assert_no_seat(out)
+        self.assertFalse(out.exists(),
+                         "an unknown verdict word must publish no seat directory")
+
+    def test_the_last_test_gaming_line_is_the_seats_own(self):
+        """An echoed brief's TEST-GAMING example must not shadow the seat's own."""
+        self.set_mode("gaming-echo")
         out, argv = self.seat()
         proc = self.run_tool(argv)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertIn("warning", proc.stderr)
-        self.assertIsNone(self.evidence(out)["no_session_persistence"])
+        self.assertEqual(self.evidence(out)["test_gaming"], "yes",
+                         "the LAST TEST-GAMING line is the seat's own answer; an "
+                         "earlier line echoed from the brief must not win (a later "
+                         "yes is the fail-closed direction)")
+
+    def test_a_result_that_is_not_utf8_refuses_without_a_traceback(self):
+        """A lone surrogate in the result is a clean refusal, not a crash."""
+        self.set_mode("surrogate")
+        out, argv = self.seat()
+        proc = self.run_tool(argv)
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr,
+                         "an unusable reply must refuse cleanly, not crash")
+        self.assert_no_seat(out)
+        self.assertFalse(out.exists())
+
+    def test_client_secrets_on_a_failed_run_are_redacted_in_the_note(self):
+        """URL userinfo, api_key= and Bearer secrets never reach the failure note."""
+        self.set_mode("stderr-secrets")
+        out, argv = self.seat()
+        proc = self.run_tool(argv)
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("qodercli exited 7", proc.stderr)
+        for secret in ("hunter2", "sk-or-v1-0123456789abcdef", "tok-abc123def456"):
+            self.assertNotIn(secret, proc.stderr,
+                             "the failure note leaked a client secret: %r" % secret)
+        self.assert_no_seat(out)
+        self.assertFalse(out.exists())
+
+    def test_a_failed_persistence_probe_refuses_the_run(self):
+        """A probe failure refuses the run: never execute with persistence on (r3)."""
+        self.set_mode("help-fail")
+        out, argv = self.seat()
+        proc = self.run_tool(argv)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("persistence", proc.stderr.lower())
+        self.assert_no_seat(out)
+        self.assertFalse(out.exists())
+        self.assertFalse((self.dir / "record.json").exists(),
+                         "the review call must never start when the persistence "
+                         "probe failed: its status is unknown, not disabled")
+
+    def test_a_client_that_survives_the_kill_is_reported_as_not_exited(self):
+        """The post-kill wait is hard-bounded: no seat, exit 1, 'client did not exit'."""
+        import importlib.util
+        from unittest.mock import patch
+        sys.path.insert(0, str(ROOT / "tools"))
+        self.addCleanup(sys.path.remove, str(ROOT / "tools"))
+        spec = importlib.util.spec_from_file_location("qoder_seat", TOOL)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        class HungClient:
+            """Answers the probe's --help once, then never exits - not even after the kill."""
+
+            def __init__(self):
+                self.pid = 4242
+                self.returncode = None
+                self.calls = 0
+                self.timeouts = []
+
+            def communicate(self, prompt=None, timeout=None):
+                self.calls += 1
+                self.timeouts.append(timeout)
+                if prompt is not None:
+                    # The review call: never completes.
+                    raise subprocess.TimeoutExpired("qodercli", timeout)
+                if self.calls == 1:
+                    # The probe's --help.
+                    return (b"--no-session-persistence  Disable session persistence\n", b"")
+                # The post-kill wait expires too: the pipe was never released.
+                raise subprocess.TimeoutExpired("qodercli", timeout)
+
+        made = []
+
+        def factory(*args, **kwargs):
+            client = HungClient()
+            made.append(client)
+            return client
+
+        out, argv = self.seat()
+        err = io.StringIO()
+        with patch.object(module.subprocess, "Popen", factory), \
+                patch.object(module.os, "killpg", create=True), \
+                patch.object(module.subprocess, "run"), \
+                contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as raised:
+                module.main(argv[2:])
+        self.assertEqual(raised.exception.code, 1)
+        self.assertIn("client did not exit within 10s of the kill", err.getvalue())
+        # The second (post-kill) wait is bounded by the hard timeout, never None.
+        self.assertEqual(made[-1].timeouts[-1], 10)
+        self.assertEqual(module.KILL_WAIT, 10)
+        self.assert_no_seat(out)
+        self.assertFalse(out.exists(), "no seat is published for a client that ignored the kill")
+
+    def test_a_leftover_partial_is_refused_before_the_client_starts(self):
+        """A leftover .partial-* refuses before the client runs, not after it."""
+        out, argv = self.seat()
+        (self.dir / (out.name + ".partial-dead")).mkdir()
+        proc = self.run_tool(argv)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertIn("partial", proc.stderr)
+        self.assertFalse((self.dir / "record.json").exists(),
+                         "the client must not run while a leftover partial seat "
+                         "waits to be recovered")
+        self.assert_no_seat(out)
 
     def test_missing_client_does_not_create_output(self):
         out, argv = self.seat()

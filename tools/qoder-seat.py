@@ -10,8 +10,32 @@ Output (both created only after a successful run, never on failure):
     <out-dir>/review.txt     the model result, verbatim, UTF-8
     <out-dir>/evidence.json  verbatim client fields + run facts (D-2494: no remapping)
 
-Exit codes: 0 ok, 1 client/runtime failure, 2 usage (banner, out-dir, client path),
-3 client reply not usable (is_error, wrong type, empty result, modelUsage shape).
+Exit codes: 0 ok, 1 client/runtime failure, 2 refusal BEFORE the review call
+(prompt banner, out-dir already holding a seat, leftover .partial-*, client
+path, failed persistence probe), 3 client reply not usable (is_error, wrong
+type, empty result, modelUsage shape, truncated stop_reason, unknown verdict
+word, non-UTF-8 result).
+
+Refusals that never publish a seat, each quoting the client's own words in the
+failure note (the note is never published as seat output):
+
+    * the killed client that does not exit within KILL_WAIT=10s of the kill
+      -> exit 1 "client did not exit within 10s of the kill";
+    * stop_reason other than end_turn/stop (a truncated reply)
+      -> exit 3 with the verbatim stop_reason;
+    * an unknown verdict word in the final VERDICT line
+      -> exit 3 with the verbatim line;
+    * a failed session-persistence probe
+      -> exit 2: unknown is not "disabled", so the run never starts.
+
+Evidence fields (D-2494: client values verbatim, a missing field stays null):
+usage, modelUsage, session_id, subtype, num_turns are the client's own;
+finish_reason is the client's stop_reason; request_id is the top-level field,
+else usage.request_id, else null; served_model is the sole modelUsage key;
+argv is the FULL argv handed the client; no_session_persistence is the probe's
+True/False (a failed probe refuses instead); verdict_parse is "known" (an
+unknown word refuses instead); test_gaming is the LAST TEST-GAMING line (an
+echoed brief example must not shadow the seat's own answer) or null.
 """
 
 from __future__ import annotations
@@ -34,8 +58,16 @@ from pathlib import Path
 BANNER = "You have NO tools and no repository access. Everything you need is below. Answer in plain text only."
 DEFAULT_MODEL = "qwen3.8-flash"
 DEFAULT_TIMEOUT = 900
+KILL_WAIT = 10  # hard bound on the post-kill wait: a client that holds the pipes past this is reported, never waited on
 TEST_GAMING_RE = re.compile(r"^\s*TEST-GAMING:\s*(yes|no|unsure)\b", re.IGNORECASE | re.MULTILINE)
 VERDICT_RE = re.compile(r"^\s*VERDICT:.*$", re.MULTILINE | re.IGNORECASE)
+KNOWN_VERDICT_WORDS = frozenset({
+    "APPROVE", "ACCEPT", "PASS", "REJECT", "FIX", "HALT", "CHANGES",
+})
+
+
+class ClientDidNotExit(subprocess.SubprocessError):
+    """The killed client (or a descendant holding its pipes) never exited."""
 
 
 def fail(code: int, message: str) -> "NoReturn":  # noqa: F821 - py<3.11 typing hint only
@@ -76,6 +108,15 @@ def spawn_prefix(executable: str) -> list[str]:
     return [executable]
 
 
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Kill the client and its process group/tree once the timeout fired."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                       stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
+    else:
+        os.killpg(proc.pid, signal.SIGKILL)
+
+
 def run_client(cmd: list[str], timeout: int, prompt: bytes | None = None):
     """Bound the whole process tree, including descendants holding output pipes."""
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
@@ -84,12 +125,15 @@ def run_client(cmd: list[str], timeout: int, prompt: bytes | None = None):
     try:
         stdout, stderr = proc.communicate(prompt, timeout=timeout)
     except subprocess.TimeoutExpired:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                           stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
-        else:
-            os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
+        _kill_tree(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=KILL_WAIT)
+        except subprocess.TimeoutExpired:
+            # A descendant still holds the pipes after the kill: the wait for
+            # them is bounded too, so the adapter reports it instead of hanging.
+            raise ClientDidNotExit(
+                f"client did not exit within {KILL_WAIT}s of the kill"
+            ) from None
         raise
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
@@ -123,8 +167,11 @@ def last_json_object(stdout: bytes) -> dict | None:
 
 
 def extract_test_gaming(text: str) -> str | None:
-    match = TEST_GAMING_RE.search(text)
-    return match.group(1).lower() if match else None
+    """The LAST match: a TEST-GAMING line echoed from the brief must not shadow
+    the seat's own answer later in the text (and a later "yes" is the
+    fail-closed direction). A text with no line at all stays null."""
+    matches = list(TEST_GAMING_RE.finditer(text))
+    return matches[-1].group(1).lower() if matches else None
 
 
 def extract_verdict(text: str) -> str | None:
@@ -179,9 +226,18 @@ def main(argv: list[str]) -> int:
         for name in ("review.txt", "evidence.json"):
             if (out_dir / name).exists():
                 return fail(2, f"--out-dir already contains {name}: {out_dir}; partial seat: move it aside to recover; no files were written")
+    # A leftover .partial-* is recovery work: refuse BEFORE the client runs, so
+    # a stale staging directory never costs a review call to discover.
+    if list(out_dir.parent.glob(out_dir.name + ".partial-*")):
+        return fail(2, "leftover partial seat detected; move the .partial-* directory aside to recover; no files were written")
 
     executable = resolve_qodercli(args.qodercli)
     with_persistence_flag = probe_no_session_persistence(executable)
+    if with_persistence_flag is None:
+        # Unknown is not "disabled": never run a client whose session
+        # persistence status could not be determined.
+        return fail(2, "session-persistence probe failed; refusing to run a client "
+                       "whose session-persistence status is unknown; no files were written")
 
     cmd = spawn_prefix(executable) + ["-p", "-o", "json", "--tools", "", "--model", args.model]
     if with_persistence_flag:
@@ -190,6 +246,8 @@ def main(argv: list[str]) -> int:
     started = time.monotonic()
     try:
         proc = run_client(cmd, args.timeout, prompt_bytes)
+    except ClientDidNotExit as exc:
+        return fail(1, f"{exc}; no evidence was written")
     except subprocess.TimeoutExpired:
         return fail(1, f"qodercli timed out after {args.timeout}s; no evidence was written")
     except OSError as exc:
@@ -217,13 +275,26 @@ def main(argv: list[str]) -> int:
         return fail(3, f"modelUsage must hold exactly one model, got {usage!r}")
     served_model = next(iter(usage))
 
+    # A truncated reply never publishes: end_turn and stop are the only two
+    # completed reasons, and the note quotes the client's own word verbatim.
+    stop_reason = data.get("stop_reason")
+    if stop_reason not in ("end_turn", "stop"):
+        return fail(3, f"client reply is truncated: stop_reason={stop_reason} "
+                       "(only end_turn and stop publish); no evidence was written")
+
     verdict = extract_verdict(result)
     if verdict is None:
         return fail(3, "review must end with a VERDICT line")
-    verdict_parse = "known" if verdict.split(":", 1)[1].strip().upper() in {
-        "APPROVE", "ACCEPT", "PASS", "REJECT", "FIX", "HALT", "CHANGES"
-    } else "unknown"
-    review_bytes = result.encode("utf-8")
+    word = verdict.split(":", 1)[1].strip().upper()
+    if word not in KNOWN_VERDICT_WORDS:
+        # An unknown word refuses with the line quoted verbatim; it is never
+        # published and never softened into a verdict_parse marker.
+        return fail(3, f"unknown verdict word in the final line: {verdict}; no evidence was written")
+    verdict_parse = "known"  # an unknown word refused above; the key is the contract pin
+    try:
+        review_bytes = result.encode("utf-8")
+    except UnicodeEncodeError:
+        return fail(3, "review result is not encodable as UTF-8; no evidence was written")
     usage_envelope = data.get("usage") if isinstance(data.get("usage"), dict) else {}
     request_id = data.get("request_id") or usage_envelope.get("request_id")
     evidence = {
@@ -233,7 +304,7 @@ def main(argv: list[str]) -> int:
         "no_session_persistence": with_persistence_flag,
         "verdict_parse": verdict_parse,
         "served_model": served_model,
-        "finish_reason": data.get("stop_reason"),
+        "finish_reason": stop_reason,
         "request_id": request_id,
         "session_id": data.get("session_id"),
         "subtype": data.get("subtype"),
@@ -253,9 +324,6 @@ def main(argv: list[str]) -> int:
     }
     evidence_bytes = (json.dumps(evidence, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     out_dir.parent.mkdir(parents=True, exist_ok=True)
-    partials = list(out_dir.parent.glob(out_dir.name + ".partial-*"))
-    if partials:
-        return fail(2, "leftover partial seat detected; move the .partial-* directory aside to recover")
     staging = Path(tempfile.mkdtemp(prefix=out_dir.name + ".partial-", dir=out_dir.parent))
     try:
         (staging / "review.txt").write_bytes(review_bytes)
