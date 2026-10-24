@@ -8408,6 +8408,10 @@ def resolve_route_unchecked(args, cfg: dict, client, exclude_routes: set | None 
             raise FamilyFenceRefused(fence_refusal(fence))
         if client.gateway:
             _fence_check_route(model_route_id(args.model) or "", fence, registry)
+    parsed = routing.parse_card(args.card or "")
+    if parsed.get("kind") == "implement" and not getattr(args, "override_reason", None):
+        return _resolve_route_v2(args, parsed, cfg, override, exclude_routes,
+                                 provider_cooldown, fence, model_decided)
     if args.tier is not None:
         model = None if args.free else resolve_model(cfg, args.tier, args.clean, override)
         combo = model_route_id(model) or None
@@ -13387,6 +13391,7 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None, *, kind
         # keeper may read as "this run meant to be a Qwen", never as "a Qwen wrote
         # the diff", which is the claim the review gate and the reviewer token read.
         "requested_model": plan.get("requested_model") or "",
+        "override_reason": (getattr(args, "override_reason", None) or "").strip() or None,
         "launched_model": plan.get("launched_model") or plan.get("model") or "",
         **witnessed_family(plan_family, plan_family_source, plan_family_reason,
                            False),
@@ -14007,6 +14012,14 @@ def cmd_ps(args) -> int:
 
 
 def cmd_run(args, cfg: dict) -> int:
+    override_reason = (getattr(args, "override_reason", None) or "").strip()
+    if not getattr(args, "card", None) and not override_reason:
+        return refuse("spawn by card only; an exception requires --override-reason TEXT", 2)
+    if getattr(args, "model", None) and not override_reason:
+        order = resolver.writer_policy_scores(
+            [{"leg": args.model.removeprefix("omniroute/")}], load_live_registry())
+        if not order:
+            return refuse("hand-picked model outside writer order requires --override-reason TEXT", 2)
     # LAYERFENCE (fix 1, R-worker-06): a leaf never spawns, and this is the last
     # mile of that rule — the MCP profile hides the tool, but a leaf that reaches
     # for `tools/autoos-agent.py run` from its own shell is the same call. Checked
@@ -15511,6 +15524,7 @@ def _parser_run(sub):
                                      "(e.g. omniroute/l2-orchestrator) for a gateway client, "
                                      "or the client's own model name for an own-account one "
                                      "(qodercli/claude --model; its family feeds the fence)")
+    run.add_argument("--override-reason", help="audited reason for a model/card exception")
     run.add_argument("--free", action="store_true", help="keyless: every tier on opencode's free model")
     run.add_argument("--free-model", default=DEFAULT_FREE_MODEL)
     run.add_argument("--not-family", dest="not_family", action="append",

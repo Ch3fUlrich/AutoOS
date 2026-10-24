@@ -1127,6 +1127,8 @@ def usable_legs(route, card, features, client_state, registry, overlay,
 
         hard, notes = _leg_availability(leg, provider_id, unavailable,
                                         registry, now)
+        if card.get("kind") == "implement" and leg in registry.get("policy", {}).get("writers", {}).get("order", DEFAULT_WRITER_ORDER):
+            hard = hard or writer_probe_reason(leg, overlay, now)
         if hard is not None:
             skipped[leg] = [hard]
             continue
@@ -1377,7 +1379,8 @@ def usable_legs(route, card, features, client_state, registry, overlay,
             # spend_unknown / unknown / guard error -> leg KEPT (last resort)
             # No reason added means the leg passes through to legs.append()
 
-        if agentic and not proven and _rate_limited(leg, overlay):
+        if agentic and not proven and _rate_limited(leg, overlay) and not _until_passed(
+                ((overlay or {}).get("legs") or {}).get(leg), now):
             reasons.append("rate_limited: %s/%s (429)" % (provider_id, model_id))
 
         if reasons:
@@ -1413,7 +1416,18 @@ def usable_legs(route, card, features, client_state, registry, overlay,
     # same last-resort rule across entries with its own two-pass walk
     # (every NON-paid entry first, then the paid ones): its entries name
     # no route, so the per-route holdback here cannot apply to them.
-    legs, skipped = _hold_back_paid_legs(legs, leg_names, skipped, registry)
+    if card.get("kind") != "implement":
+        legs, skipped = _hold_back_paid_legs(legs, leg_names, skipped, registry)
+    elif card.get("risk") == "high":
+        kept = []
+        for pair, name in zip(legs, leg_names):
+            provider = registry["providers"][pair[0]]
+            tier = registry["models"][pair[1]].get("tier", provider.get("tier"))
+            if tier == "free" or "bazaarlink" in name.lower():
+                skipped[name] = ["high-risk implement: free/bazaarlink refused"]
+            else:
+                kept.append(pair)
+        legs = kept
 
     return legs, skipped, re_probe_notes
 
@@ -2128,7 +2142,14 @@ def _score_candidates(route_ids, bucket_name, card, features, client_state,
                                 overlay, client, now, env)
         if not legs:
             raise ValueError("route %r has no usable leg to score" % route_id)
-        leg = legs[0]
+        if card.get("kind") == "implement":
+            ordered = writer_policy_scores(
+                [{"leg": "%s/%s" % pair, "pair": pair} for pair in legs], registry)
+            if not ordered:
+                continue
+            leg = ordered[0]["pair"]
+        else:
+            leg = legs[0]
         model_id = leg[1]
         model = registry["models"][model_id]
         eff = effort(bucket_name, card["kind"], route["class"],
@@ -2760,6 +2781,42 @@ def writer_policy_scores(scores, registry):
     return [score for leg in order for score in scores if score["leg"] == leg]
 
 
+def writer_skips(registry, card, features, client_state, overlay, client, now, env):
+    """Collect policy-leg outages across routes, not just the winning combo."""
+    skipped = {}
+    order = registry.get("policy", {}).get("writers", {}).get("order", DEFAULT_WRITER_ORDER)
+    for route in registry["routes"].values():
+        _, reasons, _ = usable_legs(route, card, features, client_state,
+                                    registry, overlay, client, now, env)
+        for leg, why in reasons.items():
+            if leg in order:
+                skipped[leg] = "; ".join(why)
+    return [{"leg": leg, "reason": skipped[leg]} for leg in order if leg in skipped]
+
+
+def writer_probe_reason(leg, overlay, now):
+    """Fail closed on a recorded failed probe, but retry expired cooldowns."""
+    try:
+        entry = (overlay or {}).get("legs", {}).get(leg, {})
+        if _until_passed(entry, now):
+            return None
+        if unavailable_now(entry, now):
+            return _unavailable_reason(entry, leg)
+        error = entry.get("tool_calls_last_error")
+        if error:
+            trials = error.get("trials") or []
+            statuses = [t.get("status") for t in trials]
+            if statuses and all(s in (429, 402) for s in statuses):
+                return "unavailable: HTTP %s" % statuses[0]
+            return "unavailable: probe error"
+        measured = entry.get("tool_calls", {})
+        if not isinstance(measured, dict):
+            return "unavailable: malformed probe"
+        return None
+    except (AttributeError, TypeError, ValueError):
+        return "unavailable: malformed probe"
+
+
 def plan(card, features, client_state, registry, overlay, track_record,
         orchestrator_model, now=None, client="opencode", env=None,
         credit_guards=None):
@@ -2822,6 +2879,10 @@ def plan(card, features, client_state, registry, overlay, track_record,
                 "explain": claude_budget_explain(registry) + list(credit_warns),
             }
         result = no_route(removed)
+        if card.get("kind") == "implement":
+            result["skipped"] = writer_skips(registry, card, features, client_state,
+                                              overlay, client, now, env)
+            result["reason"] = "refused: all operator writer legs unavailable; " + result["reason"]
         result["bucket"] = bucket_name
         # True when a leg was skipped as not proven for tool calls, so the
         # caller can name a missing overlay without parsing the reason.
@@ -2843,7 +2904,17 @@ def plan(card, features, client_state, registry, overlay, track_record,
                                orchestrator_model, card["mode"], client, now,
                                env)
 
-    chosen, pick_reason = pick(scores, card["mode"], registry)
+    writer = card.get("kind") == "implement"
+    if writer:
+        scores = writer_policy_scores(scores, registry)
+        if not scores:
+            return {"route": None, "state": "input_required",
+                    "reason": "refused: all operator writer legs unavailable",
+                    "skipped": writer_skips(registry, card, features, client_state,
+                                             overlay, client, now, env)}
+        chosen, pick_reason = scores[0], "operator writer order"
+    else:
+        chosen, pick_reason = pick(scores, card["mode"], registry)
     reason_parts = [pick_reason]
 
     # D-102 CLAUDEBUDGET: the Claude spend a plan may still carry is one the
@@ -2862,7 +2933,7 @@ def plan(card, features, client_state, registry, overlay, track_record,
 
     theta = _policy_value(registry, "modes", card["mode"], "theta", "value")
     eligible = [s for s in scores if s["p"] >= theta]
-    if eligible:
+    if eligible and not writer:
         chosen, time_reason = tie_break(eligible, registry, now)
         reason_parts.append(time_reason)
 
@@ -2931,5 +3002,9 @@ def plan(card, features, client_state, registry, overlay, track_record,
                                               registry)
                     + reviewer_explain_lines(review)),
         "skipped_legs": skipped_legs,
+        "skipped": (writer_skips(registry, card, features, client_state,
+                                  overlay, client, now, env) if writer else
+                    [{"leg": leg, "reason": "; ".join(reasons)}
+                     for leg, reasons in skipped_legs.items()]),
         "re_probe_notes": re_probe_notes,
     }

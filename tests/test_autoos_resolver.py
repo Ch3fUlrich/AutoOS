@@ -27,6 +27,72 @@ import autoos_resolver as r  # noqa: E402
 
 
 class MandatoryWriterPolicyTests(unittest.TestCase):
+    def policy_plan(self, down=(), risk="normal", order=None):
+        fixture = FallThroughTests()
+        registry = fixture.two_leg_registry()
+        import copy
+        model = registry["models"]["model-a"]
+        registry["routes"] = {}
+        for index, leg in enumerate(r.DEFAULT_WRITER_ORDER):
+            provider, name = leg.split("/", 1)
+            registry["providers"][provider] = {
+                "tier": "subscription", "trains_on_prompts": False}
+            registry["models"][name] = dict(copy.deepcopy(model), id=name)
+            registry["routes"]["writer-%d" % index] = {
+                "class": "cheap", "legs": [leg]}
+        registry["policy"]["review"] = {"normal": {"count": 0}}
+        if order is not None:
+            registry["policy"]["writers"] = {"order": order}
+        overlay = {"legs": {leg: {"tool_calls_last_error": {
+            "trials": [{"status": 429}]}} for leg in down}}
+        with mock.patch.object(r, "_select_reviewers", return_value=[]), \
+                mock.patch.object(r, "_escalation", return_value=[]):
+            return r.plan(fixture.card(risk=risk), fixture.features(),
+                          fixture.state(), registry, overlay, [], "orch", fixture.now())
+
+    def test_actual_plan_cx_429_uses_agy(self):
+        plan = self.policy_plan(r.DEFAULT_WRITER_ORDER[:1])
+        self.assertEqual(plan["leg"], r.DEFAULT_WRITER_ORDER[1])
+        self.assertEqual(plan["skipped"][0], {
+            "leg": r.DEFAULT_WRITER_ORDER[0], "reason": "unavailable: HTTP 429"})
+
+    def test_actual_plan_two_down_uses_mimo(self):
+        self.assertEqual(self.policy_plan(r.DEFAULT_WRITER_ORDER[:2])["leg"],
+                         r.DEFAULT_WRITER_ORDER[2])
+
+    def test_actual_plan_all_down_refuses(self):
+        plan = self.policy_plan(r.DEFAULT_WRITER_ORDER)
+        self.assertEqual(plan["state"], "input_required")
+        self.assertIn("all operator writer legs unavailable", plan["reason"])
+        self.assertEqual(len(plan["skipped"]), 4)
+
+    def test_actual_plan_registry_order_wins(self):
+        self.assertEqual(self.policy_plan(order=list(reversed(r.DEFAULT_WRITER_ORDER)))["leg"],
+                         r.DEFAULT_WRITER_ORDER[-1])
+
+    def test_actual_high_risk_uses_subscription(self):
+        self.assertEqual(self.policy_plan(risk="high")["leg"], r.DEFAULT_WRITER_ORDER[0])
+
+    def test_production_plan_applies_order_and_records_429(self):
+        scores = [{"leg": leg} for leg in reversed(r.DEFAULT_WRITER_ORDER)]
+        self.assertEqual(r.writer_policy_scores(scores, {})[0]["leg"],
+                         r.DEFAULT_WRITER_ORDER[0])
+        self.assertEqual(r.writer_probe_reason("cx/gpt-6.1-sol", {"legs": {
+            "cx/gpt-6.1-sol": {"tool_calls_last_error": {
+                "trials": [{"status": 429}]}}}}, datetime.now(timezone.utc)),
+                         "unavailable: HTTP 429")
+
+    def test_probe_garbage_is_unavailable(self):
+        self.assertIn("unavailable", r.writer_probe_reason("cx/gpt-6.1-sol",
+                      {"legs": {"cx/gpt-6.1-sol": "garbage"}},
+                      datetime.now(timezone.utc)))
+
+    def test_expired_probe_cooldown_retries(self):
+        self.assertIsNone(r.writer_probe_reason("cx/gpt-6.1-sol", {"legs": {
+            "cx/gpt-6.1-sol": {"unavailable_until": "2000-01-01T00:00:00Z",
+            "tool_calls_last_error": {"trials": [{"status": 429}]}}}},
+            datetime.now(timezone.utc)))
+
     def test_cx_429_next_leg_without_human(self):
         scores = [{"leg": "cx/gpt-6.1-sol"}, {"leg": "agy/gemini-3.8-flash"},
                   {"leg": "mimo/mimo-v2.6-flash"}]
