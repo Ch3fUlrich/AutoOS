@@ -861,7 +861,26 @@ class L2ReportToolTest(unittest.TestCase):
     def test_control_characters_are_stripped(self):
         out = self._report("a\tb\x00c\r\nd")
         body = self._lines(out["_inbox"])[0].split("REPORT:", 1)[1].strip()
-        self.assertEqual(body, "abcd")
+        self.assertEqual(body, r"a\tb\u0000c\r\nd")
+
+    def test_concurrent_reports_are_whole_lines(self):
+        from concurrent.futures import ThreadPoolExecutor
+        with tempfile.TemporaryDirectory() as root:
+            inbox = str(Path(root) / "L1.md")
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                results = list(pool.map(
+                    lambda text: mcp_server.l2_report(
+                        text, env=self._env(inbox), now=self.FIXED),
+                    ["CANARY-OK", "second reply"]))
+            self.assertTrue(all(result["ok"] for result in results))
+            lines = self._lines(inbox)
+            self.assertEqual(len(lines), 2)
+            self.assertEqual({line.split("REPORT: ")[1] for line in lines},
+                             {"CANARY-OK", "second reply"})
+
+    def test_relative_inbox_is_refused(self):
+        out = mcp_server.l2_report("hi", env=self._env("relative.md"))
+        self.assertFalse(out["ok"])
 
     def test_text_is_capped_at_500_chars(self):
         out = self._report("x" * 900)

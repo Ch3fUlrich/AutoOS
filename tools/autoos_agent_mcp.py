@@ -488,12 +488,10 @@ def l2_resume(lane: str) -> dict:
 
 
 def _l2_report_scrub(text) -> str:
-    """The body of a report forced to one printable line, capped: the report is a
+    """The body of a report escaped to one printable line, capped: the report is a
     single inbox record, so a newline a caller smuggled in would forge a second
     one and any control character would confuse the reader that parses the stamp."""
-    kept = [ch for ch in str(text)
-            if ch == " " or (0x20 <= ord(ch) and ord(ch) != 0x7F)]
-    return "".join(kept).strip()[:L2_REPORT_MAX]
+    return json.dumps(str(text).strip(), ensure_ascii=True)[1:-1][:L2_REPORT_MAX]
 
 
 def l2_report(text: str, kind: str = "REPORT", env=None, now=None) -> dict:
@@ -507,6 +505,8 @@ def l2_report(text: str, kind: str = "REPORT", env=None, now=None) -> dict:
     unknown kind, or a missing lane/inbox - a report that would mis-attribute or
     land nowhere is worse than no report. `env`/`now` are the test seams; the
     server calls this with neither, so it reads the live environment and clock.
+    This function owns the reply write so fleet-msg can replace the transport
+    later without changing the tool contract or granting shell write access.
     """
     source = os.environ if env is None else env
     if mcp_tool_profile(source) != NARROWEST_PROFILE:
@@ -527,7 +527,7 @@ def l2_report(text: str, kind: str = "REPORT", env=None, now=None) -> dict:
                 "detail": "no lane in this MCP's environment (%s): an unattributed "
                           "report is refused" % ENV_L2_LANE}
     inbox = source.get(ENV_L1_INBOX)
-    if not inbox:
+    if not inbox or not os.path.isabs(str(inbox)):
         return {"ok": False, "refused": True, "tool": L2_REPORT_TOOL,
                 "detail": "no L1 inbox (%s): the report would land nowhere"
                           % ENV_L1_INBOX}

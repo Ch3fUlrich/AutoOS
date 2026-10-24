@@ -361,6 +361,18 @@ def resolve_l1_inbox(explicit=None):
     p = Path(path)
     if not p.is_absolute():
         raise L2Error("the L1 inbox must be an absolute path (got %s)" % path)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        # Open without truncation: checking access alone misses ACL failures.
+        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            import stat
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError("inbox is not a regular file")
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        raise L2Error("L1 inbox is unusable: %s" % exc) from exc
     return p
 
 

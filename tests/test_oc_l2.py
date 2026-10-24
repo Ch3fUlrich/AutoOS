@@ -27,6 +27,60 @@ import oc_l1  # noqa: E402
 import oc_l1_serve  # noqa: E402
 import oc_l2  # noqa: E402
 import autoos_inbox  # noqa: E402
+
+
+class ReplyInboxValidationTest(unittest.TestCase):
+    def test_real_guard_keeps_shell_writes_closed_and_ignores_mcp_reply(self):
+        script = """
+import plugin from './configuration/opencode/plugins/bash-guard/index.mjs';
+let hook;
+await plugin.setup({tool: {hook: async (_name, fn) => {hook = fn;}}});
+await hook({tool: 'l2_report', input: {text: 'CANARY-OK'}});
+for (const command of [
+  "cat <<'EOF' >> other.md\\nreply\\nEOF",
+  'echo reply > other.md', 'pwd; echo reply', 'pwd && echo reply',
+  'AUTOOS_L1_INBOX=other.md python tools/oc_l2.py reply --text hi',
+  'python tools/oc_l2.py reply --inbox other.md --text hi',
+  'python tools/oc_l2.py reply --text "$(cmd)"',
+  'python tools/oc_l2.py reply --text "`cmd`"'
+]) {
+  let denied = false;
+  try {await hook({tool: 'shell', input: {command}});}
+  catch (e) {denied = String(e).includes('bash-guard: DENIED');}
+  if (!denied) throw Error('shell write was allowed');
+}
+"""
+        env = dict(os.environ, AUTOOS_GUARD_ROLE="l2")
+        result = subprocess.run(["node", "--input-type=module", "-e", script],
+                                cwd=ROOT, env=env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_missing_inbox_and_parents_are_created(self):
+        with tempfile.TemporaryDirectory() as root:
+            inbox = Path(root) / "new" / "L1.md"
+            self.assertEqual(oc_l2.resolve_l1_inbox(str(inbox)), inbox)
+            self.assertTrue(inbox.is_file())
+            self.assertEqual(inbox.read_bytes(), b"")
+
+    def test_directory_and_relative_paths_fail_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            for path in (root, "relative-inbox.md"):
+                with self.subTest(path=path), self.assertRaises(oc_l2.L2Error):
+                    oc_l2.resolve_l1_inbox(path)
+
+    def test_unwritable_inbox_fails_closed(self):
+        with tempfile.TemporaryDirectory() as root:
+            inbox = Path(root) / "L1.md"
+            with mock.patch.object(oc_l2.os, "open", side_effect=PermissionError):
+                with self.assertRaisesRegex(oc_l2.L2Error, "unusable"):
+                    oc_l2.resolve_l1_inbox(str(inbox))
+
+    def test_existing_content_is_preserved(self):
+        with tempfile.TemporaryDirectory() as root:
+            inbox = Path(root) / "L1.md"
+            inbox.write_bytes(b"previous\n")
+            oc_l2.resolve_l1_inbox(str(inbox))
+            self.assertEqual(inbox.read_bytes(), b"previous\n")
 from _oc_l1_fakes import (  # noqa: E402
     FAKE_PY,
     FAKE_SESSION_ID,
