@@ -29,6 +29,19 @@ Exit 0 in sync, 1 on any `drift`/`missing`/`extra` line, 3 when the store cannot
 `apply.sh` and `apply.ps1` also prune the two managed-orphan lists in `combos.json` from the live store: `retired` (dead ids a rename left) and `omitted` (OR1g: only the orphaned routes — a route that declared legs but the render serves none for) — never a combo in `combos.json`, and never one the user made. A deliberately legless route (`legs: []`: the LiteLLM-only `*-paid` and the dynamic `auto*`) is in neither list, so a live combo with one of its ids is never pruned.
 `--drift` reports an omitted live combo as `extra <id> (omitted: no servable leg)`, and a non-object `combo list` answer as an unreadable store (exit 3), not a crash.
 
+## Writer selection (D-2148)
+
+`catalog/ai-registry.json` → `policy.writers.order` is the source of truth for
+writer order: `cx/gpt-6.1-sol` (opencode `omniroute/cx-gpt-6.1-sol`) >
+`mimo/mimo-v2.6-flash` (API, client `mimo`) > `omniroute/deepseek-direct-flash`
+(opencode) > qodercli `qwen3.8-flash` (client `qoder`). Never use Sonnet/Claude
+for implementations, `cx/gpt-5.6-sol`, or OVH. Skip opencode while rate-limited;
+skip any rate-limited or down entry to the next eligible entry, recording each
+skip and its reason. Do not substitute another model behind a named access path.
+
+Review seats are separate from writer selection (D-1704/D-2449): choose the first
+available seats from families different from the writer and from each other.
+
 ## Standby router (LiteLLM :4000)
 
 LiteLLM is the manual fallback when you want the same tier names served
@@ -231,4 +244,3 @@ Known limits of shim resolution:
 - The first existing native token on a line wins, so a helper exe on an earlier line gets the prompt instead of the client.
 - The interpreter is taken from the shim only by name: for python the current interpreter (sys.executable) is used unless a sibling python.exe is next to the shim AND the shim spells the token `python.exe`.
 - The ~32767-character CreateProcess limit still applies to a resolved target.
-
