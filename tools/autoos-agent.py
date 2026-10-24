@@ -10397,7 +10397,7 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     features = measure_mod.measure(normalized, repo, brief or "")
     result = resolver.plan(normalized, features, client_state, registry,
                            overlay, track_record, orchestrator_model, now,
-                            client, env, credit_guards)
+                           client, env, credit_guards)
     if (apply_writer_policy and registry.get("policy", {}).get("writers", {}).get("order")
             and client == "opencode" and normalized.get("role") not in
             ("review", "read", "research") and not normalized.get("model")
@@ -10457,7 +10457,8 @@ def cmd_route(args) -> int:
                                 track_record, client_state,
                                 getattr(args, "client", None) or "opencode",
                                 os.environ, overlay_missing_at=overlay_missing_at,
-                                 credit_guards=plan_credit_guards(registry), apply_writer_policy=True)
+                                credit_guards=plan_credit_guards(registry),
+                                apply_writer_policy=getattr(args, "client", None) is None)
     except (routing.CardError, ValueError) as exc:
         return refuse(str(exc))
     if args.explain:
