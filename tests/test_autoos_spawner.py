@@ -614,6 +614,17 @@ class WriterPolicyPickTests(unittest.TestCase):
             "opencode", "omniroute/cx-gpt-6.1-sol", self.registry,
             source="policy.writers.order", cfg={}), False)
 
+    def test_writer_policy_unverified_alias_pricing_refuses_honestly(self):
+        agent = self.agent
+        self.registry["policy"]["claude_budget"]["mode"] = "budget"
+        plan = {"client": "opencode"}
+        with mock.patch.object(agent, "plan_launch_models", return_value=[
+                ("omniroute/deepseek-direct-flash", "policy.writers.order")]), mock.patch.object(
+                agent.resolver, "claude_allowed", return_value=(False, "held")):
+            refusal, _ = agent.claude_plan_refusal(argparse.Namespace(), plan, {}, self.registry, {})
+        self.assertIn("unverified policy alias", refusal)
+        self.assertNotIn("holds for finals", refusal)
+
     def test_writer_policy_log_records_skips(self):
         directory = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, directory, True)
@@ -638,10 +649,84 @@ class WriterPolicyPickTests(unittest.TestCase):
         self.assertIsNone(agent.writer_launch_adapter({"client": "unknown", "model": "x"}, registry))
 
     def test_writer_policy_default_dry_run(self):
-        with mock.patch.object(load_agent(), "load_live_registry", return_value=self.registry):
+        with mock.patch.object(_runner_agent(), "load_live_registry", return_value=self.registry):
             result = plan_of("implement a small fix")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("omniroute/cx-gpt-6.1-sol", result.stdout)
+
+    def test_writer_policy_probe_cached(self):
+        with mock.patch.object(self.agent.measure_mod, "client_state", return_value=self.state) as probe:
+            self.agent.pick_policy_writer(registry=self.registry)
+            self.agent.pick_policy_writer(registry=self.registry)
+        self.assertEqual(probe.call_count, 1)
+
+    def test_writer_policy_cmd_run_qoder_post_plan_client(self):
+        runner = _runner_agent()
+        self.state["opencode"]["installed"] = False
+        with mock.patch.object(runner, "load_live_registry", return_value=self.registry), mock.patch.object(
+                runner, "writer_client_state", return_value=self.state), mock.patch.object(
+                runner.resolver, "_client_reason", wraps=runner.resolver._client_reason) as availability, mock.patch.object(
+                runner, "daily_gate_refusal", side_effect=lambda args, plan=None: "picked-client=" + plan["client"] if plan else None):
+            result = plan_of("implement a fix")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("picked-client=qoder", result.stderr)
+        self.assertEqual(availability.call_args.args[1], "qoder")
+
+    def test_writer_policy_cmd_run_plain_unavailable(self):
+        runner = _runner_agent()
+        with mock.patch.object(runner, "build_plan", side_effect=runner.PolicyWriterUnavailable("no available policy writer: fixture")):
+            result = plan_of("implement a fix")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no available policy writer: fixture", result.stderr)
+        self.assertNotIn("see: tools", result.stderr)
+
+    def test_writer_policy_fallthrough_prints_cause(self):
+        agent = self.agent
+        args = argparse.Namespace(free_model="first")
+        output = io.StringIO()
+        with mock.patch.object(agent, "build_plan", side_effect=agent.PolicyWriterUnavailable("no available policy writer: fixture")), contextlib.redirect_stderr(output):
+            result = agent._free_fallthrough_plan(args, {}, {"model": "first", "sandbox": None},
+                                                  ["first", "second"], set())
+        self.assertEqual(result, (None, None, None))
+        self.assertIn("no available policy writer: fixture", output.getvalue())
+
+    def test_writer_policy_worker_record_persists_decision(self):
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        plan = dict(run_id="fixture", client=decision["client"], model=decision["model"],
+                    depth=(1, 2), writer_decision=decision, writer_skips=decision["writer_skips"])
+        with mock.patch.object(self.agent, "_write_worker_record") as write:
+            _, record = self.agent._worker_record_start(plan, argparse.Namespace(title="fixture", task="fix"), ".", kind="worker")
+        self.assertEqual(record["writer_decision"], decision)
+        self.assertEqual(record["writer_skips"], decision["writer_skips"])
+        self.assertEqual(write.call_args.args[1], record)
+
+    def test_writer_policy_row_reason_names_entry_and_until(self):
+        row = self.registry["policy"]["writers"]["order"][0]
+        row["unavailable_until"] = "2999-01-01T00:00:00Z"
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        reason = decision["writer_skips"][0]["reason"]
+        self.assertIn(row["model"], reason)
+        self.assertIn(row["unavailable_until"], reason)
+
+    def test_writer_policy_preflight_kind_pins_and_metadata(self):
+        agent = self.agent
+        old = dict(route="fixture", leg="old/model", effort="high", max_tokens=99,
+                   context_budget=88, expected_cost=77)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for card, eligible in [({"kind": "review"}, False),
+                               ({"kind": "implement", "override": {"client": "qoder"}}, False),
+                               ({"kind": "implement", "override": {"route": "fixture"}}, False),
+                               ({"kind": "implement"}, True)]:
+            with self.subTest(card=card), mock.patch.object(agent.measure_mod, "measure", return_value={}), mock.patch.object(agent.resolver, "plan", return_value=old):
+                result = agent.route_plan_for(card, "", ".", "fixture", now,
+                                              self.registry, {}, [], self.state,
+                                              apply_writer_policy=True)
+            self.assertEqual("writer_decision" in result, eligible)
+            if eligible:
+                self.assertEqual(result["model"], agent.pick_policy_writer(registry=self.registry, client_state=self.state)["model"])
+                for field in ("effort", "max_tokens", "context_budget", "expected_cost"):
+                    self.assertIsNone(result[field], field)
+                self.assertNotEqual(result["leg"], old["leg"])
 
     def test_writer_policy_cooldown_records_skip(self):
         agent = self.agent

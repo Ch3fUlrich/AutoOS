@@ -4777,6 +4777,13 @@ def claude_plan_refusal(args, plan, env: dict | None = None, registry: dict | No
                 "and `list` prints the values a card may take)" % exc), None
     spends = []
     for value, source in pairs:
+        # No checked-in gateway definition establishes this alias's wire leg.
+        # Do not turn a missing price into a claim about Claude allowance.
+        if (source == "policy.writers.order" and value == "omniroute/deepseek-direct-flash"
+                and not any(row.get("model") == value and row.get("leg")
+                            for row in registry.get("policy", {}).get("writers", {}).get("order", []))):
+            return ("pricing refusal: unverified policy alias %s has no declared leg; "
+                    "cannot establish its price from the registry" % value), None
         verdict = spawn_spends_claude(client, value, registry, source)
         if verdict is not False:
             spends.append((value, source, verdict))
@@ -8517,18 +8524,34 @@ class PolicyWriterUnavailable(ValueError):
     """The policy has no launchable writer; preserve this cause on retries."""
 
 
+_writer_client_snapshot = None
+_writer_client_snapshot_at = 0.0
+
+
+def writer_client_state():
+    """Share a short-lived, non-secret probe snapshot across one spawn's gates."""
+    global _writer_client_snapshot, _writer_client_snapshot_at
+    stamp = time.monotonic()
+    if _writer_client_snapshot is None or stamp - _writer_client_snapshot_at >= 60:
+        _writer_client_snapshot = measure_mod.client_state(clients)
+        _writer_client_snapshot_at = stamp
+    return _writer_client_snapshot
+
+
 def pick_policy_writer(provider_cooldown=None, *, registry=None, client_state=None, now=None):
     """Pick once using the resolver's live availability, preserving skipped rows."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     registry = load_live_registry() if registry is None else registry
-    client_state = measure_mod.client_state(clients) if client_state is None else client_state
+    client_state = writer_client_state() if client_state is None else client_state
     if provider_cooldown:
         registry = apply_provider_state(registry, {"providers": provider_cooldown}, now)
     rows = registry.get("policy", {}).get("writers", {}).get("order", [])
     skips = []
     for entry in rank_candidates("writer", rows, registry):
         launch = writer_launch_adapter(entry, registry)
-        reason = "unavailable: policy row" if unavailable_now(entry, now) else None
+        reason = ("unavailable: policy row %s until %s" %
+                  (entry["model"], entry.get("unavailable_until", "unspecified"))
+                  if unavailable_now(entry, now) else None)
         if launch is None:
             reason = "no launch adapter for " + entry["client"]
         else:
@@ -8544,6 +8567,7 @@ def pick_policy_writer(provider_cooldown=None, *, registry=None, client_state=No
             except ValueError:
                 pass
             unavailable = {}
+            # Fail safe: a leg benched on ANY route is benched for policy writers.
             for route in registry.get("routes", {}).values():
                 unavailable.update(route.get("unavailable_legs") or {})
             notes = []
@@ -8608,8 +8632,6 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         picked = writer_decision["model"]
         if fence_blocks_model(picked, load_live_registry(), fence):
             raise FamilyFenceRefused(fence_refusal(fence))
-        route = dict(route, model=picked, combo=model_route_id(picked),
-                     reason="policy.writers.order", writer_decision=writer_decision)
     if not client.gateway:
         # FAMILYFENCE-3 N4: an own-account run answers on the client's OWN model -
         # `build_command` hands it the pin or the registry default and never names a
@@ -10399,8 +10421,9 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
                            overlay, track_record, orchestrator_model, now,
                            client, env, credit_guards)
     if (apply_writer_policy and registry.get("policy", {}).get("writers", {}).get("order")
-            and client == "opencode" and normalized.get("role") not in
-            ("review", "read", "research") and not normalized.get("model")
+            and client == "opencode" and normalized.get("kind") in
+            ("implement", "debug", "bulk")
+            and not any(normalized.get("override", {}).get(key) for key in ("route", "client"))
             and result.get("route")):
         picked_route, decision = policy_writer_route(
             {"privacy": normalized.get("privacy"), "review": result.get("review")},
@@ -10409,6 +10432,10 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
             result = dict(result, route=picked_route["combo"], model=decision["model"],
                           client=decision["client"], writer_decision=decision,
                           writer_skips=decision["writer_skips"], reason=picked_route["reason"])
+            # Resolver sizing/cost belonged to the discarded leg, not this pick.
+            result.update(leg=decision["entry"].get("leg"), effort=None,
+                          max_tokens=None, context_budget=None, expected_cost=None,
+                          writer_metadata_note="policy pick: sizing and cost not estimated")
     # OVERLAYHOME: with no overlay file at all, "tool_calls: ... unproven" is
     # the machine's missing data, not the legs' verdict - say which.
     if (overlay_missing_at and result.get("state") == "input_required"
