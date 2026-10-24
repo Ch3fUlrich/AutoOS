@@ -753,6 +753,15 @@ if it "seat-model-evidence: per-turn served model, exit codes, credential privac
     out="$(python3 tests/test_seat_model_evidence.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# GW-QODER-401: the qodercli seat-dir adapter (tools/qoder-seat.py). Every case
+# runs it against a fake qodercli written to a temp dir via --qodercli - banner
+# refusal, stdin prompt, last-JSON-line parsing, exit 3 shapes, timeout kill,
+# TEST-GAMING/verdict extraction, existing out-dir refusal. The real client is
+# never started here; one live smoke run is an operator action, not a unit test.
+if it "qoder-seat: tool-less qodercli run, exit codes, seat evidence (unit tests)"; then
+    out="$(python3 tests/test_qoder_seat.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # RISKTIER-a (operator Q-013 / D-060, 2026-09-28): the diff risk classifier --
 # the glob matcher, every policy.risk_rules shape, the sha audit draw, assess()
 # against a temp git repo, and the `risk` verb. Fixtures are temp repos and
