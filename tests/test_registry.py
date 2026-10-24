@@ -43,6 +43,121 @@ def _load_tool():
 registry = _load_tool()
 
 
+class WriterOrderTests(unittest.TestCase):
+    def fixture(self):
+        return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+
+    def reject(self, order, text):
+        data = self.fixture()
+        data["policy"]["writers"]["order"] = order
+        problems = registry._check_writers(data)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn(text, problems[0])
+
+    def test_order_shape(self):
+        for order in (None, [], {}, [None], [{"client": " ", "model": "x", "family": "x"}]):
+            with self.subTest(order=order):
+                self.reject(order, "order")
+
+    def test_claude_rejected(self):
+        for field, value in (("family", "anthropic"), ("model", "SONNET"), ("client", "claude")):
+            row = dict(client="x", model="x", family="x")
+            row[field] = value
+            self.reject([row], "Claude")
+
+    def test_stale_codex_rejected(self):
+        for model in ("gpt-5.6-sol", "provider/GPT-5.6-SOL-high", "GPT_5_6_SOL"):
+            self.reject([dict(client="x", model=model, family="openai")], "gpt-5.6-sol")
+
+    def test_ovh_rejected(self):
+        for field in ("client", "model", "leg", "provider"):
+            row = dict(client="x", model="x", family="x")
+            row[field] = "prefix/OVH-model"
+            self.reject([row], "ovh")
+
+    def test_duplicates_rejected(self):
+        row = dict(client="x", model="x", family="x")
+        self.reject([row, row], "duplicate")
+
+    def test_absent_order_is_not_a_problem(self):
+        # D-2540 round 2 ruling: policy.writers.order is OPTIONAL in the
+        # validator - absent means the registry simply carries no ranking (the
+        # refusal falls back to FALLBACK_WRITER_ORDER); present means it is
+        # validated in full, exactly as test_order_shape and friends do.
+        data = self.fixture()
+        del data["policy"]["writers"]["order"]
+        self.assertEqual(registry._check_writers(data), [])
+
+    def test_claude_guard_reads_every_row_field(self):
+        # D-2540 MED2: all three guards cover the SAME field set, so a forbidden
+        # family cannot hide in the fields the guard used to skip.
+        for field, value in (("client", "claude"), ("model", "sonnet-5"),
+                             ("leg", "claude/sonnet-5"), ("provider", "anthropic"),
+                             ("family", "anthropic")):
+            with self.subTest(field=field):
+                row = dict(client="x", model="x", family="x")
+                row[field] = value
+                self.reject([row], "Claude")
+
+    def test_stale_gpt_guard_reads_every_row_field(self):
+        for field in ("client", "model", "leg", "provider", "family"):
+            with self.subTest(field=field):
+                row = dict(client="x", model="x", family="x")
+                row[field] = "gpt-5.6-sol"
+                self.reject([row], "gpt-5.6-sol")
+
+    def test_ovh_guard_reads_every_row_field(self):
+        for field in ("client", "model", "leg", "provider", "family"):
+            with self.subTest(field=field):
+                row = dict(client="x", model="x", family="x")
+                row[field] = "prefix/OVH-model"
+                self.reject([row], "ovh")
+
+    def test_the_committed_catalog_carries_the_four_entry_d2148_order(self):
+        # The real registry - the one the refusal and the ranking read - must
+        # DECLARE the D-2148 order, four entries, first leg cx-gpt-6.1-sol.
+        rows = self.fixture()["policy"]["writers"]["order"]
+        self.assertEqual([(r["client"], r["model"]) for r in rows],
+                         [("opencode", "omniroute/cx-gpt-6.1-sol"),
+                          ("mimo", "mimo-v2.6-flash"),
+                          ("opencode", "omniroute/deepseek-direct-flash"),
+                          ("qoder", "qwen3.8-flash")])
+
+    def test_real_order_and_fallback(self):
+        import autoos_ready_guards as guards
+        data = self.fixture()
+        self.assertEqual(registry._check_writers(data), [])
+        order = tuple("%s %s" % (r["client"], r["model"]) for r in data["policy"]["writers"]["order"])
+        self.assertEqual(guards.WRITER_ORDER, order)
+        self.assertEqual(guards.FALLBACK_WRITER_ORDER, order)
+        self.assertEqual(order[0], "opencode omniroute/cx-gpt-6.1-sol")
+
+    def test_writer_ranking(self):
+        data = self.fixture()
+        rows = data["policy"]["writers"]["order"]
+        self.assertEqual(registry.rank_candidates("writer", rows[::-1], data), rows)
+
+    def test_reviewer_ranking(self):
+        data = self.fixture()
+        rows = data["policy"]["reviewers"]
+        self.assertEqual(registry.rank_candidates("reviewer", rows[::-1], data), rows)
+
+    def test_unknown_last(self):
+        data = self.fixture()
+        known = data["policy"]["reviewers"][0]
+        a, b = dict(client="unknown", model="a"), dict(client="unknown", model="b")
+        self.assertEqual(registry.rank_candidates("reviewer", [a, known, b], data), [known, a, b])
+
+    def test_benchmarks_ignored(self):
+        data = self.fixture()
+        rows = data["policy"]["reviewers"]
+        self.assertEqual(registry.rank_candidates("reviewer", rows[::-1], data, benchmarks={"reverse": True}), rows)
+
+    def test_bad_role(self):
+        with self.assertRaises(ValueError):
+            registry.rank_candidates("other", [], self.fixture())
+
+
 def _load_resolver():
     """Import tools/autoos_resolver.py the same way: the usable-legs invariant
     asks the resolver's own context check rather than restating it. The resolver

@@ -3147,7 +3147,34 @@
       "gemini-3.8-flash"
     ],
     "writers": {
-      "$comment": "AO-WRITER-GUARDS P1 (2026-10-09, docs/decisions/0007 follow-up): the pre-spawn writer allow-list tools/autoos_writer_rule.py reads. sub40_models are free-model name fragments matched by containment on the normalized id; with no R3 key R3 falls back to the R2 chain (R3 = writer as R2 + all review lenses) while an explicit empty R3 list denies, first usable leg wins (qoder/qwen3.8-max is out of credits, so vertex/gemini-3.8-flash at high effort writes).",
+      "order": [
+        {
+          "client": "opencode",
+          "model": "omniroute/cx-gpt-6.1-sol",
+          "family": "openai",
+          "leg": "cx/gpt-6.1-sol",
+          "source": "operator D-2148"
+        },
+        {
+          "client": "mimo",
+          "model": "mimo-v2.6-flash",
+          "family": "xiaomi",
+          "source": "operator D-2148"
+        },
+        {
+          "client": "opencode",
+          "model": "omniroute/deepseek-direct-flash",
+          "family": "deepseek",
+          "source": "operator D-2148"
+        },
+        {
+          "client": "qoder",
+          "model": "qwen3.8-flash",
+          "family": "qwen",
+          "source": "operator D-2148"
+        }
+      ],
+      "$comment": "D-2148 writer order; AO-WRITER-GUARDS P1 (2026-10-09, docs/decisions/0007 follow-up): the pre-spawn writer allow-list tools/autoos_writer_rule.py reads. sub40_models are free-model name fragments matched by containment on the normalized id; with no R3 key R3 falls back to the R2 chain (R3 = writer as R2 + all review lenses) while an explicit empty R3 list denies, first usable leg wins (qoder/qwen3.8-max is out of credits, so vertex/gemini-3.8-flash at high effort writes).",
       "sub40_models": [
         "nemotron-3-super",
         "laguna",
