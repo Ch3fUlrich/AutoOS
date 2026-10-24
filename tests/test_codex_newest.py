@@ -99,7 +99,9 @@ class NewestOnlyTests(unittest.TestCase):
         self.assertFalse(reg['clients']['codex']['available'])
         self.assertFalse(reg['providers']['cxa']['available'])
         self.assertEqual(reg['policy']['writers']['R2'][0]['leg'], leg)
-        self.assertEqual(reg['policy']['reviewers'][0]['leg'], leg)
+        # Router option B: the seat list keeps the google seat first; cx is carried, not first.
+        self.assertEqual(reg['policy']['reviewers'][0]['family'], 'google')
+        self.assertIn(leg, [row.get('leg') for row in reg['policy']['reviewers'][1:]])
 
     def test_numeric_versions_and_proposals(self):
         spec = importlib.util.spec_from_file_location('newest', ROOT / 'tools/codex-newest-check.py')
