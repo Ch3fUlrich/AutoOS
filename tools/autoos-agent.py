@@ -5680,7 +5680,31 @@ _NO_FREE_LEG_SPACES_RE = re.compile(r"[_\s]+")
 # P12b (D-1116): the two things a seat can have RUN. `ran=` is only asked for when the
 # lane is HIGH (R3), but a value outside this list is refused in every lane — a typo
 # would otherwise read as the evidence the gate exists to demand.
+SEAT_FIRST_LINE = ("You have NO tools and no repository access. Everything you need is below. "
+                   "Answer in plain text only.")
 SEAT_RAN_VALUES = ("tests", "live")
+
+
+def seat_prompt(task, is_seat):
+    """Add the seat's no-tools boundary once, preserving all existing text."""
+    if not is_seat:
+        return task, False
+    first = next((line.strip() for line in task.splitlines() if line.strip()), "")
+    if first == SEAT_FIRST_LINE:
+        return task, False
+    return SEAT_FIRST_LINE + "\n\n" + task, True
+
+
+def is_seat_run(args):
+    """Classify review seats without consulting repository or host state."""
+    if (getattr(args, "review_base", None) or getattr(args, "review_of", None)
+            or getattr(args, "tier", None) == 3):
+        return True
+    try:
+        card = routing.parse_card(getattr(args, "card", None) or "")
+    except (ValueError, KeyError, TypeError):
+        card = {}
+    return bool(isinstance(card, dict) and _card_asks_review(card))
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
                      "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>] "
@@ -14032,6 +14056,9 @@ def cmd_run(args, cfg: dict) -> int:
     # a worker chatted twice before the route planner caught it).
     if not args.task or not args.task.strip():
         return refuse("task is empty or whitespace-only", 2)
+    args.task, changed = seat_prompt(args.task, is_seat_run(args))
+    if changed:
+        print("seat-prompt: prepended the no-tools first line", file=sys.stderr)
     # FLEETP0b: `--run-id` names a directory, a branch and a header, so a shape
     # that is not the canonical one is refused here - before any clone, record or
     # client start (and before the MCP server's own state dir is created for it).
