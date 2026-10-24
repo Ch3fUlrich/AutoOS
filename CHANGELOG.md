@@ -1,6 +1,6 @@
 # Changelog
 
-- ZED-SETUP-REMOVE (D-2598): Zed setup removed from AutoOS catalog, installers, routing, and tests.
+- ZED-SETUP-REMOVE (D-2598): Zed setup removed from AutoOS: catalog components and installer steps (install.sh, AutoOS.Install.psm1, detect.sh, start-stack), the zed client from the registry/schema and every render/sync/audit tool (registry.py, sync-ide-models.py, audit-router.py, ide-models.json), current docs and skills, and the zed-only tests. OpenHands and history notes are unchanged.
 - D-2148: enforce registry-owned newest-only Codex IDs; add read-only weekly bump proposals and align MCP availability. Remove superseded Sol credit route.
   - CODEX-NEWEST-ONLY (D-2488): keep the Google review seat first and cx carried, not first (router option B), preserving the default cross-family seat; D-2148 writer order still names cx first.
 - SEAT-FREE-OPENCODE (D-2449/D-2450/D-2459): declare DeepSeek and GLM Zen free seats and direct MiMo flash/pro pins; reject ambiguous MiMo combo pins and served-model evidence, and repair the fallback pin.

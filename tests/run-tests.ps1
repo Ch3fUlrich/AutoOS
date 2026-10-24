@@ -7115,7 +7115,7 @@ Test-Case 'opencode-cli is the headless fallback on light' {
 }
 
 Test-Case 'ai postInstall hooks are exported' {
-    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSClaudeGateway', 'Set-AutoOSOmniRouteCliKey', 'Set-AutoOSApiKeyEnv', 'Install-AutoOSQoderCli', 'Install-AutoOSOmniRouteRouting', 'Set-AutoOSZedProxy')) {
+    foreach ($fn in @('Install-AutoOSLitellm', 'Set-AutoOSClaudeGateway', 'Set-AutoOSOmniRouteCliKey', 'Set-AutoOSApiKeyEnv', 'Install-AutoOSQoderCli', 'Install-AutoOSOmniRouteRouting')) {
         Assert-True ($null -ne (Get-Command $fn -ErrorAction SilentlyContinue)) "$fn missing"
     }
     Pass
