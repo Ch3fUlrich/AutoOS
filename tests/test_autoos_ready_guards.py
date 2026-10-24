@@ -5,10 +5,12 @@ Hermetic (D-852): no runner, no subprocess, no git, no network — diff paths ar
 arguments, the tool lookup is injected (a directory name comes from this checkout's
 own path, only ever stat'ed), the brief is a real render."""
 import inspect
+import io
 import shutil
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -753,6 +755,32 @@ class ReadyGuardsTests(unittest.TestCase):
             self.assertIn(name, out["message"])
         self.assertIn("pipx install yamllint ansible-core ansible-lint pre-commit",
                       g.INSTALL_HELP)
+
+
+class WriterOrderFallbackTests(unittest.TestCase):
+    """D-2540 round 2: the D-2148 writer order stays actionable two ways - the
+    loader SAYS when it fell back (MED1: exactly one stderr line, no path, no
+    secret detail) and the refusal it feeds words the order as usable legs, not
+    free ones (MED3: "no usable writer leg? D-2148 order: ...")."""
+
+    def test_an_unreadable_registry_falls_back_and_logs_one_stderr_line(self):
+        err = io.StringIO()
+        with mock.patch.object(g.Path, "read_text", side_effect=OSError("boom")):
+            with mock.patch.object(sys, "stderr", err):
+                order = g._load_writer_order()
+        self.assertEqual(order, g.FALLBACK_WRITER_ORDER)
+        lines = [ln for ln in err.getvalue().splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, lines)           # one line, not a traceback
+        self.assertIn("writer order", lines[0])           # says what could not load
+        self.assertNotIn("boom", err.getvalue())          # no exception detail
+        self.assertNotIn(str(ROOT), err.getvalue())       # no path
+
+    def test_the_refusal_names_usable_legs_not_free_ones(self):
+        msg = g.writer_trailer_refusal(
+            [{"sha": "1" * 40, "parents": 1, "message": "lane work", "lines": 40}])
+        self.assertIn("no usable writer leg? D-2148 order:", msg)
+        self.assertNotIn("no free writer leg", msg)
+        self.assertIn("Next entry to try: 1) %s" % g.WRITER_ORDER[0], msg)
 
 
 if __name__ == "__main__":

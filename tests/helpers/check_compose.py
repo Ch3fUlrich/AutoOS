@@ -79,6 +79,34 @@ def main(path):
         if re.search(r"(sk-[A-Za-z0-9]{8,}|PASSWORD=\S|_KEY: ['\"]?[A-Za-z0-9]{12,})", body):
             bad.append(name + ": inline secret")
     om, oc, oh = svc.get("omniroute", ""), svc.get("opencode", ""), svc.get("openhands", "")
+    # opencode's exposure (incident D-2542): its OWN publish variable, loopback
+    # by default. The root UI answers without a password, so :4096 must never
+    # ride AUTOOS_STACK_BIND and never default to a wildcard - AUTOOS_STACK_BIND
+    # keeps owning :20128 and :3000 alone.
+    want_oc_port = '"${AUTOOS_OPENCODE_PUBLISH_IP:-127.0.0.1}:4096:4096"'
+    if want_oc_port not in oc:
+        bad.append("opencode: the port must be %s" % want_oc_port)
+    for peer, peer_port in (("omniroute", "20128"), ("openhands", "3000")):
+        want = '"${AUTOOS_STACK_BIND:-0.0.0.0}:%s:%s"' % (peer_port, peer_port)
+        if want not in svc.get(peer, ""):
+            bad.append("%s: the port must keep %s" % (peer, want))
+    # The healthcheck must prove the GUARDED API answers: an unauthenticated
+    # curl of the open root is satisfied by any static file server. It carries
+    # the configured password (either name - measured: either alone works,
+    # OPENCODE_PASSWORD wins when both are set) and counts the auth layer's own
+    # 401 as alive, so a container started without a password does not
+    # restart-loop under autoheal.
+    hc = re.search(r'^      test: \["CMD-SHELL", .*"\]$', oc, re.M)
+    if not hc:
+        bad.append("opencode: the healthcheck must be a CMD-SHELL probe of the guarded API")
+    else:
+        probe = hc.group(0)
+        if "/api/session" not in probe:
+            bad.append("opencode: the healthcheck must probe /api/session, not the open root")
+        if not re.search(r"OPENCODE_(SERVER_)?PASSWORD", probe):
+            bad.append("opencode: the healthcheck must authenticate with the configured password")
+        if "!= 000" not in probe:
+            bad.append("opencode: the healthcheck must count a 401 as alive")
     for name, body in (("omniroute", om), ("opencode", oc)):
         if not re.search(r'^    user: "\$\{AUTOOS_UID:-1000\}:\$\{AUTOOS_GID:-1000\}"$', body, re.M):
             bad.append(name + ": must run as the host user (AUTOOS_UID:AUTOOS_GID)")

@@ -7790,7 +7790,7 @@ def cmd_ready(args) -> int:
     Ahead of that block sits GATE-WRITER-TRAILER: `lane_commits` and
     `writer_trailer_refusal` refuse a commit whose last paragraph names no
     `Writer: <model> <run id>` (merges exempt) or names a Claude writer over its line
-    cap, spelling out the D-1704 order.
+    cap, spelling out the D-2148 order.
 
     P12b (D-1116): that same diff decides the lane's CLASS for the review gate too —
     `required_r_level` rides into `review_status` as `r_level`, and an R3 (HIGH:

@@ -17,7 +17,6 @@ flowchart LR
     COMBO --> OC["opencode.jsonc providers.omniroute\n(opencode CLI/TUI/Desktop, serve)"]
     LITE --> OCLITE["opencode.jsonc providers.litellm"]
     COMBO --> OH["tier-profiles.json\n→ sync-openhands-profiles.py\n→ OpenHands :3000"]
-    COMBO --> ZED["lib installers Zed writer\n→ autoos-omniroute :20128"]
     OC --> NVIM["nvim + sidekick\n(inherits opencode routing)"]
     SK[".agents/skills/\n(single home)"] -->|installer junctions| CL[".claude/skills/\n(Claude Code)"]
     SK -->|load_skills_from_dir| OH

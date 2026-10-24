@@ -706,7 +706,7 @@ class IdeRenderMatchesTodayTests(unittest.TestCase):
         reg["routes"]["spark-1.3-contributor"].pop("unavailable_legs", None)
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertEqual(by_id["spark-1.3-contributor"]["surfaces"], {"omniroute": ["opencode", "zed", "openhands"]})
+        self.assertEqual(by_id["spark-1.3-contributor"]["surfaces"], {"omniroute": ["opencode", "openhands"]})
 
 
 class ALeglessRouteIsOfferedThroughNoComboTests(unittest.TestCase):
@@ -728,7 +728,7 @@ class ALeglessRouteIsOfferedThroughNoComboTests(unittest.TestCase):
         # config.yaml, not in a combo), so the route is offered there and nowhere
         # else - the shape l2-worker-paid and l3-driver-paid already have.
         paid = self.by_id()["l1-orchestrator-paid"]
-        self.assertEqual(paid["surfaces"], {"litellm": ["opencode", "zed"]}, paid)
+        self.assertEqual(paid["surfaces"], {"litellm": ["opencode"]}, paid)
 
     def test_a_route_no_gateway_offers_gets_no_entry(self):
         ids = [m["id"] for m in self.by_id().values()]
@@ -943,7 +943,11 @@ class EffortLadderInRenderIdeTests(unittest.TestCase):
         seen = set()
         for m in real_ide_models()["models"]:
             want = m.get("effort_ladder")
-            for provider in m.get("surfaces", {}):
+            for provider, clients in m.get("surfaces", {}).items():
+                # D-2590: a route may serve the gateway without an opencode
+                # entry (the mimo singles: opencode uses provider mimo only).
+                if "opencode" not in clients:
+                    continue
                 models = oc["providers"][provider]["models"]
                 got = [v["id"] for v in models[m["id"]].get("variants", [])]
                 if want is None:

@@ -91,7 +91,7 @@ CLEAN_SEAT_FIXTURE = {
             "id": CLEAN_SEAT_ROUTE_ID, "class": "cheap",
             "strategy": "priority", "legs": [CLEAN_SEAT_LEG],
             "surfaces": {"omniroute": {
-                "clients": ["opencode", "zed", "openhands"],
+                "clients": ["opencode", "openhands"],
                 "context": 1048576, "context_declared": "1M",
                 "display_name": "test · clean seat · 1M", "output": 32768}},
         },
@@ -2466,14 +2466,14 @@ class GatewayOrderTests(unittest.TestCase):
     def test_openrouter_qwen_legs_are_unreferenced_by_any_route(self):
         # 16:4xZ revision: OpenRouter has no shared credit (BYOK only) - the
         # four openrouter/qwen legs added for the withdrawn 15:44Z SPEED
-        # directive keep their model entries (operator instruction) but are
+        # directive lost their unused model entries under D-2641 and are
         # "unavailable and in no route order". FREEWIRE 2026-09-30: the $0
         # ':free' qwen leg is now referenced (the operator's free-provider
         # wiring); every PAID openrouter/qwen leg stays unreferenced.
         registry = self.registry()
         for mid in ("qwen/qwen3.8-flash", "qwen/qwen3-coder-flash",
                    "qwen/qwen3.8-max-0902"):
-            self.assertIn(mid, registry["models"])
+            self.assertNotIn(mid, registry["models"])
         # ORQWEN404 2026-10-06 (operator task 10): the :free qwen leg measured
         # 404 upstream and left every route (declaration gated unavailable in
         # each route that carried it), so no openrouter/qwen leg is referenced
@@ -3625,11 +3625,11 @@ class ReviewerSelectionTests(unittest.TestCase):
                                       if e["model"] in self.FREE_ZEN_MODELS]
         self.assertEqual([e["model"] for e in reg["policy"]["reviewers"]],
                          self.FREE_ZEN_MODELS)
-        # The author is a registry model id, not the reviewer-list spelling
-        # "qwen3.8-flash": with the list sliced down to the three, only a model
+        # The author is the served Go registry model id: with the list
+        # sliced down to the three, only a model
         # id still places the author's family (REVFIX S2 fails closed on an
         # unplaceable author, and that is not what this test is about).
-        author = "qwen/qwen3.8-flash"
+        author = "qwen3.8-flash"
 
         normal = r.reviewer_for(author, reg, self.all_clients_up(), self.NOW,
                                 risk="normal", privacy="public")

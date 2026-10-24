@@ -12185,16 +12185,17 @@ class ReadyCommandTests(unittest.TestCase):
             [self.commit(sha="1" * 40, message="lane work"),
              self.commit(sha="2" * 40, message="x\n\nWriter: sonnet-5 run-2", lines=12),
              self.commit(sha="3" * 40)])
-        self.assertEqual(len(guards.WRITER_ORDER), 7)
+        self.assertEqual(len(guards.WRITER_ORDER), 4)
+        self.assertEqual(guards.WRITER_ORDER[0], "opencode omniroute/cx-gpt-6.1-sol")
         self.assertIn("11111111 has no", msg)   # every problem joins, none is dropped
         self.assertIn("; 22222222 names Claude writer", msg)
         self.assertNotIn("33333333", msg)       # a commit that clears is not named
-        self.assertIn("D-1704 order: 1) %s" % guards.WRITER_ORDER[0], msg)
+        self.assertIn("D-2148 order: 1) %s" % guards.WRITER_ORDER[0], msg)
         self.assertIn("Next entry to try: 1) %s" % guards.WRITER_ORDER[0], msg)
         self.assertEqual(guards.writer_trailer_refusal([]), "")
 
     def test_the_trailer_gate_refuses_the_lane_through_the_cli(self):
-        # Exit 1 and the D-1704 order for commits that name no writer; fail closed at
+        # Exit 1 and the D-2148 order for commits that name no writer; fail closed at
         # exit 2 when git cannot answer — "the log never ran" is not "the lane cleared
         # the check". Neither path touches the inbox.
         for commits, error, want, needle in (
@@ -18401,7 +18402,7 @@ class ClaudeBudgetLastMileTests(unittest.TestCase):
     def test_a_known_non_claude_leg_is_never_refused(self):
         # A provider/model the registry can read stays free: fail-closed on the
         # unknown is not fail-closed on everything.
-        r = run_agent("run", "--client", "qoder", "--model", "qwen/qwen3.8-flash",
+        r = run_agent("run", "--client", "qoder", "--model", "qwen3.8-flash",
                       "--dry-run", "--card", "role=review", "t", env=clean_env())
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("claude_budget", r.stderr)
