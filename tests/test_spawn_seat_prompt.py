@@ -22,7 +22,10 @@ class SeatPromptTests(unittest.TestCase):
         for task, seat, expected, changed in [
             ("review this", True, FIRST + "\n\nreview this", True),
             (FIRST + "\n\nreview this", True, FIRST + "\n\nreview this", False),
-            ("\n \t\n" + FIRST, True, "\n \t\n" + FIRST, False),
+            ("\n \t\n" + FIRST, True, FIRST + "\n\n\n \t\n" + FIRST, True),
+            ("  " + FIRST, True, FIRST + "\n\n  " + FIRST, True),
+            (FIRST, True, FIRST, False),
+            (FIRST + " extra", True, FIRST + "\n\n" + FIRST + " extra", True),
             ("\n  do x\n", False, "\n  do x\n", False),
         ]:
             with self.subTest(task=task, seat=seat):
@@ -31,7 +34,7 @@ class SeatPromptTests(unittest.TestCase):
         self.assertEqual(agent.SEAT_FIRST_LINE, FIRST)
 
     def test_explicit_seat_triggers(self):
-        for values in ({"review_base": "HEAD"}, {"review_of": "run"}, {"tier": 3}):
+        for values in ({"review_base": "HEAD"}, {"review_of": "run"}, {"tier": 3}, {"tier": "3"}):
             with self.subTest(values=values):
                 self.assertTrue(agent.is_seat_run(argparse.Namespace(**values)))
 
@@ -44,6 +47,8 @@ class SeatPromptTests(unittest.TestCase):
     def test_plain_run(self):
         self.assertFalse(agent.is_seat_run(argparse.Namespace()))
         self.assertFalse(agent.is_seat_run(argparse.Namespace(read_only=True)))
+        for tier in (None, "bad", [], "2"):
+            self.assertFalse(agent.is_seat_run(argparse.Namespace(tier=tier)))
 
     def test_malformed_card(self):
         for value in (ValueError(), KeyError(), TypeError(), []):
