@@ -49,6 +49,8 @@
 #   fail-register        register-autostart.sh fails (register.log also
 #                        records marker=yes|no: ai-stack.sh's marker at the call)
 #   compose-bind.log     AUTOOS_STACK_BIND as every `docker compose` call saw it
+#   compose-publish.log  AUTOOS_OPENCODE_PUBLISH_IP as every `docker compose`
+#                        call saw it (incident D-2542: :4096's own variable)
 #   qoder-home-at-up.log "present"/"absent": whether <state-dir>/data/qoder-home
 #                        (the sandbox's data dir) existed at each `compose up`
 #   slow-sleep           the fake `sleep` really sleeps 0.5 s (a test that must
@@ -99,6 +101,7 @@ if [[ -n "${OMNIROUTE_API_KEY:-}" ]]; then printf '%s\n' "$TOOL" >>"$S/saw-manag
 # The publish address compose would interpolate (shell env beats --env-file).
 if [[ "$TOOL" == docker && "${1:-}" == compose ]]; then
     printf 'bind=%s\n' "${AUTOOS_STACK_BIND-<unset>}" >>"$S/compose-bind.log"
+    printf 'publish=%s\n' "${AUTOOS_OPENCODE_PUBLISH_IP-<unset>}" >>"$S/compose-publish.log"
 fi
 
 container_of() {

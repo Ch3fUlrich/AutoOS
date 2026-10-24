@@ -620,20 +620,46 @@ def _run_dir(run_id: str) -> str:
     return path
 
 
-def list_clients() -> dict:
-    """The client matrix, the card fields and this caller's depth budget."""
+def _registry_client_available(entry, now) -> bool:
+    """The registry's answer for one `clients.<name>` entry (finding B7).
+
+    The same one the CLIENTAVAIL spawn gate (tools/autoos-agent.py) and
+    autoos_resolver._client_reason give: an entry is unavailable while its
+    `unavailable_until` still runs, and whenever it carries `available: false`
+    - including the "until passed, flag not cleared yet" state those gates
+    report as a re-probe. Absent flags read as available, the registry's own
+    default. A row this server shows can therefore never claim a client the
+    gate would refuse.
+    """
+    entry = entry or {}
+    return not (unavailable_now(entry, now) or entry.get("available") is False)
+
+
+def list_clients(registry_doc=None) -> dict:
+    """The client matrix, the card fields and this caller's depth budget.
+
+    `registry_doc` injects the registry document (tests); the live MCP server
+    passes nothing and reads the committed registry. Every row's `available`
+    is `_registry_client_available`'s answer, so it equals the registry's for
+    EVERY client (B7), never a per-row default.
+    """
     import shutil
     try:
         depth = "a spawn from here runs at depth %d of %d" % clients.child_depth(os.environ)
     except clients.DepthError as exc:
         depth = str(exc)
     rows = []
+    now = datetime.datetime.now(datetime.timezone.utc)
+    registry_clients = (registry_doc if registry_doc is not None
+                        else agent.load_registry(agent.REGISTRY_PATH)).get('clients', {})
     for c in clients.CLIENTS.values():
         installed = shutil.which(c.binary) is not None
         ok, reason = clients.signin_state(c)
+        available = _registry_client_available(registry_clients.get(c.name), now)
         rows.append({"name": c.name, "headless": c.headless, "gateway": c.gateway,
                      "native_subagents": c.subagents, "auth": c.auth, "promo": c.promo,
-                     "installed": installed, "usable": installed and ok is not False,
+                      "installed": installed, "available": available,
+                      "usable": available and installed and ok is not False,
                      "reason": reason if ok is False else ("" if installed else "not installed"),
                      "notes": c.notes})
     return {

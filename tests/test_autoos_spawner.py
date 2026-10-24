@@ -21652,7 +21652,7 @@ class RunFamilyRecordTests(unittest.TestCase):
         # model half says it is an openai-oss model.
         self.assertEqual(self.agent.vendor_family_name("openai/gpt-oss-120b"),
                          "openai-oss")
-        self.assertEqual(self.agent.vendor_family_name("openai/gpt-6-sol"), "openai")
+        self.assertEqual(self.agent.vendor_family_name("cx/gpt-6.1-sol"), "openai")
 
     def test_a_name_the_table_cannot_place_names_no_family(self):
         self.assertIsNone(self.agent.vendor_family_name("jetski-9"))

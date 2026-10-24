@@ -1,0 +1,5 @@
+# Additional loopback publication keeps local status/resume probes truthful.
+services:
+  opencode:
+    ports:
+      - "127.0.0.1:4096:4096"

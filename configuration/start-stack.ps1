@@ -444,10 +444,14 @@ switch ($App) {
         Write-Host 'OpenHands UI: http://localhost:3000'
     }
     'opencode-serve' {
+        . (Join-Path $PSScriptRoot 'opencode-bind.ps1')
+        # AUTOOS_OPENCODE_HOST is validated before probing or spawning.
+        $ocHost = Get-AutoOSOpencodeHost
+        $ocAuthority = if ($ocHost.Contains(':')) { "[$ocHost]" } else { $ocHost }
         # Phone fallback UI (docs/openhands-runbook.md rung 2): resume when
         # down, no-op when up. 401 without pairing credentials = alive.
         $ocUp = $false
-        try { $ocUp = (Invoke-WebRequest -Uri 'http://127.0.0.1:4096/' -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }
+        try { $ocUp = (Invoke-WebRequest -Uri "http://${ocAuthority}:4096/" -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }
         catch {
             $r = $_.Exception.Response
             if ($null -ne $r) { $ocUp = ([int]$r.StatusCode) -in 200, 401 }
@@ -458,13 +462,20 @@ switch ($App) {
         } else {
             $pw = Get-AutoOSKeyValue -Path $keysFile -Name 'opencode_password'
             if ($pw) {
+                # One value, both names (D-2542): either name alone authenticates and
+                # OPENCODE_PASSWORD wins when both are set, so a build reading only the
+                # other name must get this password, not a 401 against the operator's.
                 $env:OPENCODE_PASSWORD = $pw
+                $env:OPENCODE_SERVER_PASSWORD = $pw
                 Write-Host "Serve password: from $keysFile (user: opencode)."
             } else {
                 Write-Host "No opencode_password in $keysFile - opencode serve picks a new random password every start; add one (see docs/web-services.md#logins-and-secrets)."
             }
             Write-Host 'Starting opencode serve in the background...'
-            Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', '0.0.0.0', '--port', '4096' -WindowStyle Hidden
+            # D-2549: loopback, never a wildcard. opencode's root UI answers without a
+            # password, so 0.0.0.0 would hand every host on the network the agent's web
+            # UI; a phone or proxy reaches it through a named address instead.
+            Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', $ocHost, '--port', '4096' -WindowStyle Hidden
             Write-Host 'opencode serve should answer on http://localhost:4096 (401 = alive, pair via: opencode pair).'
         }
     }

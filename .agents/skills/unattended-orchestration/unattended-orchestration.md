@@ -347,7 +347,7 @@ your Tailscale IPv4.
 | Path | URL (phone via Tailscale) | Role |
 |---|---|---|
 | OpenHands | `http://<tail-ip>:3000` | PRIMARY agent UI (t1 inside) |
-| opencode serve | `http://<tail-ip>:4096` | FALLBACK if OpenHands breaks (`opencode serve --hostname 0.0.0.0 --port 4096`) |
+| opencode serve | `http://<tail-ip>:4096` | FALLBACK if OpenHands breaks (`AUTOOS_OPENCODE_HOST=<your-address> opencode serve --hostname <your-address> --port 4096`; default is 127.0.0.1 and a wildcard is refused - D-2542) |
 | OmniRoute | `http://<tail-ip>:20128` | router for Zed/Desktop/nvim (client key via env, never URL) |
 | AutoOS `--serve` | loopback only unless elevated | installer UI; LAN bind needs `netsh http add urlacl url=http://+:8777/ user=<you>` from an elevated shell, then `setup.ps1 -Serve -Bind 0.0.0.0` |
 

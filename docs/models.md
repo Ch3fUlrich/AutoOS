@@ -53,7 +53,6 @@ _Generated from `catalog/ai-registry.json` — do not edit by hand. Run `python3
 | `class-1m` | cheap | 1M | vertex `gemini-3.8-flash` → opencode-go `glm-5.3-flash` |
 | `class-256k` | cheap | 256k | vertex `gemini-3.8-flash` → opencode-go `glm-5.3-flash` |
 | `deepseek-v4.1-flash` | cheap | 1M | ~~deepseek `deepseek-flash`~~ (unavailable) → ~~opencode-zen `deepseek-v4.1-flash`~~ (unavailable) |
-| `faik-gpt-6-sol` | credit | 128k | ~~freeaiapikey `openai/gpt-6-sol`~~ (unavailable) |
 | `gemini-3.8-flash` | cheap | 1M | ~~gemini `gemini-3.8-flash`~~ (unavailable) → vertex `gemini-3.8-flash` |
 | `groq-qwen3.8-27b` | free | 128k | ~~groq `qwen/qwen3.8-27b`~~ (unavailable) |
 | `hf-glm-5.2` | free | 128k | ~~huggingface `zai-org/GLM-5.2`~~ (unavailable) |

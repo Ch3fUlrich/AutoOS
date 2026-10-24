@@ -357,8 +357,10 @@ SERVICES = [
     {"id": "litellm", "name": "LiteLLM fallback", "port": 4000, "path": "/",
      "bind": "127.0.0.1", "auth": "LITELLM_MASTER_KEY",
      "unit": "autoos-litellm", "actions": ["resume-stack"]},
+    # D-2542: the published bind is loopback by default (an explicit
+    # AUTOOS_OPENCODE_PUBLISH_IP from stack.env may name one other address).
     {"id": "opencode", "name": "opencode serve (web UI)", "port": 4096, "path": "/",
-     "bind": "0.0.0.0", "auth": "HTTP Basic on /api/* (user opencode)",
+     "bind": "127.0.0.1", "auth": "HTTP Basic on /api/* (user opencode)",
      "unit": "autoos-opencode", "actions": ["start-opencode-serve"]},
     {"id": "openhands", "name": "OpenHands", "port": 3000, "path": "/",
      "bind": "0.0.0.0", "auth": "none - reach it only through the proxy",

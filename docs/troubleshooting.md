@@ -123,10 +123,16 @@ is ignored by Zed and stays hidden providers hidden.
 ## Phone over Tailscale (remote UIs)
 
 Verified 2026-09-20: OpenHands `:3000` (dual-stack `::`, reachable on both
-interfaces), opencode serve `:4096` and the OmniRoute gateway `:20128` (both
-`0.0.0.0`) all answer on the Tailscale and LAN addresses below. No secrets
+interfaces) and the OmniRoute gateway `:20128` (both `0.0.0.0`) all answer on
+the Tailscale and LAN addresses below. No secrets
 here — every UI still needs its own credential (OpenHands login, opencode
 pairing, OmniRoute client key, AutoOS token).
+
+opencode serve `:4096` is the exception since incident D-2542: its root UI
+needs no password, so it binds `127.0.0.1` by default and only answers the
+phone when you name the address it publishes on
+(`AUTOOS_OPENCODE_HOST=… opencode serve …`, or `AUTOOS_OPENCODE_PUBLISH_IP`
+for the docker stack; a wildcard is refused).
 
 | UI | Phone URL (Tailscale) | Phone URL (LAN) |
 |---|---|---|
@@ -140,5 +146,6 @@ Check first when the phone cannot reach one: `configuration/healthcheck.ps1`
 is Automatic startup — verify with `tailscale ip -4`. The AutoOS browser UI
 row only answers while `setup.ps1 -Serve -Bind 0.0.0.0` runs (elevated shell,
 prints a per-run token); opencode serve only answers while
-`opencode serve --hostname 0.0.0.0 --port 4096` runs (see
+`opencode serve --hostname <your-address> --port 4096` runs with that address
+named (the wrapper refuses `0.0.0.0`; see
 [configuration/README](../configuration/README.md)).
