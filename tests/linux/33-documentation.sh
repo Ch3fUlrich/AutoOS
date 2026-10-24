@@ -1038,6 +1038,9 @@ fi
 if it "spawn_pin_allowed_id: an undeclared model id refusal names the allowed ids (unit tests)"; then
     out="$(python3 tests/test_spawn_pin_allowed_id.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
+if it "spawn_relaunch_quota: stalled writers check shared quota before relaunch (unit tests)"; then
+    out="$(python3 tests/test_spawn_relaunch_quota.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
 
 # OVERLAYHOME: the machine-wide tool_calls overlay (path resolution, legacy
 # fallback, locked merge-save) - temp dirs only, never the real state dir.

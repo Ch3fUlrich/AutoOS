@@ -13617,6 +13617,62 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
     return rows
 
 
+QUOTA_GROUPS = (('cx-gpt', 'codex'), ('mimo', 'mimo'))
+RELAUNCH_QUIET_MINUTES = 30
+
+
+def quota_group(model):
+    pin = (model or "").lower()
+    return next((group for needle, group in QUOTA_GROUPS if needle in pin),
+                pin.split("/", 1)[0])
+
+
+def relaunch_quota_ok(group):
+    """Read recorded cooldowns only; absent state does not block a launch."""
+    try:
+        state = load_provider_state(PROVIDER_STATE_PATH)
+    except (OSError, ValueError):
+        return True, "no cooldown recorded"
+    providers = state.get("providers") or {}
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if isinstance(providers, dict):
+        for provider, entry in providers.items():
+            if quota_group(provider) != group or not isinstance(entry, dict):
+                continue
+            until = _iso_utc(entry.get("unavailable_until"))
+            if until is not None and until > now:
+                return False, "unavailable_until %s" % entry["unavailable_until"]
+    return True, "no cooldown recorded"
+
+
+def relaunch_quota_refusal(model, title_or_lane, workers, now, quota_ok):
+    # A stalled writer must check quota first: switching sol to luna shares it.
+    group = quota_group(model)
+    earlier = []
+    for row in workers:
+        identity = row.get("title") or row.get("lane")
+        started = _iso_utc(row.get("started"))
+        if (identity == title_or_lane and quota_group(row.get("model")) == group
+                and started is not None and started < now):
+            earlier.append((started, row))
+    if not earlier:
+        return None
+    started, row = max(earlier, key=lambda item: item[0])
+    # A newer successful run supersedes an old failure; it is progress.
+    if row.get("state") != "died" and row.get("rc") not in (5, 10):
+        return None
+    minutes = (now - started).total_seconds() / 60
+    if minutes <= RELAUNCH_QUIET_MINUTES:
+        return None
+    ok, detail = quota_ok(group)
+    if ok:
+        return None
+    return ("relaunch refused: previous run %s (%s) made no workspace change for "
+            "%d min and the %s quota check failed (%s); wait for the window or "
+            "pick a model from another quota group"
+            % (row.get("id"), row.get("model"), minutes, group, detail))
+
+
 ENDED_VISIBLE_WINDOW = datetime.timedelta(hours=24)
 
 
@@ -14497,6 +14553,12 @@ def cmd_run(args, cfg: dict) -> int:
               "post-run leak check (exit 7). What is and is not isolated: "
               "\"ISOLATION STATEMENT\" in isolate_clone (tools/autoos-agent.py)."
               % client.name)
+    quota_refusal = relaunch_quota_refusal(
+        plan["model"], args.title or plan.get("session_tag") or "",
+        list_workers(workers_dir(), include_ended=True),
+        datetime.datetime.now(datetime.timezone.utc), relaunch_quota_ok)
+    if quota_refusal is not None:
+        return refuse(quota_refusal, EXIT_HOST_ADMISSION)
     if args.dry_run:
         # CLAUDEBUDGET-g item A: the last-mile gate, on the plan this process would
         # hand the client. The early gate proved the *flags*; a reviewer override,
