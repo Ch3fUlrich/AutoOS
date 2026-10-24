@@ -42,11 +42,17 @@ skip and its reason. Do not substitute another model behind a named access path.
 This writer pick applies to a pin-less, default-client write run (CLI and MCP
 spawn without `--client`); an explicit `--model` or `--client` pin wins.
 
-Review seats are separate from writer selection (D-1704/D-2449). The resolver
-provides `seats_for`: two seats from families different from the writer and from
-each other, with Anthropic never the first seat of a HIGH lane. Wiring this
-resolver into seat launch is part of `autoos:MODEL-ORDER-D1704`, not current
-seat-launch behaviour.
+## Seat selection
+
+`policy.reviewers` keeps its D-2488 order (Google first); D-2654 does not
+reorder those rows. The resolver's `seats_for` selects by availability (D-2596):
+two seats whose families differ from the writer and from each other, skipping
+rate-limited or unavailable entries and recording the provider's text. Qwen is
+only via qodercli ACP (D-2641); other clients are skipped with
+`D-2641: qwen only via qodercli`. Opencode Go/free rows remain in the policy but
+are skipped while rate-limited (D-2148). Agy seats pass `--model` and verify the
+served model id (L22/D-2654), rather than trusting the requested Gemini name.
+Launch both `seat=1` and `seat=2` from `seats_for`; the CLI `route` prints both.
 
 ## Standby router (LiteLLM :4000)
 
