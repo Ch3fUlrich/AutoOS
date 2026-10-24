@@ -2747,6 +2747,19 @@ def _paid_last_resort_lines(chosen_leg, skipped_legs, registry):
     return lines
 
 
+DEFAULT_WRITER_ORDER = (
+    "cx/gpt-6.1-sol", "agy/gemini-3.8-flash",
+    "mimo/mimo-v2.6-flash", "qodercli/qwen3.8-flash",
+)
+
+
+def writer_policy_scores(scores, registry):
+    """Order already eligible legs by operator policy, never by their price."""
+    order = registry.get("policy", {}).get("writers", {}).get(
+        "order", DEFAULT_WRITER_ORDER)
+    return [score for leg in order for score in scores if score["leg"] == leg]
+
+
 def plan(card, features, client_state, registry, overlay, track_record,
         orchestrator_model, now=None, client="opencode", env=None,
         credit_guards=None):
@@ -2905,6 +2918,7 @@ def plan(card, features, client_state, registry, overlay, track_record,
         "bucket": bucket_name,
         "decompose": bucket_name in ("S3", "S4"),
         "p": chosen["p"],
+        "p_source": chosen["p_source"],
         "expected_cost": chosen["expected_cost"],
         "reviewers": reviewers,
         "review": review,

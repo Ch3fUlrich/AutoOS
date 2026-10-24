@@ -5,6 +5,10 @@ description: "Portable runner and CLI orchestrator for work that runs with nobod
 
 # Unattended Orchestration
 
+Spawn by card (route/spawn), never hand-pick a model. An explicit model
+exception needs an override reason recorded in the run record. Writer order
+is operator policy; an unavailable leg must fall through without a human.
+
 Long-horizon agent work with **no human present**: an overnight batch, a weekend migration, a
 queue of handoffs too large for one sitting. The runner starts each session, watches it, and
 recovers it through a usage limit, a 529, and a session that stops early.
@@ -242,5 +246,4 @@ The opencode server has no cron: the router runs this loop every operator turn a
 - R-heartbeat-05: The interactive router session cannot self-wake, so the loop pings it (`Router fleet analysis and next steps`, by title): on alert findings (`BLOCKED`, `OOM_KILL`, `MISSING`) and
   for the scheduled 08:00/13:00/19:00 operator-clock digests (one per hour-slot per day, tracked in the watch file; skipped if the operator spoke in the last 20 min). The pinged router investigates
   and reports in chat unprompted. (why: the router only ever reacted; operator-worthy findings waited for questions; source: operator 2026-09-30)
-
 

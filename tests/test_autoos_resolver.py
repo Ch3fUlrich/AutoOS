@@ -24,6 +24,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import autoos_clients as clients  # noqa: E402  (the client adapters: signin probe)
 import autoos_redact as redact  # noqa: E402  (the one canonical text mask)
 import autoos_resolver as r  # noqa: E402
+
+
+class MandatoryWriterPolicyTests(unittest.TestCase):
+    def test_cx_429_next_leg_without_human(self):
+        scores = [{"leg": "cx/gpt-6.1-sol"}, {"leg": "agy/gemini-3.8-flash"},
+                  {"leg": "mimo/mimo-v2.6-flash"}]
+        self.assertEqual(r.writer_policy_scores(scores[1:], {})[0]["leg"],
+                         "agy/gemini-3.8-flash")
+
+    def test_cx_agy_down_uses_mimo(self):
+        self.assertEqual(r.writer_policy_scores([
+            {"leg": "mimo/mimo-v2.6-flash"}], {})[0]["leg"],
+            "mimo/mimo-v2.6-flash")
+
+    def test_free_leg_not_writer_and_all_down_refuses(self):
+        self.assertEqual(r.writer_policy_scores([
+            {"leg": "bazaarlink/free-model"}], {}), [])
+
+    def test_registry_order_overrides_default(self):
+        scores = [{"leg": "cx/gpt-6.1-sol"}, {"leg": "mimo/mimo-v2.6-flash"}]
+        registry = {"policy": {"writers": {"order": ["mimo/mimo-v2.6-flash"]}}}
+        self.assertEqual(r.writer_policy_scores(scores, registry), scores[1:])
 import autoos_usage as usage  # noqa: E402  (the spend guard's one reader of the cap trio)
 import registry as registry_tool  # noqa: E402  (tools/registry.py; private_safe lives here)
 
@@ -1898,7 +1920,7 @@ class PlanTests(unittest.TestCase):
         result = self.s0_plan()
         self.assertEqual(set(result.keys()), {
             "route", "class", "client", "leg", "effort", "max_tokens",
-            "context_budget", "bucket", "decompose", "p", "expected_cost",
+            "context_budget", "bucket", "decompose", "p", "p_source", "expected_cost",
             "reviewers", "escalation", "state", "defer_until", "reason",
             "explain", "skipped_legs", "re_probe_notes", "review",
         })
