@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
     Provider dispatch and post-install steps for AutoOS on Windows.
@@ -1174,13 +1174,13 @@ function Get-AutoOSIdeModel {
         catalog/ide-models.json (rendered from catalog/ai-registry.json -
         do not edit) lists the gateway models (ids, display names,
         token windows, per-surface membership).
-        The Zed and OpenCode writers project it at run time instead of
+        The OpenCode writer projects it at run time instead of
         carrying a copy; tools/sync-ide-models.py keeps the static copies
         (opencode.jsonc, the OpenHands tier spec) in step.
     #>
     param(
         [Parameter(Mandatory)][ValidateSet('omniroute', 'litellm')][string]$Gateway,
-        [Parameter(Mandatory)][ValidateSet('opencode', 'zed', 'openhands')][string]$Surface
+        [Parameter(Mandatory)][ValidateSet('opencode', 'openhands')][string]$Surface
     )
     $path = Join-Path $script:RepoRoot 'catalog\ide-models.json'
     # One clear message naming the file - never a bare parser error or a
@@ -1387,7 +1387,7 @@ function Set-AutoOSOmnigraphEnv {
 
       .DESCRIPTION
         Tracked configs name the token (${OMNIGRAPH_TOKEN} in .mcp.json;
-        opencode, Zed and OpenHands inherit it), so something has to put the
+        opencode and OpenHands inherit it), so something has to put the
         value into the environment of whatever launches a client. A token that
         only one shell profile exports reaches that shell and nothing else, and
         the bridge still shows "connected" (it answers health without a token)
@@ -2509,7 +2509,7 @@ function Set-AutoOSOpenCodeConfig {
     # direct entry below stays because OpenHands' vendored
     # muse-spark-1.3-contributor.json template needs fresh catalog numbers
     # projected at setup (catalog wins). Tier ids are the stable contract
-    # (docs/models.md) — same list as the repo config and the Zed writer.
+    # (docs/models.md) — same list as the repo config.
     # Keys stay out of the file: {env:...} placeholders resolve at runtime —
     # EXCEPT that a placeholder no environment can fill breaks the whole parse.
     # REVROUTE (S2) item 4 (measured on L1-backlog, Linux twin in
@@ -3411,7 +3411,7 @@ for name, p_data in profiles.items():
     _put_json(os.path.join(profiles_dir, name), p_data)
 gw_key = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] != 'null' else None
 # LiteLLM master key for the litellm-tier* fallback profiles: env first
-# (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
+# (LITELLM_MASTER_KEY, then AUTOOS_LITELLM_API_KEY), never argv.
 _lit_key = os.environ.get('LITELLM_MASTER_KEY') or os.environ.get('AUTOOS_LITELLM_API_KEY')
 # A direct-provider tier (the effort-ladder surface, e.g. OpenRouter spark)
 # carries its own key: it does NOT go through either gateway.
@@ -3845,7 +3845,7 @@ function Install-AutoOSOmniRouteRouting {
       component: persistent client-key env, Claude Code settings, Qwen model
       entry. Each step skips quietly when its CLI is absent; DryRun announces.
       Secrets travel Process-scope only and are never printed. NOTE the two
-      key names below are pre-existing repo convention (Zed docs use the
+      key names below are pre-existing repo convention (the
       _API_KEY form, Set-AutoOSClaudeGateway reads the short form); both
       carry the same gateway client key.
     #>
@@ -3947,186 +3947,6 @@ function Install-AutoOSQoderCli {
     else { Write-AutoOSLine 'qodercli still not resolvable - open a new terminal (PATH refresh) or check the install' -Level warn }
 }
 
-function Set-AutoOSZedProxy {
-    <#
-      .SYNOPSIS Point Zed's agent panel at the local OmniRoute gateway + LiteLLM fallback.
-      Only the provider ids 'autoos-omniroute' / 'autoos-litellm' are written;
-      every other Zed setting is kept. Keys NEVER go into settings.json (Zed
-      docs: provider keys come from the keychain/UI or from env). Zed derives
-      the env name from the provider id (upper snake + _API_KEY), so the
-      gateway key must be exported as AUTOOS_OMNIROUTE_API_KEY and the
-      fallback key as AUTOOS_LITELLM_API_KEY before Zed starts; missing keys
-      warn here and the providers stay hidden until a restart picks them up.
-    #>
-    $cfgDir  = Join-Path $env:APPDATA 'Zed'
-    $cfgPath = Join-Path $cfgDir 'settings.json'
-    if ($script:DryRun) {
-        Write-AutoOSLine "would route Zed agents to OmniRoute in $cfgPath" -Level muted
-        return
-    }
-    # Model ids, display names, context windows and membership come from
-    # catalog/ide-models.json at run time (rendered from catalog/ai-registry.json)
-    # - never inline
-    # tiers here: the two Zed writers once drifted from every other surface.
-    # Read first: a missing or broken catalog stops the writer here, in one
-    # line naming the file, before any backup or write. max_tokens is Zed's
-    # context window; reasoning_effort only where the catalog sets one.
-    $zedModels = {
-        param([string]$Gateway)
-        foreach ($m in @(Get-AutoOSIdeModel -Gateway $Gateway -Surface 'zed')) {
-            $entry = [ordered]@{ name = $m.id; display_name = $m.name; max_tokens = $m.context }
-            $effort = $m.PSObject.Properties['reasoning_effort']
-            if ($null -ne $effort -and $effort.Value) { $entry['reasoning_effort'] = $effort.Value }
-            $entry
-        }
-    }
-    try {
-        $omniModels = @(& $zedModels 'omniroute')
-        $litModels = @(& $zedModels 'litellm')
-    } catch {
-        Write-AutoOSLine "$($_.Exception.Message) - Zed settings left unchanged" -Level error
-        return
-    }
-    if (-not (Test-Path $cfgDir)) { New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null }
-    # -Encoding UTF8: this writer saves BOM-less UTF-8 (below), and Windows
-    # PowerShell 5.1 reads a BOM-less file as ANSI - the catalog's em-dash
-    # names and any non-ASCII user setting would come back as mojibake.
-    $settings = if (Test-Path $cfgPath) { Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json } else { New-Object psobject }
-    # StrictMode turns a missing-property read into a throw (even member
-    # enumeration over an empty property set), so probe the collection with
-    # the indexer, which returns $null for a missing name instead of throwing.
-    if ($null -eq $settings.PSObject.Properties['language_models']) {
-        Add-Member -InputObject $settings -NotePropertyName 'language_models' -NotePropertyValue (New-Object psobject)
-    }
-    if ($null -eq $settings.language_models.PSObject.Properties['openai_compatible']) {
-        Add-Member -InputObject $settings.language_models -NotePropertyName 'openai_compatible' -NotePropertyValue (New-Object psobject)
-    }
-    # Bypass profile: every built-in tool on, no confirmations (global
-    # tool_permissions.default allow). Existing profiles and any per-tool
-    # rules the user already has are kept; only the default flips.
-    if ($null -eq $settings.PSObject.Properties['agent']) {
-        Add-Member -InputObject $settings -NotePropertyName 'agent' -NotePropertyValue (New-Object psobject)
-    }
-    if ($null -eq $settings.agent.PSObject.Properties['profiles']) {
-        Add-Member -InputObject $settings.agent -NotePropertyName 'profiles' -NotePropertyValue (New-Object psobject)
-    }
-    $bypassTools = [ordered]@{}
-    foreach ($t in @('ask_user','create_directory','copy_path','delete_path','diagnostics','edit_file','fetch','find_path','grep','list_directory','move_path','skill','read_file','spawn_agent','terminal','search_web','write_file')) {
-        $bypassTools[$t] = $true
-    }
-    $bypass = [ordered]@{
-        name = 'bypass'
-        tools = $bypassTools
-        enable_all_context_servers = $true
-        context_servers = [ordered]@{}
-        default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 'l1-orchestrator' }
-    }
-    Add-Member -InputObject $settings.agent.profiles -NotePropertyName 'bypass' -NotePropertyValue $bypass -Force
-    if ($null -eq $settings.agent.PSObject.Properties['tool_permissions']) {
-        Add-Member -InputObject $settings.agent -NotePropertyName 'tool_permissions' -NotePropertyValue ([ordered]@{ default = 'allow' })
-    } elseif ($null -eq $settings.agent.tool_permissions.PSObject.Properties['default']) {
-        Add-Member -InputObject $settings.agent.tool_permissions -NotePropertyName 'default' -NotePropertyValue 'allow'
-    } else {
-        $settings.agent.tool_permissions.default = 'allow'
-    }
-    # omniroute-first: the litellm proxy currently has zero healthy endpoints,
-    # so a default pointing at autoos-litellm/* is broken. Converge it to
-    # {autoos-omniroute, l1-orchestrator}; never touch a default already on omniroute/*.
-    if ($null -ne $settings.agent.PSObject.Properties['default_model'] -and
-        $null -ne $settings.agent.default_model.PSObject.Properties['provider'] -and
-        $settings.agent.default_model.provider -like 'autoos-litellm*') {
-        $settings.agent.default_model = [ordered]@{ provider = 'autoos-omniroute'; model = 'l1-orchestrator' }
-    }
-    $omniEntry = [ordered]@{
-        api_url = 'http://127.0.0.1:20128/v1'
-        available_models = $omniModels
-    }
-    if ($env:AUTOOS_OMNIROUTE_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_OMNIROUTE_API_KEY from the environment' -Level muted }
-    else { Write-AutoOSLine 'AUTOOS_OMNIROUTE_API_KEY not set - export the OmniRoute client key before starting Zed, or the provider stays hidden' -Level warn }
-    Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-omniroute' -NotePropertyValue $omniEntry -Force
-    $litEntry = [ordered]@{
-        api_url = 'http://127.0.0.1:4000/v1'
-        available_models = $litModels
-    }
-    if ($env:AUTOOS_LITELLM_API_KEY) { Write-AutoOSLine 'Zed will use AUTOOS_LITELLM_API_KEY from the environment' -Level muted }
-    else { Write-AutoOSLine 'AUTOOS_LITELLM_API_KEY not set - export the LiteLLM master key before starting Zed, or the fallback stays hidden' -Level warn }
-    Add-Member -InputObject $settings.language_models.openai_compatible -NotePropertyName 'autoos-litellm' -NotePropertyValue $litEntry -Force
-    # MCP context servers for the agent panel (Settings -> AI -> MCP Servers
-    # shows their status dots). Serena resolves its project per workspace at
-    # call time (the agent activates by absolute path); graphify serves the
-    # cwd-relative graph; omnigraph/playwright/context7 mirror the harness
-    # pins. enable_all_context_servers stays false on the auto
-    # profile; the bypass profile below opts in.
-    if ($null -eq $settings.PSObject.Properties['context_servers']) {
-        Add-Member -InputObject $settings -NotePropertyName 'context_servers' -NotePropertyValue (New-Object psobject)
-    }
-    $serenaCtx = [ordered]@{
-        command = 'uvx'
-        args = @('--from', (Get-AutoOSMcpPackage -Name 'serena'), 'serena', 'start-mcp-server')
-    }
-    Add-Member -InputObject $settings.context_servers -NotePropertyName 'serena' -NotePropertyValue $serenaCtx -Force
-    $graphifyCtx = [ordered]@{
-        command = 'uv'
-        args = @('run', '--with', (Get-AutoOSMcpPackage -Name 'graphify'), 'python', '-m', 'graphify.serve', 'graphify-out/graph.json')
-    }
-    Add-Member -InputObject $settings.context_servers -NotePropertyName 'graphify' -NotePropertyValue $graphifyCtx -Force
-    # Full MCP set for the agent panel: omnigraph (project memory; the bridge
-    # exits at start-up without a base URL and a graph id, so both are set
-    # here - the token never is, Zed inherits OMNIGRAPH_TOKEN from the user
-    # environment Set-AutoOSOmnigraphEnv keeps), playwright
-    # (browser verification) and context7 (library docs). Pins resolve from
-    # catalog/agent-harness.json at runtime, never as literals.
-    # Written as a value, not a reference: Zed's env block is not the installer's
-    # environment, so a URL from the answer or the env file has to be spelled out.
-    # Nothing resolved: skip the entry, keep any the user already wrote.
-    $omniBase = Get-AutoOSOmnigraphBaseUrl
-    if ($null -ne $omniBase) {
-        $omnigraphCtx = [ordered]@{
-            command = 'npx'
-            args = @('-y', (Get-AutoOSMcpPackage -Name 'omnigraph'))
-            env = [ordered]@{ OMNIGRAPH_BASE_URL = $omniBase; OMNIGRAPH_GRAPH_ID = 'autoos' }
-        }
-        Add-Member -InputObject $settings.context_servers -NotePropertyName 'omnigraph' -NotePropertyValue $omnigraphCtx -Force
-    } else {
-        Write-AutoOSLine 'Zed: OMNIGRAPH_BASE_URL is not set - skipping the omnigraph entry' -Level warn
-    }
-    $playwrightCtx = [ordered]@{
-        command = 'npx'
-        args = @('-y', (Get-AutoOSMcpPackage -Name 'playwright'))
-    }
-    Add-Member -InputObject $settings.context_servers -NotePropertyName 'playwright' -NotePropertyValue $playwrightCtx -Force
-    $context7Ctx = [ordered]@{
-        command = 'npx'
-        args = @('-y', (Get-AutoOSMcpPackage -Name 'context7'))
-    }
-    Add-Member -InputObject $settings.context_servers -NotePropertyName 'context7' -NotePropertyValue $context7Ctx -Force
-    # The agent spawner (tools\autoos_agent_mcp.py) from this checkout.
-    $spawnerCtx = [ordered]@{
-        command = 'uv'
-        args = @('--quiet', 'run', '--no-project', '--with', (Get-AutoOSMcpPackage -Name 'autoos-agent'), 'python',
-            (Join-Path $script:RepoRoot 'tools\autoos_agent_mcp.py'))
-    }
-    Add-Member -InputObject $settings.context_servers -NotePropertyName 'autoos-agent' -NotePropertyValue $spawnerCtx -Force
-    # BOM-less UTF-8: Zed's parser (serde_json) rejects a leading BOM with
-    # "expected value at line 1 column 1", and PowerShell 5.1 Out-File -Encoding
-    # utf8 always emits one (measured 2026-09-22 — broke the live file).
-    $json = $settings | ConvertTo-Json -Depth 8
-    $utf8 = [Text.UTF8Encoding]::new($false)
-    if (Test-Path $cfgPath) {
-        # Bytes, not parsed data: a file that already has the right content but a BOM
-        # (which Zed rejects) still differs and gets rewritten. Only a run that
-        # changes the file backs it up.
-        $same = [Convert]::ToBase64String([IO.File]::ReadAllBytes($cfgPath)) -ceq [Convert]::ToBase64String($utf8.GetBytes($json))
-        if ($same) {
-            Write-AutoOSLine "Zed agents already routed to OmniRoute + LiteLLM ($cfgPath) - skipped" -Level ok
-            return
-        }
-        $null = Copy-AutoOSBackup -Path $cfgPath
-    }
-    [IO.File]::WriteAllText($cfgPath, $json, $utf8)
-    Write-AutoOSLine 'Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)' -Level ok
-}
-
 function Set-AutoOSQoderMcp {
     <#
       .SYNOPSIS Register the shared MCP servers with Qoder CLI at user scope.
@@ -4139,7 +3959,7 @@ function Set-AutoOSQoderMcp {
         pre-check, so a second run reports every server as left alone.
 
         MCP servers ONLY, deliberately - Qoder cannot ride the OmniRoute
-        gateway the way Zed and opencode do: its Custom Models accept just a
+        gateway the way opencode does: its Custom Models accept just a
         curated provider list (Alibaba Cloud Model Studio, DeepSeek, Z.ai,
         Kimi, MiniMax, Xiaomi MIMO) with no arbitrary OpenAI-compatible base
         URL, and the store is encrypted - the customs folder under
@@ -4373,7 +4193,7 @@ Export-ModuleMember -Function `
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Get-AutoOSLegacyModels, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig, Sync-AutoOSSkillDirs, Sync-AutoOSAgentSkillTargets,
-    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Set-AutoOSZedProxy, Install-AutoOSOpenHands,
+    Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Install-AutoOSOpenHands,
     Set-AutoOSQoderMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,

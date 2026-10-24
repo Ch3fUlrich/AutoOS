@@ -115,7 +115,7 @@ class RegistrySourcedRepoCombosTests(unittest.TestCase):
 
 # A registry fixture with two combo routes: one served to opencode only,
 # one served to openhands too. Only the openhands one needs an
-# tier profile named <name> (PREFIX-STRIP, no omniroute- prefix) (Q1fix: the four pinned opencode+zed-only
+# tier profile named <name> (PREFIX-STRIP, no omniroute- prefix) (Q1fix: the four pinned opencode-only
 # routes were wrongly reported as drift).
 OPENHANDS_FIXTURE = {
     "routes": {
@@ -173,12 +173,11 @@ class ClientExposureTests(unittest.TestCase):
 
     def assert_client_drift(self, omni, required):
         drift = self.audit_missing_clients(omni)
-        for line in ("opencode.jsonc lacks model 'fixture-route'",
-                     "catalog/ide-models.json does not offer 'fixture-route' to zed"):
+        for line in ("opencode.jsonc lacks model 'fixture-route'",):
             self.assertEqual(line in drift, required, line)
 
     def test_explicit_ide_clients_still_required(self):
-        self.assert_client_drift({"clients": ["opencode", "zed"]}, True)
+        self.assert_client_drift({"clients": ["opencode"]}, True)
 
     def test_unreadable_registry_requires_both_ide_clients(self):
         audit = _load_module()
@@ -194,13 +193,10 @@ class ClientExposureTests(unittest.TestCase):
             self.assertNotEqual(result, 0)
             drift = json.loads(output.getvalue())["drift"]
             self.assertIn("opencode.jsonc lacks model 'fixture-route'", drift)
-            self.assertIn("catalog/ide-models.json does not offer 'fixture-route' to zed",
-                          drift)
 
     def assert_unknown_route_required(self, routes):
         drift = self.audit_missing_clients({}, routes=routes)
         self.assertIn("opencode.jsonc lacks model 'fixture-route'", drift)
-        self.assertIn("catalog/ide-models.json does not offer 'fixture-route' to zed", drift)
 
     def test_combo_absent_from_registry_requires_both_ide_clients(self):
         self.assert_unknown_route_required({})
@@ -219,13 +215,13 @@ class ClientExposureTests(unittest.TestCase):
     def test_route_names_for_each_client(self):
         audit = _load_module()
         surfaces = {
-            "both": {"omniroute": {"clients": ["opencode", "zed"]}},
+            "both": {"omniroute": {"clients": ["opencode", "openhands"]}},
             "oc": {"omniroute": {"clients": ["opencode"]}},
             "oh": {"omniroute": {"clients": ["openhands"]}},
             "empty": {"omniroute": {"clients": []}},
             "missing": {"omniroute": {}},
             "null": {"omniroute": {"clients": None}},
-            "invalid": {"omniroute": {"clients": "zed"}},
+            "invalid": {"omniroute": {"clients": "not-a-list"}},
             "no-omni": {}, "bad-omni": {"omniroute": []},
         }
         doc = {"routes": {rid: {"surfaces": s} for rid, s in surfaces.items()}}
@@ -233,8 +229,7 @@ class ClientExposureTests(unittest.TestCase):
         fallback = {"missing", "null", "invalid", "no-omni", "bad-omni", "no-surfaces"}
         self.assertEqual(audit.route_names_for_client(doc, "opencode"),
                          fallback | {"both", "oc"})
-        self.assertEqual(audit.route_names_for_client(doc, "zed"), fallback | {"both"})
-        self.assertEqual(audit.route_names_for_client(doc, "openhands"), {"oh"})
+        self.assertEqual(audit.route_names_for_client(doc, "openhands"), {"both", "oh"})
 
 
 if __name__ == "__main__":

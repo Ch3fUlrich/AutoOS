@@ -202,18 +202,6 @@ if it "both healthchecks probe omnigraph through the live probe"; then
     if (( ok )); then pass; else fail "an omnigraph probe is missing"; fi
 fi
 
-if it "zed's omnigraph context server carries the base URL and graph id the bridge requires"; then
-    scratch="$(mktemp -d)"
-    ( SYS_HOME="$scratch" HOME="$scratch" AUTOOS_DRY_RUN=0
-      OMNIGRAPH_BASE_URL="http://omnigraph.test.invalid:8080" route_zed_to_proxy >/dev/null 2>&1 )
-    got="$(python3 -c "
-import json,sys
-e=json.load(open(sys.argv[1],encoding='utf-8'))['context_servers']['omnigraph'].get('env',{})
-print(bool(e.get('OMNIGRAPH_BASE_URL')), e.get('OMNIGRAPH_GRAPH_ID'), 'OMNIGRAPH_TOKEN' in e)
-" "$scratch/.config/zed/settings.json" 2>&1)"
-    rm -rf "$scratch"
-    assert_eq "$got" "True autoos False"
-fi
 
 # ─── Where OMNIGRAPH_BASE_URL comes from ────────────────────────────────────
 # The bridge needs a base URL and a graph id, and nothing listens on
@@ -252,49 +240,6 @@ omnigraph_resolve() {
     ) 2>&1
 }
 
-# zed_omni_run <home> [answer] [env var] [env-file body]: route_zed_to_proxy with
-# the same isolation, the two gateway keys deliberately unset — a writer that
-# skips the omnigraph entry still has to finish the rest of its job. Prints the
-# writer's output, leaves <home> for the caller, returns the writer's rc.
-zed_omni_run() {
-    local home="$1" answer="${2:-}" envval="${3:-}" body="${4:-}"
-    mkdir -p "$home/.config/zed"
-    [[ -z "$body" ]] || printf '%s' "$body" >"$home/.autoos-omnigraph.env"
-    (
-        HOME="$home" SYS_HOME="$home" AUTOOS_DRY_RUN=0
-        AUTOOS_ANSWERS=()
-        [[ -z "$answer" ]] || AUTOOS_ANSWERS[omnigraph_url]="$answer"
-        unset OMNIGRAPH_BASE_URL OMNIGRAPH_GRAPH_ID FORCE_COLOR \
-              AUTOOS_OMNIROUTE_API_KEY AUTOOS_LITELLM_API_KEY
-        [[ -z "$envval" ]] || export OMNIGRAPH_BASE_URL="$envval"
-        route_zed_to_proxy
-    ) 2>&1
-}
-
-# zed_omni_entry <home>: the OMNIGRAPH_BASE_URL held by the Zed omnigraph entry,
-# NOENTRY when the writer wrote none, NOURL when it wrote one without a URL.
-zed_omni_entry() {
-    python3 - "$1/.config/zed/settings.json" <<'PY' 2>&1
-import json, sys
-try:
-    ctx = json.load(open(sys.argv[1], encoding='utf-8')).get('context_servers', {})
-except Exception:
-    print('NOWRITE'); sys.exit(0)
-entry = ctx.get('omnigraph')
-print('NOENTRY' if not isinstance(entry, dict)
-      else entry.get('env', {}).get('OMNIGRAPH_BASE_URL', 'NOURL'))
-PY
-}
-
-# zed_omni_url <answer>: the URL the Zed writer resolved for that answer.
-zed_omni_url() {
-    local scratch out
-    scratch="$(mktemp -d)"
-    zed_omni_run "$scratch" "$1" >/dev/null 2>&1
-    out="$(zed_omni_entry "$scratch")"
-    rm -rf "$scratch"
-    printf '%s' "$out"
-}
 
 if it "omnigraph: the resolver prefers the answer, then the environment, then the env file"; then
     tmp="$(mktemp -d)"; ok=1
@@ -400,68 +345,13 @@ http://host:8080///|http://host:8080
 http://host/graph//|http://host/graph
 http://host//graph/|http://host//graph
 CASES
-    # ...and the Zed writer, the other consumer, writes the same stripped value.
-    got="$(zed_omni_url "https://graph.example.invalid:9000//")"
-    [[ "$got" == "https://graph.example.invalid:9000" ]] \
-        || { ok=0; echo "the Zed entry says [$got] for a doubled trailing slash" >&2; }
     rm -rf "$tmp"
     if (( ok )); then pass; else fail "omnigraph_base_url leaves a trailing slash on the base URL"; fi
 fi
 
-if it "zed: the omnigraph entry uses the omnigraph_url answer"; then
-    ok=1
-    got="$(zed_omni_url "https://graph.example.invalid:9000/")"
-    [[ "$got" == "https://graph.example.invalid:9000" ]] || { ok=0; echo "the Zed entry says [$got], not the answer without its trailing slash" >&2; }
-    got="$(zed_omni_url "")"
-    [[ "$got" == "NOENTRY" ]] || { ok=0; echo "with nothing configured the Zed entry says [$got]" >&2; }
-    if (( ok )); then pass; else fail "the Zed omnigraph entry ignores the omnigraph_url answer"; fi
-fi
-
-if it "zed: an unresolved base URL skips the entry loudly and still routes the providers"; then
-    scratch="$(mktemp -d)"
-    out="$(zed_omni_run "$scratch")"; rc=$?
-    entry="$(zed_omni_entry "$scratch")"
-    kept="$(python3 -c "
-import json,sys
-cfg=json.load(open(sys.argv[1],encoding='utf-8'))
-ctx=cfg.get('context_servers',{})
-api=cfg.get('language_models',{}).get('openai_compatible',{}).get('autoos-omniroute',{}).get('api_url','')
-print(','.join(sorted(ctx))+'|'+str(api))
-" "$scratch/.config/zed/settings.json" 2>&1)"
-    rm -rf "$scratch"
-    ok=1
-    [[ "$rc" == "1" ]] || { ok=0; echo "rc=$rc (a skipped omnigraph entry must fail the run)" >&2; }
-    [[ "$entry" == "NOENTRY" ]] || { ok=0; echo "the entry says [$entry]" >&2; }
-    [[ "$out" == *"OMNIGRAPH_BASE_URL is not set"* ]] || { ok=0; echo "no loud message: $out" >&2; }
-    [[ "$out" == *"Zed: skipping omnigraph entry"* ]] || { ok=0; echo "the skip is not announced per client" >&2; }
-    # The rest of the writer's job is not the omnigraph entry's failure to do:
-    # the other context servers, the providers, and both key warnings.
-    [[ "$kept" == "autoos-agent,context7,graphify,playwright,serena|http://127.0.0.1:20128/v1" ]] \
-        || { ok=0; echo "the other work changed: [$kept]" >&2; }
-    [[ "$out" == *"AUTOOS_OMNIROUTE_API_KEY not set"* ]] || { ok=0; echo "the omniroute key warning is gone" >&2; }
-    [[ "$out" == *"AUTOOS_LITELLM_API_KEY not set"* ]] || { ok=0; echo "the litellm key warning is gone" >&2; }
-    [[ "$out" == *"Zed agents routed"* ]] || { ok=0; echo "the writer stopped before it finished" >&2; }
-    [[ "$out" != *"localhost:8080"* ]] || { ok=0; echo "a default was written" >&2; }
-    if (( ok )); then pass; else fail "route_zed_to_proxy invents a server or abandons its other work when OMNIGRAPH_BASE_URL is unset"; fi
-fi
-
-if it "zed: an unset run keeps the omnigraph entry the user already had"; then
-    scratch="$(mktemp -d)"
-    mkdir -p "$scratch/.config/zed"
-    printf '%s' '{"context_servers":{"omnigraph":{"command":"npx","args":["-y","dummy"],"env":{"OMNIGRAPH_BASE_URL":"http://existing.test.invalid:8080","OMNIGRAPH_GRAPH_ID":"mine"}}}}' \
-        >"$scratch/.config/zed/settings.json"
-    zed_omni_run "$scratch" >/dev/null 2>&1
-    got="$(zed_omni_entry "$scratch")"
-    graph="$(python3 -c "
-import json,sys
-print(json.load(open(sys.argv[1],encoding='utf-8'))['context_servers']['omnigraph']['env']['OMNIGRAPH_GRAPH_ID'])
-" "$scratch/.config/zed/settings.json" 2>&1)"
-    rm -rf "$scratch"
-    assert_eq "$got|$graph" "http://existing.test.invalid:8080|mine"
-fi
 
 # oc_omni_run <home> <config file> [answer] [env var]: the OpenCode user-config
-# merge on one file, with the same isolation as the Zed fixture above.
+# merge on one file.
 oc_omni_run() {
     local home="$1" file="$2" answer="${3:-}" envval="${4:-}"
     mkdir -p "$home" "$(dirname "$file")"
@@ -704,7 +594,7 @@ fi
 # The omnigraph_url answer is user input. install_agent_skills used to splice it
 # into the SOURCE of a `python3 -c "..."` string, so a quote, a backslash or
 # Python code in the answer broke the literal or ran (`' + os.system(...)`).
-# It travels in the environment now (like the Zed writer's OMNI_BASE) and must
+# It travels in the environment now and must
 # arrive byte for byte. Every marker file below is what a payload would create.
 if it "omnigraph: a hostile omnigraph_url answer is data, never python source"; then
     scratch="$(mktemp -d)"; ok=1

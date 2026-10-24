@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Start the AutoOS AI stack: OmniRoute gateway, then the app you pick.
 
@@ -7,14 +7,14 @@
      (starts it in the background when needed).
   2. Requires $env:AUTOOS_OMNIROUTE_KEY (client key from the OmniRoute
      dashboard -> api-manager). Pass -App to launch it wired:
-     opencode | zed | nvim | openhands
+     opencode | nvim | openhands
 
 .EXAMPLE
   $env:AUTOOS_OMNIROUTE_KEY = 'sk-...'
   .\configuration\start-stack.ps1 -App opencode
 #>
 [CmdletBinding()]
-param([ValidateSet('opencode', 'zed', 'nvim', 'openhands', 'opencode-serve', 'none')][string]$App = 'none')
+param([ValidateSet('opencode', 'nvim', 'openhands', 'opencode-serve', 'none')][string]$App = 'none')
 
 $ErrorActionPreference = 'Stop'
 $Gateway = 'http://127.0.0.1:20128'
@@ -250,8 +250,8 @@ $env:AUTOOS_OMNIROUTE_URL = $Gateway
 try { $Key = Get-AutoOSClientKey -KeysFile $keysFile }
 finally { if ($null -eq $savedGatewayUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $savedGatewayUrl } }
 if ($null -eq $Key) { exit 1 }
-# Export so the launched apps inherit it: opencode.jsonc and the Zed settings
-# carry no key by design ("key via env"), so without this the apps the script
+# Export so the launched apps inherit it: opencode.jsonc
+# carries no key by design ("key via env"), so without this the apps the script
 # launches would start unauthenticated.
 $env:AUTOOS_OMNIROUTE_KEY = $Key
 # END key-block
@@ -342,7 +342,6 @@ Write-Host "Gateway OK on $Gateway"
 
 switch ($App) {
     'opencode'  { & opencode }
-    'zed'       { & "$env:LOCALAPPDATA\Programs\Zed\zed.exe" . }
     'nvim'      { & nvim }
     'openhands' {
         # Docker Desktop must be running; the container reaches the gateway via
@@ -380,7 +379,7 @@ switch ($App) {
                     }
                     # BOM-free on every host: PS 5.1 Set-Content -Encoding
                     # utf8 emits a BOM, which breaks the container's json
-                    # parse (same reason the Zed writer asserts no BOM).
+                    # parse (asserts no BOM).
                     [IO.File]::WriteAllText($ohSettings, ($ohJson | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
                     Write-Host "Repaired OpenHands settings (agent_settings.schema_version $ohAgentVer -> $($ohJson.agent_settings.schema_version), stripped enabled keys). Backup: $backup."
                 }

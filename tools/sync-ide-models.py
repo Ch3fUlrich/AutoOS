@@ -9,11 +9,11 @@ A4c) - catalog/ide-models.json itself is rendered from catalog/ai-registry.json
 (do not edit; regenerate with `python3 tools/registry.py render ide
 --out catalog/ide-models.json`). Before that file existed, the same list was hand-maintained
 in about eight places and drifted: the 1M tier was 1000000 in opencode.jsonc,
-1048576 in the Zed writers and tier profiles, 128000 in
+1048576 in the tier profiles, 128000 in
 configuration/openhands/config.toml, with three different output budgets.
 --catalog reads catalog/ide-models.json's own shape directly instead (an
 explicit override kept for anyone still relying on that file rather than the
-registry) - the Zed and V1 OpenCode writers in lib/ still read catalog/ide-
+registry) - the V1 OpenCode writer in lib/ still reads catalog/ide-
 models.json directly at run time on the target machine and need no sync
 either way.
 
@@ -94,7 +94,7 @@ from registry_loader import load_registry_tool  # noqa: E402 - tools/ added abov
 
 ROOT = Path(__file__).resolve().parent.parent
 GATEWAYS = ("omniroute", "litellm")
-SURFACES = ("opencode", "zed", "openhands")
+SURFACES = ("opencode", "openhands")
 REQUIRED = {"id": str, "name": str, "context": int, "output": int, "surfaces": dict}
 
 START = "// AUTOOS-MANAGED-START"

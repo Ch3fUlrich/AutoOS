@@ -281,7 +281,7 @@ for p in ("catalog/windows.json", "catalog/linux.json", "catalog/macos.json"):
             have[c["id"]].add(plat)
 core = ["claude-code", "git", "nodejs", "docker", "tailscale",
         "handy", "vscode", "herdr", "agent-skills", "nerd-font",
-        "zed", "litellm", "opencode-cli", "omniroute", "openhands-docker"]
+        "litellm", "opencode-cli", "omniroute", "openhands-docker"]
 bad = [c for c in core if have[c] != {"windows", "linux", "macos"}]
 print(" ".join(bad))
 PY

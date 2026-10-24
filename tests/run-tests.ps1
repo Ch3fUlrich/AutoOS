@@ -4489,28 +4489,6 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer rewrites an entry th
     Pass
 }
 
-Test-Case "zed's omnigraph context server carries the base URL and graph id the bridge requires" {
-    $realAppData = $env:APPDATA
-    $realBase = $env:OMNIGRAPH_BASE_URL
-    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-zog-" + [Guid]::NewGuid().ToString('N'))
-    try {
-        $env:APPDATA = $scratch
-        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
-        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
-        Set-AutoOSZedProxy 6>$null | Out-Null
-        $s = Get-Content (Join-Path $scratch 'Zed\settings.json') -Raw | ConvertFrom-Json
-        $e = $s.context_servers.omnigraph.env
-        Assert-True ($null -ne $e) 'omnigraph context server has no env'
-        Assert-Equal $e.OMNIGRAPH_GRAPH_ID 'autoos'
-        Assert-Equal $e.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the resolved URL did not reach the entry'
-        Assert-True ($null -eq $e.PSObject.Properties['OMNIGRAPH_TOKEN']) 'a token landed in Zed settings'
-    } finally {
-        $env:APPDATA = $realAppData
-        if ($null -eq $realBase) { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
-        else { $env:OMNIGRAPH_BASE_URL = $realBase }
-        Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
 
 # ─── OMNIGRAPH-URL-LOUD: a missing base URL fails loudly, it never defaults ──
 # Nothing listens on localhost:8080 on the server since D-1398, so the silent
@@ -4540,7 +4518,6 @@ function Invoke-OmnigraphBaseScratch {
     $repo = if ($ScratchRepo) { (New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'repo')).FullName } else { $Root }
     $result = $null
     try {
-        $null = New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'AppData\Zed')
         $env:USERPROFILE = $scratch
         $env:HOME = $scratch
         $env:APPDATA = Join-Path $scratch 'AppData'
@@ -4591,25 +4568,6 @@ Test-Case 'omnigraph base URL: the answer beats OMNIGRAPH_BASE_URL beats the env
     Pass
 }
 
-Test-Case 'omnigraph base URL: Zed with none configured writes no entry and keeps the user''s own, then the resolved value' {
-    $keepers = '{"theme":"mine","context_servers":{"omnigraph":{"command":"npx","args":["-y","user-pin"],"env":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}}}'
-    Invoke-OmnigraphBaseScratch -Body {
-        param($scratch)
-        $cfg = Join-Path $scratch 'AppData\Zed\settings.json'
-        $run = { Set-AutoOSZedProxy 6>$null | Out-Null; Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 | ConvertFrom-Json }
-        $s = & $run
-        Assert-True ($null -eq $s.context_servers.PSObject.Properties['omnigraph']) 'an omnigraph entry was written with no base URL'
-        [IO.File]::WriteAllText($cfg, $keepers)
-        $s = & $run
-        Assert-Equal $s.context_servers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://keep.invalid' "the user's omnigraph entry was rewritten"
-        Assert-True ((Get-Content -LiteralPath $cfg -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in Zed settings'
-        # The URL resolves from the env file while the variable stays absent:
-        # what lands in settings.json has to be the value, not a reference.
-        [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
-        $s = & $run
-        Assert-Equal $s.context_servers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
-    }
-}
 
 Test-Case 'omnigraph base URL: Antigravity with none configured writes no entry and keeps the user''s own, then the resolved value' {
     $keepers = '{"mcpServers":{"other":{"command":"node","args":["srv.js"]},"omnigraph":{"command":"npx","args":["-y","user-pin"],"env":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}},"theme":"mine"}'
@@ -7122,7 +7080,7 @@ Test-Case 'openhands settings: a missing python is reported, not called written'
     Pass
 }
 
-# --- AI routing stack (omniroute / litellm / zed / opencode) ---
+# --- AI routing stack (omniroute / litellm / opencode) ---
 Describe-Group 'ai routing'
 
 function Get-AutoOSWinComponent {
@@ -7134,22 +7092,18 @@ function Get-AutoOSWinComponent {
 }
 
 Test-Case 'ai routing components exist with the right providers' {
-    $zed = Get-AutoOSWinComponent 'zed'
     $lit = Get-AutoOSWinComponent 'litellm'
     $oc = Get-AutoOSWinComponent 'opencode-cli'
     $om = Get-AutoOSWinComponent 'omniroute'
     $oh = Get-AutoOSWinComponent 'openhands-docker'
-    Assert-True ($null -ne $zed -and $null -ne $lit -and $null -ne $oc -and $null -ne $om -and $null -ne $oh) 'missing component'
-    Assert-Equal "$($zed.provider)|$($lit.provider)|$($oc.provider)|$($om.provider)|$($oh.provider)" 'winget|custom|npm|npm|custom'
-    Assert-Equal "$($zed.package)|$($oc.package)|$($om.package)" 'ZedIndustries.Zed|@opencode/cli|omniroute'
+    Assert-True ($null -ne $lit -and $null -ne $oc -and $null -ne $om -and $null -ne $oh) 'missing component'
+    Assert-Equal "$($lit.provider)|$($oc.provider)|$($om.provider)|$($oh.provider)" 'custom|npm|npm|custom'
+    Assert-Equal "$($oc.package)|$($om.package)" '@opencode/cli|omniroute'
     Assert-Equal $oh.postInstall 'Install-AutoOSOpenHands'
     Assert-True ($oh.verify -match 'docker\.openhands\.dev') 'openhands verify does not check the current image'
 }
 
-Test-Case 'zed routes through litellm and both ride ai-coding' {
-    $zed = Get-AutoOSWinComponent 'zed'
-    Assert-Contains $zed.requires 'litellm'
-    Assert-Contains $zed.profiles 'ai-coding'
+Test-Case 'litellm and omniroute both ride ai-coding' {
     Assert-Contains (Get-AutoOSWinComponent 'litellm').profiles 'ai-coding'
     Assert-Contains (Get-AutoOSWinComponent 'omniroute').profiles 'ai-coding'
 }
@@ -7184,17 +7138,6 @@ Test-Case 'litellm installer announces instead of running in dry run' {
     }
 }
 
-Test-Case 'zed routing writes nothing in dry run' {
-    $realAppData = $env:APPDATA
-    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
-    try {
-        $env:APPDATA = $scratch
-        Initialize-AutoOSInstaller -DryRun $true -RepoRoot $Root
-        Set-AutoOSZedProxy
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
-        Assert-Equal (Test-Path (Join-Path $scratch 'Zed\settings.json')) $false
-    } finally { $env:APPDATA = $realAppData }
-}
 
 # Claude Code gateway routing is opt-in and reversible (catalog prompt
 # claude_gateway_routing, default 'login'). ANTHROPIC_BASE_URL/AUTH_TOKEN in
@@ -8189,123 +8132,6 @@ Test-Case 'gwkey: setup -HostName defaults to the short hostname' {
     Pass
 }
 
-Test-Case 'zed routing merges one provider and keeps the rest' {
-    $realAppData = $env:APPDATA
-    $realOmni = $env:AUTOOS_OMNIROUTE_KEY
-    $realLit = $env:LITELLM_MASTER_KEY
-    $realBase = $env:OMNIGRAPH_BASE_URL
-    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
-    try {
-        $env:APPDATA = $scratch
-        $env:AUTOOS_OMNIROUTE_KEY = 'test-omni-key'
-        $env:LITELLM_MASTER_KEY = 'test-lit-key'
-        # The omnigraph entry is only written when a base URL resolves (see
-        # Get-AutoOSOmnigraphBaseUrl), so this case supplies one.
-        $env:OMNIGRAPH_BASE_URL = 'http://omnigraph.test.invalid:8080'
-        $cfgDir = Join-Path $scratch 'Zed'
-        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
-        '{"theme":"mine","language_models":{"openai":{"api_url":"https://x"}}}' |
-            Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
-        Set-AutoOSZedProxy
-        Set-AutoOSZedProxy
-        # -Encoding UTF8: the file is BOM-less UTF-8 and the catalog names carry
-        # em-dashes, which Windows PowerShell 5.1 would read as ANSI otherwise.
-        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-        Assert-Equal $s.theme 'mine'
-        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_url 'http://127.0.0.1:20128/v1'
-        # Keys never land in settings.json (Zed docs: keychain/UI or env);
-        # the writers must not write api_key even when env carries keys.
-        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-omniroute'.PSObject.Properties['api_key']) 'api_key in omni entry'
-        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-litellm'.PSObject.Properties['api_key']) 'api_key in lit entry'
-        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
-        # The model lists are catalog/ide-models.json projected at run time
-        # (ids, display names, windows, membership, order).
-        $cat = @((Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models)
-        foreach ($gw in @('omniroute', 'litellm')) {
-            $want = @($cat | Where-Object { $null -ne $_.surfaces.PSObject.Properties[$gw] -and @($_.surfaces.PSObject.Properties[$gw].Value) -contains 'zed' })
-            $got = @($s.language_models.openai_compatible."autoos-$gw".available_models)
-            Assert-Equal (($got | ForEach-Object { $_.name }) -join ',') (($want | ForEach-Object { $_.id }) -join ',')
-            Assert-Equal (($got | ForEach-Object { "$($_.display_name)|$($_.max_tokens)" }) -join ',') (($want | ForEach-Object { "$($_.name)|$($_.context)" }) -join ',')
-        }
-        # PROVFIX3 finding 1 re-pins the window: a route promises what its
-        # smallest SERVED leg takes. FREEKEYS-2/2c (D-141) put the free band
-        # (scaleway/nebius, 128k advertised) ahead of gemini in l1-orchestrator,
-        # so 128,000 is the honest promise now. Finding 8 still holds and now
-        # bites for real: the head is gemini, whose ladder tops out at "high",
-        # so the surface default "xhigh" is DROPPED, never forwarded.
-        $t1 = @($s.language_models.openai_compatible.'autoos-omniroute'.available_models | Where-Object { $_.name -eq 'l1-orchestrator' })
-        Assert-Equal $t1.Count 1
-        Assert-Equal $t1[0].max_tokens 128000
-        Assert-Equal ($null -eq $t1[0].PSObject.Properties['reasoning_effort']) $true 'xhigh must be dropped for gemini, not forwarded'
-        $bypass = $s.agent.profiles.bypass
-        Assert-Equal $bypass.name 'bypass'
-        $off = @($bypass.tools.PSObject.Properties | Where-Object { $_.Value -ne $true } | ForEach-Object { $_.Name })
-        Assert-Equal ($off -join ',') '' "bypass tools off: $($off -join ',')"
-        Assert-Equal $bypass.default_model.provider 'autoos-omniroute'
-        Assert-Equal $bypass.default_model.model 'l1-orchestrator'
-        Assert-Equal $s.agent.tool_permissions.default 'allow'
-        Assert-True ($null -ne $s.context_servers.serena) 'serena context server missing'
-        Assert-True ($null -ne $s.context_servers.graphify) 'graphify context server missing'
-        Assert-True ($null -ne $s.context_servers.omnigraph) 'omnigraph context server missing'
-        Assert-True ($null -ne $s.context_servers.playwright) 'playwright context server missing'
-        Assert-True ($null -ne $s.context_servers.context7) 'context7 context server missing'
-        # Pins come from the harness at runtime, never as literals in lib/
-        # (mcp-pins tests forbid both the bare names and the versions there).
-        $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-        foreach ($n in @('serena', 'graphify', 'omnigraph', 'playwright', 'context7', 'autoos-agent')) {
-            $pin = $harness.mcp_servers.$n.package
-            Assert-True ((@($s.context_servers.$n.args) -join ' ') -match [regex]::Escape($pin)) "$n context server does not carry harness pin $pin"
-        }
-        Assert-True ($s.agent.profiles.bypass.enable_all_context_servers -eq $true) 'bypass does not opt into context servers'
-        Assert-True ((@(Get-ChildItem $cfgDir -Filter '*.autoos-backup-*')).Count -ge 1) 'no backup written'
-        $raw = Get-Content (Join-Path $cfgDir 'settings.json') -Raw
-        Assert-True ($raw -notmatch 'sk-' -and $raw -notmatch 'AUTOOS_OMNIROUTE_KEY|LITELLM_MASTER_KEY|REPLACE') 'secret leaked into settings'
-        # No BOM: Zed's parser rejects a leading UTF-8 BOM with "expected
-        # value at line 1 column 1" (measured 2026-09-22 — Out-File utf8 bug).
-        $bytes = [IO.File]::ReadAllBytes((Join-Path $cfgDir 'settings.json'))
-        Assert-True (-not ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191)) 'settings.json starts with a BOM'
-    } finally {
-        $env:APPDATA = $realAppData
-        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_KEY -ErrorAction SilentlyContinue }
-        else { $env:AUTOOS_OMNIROUTE_KEY = $realOmni }
-        if ($null -eq $realLit) { Remove-Item Env:LITELLM_MASTER_KEY -ErrorAction SilentlyContinue }
-        else { $env:LITELLM_MASTER_KEY = $realLit }
-        if ($null -eq $realBase) { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
-        else { $env:OMNIGRAPH_BASE_URL = $realBase }
-    }
-}
-
-Test-Case 'zed routing warns when the Zed key env names are absent' {
-    # Zed derives provider env names from the provider id (upper snake +
-    # _API_KEY): AUTOOS_OMNIROUTE_API_KEY, AUTOOS_LITELLM_API_KEY. The writer
-    # warns when they are missing; settings stay key-free either way.
-    $realAppData = $env:APPDATA
-    $realOmni = $env:AUTOOS_OMNIROUTE_API_KEY
-    $realLit = $env:AUTOOS_LITELLM_API_KEY
-    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
-    try {
-        $env:APPDATA = $scratch
-        Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue
-        Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue
-        $cfgDir = Join-Path $scratch 'Zed'
-        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
-        '{}' | Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
-        Set-AutoOSZedProxy
-        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
-        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-omniroute'.PSObject.Properties['api_key']) 'omni key written without env'
-        Assert-True ($null -eq $s.language_models.openai_compatible.'autoos-litellm'.PSObject.Properties['api_key']) 'lit key written without env'
-        Assert-Equal $s.language_models.openai_compatible.'autoos-omniroute'.api_url 'http://127.0.0.1:20128/v1'
-        Assert-Equal $s.language_models.openai_compatible.'autoos-litellm'.api_url 'http://127.0.0.1:4000/v1'
-    } finally {
-        $env:APPDATA = $realAppData
-        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue }
-        else { $env:AUTOOS_OMNIROUTE_API_KEY = $realOmni }
-        if ($null -eq $realLit) { Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue }
-        else { $env:AUTOOS_LITELLM_API_KEY = $realLit }
-    }
-}
 
 Test-Case 'serena memory tools off from harness field (serena)' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
@@ -8842,29 +8668,6 @@ Test-Case 'opencode V2: an invalid repo opencode.jsonc leaves the user opencode.
     }
 }
 
-Test-Case 'zed default_model converges litellm to omniroute (zed routing)' {
-    $realAppData = $env:APPDATA
-    $scratch = Join-Path $env:TEMP "autoos-zeddm-$([Guid]::NewGuid().ToString('N'))"
-    try {
-        $env:APPDATA = $scratch
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
-        $cfgDir = Join-Path $scratch 'Zed'
-        New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
-        '{"agent":{"default_model":{"provider":"autoos-litellm","model":"l3-driver-paid"}}}' |
-            Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
-        Set-AutoOSZedProxy
-        $s = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
-        Assert-Equal $s.agent.default_model.provider 'autoos-omniroute'
-        Assert-Equal $s.agent.default_model.model 'l1-orchestrator'
-        # A default already on omniroute must survive untouched.
-        '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"l2-worker"}}}' |
-            Out-File (Join-Path $cfgDir 'settings.json') -Encoding utf8
-        Set-AutoOSZedProxy
-        $s2 = Get-Content (Join-Path $cfgDir 'settings.json') -Raw | ConvertFrom-Json
-        Assert-Equal $s2.agent.default_model.provider 'autoos-omniroute'
-        Assert-Equal $s2.agent.default_model.model 'l2-worker'
-    } finally { $env:APPDATA = $realAppData }
-}
 
 Test-Case 'opencode repo config pins omniroute with litellm fallback' {
     $raw = Get-Content (Join-Path $Root 'opencode.jsonc') -Raw -Encoding utf8
@@ -9338,34 +9141,12 @@ Test-Case 'openhands launch is detached, probed and stale-settings safe' {
     Pass
 }
 
-Test-Case 'zed routing creates a fresh config when none exists' {
-    $realAppData = $env:APPDATA
-    $scratch = Join-Path $env:TEMP "autoos-apex-$([Guid]::NewGuid().ToString('N'))"
-    try {
-        $env:APPDATA = $scratch
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
-        Set-AutoOSZedProxy
-        $cfgPath = Join-Path $scratch 'Zed\settings.json'
-        Assert-True (Test-Path $cfgPath) 'settings.json not created'
-        $s = Get-Content $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        # One entry per catalog/ide-models.json model Zed lists through each gateway.
-        $cat = @((Get-Content (Join-Path $Root 'catalog\ide-models.json') -Raw -Encoding UTF8 | ConvertFrom-Json).models)
-        foreach ($gw in @('omniroute', 'litellm')) {
-            $want = @($cat | Where-Object { $null -ne $_.surfaces.PSObject.Properties[$gw] -and @($_.surfaces.PSObject.Properties[$gw].Value) -contains 'zed' }).Count
-            Assert-True ($want -gt 0) "catalog lists no zed model for $gw"
-            Assert-Equal (@($s.language_models.openai_compatible."autoos-$gw".available_models).Count) $want
-        }
-    } finally { $env:APPDATA = $realAppData }
-}
 
 Test-Case 'a missing or malformed catalog/ide-models.json stops the IDE writers with one clear line (ide-models)' {
-    # The Zed and OpenCode writers read the model catalog at install time.
+    # The OpenCode writer reads the model catalog at install time.
     # Missing or malformed, Get-AutoOSIdeModel must throw ONE message naming
-    # the file (not a parser error or a silent empty list), and the Zed
-    # writer must report it and write nothing.
-    $realAppData = $env:APPDATA
+    # the file (not a parser error or a silent empty list).
     $fakeRoot = Join-Path ([IO.Path]::GetTempPath()) "autoos-idecat-$([Guid]::NewGuid().ToString('N'))"
-    $unusedLog = Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log'
     try {
         $null = New-Item -ItemType Directory -Force -Path (Join-Path $fakeRoot 'catalog')
         $catPath = Join-Path $fakeRoot 'catalog\ide-models.json'
@@ -9375,73 +9156,16 @@ Test-Case 'a missing or malformed catalog/ide-models.json stops the IDE writers 
             Remove-Item -LiteralPath $catPath -Force -ErrorAction SilentlyContinue
             if ($cases[$i]) { [IO.File]::WriteAllText($catPath, $cases[$i]) }
             $msg = $null
-            try { $null = @(Get-AutoOSIdeModel -Gateway 'omniroute' -Surface 'zed') } catch { $msg = $_.Exception.Message }
+            try { $null = @(Get-AutoOSIdeModel -Gateway 'omniroute' -Surface 'opencode') } catch { $msg = $_.Exception.Message }
             Assert-True ($null -ne $msg) "case ${i}: no error"
             Assert-True ($msg.Contains($catPath)) "case ${i}: the error does not name the file: $msg"
-            $env:APPDATA = Join-Path $fakeRoot "appdata-$i"
-            $log = Join-Path $fakeRoot "zed-$i.log"
-            Initialize-AutoOSLog -Path $log
-            Set-AutoOSZedProxy
-            Initialize-AutoOSLog -Path $unusedLog
-            $text = Get-Content -LiteralPath $log -Raw -Encoding utf8
-            Assert-True ($text.Contains($catPath)) "case ${i}: the Zed writer did not name the file: $text"
-            Assert-True (-not (Test-Path (Join-Path $env:APPDATA 'Zed'))) "case ${i}: the Zed writer touched its folder"
         }
     } finally {
-        $env:APPDATA = $realAppData
-        Initialize-AutoOSLog -Path $unusedLog
         Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
         Remove-Item -LiteralPath $fakeRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
-Test-Case 'backup-once: Set-AutoOSZedProxy does not back up again when nothing changed' {
-    # Only the run that changes settings.json backs it up. The backup name carries a
-    # second-resolution timestamp, so two quick runs would collide on one name and a
-    # bare count proves nothing: the surviving backup must still be the ORIGINAL file.
-    $realAppData = $env:APPDATA
-    $realOmni = $env:AUTOOS_OMNIROUTE_API_KEY
-    $realLit = $env:AUTOOS_LITELLM_API_KEY
-    $scratch = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N'))"
-    $log = Join-Path ([IO.Path]::GetTempPath()) "autoos-backuponce-$([Guid]::NewGuid().ToString('N')).log"
-    try {
-        $env:APPDATA = $scratch
-        $env:AUTOOS_OMNIROUTE_API_KEY = 'test-omni-key'
-        $env:AUTOOS_LITELLM_API_KEY = 'test-lit-key'
-        $cfgDir = Join-Path $scratch 'Zed'
-        $cfgPath = Join-Path $cfgDir 'settings.json'
-        $null = New-Item -ItemType Directory -Path $cfgDir -Force
-        $seed = '{"theme":"mine","vim_mode":true,"language_models":{"openai":{"api_url":"https://example.invalid"}},"agent":{"default_model":{"provider":"anthropic","model":"claude"}}}'
-        [IO.File]::WriteAllText($cfgPath, $seed)
-        Initialize-AutoOSInstaller -DryRun $false -RepoRoot $Root
-        Initialize-AutoOSLog -Path $log
-        Set-AutoOSZedProxy
-        $backups1 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'settings.json.autoos-backup-*')
-        if ($backups1.Count -ne 1) { throw "run 1: backups=$($backups1.Count) (want 1)" }
-        $hash1 = (Get-FileHash -LiteralPath $cfgPath -Algorithm SHA256).Hash
-        Initialize-AutoOSLog -Path $log
-        Set-AutoOSZedProxy
-        $out2 = Get-Content -LiteralPath $log -Raw -Encoding utf8
-        $backups2 = @(Get-ChildItem -LiteralPath $cfgDir -Filter 'settings.json.autoos-backup-*')
-        if ($backups2.Count -ne 1) { throw "run 2: backups=$($backups2.Count) (want 1: nothing changed, so no new backup)" }
-        if ([IO.File]::ReadAllText($backups2[0].FullName) -ne $seed) { throw 'run 2 overwrote the run 1 backup: it is no longer the original file' }
-        $hash2 = (Get-FileHash -LiteralPath $cfgPath -Algorithm SHA256).Hash
-        if ($hash2 -ne $hash1) { throw 'run 2 changed settings.json although nothing needed changing' }
-        if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
-        $s = Get-Content -LiteralPath $cfgPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        if ($s.theme -ne 'mine' -or $s.vim_mode -ne $true) { throw 'user settings lost' }
-        if ($s.language_models.openai.api_url -ne 'https://example.invalid') { throw 'user provider lost' }
-        if ($s.language_models.openai_compatible.'autoos-omniroute'.api_url -ne 'http://127.0.0.1:20128/v1') { throw 'omniroute provider not written' }
-    } finally {
-        Initialize-AutoOSLog -Path (Join-Path ([IO.Path]::GetTempPath()) 'autoos-unused.log')
-        $env:APPDATA = $realAppData
-        if ($null -eq $realOmni) { Remove-Item Env:AUTOOS_OMNIROUTE_API_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_API_KEY = $realOmni }
-        if ($null -eq $realLit) { Remove-Item Env:AUTOOS_LITELLM_API_KEY -ErrorAction SilentlyContinue } else { $env:AUTOOS_LITELLM_API_KEY = $realLit }
-        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    Pass
-}
 
 Test-Case 'component profiles name real profiles and verify is set' {
     $bad = @()
@@ -9450,7 +9174,7 @@ Test-Case 'component profiles name real profiles and verify is set' {
         $profiles = @($c.profiles.PSObject.Properties.Name)
         foreach ($cat in $c.categories) {
             foreach ($comp in $cat.components) {
-                if ($comp.id -notin @('zed', 'litellm', 'opencode-cli', 'omniroute')) { continue }
+                if ($comp.id -notin @('litellm', 'opencode-cli', 'omniroute')) { continue }
                 foreach ($p in $comp.profiles) {
                     if ($p -notin $profiles) { $bad += "$file/$($comp.id):$p" }
                 }
@@ -9464,7 +9188,7 @@ Test-Case 'component profiles name real profiles and verify is set' {
 Test-Case 'ai-coding ticks the whole routing stack' {
     $a = @(Get-AutoOSAvailableComponents -Catalog $winCatalog -SystemInfo (New-FakeSystem))
     $ticks = @($a | Where-Object { 'ai-coding' -in $_.Profiles } | ForEach-Object { $_.Id })
-    foreach ($id in @('zed', 'litellm', 'opencode-cli', 'omniroute', 'openhands-docker')) {
+    foreach ($id in @('litellm', 'opencode-cli', 'omniroute', 'openhands-docker')) {
         Assert-Contains $ticks $id
     }
     Pass
@@ -10083,7 +9807,7 @@ Test-Case 'opencode.jsonc is valid JSON once comments are stripped' {
 
 Test-Case 'the router declarations do not drift from each other' {
     # tools/audit-router.py --offline compares combos.json against
-    # opencode.jsonc, both Zed writers and the OpenHands tier profiles, and
+    # opencode.jsonc and the OpenHands tier profiles, and
     # rejects any combo-bypassing direct ref. Live probes are the operator
     # path; CI stays deterministic.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
