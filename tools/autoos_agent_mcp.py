@@ -848,6 +848,21 @@ def review_base_refusal(value) -> str | None:
     return None
 
 
+def implicit_policy_writer(req: dict) -> bool:
+    """Leave only unpinned write cards to the CLI's default-client policy."""
+    return (not req.get("client") and not req.get("model")
+            and not req.get("free_model") and not req.get("free")
+            and req.get("tier") is None and not req.get("read_only")
+            and is_write_role(req))
+
+
+def spawn_client(req: dict) -> str:
+    """Resolve the implicit policy client for gates, never pin it in argv."""
+    if implicit_policy_writer(req):
+        return agent.pick_policy_writer()["client"]
+    return req.get("client") or "opencode"
+
+
 def build_argv(req: dict, run_id: str | None = None,
                cwd: str | None = None) -> tuple:
     """(autoos-agent.py run argv, route) for a spawn request; ValueError on a bad one.
@@ -863,7 +878,7 @@ def build_argv(req: dict, run_id: str | None = None,
     leaf = agent.leaf_spawn_refusal()
     if leaf is not None:
         raise ValueError(leaf)
-    client = req.get("client") or "opencode"
+    client = spawn_client(req)
     if client not in clients.CLIENTS:
         raise ValueError("unknown client %r; one of %s" % (client, ", ".join(clients.CLIENTS)))
     task = (req.get("task") or "").strip()
@@ -876,7 +891,10 @@ def build_argv(req: dict, run_id: str | None = None,
         d284 = agent.d284_model_refusal(pin)
         if d284 is not None:
             raise ValueError(d284)
-    argv = ["run", "--client", client]
+    # Naming even the default client disables cmd_run's policy writer pick.
+    argv = ["run"]
+    if not implicit_policy_writer(req):
+        argv += ["--client", client]
     tier = req.get("tier")
     card = req.get("card")
     if isinstance(card, str):
@@ -1149,8 +1167,10 @@ def planned_model_args(req: dict) -> dict:
     value the plan will carry. AO-RUN-FAMILY-RECORD (D-807) adds the second
     reader: the family written into job.json is resolved from that same model, so
     the price and the record cannot drift onto two different runs."""
+    # Price and record the policy model, not the old opencode route default.
+    policy = agent.pick_policy_writer() if implicit_policy_writer(req) else None
     return dict(
-        model=req.get("model"),
+        model=policy["model"] if policy else req.get("model"),
         card=req.get("card"),
         tier=req.get("tier"),
         free=bool(req.get("free")),
@@ -1204,7 +1224,7 @@ def spawn(req: dict) -> dict:
     # AUTOOS_CLAUDE_CRITICAL the server holds for every caller that follows.
     try:
         budget_refusal, budget_note = agent.claude_spawn_refusal(
-            req.get("client") or "opencode", os.environ,
+            spawn_client(req), os.environ,
             # CLAUDEBUDGET-f item 3: the same one resolution the CLI's build_plan
             # runs -- the flags go in as flags, and `free` is priced at the promo
             # model the argv carries. `planned_model_args` is the same reading the
@@ -1220,7 +1240,7 @@ def spawn(req: dict) -> dict:
     if budget_refusal is not None:
         return _refused(budget_refusal)
     budget_env = spawn_budget_env(req)
-    client = req.get("client") or "opencode"
+    client = spawn_client(req)
     cwd = req.get("cwd") or os.getcwd()
     if not os.path.isdir(cwd):
         return _refused("cwd %s is not a directory" % cwd)
