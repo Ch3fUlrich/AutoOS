@@ -1201,6 +1201,13 @@ class McpHeartbeatTests(unittest.TestCase):
         os.environ.update(AUTOOS_STATE_DIR=state_dir, AUTOOS_AGENT_MCP_DRY_RUN="1")
         os.environ.pop("AUTOOS_AGENT_DEPTH", None)
         os.environ.pop("AUTOOS_AGENT_MAX_DEPTH", None)
+        # D-2148: an unpinned MCP write spawn runs the policy writer pick, which
+        # probes installed clients; the CI runner has none, so pin the decision.
+        _pick = mock.patch.object(mcp_server.agent, "pick_policy_writer", return_value={
+            "entry": {"client": "opencode", "model": "omniroute/cx-gpt-6.1-sol"},
+            "client": "opencode", "model": "omniroute/cx-gpt-6.1-sol", "writer_skips": []})
+        _pick.start()
+        self.addCleanup(_pick.stop)
         os.environ.pop("AUTOOS_AGENT_INBOX", None)
         self.addCleanup(self._restore_env)
 
