@@ -3142,6 +3142,31 @@ def _check_writers(registry) -> list:
         return ["writers: policy.writers is missing - writer_allowed fails closed without it"]
     if not isinstance(writers, dict):
         return ["writers: policy.writers must be an object"]
+    order = writers.get("order")
+    if not isinstance(order, list) or not order:
+        problems.append("writers: policy.writers.order must be a non-empty list")
+    else:
+        seen = set()
+        for index, row in enumerate(order):
+            label = "writers: policy.writers.order[%d]" % index
+            if not isinstance(row, dict) or any(
+                    not isinstance(row.get(key), str) or not row[key].strip()
+                    for key in ("client", "model", "family")):
+                problems.append(label + " must have non-empty string client/model/family")
+                continue
+            if row["family"].lower() == "anthropic" or re.search(
+                    r"claude|sonnet|opus|haiku|anthropic",
+                    row["client"] + " " + row["model"], re.I):
+                problems.append(label + " forbids Claude-family writers")
+            if re.search(r"gpt[-_. ]*5[-_. ]*6[-_. ]*sol", row["model"], re.I):
+                problems.append(label + " forbids stale gpt-5.6-sol")
+            if any("ovh" in str(row.get(key, "")).lower()
+                   for key in ("client", "model", "leg", "provider")):
+                problems.append(label + " forbids ovh writers")
+            pair = (row["client"], row["model"])
+            if pair in seen:
+                problems.append(label + " duplicate client/model pair")
+            seen.add(pair)
     subs = writers.get("sub40_models")
     if not isinstance(subs, list) or not subs or any(not isinstance(s, str) or not s for s in subs):
         problems.append("writers: policy.writers.sub40_models must list non-empty strings")
@@ -3161,6 +3186,23 @@ def _check_writers(registry) -> list:
 
 
 # ===========================================================================
+def rank_candidates(role, candidates, registry, benchmarks=None):
+    """benchmark-informed ranking arrives with OR-BENCH-SEED-SHIP; until then the registry order is the ranking.
+
+    Unknown candidates retain their input order after all registered candidates.
+    """
+    policy = _section(registry, "policy")
+    if role == "writer":
+        rows = policy.get("writers", {}).get("order", [])
+    elif role == "reviewer":
+        rows = policy.get("reviewers", [])
+    else:
+        raise ValueError("unknown ranking role %r" % role)
+    ranks = {(row["client"], row["model"]): index for index, row in enumerate(rows)}
+    return sorted(candidates, key=lambda row: ranks.get(
+        (row.get("client"), row.get("model")), len(ranks)))
+
+
 # rule 12 - the risk policy is a policy tools/autoos_risk.py can actually apply
 # ===========================================================================
 

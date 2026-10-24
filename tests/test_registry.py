@@ -43,6 +43,77 @@ def _load_tool():
 registry = _load_tool()
 
 
+class WriterOrderTests(unittest.TestCase):
+    def fixture(self):
+        return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+
+    def reject(self, order, text):
+        data = self.fixture()
+        data["policy"]["writers"]["order"] = order
+        problems = registry._check_writers(data)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertIn(text, problems[0])
+
+    def test_order_shape(self):
+        for order in (None, [], {}, [None], [{"client": " ", "model": "x", "family": "x"}]):
+            with self.subTest(order=order):
+                self.reject(order, "order")
+
+    def test_claude_rejected(self):
+        for field, value in (("family", "anthropic"), ("model", "SONNET"), ("client", "claude")):
+            row = dict(client="x", model="x", family="x")
+            row[field] = value
+            self.reject([row], "Claude")
+
+    def test_stale_codex_rejected(self):
+        for model in ("gpt-5.6-sol", "provider/GPT-5.6-SOL-high", "GPT_5_6_SOL"):
+            self.reject([dict(client="x", model=model, family="openai")], "gpt-5.6-sol")
+
+    def test_ovh_rejected(self):
+        for field in ("client", "model", "leg", "provider"):
+            row = dict(client="x", model="x", family="x")
+            row[field] = "prefix/OVH-model"
+            self.reject([row], "ovh")
+
+    def test_duplicates_rejected(self):
+        row = dict(client="x", model="x", family="x")
+        self.reject([row, row], "duplicate")
+
+    def test_real_order_and_fallback(self):
+        import autoos_ready_guards as guards
+        data = self.fixture()
+        self.assertEqual(registry._check_writers(data), [])
+        order = tuple("%s %s" % (r["client"], r["model"]) for r in data["policy"]["writers"]["order"])
+        self.assertEqual(guards.WRITER_ORDER, order)
+        self.assertEqual(guards.FALLBACK_WRITER_ORDER, order)
+        self.assertEqual(order[0], "opencode omniroute/cx-gpt-6.1-sol")
+
+    def test_writer_ranking(self):
+        data = self.fixture()
+        rows = data["policy"]["writers"]["order"]
+        self.assertEqual(registry.rank_candidates("writer", rows[::-1], data), rows)
+
+    def test_reviewer_ranking(self):
+        data = self.fixture()
+        rows = data["policy"]["reviewers"]
+        self.assertEqual(registry.rank_candidates("reviewer", rows[::-1], data), rows)
+
+    def test_unknown_last(self):
+        data = self.fixture()
+        known = data["policy"]["reviewers"][0]
+        a, b = dict(client="unknown", model="a"), dict(client="unknown", model="b")
+        self.assertEqual(registry.rank_candidates("reviewer", [a, known, b], data), [known, a, b])
+
+    def test_benchmarks_ignored(self):
+        data = self.fixture()
+        rows = data["policy"]["reviewers"]
+        self.assertEqual(registry.rank_candidates("reviewer", rows[::-1], data, benchmarks={"reverse": True}), rows)
+
+    def test_bad_role(self):
+        with self.assertRaises(ValueError):
+            registry.rank_candidates("other", [], self.fixture())
+
+
 def _load_resolver():
     """Import tools/autoos_resolver.py the same way: the usable-legs invariant
     asks the resolver's own context check rather than restating it. The resolver
