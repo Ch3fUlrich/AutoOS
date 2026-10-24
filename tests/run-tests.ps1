@@ -4518,6 +4518,7 @@ function Invoke-OmnigraphBaseScratch {
     $repo = if ($ScratchRepo) { (New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'repo')).FullName } else { $Root }
     $result = $null
     try {
+        $null = New-Item -ItemType Directory -Force -Path $scratch
         $env:USERPROFILE = $scratch
         $env:HOME = $scratch
         $env:APPDATA = Join-Path $scratch 'AppData'
