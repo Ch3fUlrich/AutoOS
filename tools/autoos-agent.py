@@ -5689,7 +5689,7 @@ def seat_prompt(task, is_seat):
     """Add the seat's no-tools boundary once, preserving all existing text."""
     if not is_seat:
         return task, False
-    if task == SEAT_FIRST_LINE or task.startswith(SEAT_FIRST_LINE + "\n"):
+    if task == SEAT_FIRST_LINE or task.startswith((SEAT_FIRST_LINE + "\n", SEAT_FIRST_LINE + "\r\n")):
         return task, False
     return SEAT_FIRST_LINE + "\n\n" + task, True
 
@@ -9223,12 +9223,12 @@ def _seat_item_text(text):
     lines = []
     fenced = False
     for line in (text or "").splitlines():
-        if line.startswith(("diff --git", "--- a/", "+++ b/")):
-            break
         if line.lstrip().startswith("```"):
             fenced = not fenced
             lines.append("")
         else:
+            if not fenced and line.startswith(("diff --git", "--- a/", "+++ b/")):
+                break
             lines.append("" if fenced else line)
     return "\n".join(lines)
 
@@ -9236,36 +9236,25 @@ def _seat_item_text(text):
 def _seat_clause_matches(text):
     """Yield family and original clause text without reading host or registry state."""
     text = _seat_item_text(text)
-    counts = {"one", "two", "three", "four", "five", "six", "seven", "eight",
-              "nine", "ten", "eleven", "twelve", "both", "all"}
-    pattern = r"\b(?:(?:non|not)(?:-|[^\S\n]+)|no[^\S\n]+)([a-z]+)\b"
-    for match in re.finditer(pattern, text or "", re.IGNORECASE):
-        # Neither the noun window nor a count may leak across sentences.
-        left = max(text.rfind(mark, 0, match.start()) for mark in (".", ";", "\n")) + 1
-        right = re.search(r"[.;\n]", text[match.end():])
-        right = match.end() + right.start() if right else len(text)
-        before = list(re.finditer(r"\b\w+\b", text[left:match.start()]))[-3:]
-        after = list(re.finditer(r"\b\w+\b", text[match.end():right]))[:3]
-        noun = r"seats?|famil(?:y|ies)|reviewers?|verdicts?"
-        seat_before = next((word for word in reversed(before) if re.fullmatch(
-            noun, word.group(), re.IGNORECASE)), None)
-        seat_after = next((word for word in after if re.fullmatch(
-            noun, word.group(), re.IGNORECASE)), None)
-        if seat_before is None and seat_after is None:
-            continue
-        count = next((word for word in reversed(before)
-                      if word.group().casefold() in counts
-                      or re.fullmatch(r"[0-9]+", word.group()) and int(word.group()) > 0), None)
-        end = match.end() + seat_after.end() if seat_after else match.end()
-        only = re.match(r"[^\S\n]+only\b", text[end:right], re.IGNORECASE)
-        name = resolver.family_key(match.group(1))
-        # Use the fence's vendor aliases, including Haiku/Sonnet/Opus -> Anthropic.
-        family = vendor_family_name_unique(name) or name
-        if family not in {resolver.family_key(fam) for fam, _ in FAMILY_VENDORS}:
-            continue
-        start = min([match.start()] + [left + word.start() for word in (count, seat_before)
-                                      if word is not None])
-        yield family, text[start:end + (only.end() if only else 0)]
+    count = r"(?:[0-9]*[1-9][0-9]*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|both|all|a|an|the)"
+    noun = r"(?:seats?|famil(?:y|ies)|reviewers?|verdicts?)"
+    negative = r"(?:non-|not-|not\s+)([a-z]+)\b"
+    # Match requirements, not nearby mentions of reviewers or vendor compatibility.
+    patterns = (
+        rf"\b(?:{count}\s+)?{negative}\s+(?:[a-z]+\s+)?{noun}\b(?:\s+only\b)?",
+        rf"^\s*(?:{count}\s+)?{noun}(?:\s+(?:clause|rule|requirement))?\s*(?::|=| - )\s*{negative}",
+        rf"(?:^\s*|:\s*|\b{count}\s+)no\s+([a-z]+)\s+{noun}\b",
+    )
+    known = {resolver.family_key(fam) for fam, _ in FAMILY_VENDORS}
+    for sentence in re.split(r"[.;\n]", text):
+        matches = sorted((match for pattern in patterns
+                          for match in re.finditer(pattern, sentence, re.IGNORECASE)),
+                         key=lambda match: match.start())
+        for match in matches:
+            name = resolver.family_key(match.group(1))
+            family = vendor_family_name_unique(name) or name
+            if family in known:
+                yield family, match.group().strip()
 
 
 def seat_clause_exclusions(text) -> list[str]:

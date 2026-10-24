@@ -22,6 +22,7 @@ class SeatPromptTests(unittest.TestCase):
         for task, seat, expected, changed in [
             ("review this", True, FIRST + "\n\nreview this", True),
             (FIRST + "\n\nreview this", True, FIRST + "\n\nreview this", False),
+            (FIRST + "\r\n\r\nReview item", True, FIRST + "\r\n\r\nReview item", False),
             ("\n \t\n" + FIRST, True, FIRST + "\n\n\n \t\n" + FIRST, True),
             ("  " + FIRST, True, FIRST + "\n\n  " + FIRST, True),
             (FIRST, True, FIRST, False),

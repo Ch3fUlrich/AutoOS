@@ -27,16 +27,16 @@ class SeatClauseTests(unittest.TestCase):
             ("10 non-Claude seats", ["anthropic"]),
             ("123 non-Claude seats", ["anthropic"]),
             ("twelve not-anthropic reviewers", ["anthropic"]),
-            ("eleven non claude families", ["anthropic"]),
+            ("eleven non claude families", []),
             ("2 seats: non-Claude", ["anthropic"]),
             ("seat clause: non-anthropic", ["anthropic"]),
             ("non-anthropic", []),
             ("seat. non-Claude", []),
             ("seat; non-Claude", []),
             ("seat\nnon-Claude", []),
-            ("non-Claude one two seats", ["anthropic"]),
+            ("non-Claude one two seats", []),
             ("non-Claude one two three seats", []),
-            ("seats one two non-Claude", ["anthropic"]),
+            ("seats one two non-Claude", []),
             ("seats one two three non-Claude", []),
             ("non-Claude. seats", []),
             ("non-Claude; seats", []),
@@ -45,6 +45,14 @@ class SeatClauseTests(unittest.TestCase):
             ("step 2 of the non-claude runbook", []),
             ("non-Claude prose without any restriction", []),
             ("", []),
+            ("Reviewer: verify non-Claude compatibility", []),
+            ("Reviewer note: non-Claude tests passed", []),
+            ("Summary of verdicts: non-Claude runs passed", []),
+            ("There is no Claude verdict yet, please run review", []),
+            ("do not use Claude Code", []),
+            ("non-Claude independent seats", ["anthropic"]),
+            ("seats = not Claude", ["anthropic"]),
+            ("seat requirement - non-anthropic", ["anthropic"]),
         ]:
             with self.subTest(text=text):
                 self.assertEqual(agent.seat_clause_exclusions(text), expected)
@@ -69,11 +77,15 @@ class SeatClauseTests(unittest.TestCase):
             self.assertEqual(agent.seat_clause_exclusions(task), [])
             result = self.run_cli("qwen3.8-flash", task=task)
             self.assertEqual(result.returncode, 0, result.stderr)
-        for fence in ("```", "```python"):
+        for fence in ("```", "```python", "```diff\n--- a/app.py\n+++ b/app.py"):
             task = "Review this\n" + fence + "\nall non-qwen verdicts\n```\n2 non-Claude seats"
             self.assertEqual(agent.seat_clause_exclusions(task), ["anthropic"])
             result = self.run_cli("qwen3.8-flash", task=task)
             self.assertEqual(result.returncode, 0, result.stderr)
+            result = self.run_cli("claude-haiku-4-5", task=task)
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("seat clause", result.stderr)
+            self.assertIn("2 non-Claude seats", result.stderr)
 
     def run_cli(self, model, seat=True, task="2 non-Claude seats"):
         with tempfile.TemporaryDirectory() as tmp:
