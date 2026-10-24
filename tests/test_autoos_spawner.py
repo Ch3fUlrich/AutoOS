@@ -131,9 +131,12 @@ def setUpModule():
     # no sign-in probe, so an inert executable supplies the same availability.
     _CLIENT_BIN = os.path.join(_WORKERS_TMP, "bin")
     os.mkdir(_CLIENT_BIN)
-    stub = Path(_CLIENT_BIN, "opencode")
-    stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-    stub.chmod(0o755)
+    if os.name != "nt":
+        stub = Path(_CLIENT_BIN, "opencode")
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+    else:
+        Path(_CLIENT_BIN, "opencode.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
     _CLIENT_PATH_PATCH = mock.patch.dict(os.environ, {
         "PATH": _CLIENT_BIN + os.pathsep + os.environ.get("PATH", os.defpath)})
     _CLIENT_PATH_PATCH.start()
