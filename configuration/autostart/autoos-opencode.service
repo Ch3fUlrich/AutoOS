@@ -2,7 +2,7 @@
 # (template). Rendered and installed by register-autostart.sh, which fills in
 # this checkout's path and the machine's PATH. Opt-in only.
 #
-# Listens on 0.0.0.0:4096 because the LAN reverse proxy is another host. Its
+# Listens on loopback by default; a named unicast address is opt-in. Its
 # own auth: HTTP Basic on /api/* (user "opencode"); the wrapper pins the
 # password in ~/.config/autoos/opencode-serve.password and exports the
 # {env:...} keys the global opencode config references.

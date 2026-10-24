@@ -3162,7 +3162,7 @@ if it "svc: run-opencode-serve binds the LAN port with a pinned password and key
         AUTOOS_OPENCODE_PASSWORD_FILE="$d/pw" \
         bash "$ROOT/configuration/autostart/run-opencode-serve.sh" --dry-run 2>&1)"
     ok=1
-    [[ "$out" == *"opencode serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "bind: $out" >&2; }
+    [[ "$out" == *"opencode serve --hostname 127.0.0.1 --port 4096"* ]] || { ok=0; echo "bind: $out" >&2; }
     [[ "$out" == *"LITELLM_MASTER_KEY"* && "$out" == *"AUTOOS_OMNIROUTE_KEY"* ]] || { ok=0; echo "keys: $out" >&2; }
     [[ "$out" == *"OPENROUTER_API_KEY"* ]] && { ok=0; echo "placeholder loaded" >&2; }
     [[ "$out" == *"fake-000"* || "$out" == *"fake-111"* ]] && { ok=0; echo "a value was printed" >&2; }
@@ -3184,7 +3184,7 @@ if it "svc: run-opencode-serve generates the password once, private, and reuses 
     second="$(run)"; pw2="$(cat "$d/cfg/pw" 2>/dev/null)"
     mode="$(stat -c %a "$d/cfg/pw" 2>/dev/null)"
     ok=1
-    [[ "$first" == *"pw-set serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "first: $first" >&2; }
+    [[ "$first" == *"pw-set serve --hostname 127.0.0.1 --port 4096"* ]] || { ok=0; echo "first: $first" >&2; }
     [[ ${#pw1} -ge 24 && "$pw1" == "$pw2" ]] || { ok=0; echo "password not stable" >&2; }
     [[ "$mode" == 600 ]] || { ok=0; echo "mode $mode" >&2; }
     [[ "$first$second" == *"$pw1"* ]] && { ok=0; echo "password printed" >&2; }
@@ -3208,7 +3208,7 @@ if it "svc: run-opencode-serve takes the password from api-keys.yml opencode_pas
     out="$(_run)"
     plan="$(_run --dry-run)"
     ok=1
-    [[ "$out" == *"pw-match serve --hostname 0.0.0.0 --port 4096"* ]] || { ok=0; echo "password not from the keys file: $out" >&2; }
+    [[ "$out" == *"pw-match serve --hostname 127.0.0.1 --port 4096"* ]] || { ok=0; echo "password not from the keys file: $out" >&2; }
     [[ "$out" == *"new-pass"* ]] && { ok=0; echo "the password was printed" >&2; }
     [[ -e "$d/cfg/pw" ]] && { ok=0; echo "the fallback file was written despite a keys password" >&2; }
     [[ "$plan" == *"$d/keys.yml"* ]] || { ok=0; echo "the dry run did not name the source: $plan" >&2; }
@@ -3675,7 +3675,7 @@ up = {k: v["up"] for k, v in by.items()}
 if up != {"omniroute": True, "litellm": False, "opencode": True, "openhands": True}:
     problems.append("up=%s" % up)
 if by["litellm"]["bind"] != "127.0.0.1": problems.append("litellm-bind")
-if by["opencode"]["bind"] != "0.0.0.0": problems.append("opencode-bind")
+if by["opencode"]["bind"] != "127.0.0.1": problems.append("opencode-bind")
 if "apply-dry-run" not in by["omniroute"]["actions"]: problems.append("no-apply-dry-run")
 if "start-openhands" not in by["openhands"]["actions"]: problems.append("no-start-openhands")
 if "start-opencode-serve" not in by["opencode"]["actions"]: problems.append("no-start-serve")
@@ -3773,6 +3773,7 @@ _aistack() {
     # shellcheck disable=SC2016
     env -u AUTOOS_OMNIROUTE_KEY -u OMNIGRAPH_TOKEN -u AUTOOS_OPENHANDS_SANDBOX_URL -u AUTOOS_OPENHANDS_WEB_HOST \
         -u AUTOOS_AI_STACK_MIGRATING -u OMNIROUTE_API_KEY -u AUTOOS_STACK_BIND -u AUTOOS_STACK_ALLOW_LAN \
+        -u AUTOOS_OPENCODE_PUBLISH_IP \
         -u AUTOOS_CURL -u AUTOOS_VERIFY_PUBLIC_URLS -u AUTOOS_VERIFY_COMBOS -u COMPOSE_PROFILES -u AUTOOS_STACK_DATA -u AUTOOS_OMNIROUTE_PUBLIC_URL \
         -u OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT -u OMNIROUTE_CHAT_ADMISSION_QUEUE_MS -u AUTOOS_VERIFY_RETRY_SLEEP \
         -u AUTOOS_LITELLM_HOST -u AUTOOS_LITELLM_PORT -u AUTOOS_LITELLM_MASTER_KEY_FILE -u AUTOOS_LITELLM_STATE_DIR \
@@ -4011,13 +4012,27 @@ if it "aistack: the opencode layer builds on a digest-pinned V2 image, never V1"
     if (( ok )); then pass; else fail "opencode layer is not pinned V2"; fi
 fi
 
+if it "aistack: stack.env.example documents the opencode publish address with a loopback default"; then
+    # Incident D-2542: :4096 has its own variable now, so the operator can name
+    # an allowlisted address for it without touching the gateway's publish bind.
+    # The documented default is loopback - a wildcard default would ship the
+    # exposure this change exists to close.
+    f="$AISTACK/stack.env.example"
+    ok=1
+    grep -q '^AUTOOS_OPENCODE_PUBLISH_IP=127.0.0.1$' "$f" \
+        || { ok=0; echo "no AUTOOS_OPENCODE_PUBLISH_IP=127.0.0.1 line" >&2; }
+    grep -qE '^AUTOOS_OPENCODE_PUBLISH_IP=0\.0\.0\.0$' "$f" \
+        && { ok=0; echo "the documented default is a wildcard bind" >&2; }
+    if (( ok )); then pass; else fail "the opencode publish address is not documented safely"; fi
+fi
+
 if it "aistack: the env example carries no real value"; then
     ok=1
     [[ -f "$AISTACK/stack.env.example" ]] || { ok=0; echo "missing" >&2; }
     while IFS= read -r line; do
         [[ -z "$line" || "$line" == \#* ]] && continue
         v="${line#*=}"
-        [[ -z "$v" || "$v" == REPLACE_WITH_* || "$v" =~ ^[0-9]+[mg]?$ || "$v" == 0.0.0.0 || "$v" == /* ]] \
+        [[ -z "$v" || "$v" == REPLACE_WITH_* || "$v" =~ ^[0-9]+[mg]?$ || "$v" == 0.0.0.0 || "$v" == 127.0.0.1 || "$v" == /* ]] \
             || { ok=0; echo "suspicious: $line" >&2; }
         [[ "$v" == /home/* ]] && { ok=0; echo "home path: $line" >&2; }
     done <"$AISTACK/stack.env.example"
@@ -4370,7 +4385,7 @@ if it "svc: run-opencode-serve reads a quoted opencode_password with a trailing 
         AUTOOS_OPENCODE_PASSWORD_FILE="$d/cfg/pw" \
         bash "$ROOT/configuration/autostart/run-opencode-serve.sh" 2>&1)"
     ok=1
-    [[ "$out" == *"pw-match serve --hostname 0.0.0.0 --port 4096"* ]] \
+    [[ "$out" == *"pw-match serve --hostname 127.0.0.1 --port 4096"* ]] \
         || { ok=0; echo "password not from the keys file (with trailing comment): $out" >&2; }
     [[ "$out" == *"pw-with-comment"* ]] && { ok=0; echo "the password was printed" >&2; }
     rm -rf "$d"
@@ -4714,7 +4729,7 @@ if it "aistack: the opencode image is rebuilt when its Dockerfile or base image 
     t="$d/tree/configuration"
     mkdir -p "$t/docker/ai-stack"
     cp "$AISTACK/ai-stack.sh" "$AISTACK/compose.yml" "$AISTACK/opencode.Dockerfile" "$t/docker/ai-stack/"
-    cp "$ROOT/configuration/env-file.sh" "$t/"
+    cp "$ROOT/configuration/env-file.sh" "$ROOT/configuration/opencode-bind.py" "$t/"
     mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
     : >"$d/image-exists"; printf 'stale\n' >"$d/opencode-label"
     ok=1
@@ -4847,6 +4862,46 @@ if it "aistack: the guard and compose agree on the bind when the shell exports A
     [[ "$(sort -u "$d/compose-bind.log")" == "bind=127.0.0.1" ]] || { ok=0; echo "compose not given the file's bind" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the guarded bind and the published bind can differ"; fi
+fi
+
+if it "aistack: compose is handed a loopback opencode publish address, and a wildcard is refused"; then
+    # D-2542/D-2549: :4096 no longer rides AUTOOS_STACK_BIND. ai-stack.sh must
+    # hand compose the effective AUTOOS_OPENCODE_PUBLISH_IP on every call (a
+    # shell export otherwise beats --env-file and could re-wildcard the port)
+    # and refuse a wildcard outright - opencode's root UI needs no password, so
+    # :4096 is the one port the firewall policy cannot cover.
+    ok=1
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+    _aistack "$d" up >/dev/null || { ok=0; echo "loopback up refused" >&2; }
+    [[ "$(sort -u "$d/compose-publish.log")" == "publish=127.0.0.1" ]] \
+        || { ok=0; echo "compose saw another opencode publish address: $(sort -u "$d/compose-publish.log" 2>/dev/null | tr '\n' ' ')" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_OPENCODE_PUBLISH_IP='192.0.2.10'\n" >"$d/cfg/stack.env"
+    _aistack "$d" up >/dev/null || { ok=0; echo "an allowlisted publish address refused" >&2; }
+    [[ "$(sort -u "$d/compose-publish.log")" == "publish=192.0.2.10" ]] \
+        || { ok=0; echo "the named address was not handed to compose: $(sort -u "$d/compose-publish.log" 2>/dev/null | tr '\n' ' ')" >&2; }
+    rm -rf "$d"
+    d="$(_aistack_sandbox)"
+    mkdir -p "$d/cfg"; : >"$d/image-exists"
+    printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_OPENCODE_PUBLISH_IP='0.0.0.0'\n" >"$d/cfg/stack.env"
+    out="$(_aistack "$d" up 2>&1)" && { ok=0; echo "a wildcard opencode publish address was accepted" >&2; }
+    [[ "$out" == *"0.0.0.0"* ]] || { ok=0; echo "the refusal does not name 0.0.0.0: $out" >&2; }
+    grep -q 'up -d' "$d/docker.log" 2>/dev/null && { ok=0; echo "containers were started on a wildcard :4096 publish" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "opencode's publish address is not loopback-or-allowlist"; fi
+fi
+
+if it "opencode exposure: guarded publish address, guarded healthcheck, loopback spawners, one password under both names (unit tests)"; then
+    # tests/test_opencode_auth_bind.py is hermetic: compose/template text, the
+    # wrappers' own --dry-run plans and a fake `opencode` on PATH - it never
+    # starts a container. Its UpstreamUsernameAnomalyTests class records
+    # anomalyco/opencode#45856 as an expected failure, so an unexpected
+    # success there is the signal to drop the xfail.
+    out="$(python3 tests/test_opencode_auth_bind.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "aistack: every FROM in opencode.Dockerfile and omniroute.Dockerfile is digest-pinned, or the rebuild hash is blind"; then
@@ -5057,7 +5112,7 @@ if it "aistack: the omniroute image is rebuilt when its label, base digest or Do
     t="$d/tree/configuration"
     mkdir -p "$t/docker/ai-stack" "$d/cfg"
     cp "$AISTACK/ai-stack.sh" "$AISTACK/compose.yml" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
-    cp "$ROOT/configuration/env-file.sh" "$t/"
+    cp "$ROOT/configuration/env-file.sh" "$ROOT/configuration/opencode-bind.py" "$t/"
     printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
     _omni_up() { rm -f "$d/docker.log" "$d/run-autoos-omniroute"; _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up omniroute >/dev/null; }
     _omni_builds() { grep -c '^build' "$d/docker.log" 2>/dev/null || true; }
@@ -5605,7 +5660,7 @@ if it "aistack: verify checks the gateway container has qodercli: ok, FAIL, or s
     t="$d/tree/configuration"
     mkdir -p "$t/docker/ai-stack"
     cp "$AISTACK/ai-stack.sh" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
-    cp "$ROOT/configuration/env-file.sh" "$t/"
+    cp "$ROOT/configuration/env-file.sh" "$ROOT/configuration/opencode-bind.py" "$t/"
     sed 's/^    container_name: autoos-omniroute$/&\n    profiles: ["gateway"]/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
     out="$(_AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack_verify "$d" verify)" && rc=0 || rc=$?
     grep -qx '  skip  omniroute has qodercli - the omniroute service is not enabled' <<<"$out" || { ok=0; echo "profile off: no skip line: $(grep qodercli <<<"$out")" >&2; }
@@ -5666,7 +5721,7 @@ if it "aistack: verify follows the compose profiles: a disabled openhands is ski
         t="$d/tree/configuration"
         mkdir -p "$t/docker/ai-stack"
         cp "$AISTACK/ai-stack.sh" "$AISTACK/opencode.Dockerfile" "$t/docker/ai-stack/"
-        cp "$ROOT/configuration/env-file.sh" "$t/"
+        cp "$ROOT/configuration/env-file.sh" "$ROOT/configuration/opencode-bind.py" "$t/"
         if [[ "$style" == inline ]]; then
             sed 's/^    container_name: openhands-app$/&\n    profiles: ["extras", "openhands"]/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
         else

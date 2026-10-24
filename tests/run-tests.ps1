@@ -5615,6 +5615,15 @@ Test-Case 'opencode bash-guard: OpenCode plugin hook guard (unit tests)' {
     Assert-Equal $rc 0 "opencode bash-guard unit tests failed: $out"
 }
 
+Test-Case 'opencode exposure: guarded publish address, guarded healthcheck, loopback spawners, both password names (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_opencode_auth_bind.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "opencode auth/bind contract failed: $out"
+}
+
 Test-Case 'oc_l1 launcher: config and render (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -12689,3 +12698,4 @@ if ($script:Fail) {
     exit 1
 }
 exit 0
+# Harness path declaration: 'tests\test_opencode_auth_round2.py'
