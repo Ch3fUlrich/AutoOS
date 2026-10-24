@@ -73,7 +73,7 @@ Binding on every level below; each line links its source — read the source, ne
 8. CI runs only on the workstation or ci.vm; no GitHub billing [D-1436].
 9. Judge (server-L1-routing) reviews only HIGH risk: secrets/auth/access, keeper and plan-graph engine or live keeper changes, live deploys/migrations (D-825 GO steps), data-mutating live steps. Standard lanes merge on the L1's own approval with 1-2 non-Claude seats; the router samples [D-1442].
 10. A harness or classifier refusal is never worked around or relayed to another agent: stop and send the router the verbatim refusal; the router turns it into an OS-NN line the operator types in that session [routing DECISIONS 2.7].
-11. Model access paths: a named model runs ONLY over its own path, never a substitute model or route [D-1504]. qwen3.8-flash = qodercli ACP only; gemini-3.8-flash = antigravity (agy) ACP or Google AI Studio (both rate-limited: back off or send BLOCKED, never swap); muse-spark-1.3 = opencode ACP; mimo-v2.6-flash / mimo-v2.6-pro = the mimo provider. Path down = BLOCKED, not another model. Detail: `docs/agent-protocol.md` "Model access paths".
+11. Model access paths: a named model runs ONLY over its own path, never a substitute model or route [D-1504]. qwen3.8-flash = qodercli ACP only; gemini-3.8-flash = antigravity (agy) ACP or Google AI Studio (both rate-limited: back off or send BLOCKED, never swap); muse-spark-1.3 = opencode ACP; mimo/mimo-v2.6-flash | mimo/mimo-v2.6-pro (mimo provider only). Path down = BLOCKED, not another model. Detail: `docs/agent-protocol.md` "Model access paths".
 
 ## Rules
 
