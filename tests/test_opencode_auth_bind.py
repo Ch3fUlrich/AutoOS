@@ -411,6 +411,47 @@ class RoundTwoTests(unittest.TestCase):
                 worker.join()
                 server.server_close()
 
+    def test_healthcheck_survives_compose_interpolation(self):
+        # compose interpolates $name and ${...} in the whole file; only $$ is a
+        # literal $. A shell variable written as $c renders as "" and the probe
+        # fails for every answer (seat r2 of ZED-SETUP-REMOVE, docker compose config).
+        import sys
+        sys.path.insert(0, str(ROOT / 'tests/helpers'))
+        import check_compose
+        body = check_compose.services((ROOT / 'configuration/docker/ai-stack/compose.yml').read_text())['opencode']
+        line = next(line for line in body.splitlines() if 'test: [' in line)
+        command = json.loads(line.split('test:', 1)[1])[1]
+        unescaped = re.findall(r'\$[A-Za-z_{][A-Za-z0-9_]*', command.replace('$$', ''))
+        self.assertEqual(unescaped, [], 'compose would interpolate these away: %s' % unescaped)
+
+    def test_healthcheck_as_docker_compose_renders_it(self):
+        # The real interpolator, when a docker CLI with compose is on this host:
+        # the rendered probe must be exactly the shell command we mean to run.
+        docker = shutil.which('docker')
+        if not docker or subprocess.run([docker, 'compose', 'version'], capture_output=True).returncode != 0:
+            self.skipTest('docker compose not available')
+        import sys
+        sys.path.insert(0, str(ROOT / 'tests/helpers'))
+        import check_compose
+        body = check_compose.services((ROOT / 'configuration/docker/ai-stack/compose.yml').read_text())['opencode']
+        line = next(line for line in body.splitlines() if 'test: [' in line)
+        want = ('c=$(curl --max-time 4 -sS -o /dev/null -w \'%{http_code}\' -u '
+                '"opencode:${OPENCODE_PASSWORD:-${OPENCODE_SERVER_PASSWORD}}" '
+                'http://127.0.0.1:4096/api/session 2>/dev/null); [ -n "$c" ] && [ "$c" != 000 ]')
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, 'compose.yml').write_text(
+                'services:\n  opencode:\n    image: scratch\n    healthcheck:\n      ' + line.strip() + '\n')
+            env = {k: v for k, v in os.environ.items() if k not in ('c', 'OPENCODE_PASSWORD', 'OPENCODE_SERVER_PASSWORD')}
+            result = subprocess.run([docker, 'compose', '--project-directory', directory, '-f',
+                                     str(pathlib.Path(directory, 'compose.yml')), 'config', '--format', 'json'],
+                                    capture_output=True, text=True, env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('variable is not set', result.stderr)
+        # `config` writes compose again, so every literal $ comes back as $$.
+        rendered = [part.replace('$$', '$') for part in
+                    json.loads(result.stdout)['services']['opencode']['healthcheck']['test']]
+        self.assertEqual(rendered, ['CMD-SHELL', want])
+
     def test_execute_healthcheck_against_v2_fake(self):
         if os.name == 'nt':
             self.skipTest('POSIX shell probe runs in the Linux gate')
