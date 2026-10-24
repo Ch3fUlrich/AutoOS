@@ -3453,6 +3453,24 @@ class ReviewerSelectionTests(unittest.TestCase):
     FUTURE = "2026-09-30T09:00:00Z"
     FUTURE_LATER = "2026-09-30T12:00:00Z"
 
+    def test_measured_reviewer_outages_queue_with_retry_at(self):
+        for source in ("client", "providers", "legs", "entry"):
+            with self.subTest(source=source):
+                reg = self.registry()
+                row = reg["policy"]["reviewers"][1]
+                reg["policy"]["reviewers"] = [row]
+                outage = {"unavailable_until": self.FUTURE}
+                state = {"gemini": {"installed": True, "signed_in": True}}
+                if source == "client":
+                    state["gemini"].update(outage)
+                elif source == "entry":
+                    row.update(outage)
+                else:
+                    state[source] = {"gemini" if source == "providers" else row["leg"]: outage}
+                result = r.reviewer_for("meta", reg, state, self.NOW)
+                self.assertEqual(result["state"], "queued")
+                self.assertEqual(result["retry_at"], self.FUTURE)
+
     def registry(self):
         return {
             "providers": {

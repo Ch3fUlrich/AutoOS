@@ -5559,6 +5559,11 @@ class RouteDeferred(ValueError):
     """A v2 card's resolver plan is deferred and --no-defer was not given."""
 
 
+def review_seat(card):
+    """Validate even hand-built cards before indexing a resolved seat pair."""
+    return routing.normalize({"seat": card.get("seat", 1)})["seat"]
+
+
 def resolve_review_plan(card: dict, now=None) -> dict | None:
     """The ``policy.reviewers`` decision for an authored review card.
 
@@ -5572,13 +5577,14 @@ def resolve_review_plan(card: dict, now=None) -> dict | None:
     """
     if not _card_asks_review(card) or not card.get("author"):
         return None
+    seat = review_seat(card)
     now = now or datetime.datetime.now(datetime.timezone.utc)
     result = resolver.seats_for(
         card["author"], load_live_registry(),
         measure_mod.client_state(clients), now,
         risk=card.get("risk", "normal"), privacy=card.get("privacy", "public"))
     result = dict(result)
-    result["reviewer"] = (result["seats"][int(card.get("seat", 1)) - 1]
+    result["reviewer"] = (result["seats"][seat - 1]
                           if result["state"] == "resolved" else None)
     return result
 
@@ -8134,8 +8140,8 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free,
         return model, None, "note: --free keeps its promo model, not policy.reviewers (%s)" % asked
     if entry.get("client") != client.name:
         return (model, None,
-                "note: policy.reviewers wants --client %s --model %s; this run stays on %s, "
-                "so it is NOT the review that list picked"
+                "note: policy.reviewers switches this run to --client %s --model %s "
+                "from %s"
                 % (entry.get("client"), entry.get("model"), client.name))
     if not client.gateway:
         _fence_check_reviewer(asked, entry["model"], fence)
@@ -8736,7 +8742,9 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         level = clients.seat_level(client, level, isolate=bool(args.isolate),
                                    read_only=bool(route.get("read_only")))
         model = (writer_decision["model"] if writer_decision else
-                 args.model if not client.gateway else None)
+                 route["model"] if review and review.get("seats")
+                 and review.get("state") == "resolved" and not args.model and not args.free
+                 and not client.gateway else args.model if not client.gateway else None)
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         # KEYDENY3g item 3: a leaf that runs on a CLI with its own spawn gate has
         # that gate denied in argv; opencode's gate is the overlay below.
@@ -10428,6 +10436,7 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     closed on it.
     """
     parsed = routing.parse_card(card) if isinstance(card, str) else dict(card or {})
+    seat = review_seat(parsed)
     normalized = routing.normalize_v2(parsed)
     features = measure_mod.measure(normalized, repo, brief or "")
     result = resolver.plan(normalized, features, client_state, registry,
@@ -10438,7 +10447,7 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
                                     risk=normalized.get("risk", "normal"),
                                     privacy=normalized.get("privacy", "public"))
         review = dict(review)
-        review["reviewer"] = (review["seats"][normalized.get("seat", 1) - 1]
+        review["reviewer"] = (review["seats"][seat - 1]
                               if review["state"] == "resolved" else None)
         result["review"] = review
         result["explain"] = list(result.get("explain") or []) + resolver.reviewer_explain_lines(review)

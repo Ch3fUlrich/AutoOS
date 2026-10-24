@@ -2660,7 +2660,7 @@ def _reviewer_for(author, registry, client_state, now=None, risk="normal",
                             "reasons": reasons,
                             "waiting": temporary})
             if temporary:
-                waits.extend(_entry_unavailable_until(entry, registry, now))
+                waits.extend(_entry_unavailable_until(entry, registry, now, client_state))
     for entry, reasons in examined:
         if not reasons and not _reviewer_is_paid(entry, registry):
             model = entry.get("model")
@@ -2699,7 +2699,7 @@ def _reviewer_for(author, registry, client_state, now=None, risk="normal",
                       "(%d candidate(s) rejected)" % (family, len(skipped))}
 
 
-def _entry_unavailable_until(entry, registry, now):
+def _entry_unavailable_until(entry, registry, now, client_state=None):
     """The ISO dates a reviewer entry is down until, parsed to datetimes.
 
     Reads the same ``unavailable_until`` values the rejection reasons named
@@ -2709,6 +2709,10 @@ def _entry_unavailable_until(entry, registry, now):
     operator flips it, not when the clock reaches something.
     """
     moments = []
+    client_state = client_state or {}
+    client = entry.get("client")
+    sources = [entry, (registry.get("clients") or {}).get(client) or {},
+               client_state.get(client) or {}]
     leg = entry.get("leg")
     if leg:
         try:
@@ -2716,12 +2720,17 @@ def _entry_unavailable_until(entry, registry, now):
         except ValueError:
             return moments
         entry_data = registry["providers"].get(provider_id) or {}
+        sources.extend((client_state.get(section) or {}).get(name) or {}
+                       for section, name in (("providers", provider_id), ("legs", leg)))
     else:
         entry_data = (registry.get("clients") or {}).get(entry.get("client")) or {}
-    moment = _parse_until(entry_data.get("unavailable_until"))
-    if moment is not None and moment > now:
-        moments.append(moment)
-    return moments
+    sources.append(entry_data)
+    for data in sources:
+        moment = _parse_until(data.get("unavailable_until"))
+        if moment is not None and moment > now:
+            moments.append(moment)
+    # All outages on this candidate must clear before it can serve.
+    return [max(moments)] if moments else []
 
 
 def _format_retry(moment):

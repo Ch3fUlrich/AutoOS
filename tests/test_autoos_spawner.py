@@ -9138,15 +9138,22 @@ def _reviewer_registry():
 
 
 class ModelOrderSeatTests(unittest.TestCase):
+    def seat_plan(self, seat):
+        harness = ReviewerGateTests()
+        harness.setUp()
+        self.addCleanup(harness.doCleanups)
+        harness.registry["policy"]["reviewers"] = [
+            {"client": "agy", "model": "gemini-3.8-flash", "family": "gemini"},
+            {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen"}]
+        harness.client_state["agy"] = {"installed": True, "signed_in": True}
+        return harness.agent.build_plan(harness.args(
+            card="kind=review,author=meta,seat=%d,paths=tools/registry.py" % seat),
+            harness.cfg())
+
     def test_model_order_agy_explicit_model(self):
-        agent = load_agent()
-        row = {"client": "agy", "model": "gemini-test", "family": "gemini"}
-        model, _, _ = agent.reviewer_run_override(
-            {"state": "resolved", "reviewer": row}, agent.clients.CLIENTS["agy"],
-            {}, 2, None, None, False)
-        argv = agent.clients.build_command(agent.clients.CLIENTS["agy"], "review", None,
-                                           "medium", model)
-        self.assertEqual(argv[argv.index("--model") + 1], row["model"])
+        argv = self.seat_plan(1)["cmd"]
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash")
+        self.assertNotIn(clients.AGY_DEFAULT_MODEL, argv)
 
     def test_model_order_seat_card_validation(self):
         agent = load_agent()
@@ -9155,15 +9162,13 @@ class ModelOrderSeatTests(unittest.TestCase):
             agent.routing.normalize({"seat": 3})
 
     def test_model_order_selects_second_seat(self):
+        argv = self.seat_plan(2)["cmd"]
+        self.assertEqual(argv[argv.index("--model") + 1], "qwen3.8-flash")
+
+    def test_hand_built_card_rejects_out_of_range_seat(self):
         agent = load_agent()
-        seats = [{"client": "agy", "model": "gemini-test", "family": "gemini"},
-                 {"client": "qoder", "model": "qwen-test", "family": "qwen"}]
-        with mock.patch.object(agent, "load_live_registry", return_value={}), \
-                mock.patch.object(agent.measure_mod, "client_state", return_value={}), \
-                mock.patch.object(agent.resolver, "seats_for", return_value={
-                    "state": "resolved", "seats": seats, "skipped": []}):
-            plan = agent.resolve_review_plan({"kind": "review", "author": "gpt", "seat": 2})
-        self.assertEqual(plan["reviewer"], seats[1])
+        with self.assertRaisesRegex(routing.CardError, "seat"):
+            agent.resolve_review_plan({"kind": "review", "author": "gpt", "seat": 3})
 
 
 class ReviewerGateTests(unittest.TestCase):
@@ -9374,8 +9379,8 @@ class ReviewerGateTests(unittest.TestCase):
         route = self.route()
         self.assertEqual(route["review_plan"]["reviewer"]["client"], "gemini")
         self.assertEqual(route["model"], "gem-flash")
-        self.assertIn("policy.reviewers wants --client gemini", route["reviewer_note"])
-        self.assertIn("it is NOT the review that list picked", self.run_cmd_run()[1])
+        self.assertIn("policy.reviewers switches this run to --client gemini", route["reviewer_note"])
+        self.assertIn("switches this run to --client", self.run_cmd_run()[1])
 
     def test_a_review_plan_is_carried_through_the_route_cli_explain_output(self):
         # route --explain must show the skipped reviewers, not only the run's own
