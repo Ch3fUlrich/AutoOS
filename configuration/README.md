@@ -134,3 +134,10 @@ boxes and would report them down.
 - Model refs in `combos.json` are validated against the live catalog when the
   client key allows it; unknown refs are skipped with a warning, never
   silently swapped for something else.
+# opencode bind safety (D-2549)
+
+Use `AUTOOS_OPENCODE_HOST` with the supplied host launchers only; it is not
+an upstream opencode option. It defaults to loopback and accepts a named numeric
+unicast address. Docker `AUTOOS_OPENCODE_PUBLISH_IP` defaults to 127.0.0.1;
+the manager adds a loopback publication alongside a named external address.
+See `docs/web-services.md` for the v2 auth bypass and liveness rationale.

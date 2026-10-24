@@ -444,10 +444,14 @@ switch ($App) {
         Write-Host 'OpenHands UI: http://localhost:3000'
     }
     'opencode-serve' {
+        . (Join-Path $PSScriptRoot 'opencode-bind.ps1')
+        # AUTOOS_OPENCODE_HOST is validated before probing or spawning.
+        $ocHost = Get-AutoOSOpencodeHost
+        $ocAuthority = if ($ocHost.Contains(':')) { "[$ocHost]" } else { $ocHost }
         # Phone fallback UI (docs/openhands-runbook.md rung 2): resume when
         # down, no-op when up. 401 without pairing credentials = alive.
         $ocUp = $false
-        try { $ocUp = (Invoke-WebRequest -Uri 'http://127.0.0.1:4096/' -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }
+        try { $ocUp = (Invoke-WebRequest -Uri "http://${ocAuthority}:4096/" -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }
         catch {
             $r = $_.Exception.Response
             if ($null -ne $r) { $ocUp = ([int]$r.StatusCode) -in 200, 401 }
@@ -471,7 +475,7 @@ switch ($App) {
             # D-2549: loopback, never a wildcard. opencode's root UI answers without a
             # password, so 0.0.0.0 would hand every host on the network the agent's web
             # UI; a phone or proxy reaches it through a named address instead.
-            Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', '127.0.0.1', '--port', '4096' -WindowStyle Hidden
+            Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', $ocHost, '--port', '4096' -WindowStyle Hidden
             Write-Host 'opencode serve should answer on http://localhost:4096 (401 = alive, pair via: opencode pair).'
         }
     }

@@ -105,7 +105,7 @@ def main(path):
             bad.append("opencode: the healthcheck must probe /api/session, not the open root")
         if not re.search(r"OPENCODE_(SERVER_)?PASSWORD", probe):
             bad.append("opencode: the healthcheck must authenticate with the configured password")
-        if "401" not in probe:
+        if "!= 000" not in probe:
             bad.append("opencode: the healthcheck must count a 401 as alive")
     for name, body in (("omniroute", om), ("opencode", oc)):
         if not re.search(r'^    user: "\$\{AUTOOS_UID:-1000\}:\$\{AUTOOS_GID:-1000\}"$', body, re.M):

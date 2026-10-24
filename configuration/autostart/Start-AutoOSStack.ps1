@@ -31,6 +31,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $Gateway = 'http://127.0.0.1:20128'
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'opencode-bind.ps1')
+# AUTOOS_OPENCODE_HOST is a numeric operator allowlist, never a wildcard.
+$ocHost = Get-AutoOSOpencodeHost
+$ocAuthority = if ($ocHost.Contains(':')) { "[$ocHost]" } else { $ocHost }
 
 function Test-AutoOSGateway {
     try { (Invoke-WebRequest -Uri "$Gateway/api/health" -UseBasicParsing -TimeoutSec 5).StatusCode -eq 200 }
@@ -137,7 +141,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 # 4. opencode serve on :4096: start hidden only when down (401 = alive,
 #    needs pairing — the server is up, the browser just needs credentials).
 function Test-OpencodeServe {
-    try { (Invoke-WebRequest -Uri "http://127.0.0.1:4096/" -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }
+    try { (Invoke-WebRequest -Uri "http://${ocAuthority}:4096/" -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }
     catch {
         $resp = $_.Exception.Response
         if ($null -ne $resp) { return ([int]$resp.StatusCode) -in 200, 401 }
@@ -152,7 +156,22 @@ if (Test-OpencodeServe) {
     Write-Host 'Starting opencode serve in the background...'
     # D-2549: loopback, never a wildcard - opencode's root UI answers without a
     # password, so 0.0.0.0 would hand every host the agent's web UI.
-    Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', '127.0.0.1', '--port', '4096' -WindowStyle Hidden
+    # Reuse the normal launcher's key parser and single credential source.
+    $launcher = Join-Path (Split-Path -Parent $PSScriptRoot) 'start-stack.ps1'
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$tokens, [ref]$errors)
+    foreach ($name in @('ConvertFrom-AutoOSKeyValue', 'Read-AutoOSKeyMap', 'Get-AutoOSKeyValue')) {
+        $fn = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+        . ([scriptblock]::Create($fn.Extent.Text))
+    }
+    $keysFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'api-keys.yml'
+    if ($env:AUTOOS_KEYS_FILE) { $keysFile = $env:AUTOOS_KEYS_FILE }
+    $pw = Get-AutoOSKeyValue -Path $keysFile -Name 'opencode_password'
+    if ($pw) {
+        $env:OPENCODE_PASSWORD = $pw
+        $env:OPENCODE_SERVER_PASSWORD = $pw
+    }
+    Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', $ocHost, '--port', '4096' -WindowStyle Hidden
     $tries = 0
     while ((-not (Test-OpencodeServe)) -and ($tries -lt 24)) { Start-Sleep 5; $tries++ }
     if (Test-OpencodeServe) { Write-Host 'opencode serve OK on :4096.' }

@@ -1,5 +1,18 @@
 # Web services on the coding host
 
+### D-2549 opencode correction
+
+The v2 env password does not enforce auth (anomalyco/opencode#45856).
+The network bind is the security boundary. Password precedence and API-only
+protection claims below are unverified, not security guarantees.
+`AUTOOS_OPENCODE_PUBLISH_IP` names one numeric unicast proxy-facing address;
+`ai-stack.sh` adds `compose.loopback.yml` when it differs from 127.0.0.1,
+retaining local probes. Use the manager rather than bare compose for this topology.
+The credentialed health probe accepts every HTTP answer, including 401 and 5xx,
+so auth or database errors do not trigger autoheal cuts of in-flight work.
+Both Windows launchers and the shell wrapper honour `AUTOOS_OPENCODE_HOST`;
+opencode itself does not read this AutoOS variable. Wildcards are refused.
+
 Every web UI and HTTP service that runs on the AI coding host, what guards
 it, and whether the LAN reverse proxy publishes it. Measured on the host on
 2026-09-24 with `ss -ltnp` and `curl` against each port. Hostnames are
@@ -353,7 +366,7 @@ accept the exposure (`AUTOOS_STACK_ALLOW_LAN`), never an inherited variable.
 Containers docker already restarted keep running when the guard refuses.
 
 **opencode has its own variable and its own guard** (incident D-2542,
-scope D-2543): `AUTOOS_OPENCODE_PUBLISH_IP`, default `127.0.0.1`, publishes
+scope D-2549): `AUTOOS_OPENCODE_PUBLISH_IP`, default `127.0.0.1`, publishes
 only `:4096`. Its root UI answers without a password (HTTP Basic guards
 `/api/*` only), so opencode gets no `AUTOOS_STACK_ALLOW_LAN` escape hatch:
 `opencode_publish_guard()` refuses a wildcard (`0.0.0.0`, `::`, `*`) outright

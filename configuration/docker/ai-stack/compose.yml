@@ -181,16 +181,11 @@ services:
       # The UI answers 200 without the password (measured on 2.0.19), so
       # curling the open root only proves *a* file server is there. Probe the
       # guarded /api/session instead, carrying the configured password under
-      # either name (measured: either alone works, OPENCODE_PASSWORD wins when
-      # both are set). A 401 still counts as alive: it proves the auth layer
-      # answers, and opencode invents a random password when neither name is
-      # set - anything stricter would restart-loop that container forever
-      # under autoheal. User `opencode` is upstream's constant:
-      # anomalyco/opencode#45856 (OPENCODE_SERVER_USERNAME ignored; measured
-      # 2.0.19 in-container, host builds 2.0.32 and 2.1.1).
-      # `$$` is compose's escape for a literal `$`: the container's shell
-      # expands these, not compose.
-      test: ["CMD-SHELL", "c=$(curl -sS -o /dev/null -w '%{http_code}' -u \"opencode:$${OPENCODE_PASSWORD:-$${OPENCODE_SERVER_PASSWORD}}\" http://127.0.0.1:4096/api/session 2>/dev/null); [ \"$c\" = 200 ] || [ \"$c\" = 401 ]"]
+      # Both names share the existing key; precedence is unverified.
+      # anomalyco/opencode#45856: env password does not enforce auth in v2.
+      # Any HTTP answer is liveness, not application health: avoid autoheal
+      # cutting in-flight work on auth failures or database 5xx responses.
+      test: ["CMD-SHELL", "c=$(curl --max-time 4 -sS -o /dev/null -w '%{http_code}' -u \"opencode:$${OPENCODE_PASSWORD:-$${OPENCODE_SERVER_PASSWORD}}\" http://127.0.0.1:4096/api/session 2>/dev/null); [ -n \"$c\" ] && [ \"$c\" != 000 ]"]
       interval: 30s
       timeout: 5s
       start_period: 30s

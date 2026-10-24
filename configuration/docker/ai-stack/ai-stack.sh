@@ -498,6 +498,9 @@ zcode_decide() {
 dc() {
     zcode_decide
     local args=(--project-name autoos-ai --env-file "$STACK_ENV" -f "$HERE/compose.yml")
+    if [[ "$(effective_opencode_publish)" != 127.0.0.1 ]]; then
+        args+=(-f "$HERE/compose.loopback.yml")
+    fi
     if [[ -n "$ZCODE_DIR" ]]; then
         args+=(-f "$HERE/compose.zcode.yml")
         # Both variables are exported for this compose call only, so the
@@ -634,17 +637,14 @@ opencode_publish_guard() {
     local pub
     (( OC_PUBLISH_OK )) && return 0
     pub="$(effective_opencode_publish)"
-    case "$pub" in
-        0.0.0.0|::|'*')
+    if ! python3 "$HERE/../../opencode-bind.py" "$pub"; then
             echo "  ! refusing to publish :4096 on $pub: opencode's root UI answers without a"
             echo "    password, so a wildcard bind exposes the agent's sessions to every host on the"
             echo "    network. Set AUTOOS_OPENCODE_PUBLISH_IP=127.0.0.1 (default) or to one"
             echo "    allowlisted address in $STACK_ENV."
             [[ -n "${AUTOOS_OPENCODE_PUBLISH_IP:-}" ]] && echo "    (this shell exports AUTOOS_OPENCODE_PUBLISH_IP=$pub, which wins over the file)"
-            if [[ $DRY -eq 1 ]]; then echo "    (dry run: a real run stops here)"; return 0; fi
             return 1
-            ;;
-    esac
+    fi
     OC_PUBLISH_OK=1
 }
 

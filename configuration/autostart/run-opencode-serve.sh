@@ -26,7 +26,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-HOST="${AUTOOS_OPENCODE_HOST:-127.0.0.1}"
+HOST="${AUTOOS_OPENCODE_HOST-127.0.0.1}"
 PORT="${AUTOOS_OPENCODE_PORT:-4096}"
 PW_FILE="${AUTOOS_OPENCODE_PASSWORD_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/autoos/opencode-serve.password}"
 KEYS_FILE="${AUTOOS_KEYS_FILE:-$REPO/configuration/api-keys.yml}"
@@ -49,14 +49,12 @@ done
 # default; an address the operator names in AUTOOS_OPENCODE_HOST is the
 # allowlist; a wildcard is never an answer. Checked before anything runs, so a
 # --dry-run plan can never print a wildcard bind either.
-case "$HOST" in
-    0.0.0.0|::|'*')
+if ! python3 "$REPO/configuration/opencode-bind.py" "$HOST"; then
         echo "Refusing to serve opencode on $HOST:$PORT: the root UI needs no password, so a"
         echo "wildcard bind exposes the agent's sessions to every host on the network."
         echo "Use the default 127.0.0.1, or name an allowlisted address in AUTOOS_OPENCODE_HOST."
         exit 3
-        ;;
-esac
+fi
 
 [[ $DRY -eq 1 ]] && echo "This is a dry run - nothing is started or written."
 
