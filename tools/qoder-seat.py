@@ -7,7 +7,7 @@ no session persistence, and the LAST JSON object line of stdout is parsed.
 
 Output (both created only after a successful run, never on failure):
 
-    <out-dir>/review.txt     the model result, verbatim, UTF-8, LF
+    <out-dir>/review.txt     the model result, verbatim, UTF-8
     <out-dir>/evidence.json  verbatim client fields + run facts (D-2494: no remapping)
 
 Exit codes: 0 ok, 1 client/runtime failure, 2 usage (banner, out-dir, client path),
@@ -25,6 +25,9 @@ import shutil
 import subprocess
 import sys
 import time
+import signal
+import tempfile
+from autoos_redact import redact_argv
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,11 +35,11 @@ BANNER = "You have NO tools and no repository access. Everything you need is bel
 DEFAULT_MODEL = "qwen3.8-flash"
 DEFAULT_TIMEOUT = 900
 TEST_GAMING_RE = re.compile(r"^\s*TEST-GAMING:\s*(yes|no|unsure)\b", re.IGNORECASE | re.MULTILINE)
-VERDICT_RE = re.compile(r"^\s*VERDICT:.*$", re.MULTILINE)
+VERDICT_RE = re.compile(r"^\s*VERDICT:.*$", re.MULTILINE | re.IGNORECASE)
 
 
 def fail(code: int, message: str) -> "NoReturn":  # noqa: F821 - py<3.11 typing hint only
-    print(f"qoder-seat: error: {message}", file=sys.stderr)
+    print(f"qoder-seat: error: {redact_argv([message])[0]}", file=sys.stderr)
     sys.exit(code)
 
 
@@ -61,21 +64,46 @@ def resolve_qodercli(explicit: str | None) -> str:
 
 
 def spawn_prefix(executable: str) -> list[str]:
-    """Windows cannot spawn a .cmd/.bat directly (WinError 193); route it through cmd."""
-    if os.name == "nt" and executable.lower().endswith((".cmd", ".bat")):
-        return ["cmd.exe", "/c", executable]
+    """Use executables directly; never re-quote an empty tool argument via cmd."""
+    path = Path(executable)
+    if os.name == "nt" and path.suffix.lower() in (".cmd", ".bat"):
+        native = path.with_suffix(".exe")
+        if native.is_file():
+            return [str(native)]
+        fail(2, "batch clients are unsafe for empty argv; use --qodercli with the resolved executable")
+    if path.suffix.lower() == ".py":
+        return [sys.executable, executable]
     return [executable]
 
 
-def probe_no_session_persistence(executable: str) -> bool:
-    """Only pass --no-session-persistence when the client advertises it."""
-    cmd = spawn_prefix(executable) + ["--help"]
+def run_client(cmd: list[str], timeout: int, prompt: bytes | None = None):
+    """Bound the whole process tree, including descendants holding output pipes."""
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if prompt is not None else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            start_new_session=os.name != "nt")
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=60)
+        stdout, stderr = proc.communicate(prompt, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           stdin=subprocess.DEVNULL, capture_output=True, timeout=15)
+        else:
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def probe_no_session_persistence(executable: str) -> bool | None:
+    """A failed probe is unknown, not evidence that persistence is disabled."""
+    try:
+        proc = run_client(spawn_prefix(executable) + ["--help"], 15)
+        if proc.returncode:
+            raise OSError("help failed")
     except (OSError, subprocess.SubprocessError):
-        return False
-    help_text = (proc.stdout or b"") + (proc.stderr or b"")
-    return b"--no-session-persistence" in help_text
+        print("qoder-seat: warning: session-persistence probe failed; persistence status unknown", file=sys.stderr)
+        return None
+    return b"--no-session-persistence" in (proc.stdout + proc.stderr)
 
 
 def last_json_object(stdout: bytes) -> dict | None:
@@ -100,8 +128,8 @@ def extract_test_gaming(text: str) -> str | None:
 
 
 def extract_verdict(text: str) -> str | None:
-    matches = VERDICT_RE.findall(text)
-    return matches[-1].strip() if matches else None
+    lines = text.rstrip().splitlines()
+    return lines[-1].strip() if lines and VERDICT_RE.fullmatch(lines[-1]) else None
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -114,9 +142,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"requested model (default: {DEFAULT_MODEL})")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help=f"seconds (default: {DEFAULT_TIMEOUT})")
     parser.add_argument("--qodercli", default=None, help="client executable (default: PATH, else ~/.qoder/bin/qodercli/qodercli)")
-    parser.add_argument("--item", default=None, help="plan item recorded in evidence.json")
-    parser.add_argument("--head", default=None, help="commit head recorded in evidence.json")
+    parser.add_argument("--item", required=True, help="plan item recorded in evidence.json")
+    parser.add_argument("--head", required=True, help="commit head recorded in evidence.json")
     args = parser.parse_args(argv)
+    if not args.item.strip() or not args.head.strip():
+        parser.error("--item and --head must be non-empty")
     if args.timeout <= 0:
         parser.error("--timeout must be a positive number of seconds")
     return args
@@ -148,8 +178,7 @@ def main(argv: list[str]) -> int:
     if out_dir.exists():
         for name in ("review.txt", "evidence.json"):
             if (out_dir / name).exists():
-                return fail(2, f"--out-dir already contains {name}: {out_dir}; no files were written")
-    out_dir.mkdir(parents=True, exist_ok=True)
+                return fail(2, f"--out-dir already contains {name}: {out_dir}; partial seat: move it aside to recover; no files were written")
 
     executable = resolve_qodercli(args.qodercli)
     with_persistence_flag = probe_no_session_persistence(executable)
@@ -160,7 +189,7 @@ def main(argv: list[str]) -> int:
 
     started = time.monotonic()
     try:
-        proc = subprocess.run(cmd, input=prompt_bytes, capture_output=True, timeout=args.timeout)
+        proc = run_client(cmd, args.timeout, prompt_bytes)
     except subprocess.TimeoutExpired:
         return fail(1, f"qodercli timed out after {args.timeout}s; no evidence was written")
     except OSError as exc:
@@ -168,16 +197,16 @@ def main(argv: list[str]) -> int:
     secs = round(time.monotonic() - started, 3)
 
     if proc.returncode != 0:
+        # Redact BEFORE truncation: slicing first can remove a credential prefix.
         detail = (proc.stderr or proc.stdout or b"").decode("utf-8", "replace").strip()
-        detail = detail[-600:] if detail else "(no output)"
+        detail = redact_argv([detail])[0][-600:] if detail else "(no output)"
         return fail(1, f"qodercli exited {proc.returncode}: {detail}; no evidence was written")
 
     data = last_json_object(proc.stdout or b"")
     if data is None:
-        tail = (proc.stdout or b"")[-300:].decode("utf-8", "replace").strip()
-        return fail(3, f"no JSON object line in stdout; tail: {tail!r}")
+        return fail(3, "no JSON object line in stdout")
     if data.get("is_error"):
-        return fail(3, f"client returned is_error: {data.get('result') or data.get('error') or '(no detail)'}")
+        return fail(3, "client returned is_error")
     if data.get("type") != "result":
         return fail(3, f"expected type 'result', got {data.get('type')!r}")
     result = data.get("result")
@@ -188,15 +217,21 @@ def main(argv: list[str]) -> int:
         return fail(3, f"modelUsage must hold exactly one model, got {usage!r}")
     served_model = next(iter(usage))
 
-    # --- write the seat directory only now, from a usable reply ------------------
-    # review.txt is the result verbatim as UTF-8/LF text: newlines normalised,
-    # exactly one trailing LF (a text file ends in a newline).
-    review_bytes = result.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
-    if not review_bytes.endswith(b"\n"):
-        review_bytes += b"\n"
+    verdict = extract_verdict(result)
+    if verdict is None:
+        return fail(3, "review must end with a VERDICT line")
+    verdict_parse = "known" if verdict.split(":", 1)[1].strip().upper() in {
+        "APPROVE", "ACCEPT", "PASS", "REJECT", "FIX", "HALT", "CHANGES"
+    } else "unknown"
+    review_bytes = result.encode("utf-8")
     usage_envelope = data.get("usage") if isinstance(data.get("usage"), dict) else {}
     request_id = data.get("request_id") or usage_envelope.get("request_id")
     evidence = {
+        "usage": data.get("usage"),
+        "modelUsage": data.get("modelUsage"),
+        "argv": cmd,
+        "no_session_persistence": with_persistence_flag,
+        "verdict_parse": verdict_parse,
         "served_model": served_model,
         "finish_reason": data.get("stop_reason"),
         "request_id": request_id,
@@ -216,9 +251,20 @@ def main(argv: list[str]) -> int:
         "created": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "secs": secs,
     }
-    (out_dir / "review.txt").write_bytes(review_bytes)
-    evidence_bytes = (json.dumps(evidence, indent=2, ensure_ascii=False, sort_keys=False) + "\n").encode("utf-8")
-    (out_dir / "evidence.json").write_bytes(evidence_bytes)
+    evidence_bytes = (json.dumps(evidence, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
+    partials = list(out_dir.parent.glob(out_dir.name + ".partial-*"))
+    if partials:
+        return fail(2, "leftover partial seat detected; move the .partial-* directory aside to recover")
+    staging = Path(tempfile.mkdtemp(prefix=out_dir.name + ".partial-", dir=out_dir.parent))
+    try:
+        (staging / "review.txt").write_bytes(review_bytes)
+        (staging / "evidence.json").write_bytes(evidence_bytes)
+        if out_dir.exists():
+            out_dir.rmdir()  # Only an empty directory is safe to replace.
+        staging.rename(out_dir)
+    except OSError:
+        return fail(1, "atomic seat publish failed; move the .partial-* directory aside to recover")
 
     print(
         f"qoder-seat: out_dir={out_dir} served_model={served_model} "

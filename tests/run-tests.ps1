@@ -5235,6 +5235,15 @@ Test-Case 'autoos-agent spawner unit tests: card routing, clients, depth' {
     Assert-Equal $rc 0 "spawner unit tests failed: $out"
 }
 
+Test-Case 'qoder seat fake client unit tests' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_qoder_seat.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "qoder seat unit tests failed: $out"
+}
+
 Test-Case 'runner pool unit tests: core, gate, proc, slot loop, CLI' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }

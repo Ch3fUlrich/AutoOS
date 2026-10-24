@@ -1,3 +1,9 @@
+## Qoder seat safety fix (GW-QODER-401)
+
+Preserve usage and result bytes, audit direct client argv, bound process trees,
+require seat identity and final verdicts, and atomically publish recoverable seats.
+Fake-client coverage now runs on Windows as well as Linux.
+
 # Changelog
 
 - SEAT-FREE-OPENCODE (D-2449/D-2450/D-2459): declare DeepSeek and GLM Zen free seats and direct MiMo flash/pro pins; reject ambiguous MiMo combo pins and served-model evidence, and repair the fallback pin.

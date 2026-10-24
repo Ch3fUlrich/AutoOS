@@ -132,3 +132,18 @@ untested and use `--dry-run`.
 
 [MIT](LICENSE). Vendored third-party code under `third_party/` keeps its own
 licence.
+# Qoder review seats
+
+`python3 tools/qoder-seat.py --prompt-file brief.txt --out-dir seat --item example-item --head example-head`
+runs only the qodercli client, never a gateway. The prompt's first line must be
+the exact NO-tools banner shown by the tool. `--prompt-file`, `--out-dir`,
+`--item`, and `--head` are required; identity values must not be blank.
+Optional flags: `--model` (default `qwen3.8-flash`), `--timeout` (900 seconds),
+and `--qodercli` (resolved executable, otherwise PATH/runtime installation).
+Windows batch wrappers are refused unless a sibling executable exists: direct
+execution preserves the empty `--tools ""` argument without shell re-quoting.
+Evidence records argv, persistence probe status, usage, and client fields;
+review bytes are unchanged UTF-8. A missing final verdict refuses publication;
+unknown verdict vocabulary is marked `verdict_parse: unknown`.
+Both files publish by directory rename. Move a reported `.partial-*` directory
+or incomplete previous seat aside before retrying; existing output is never overwritten.
