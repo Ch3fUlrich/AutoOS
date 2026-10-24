@@ -79,7 +79,7 @@ CARD_V2_ONLY = frozenset({"kind", "risk", "spec", "mode", "deferrable",
 # privacy and author belong to both dialects: REVROUTE (S2) item 2 put the
 # author on the card so a review can be resolved to a different-family
 # reviewer, and role=review is how most lanes already spell a review.
-CARD_SHARED = frozenset({"privacy", "author"})
+CARD_SHARED = frozenset({"privacy", "author", "seat"})
 # The shared fields that are not one of v1's five combo inputs. privacy is
 # shared AND an input (it hard-filters routes); author is shared and never one
 # (it changes who reviews, not what runs) -- so normalize() validates it
@@ -144,6 +144,12 @@ def _check_author(value) -> str:
     return value.strip()
 
 
+def _check_seat(value):
+    if isinstance(value, bool) or str(value) not in ("1", "2"):
+        raise CardError("card seat=%r: expected 1 or 2" % (value,))
+    return int(value)
+
+
 def normalize(card: dict) -> dict:
     unknown = sorted(set(card) - set(CARD_VALUES) - _CARD_NON_COMBO_SHARED)
     if unknown:
@@ -156,7 +162,7 @@ def normalize(card: dict) -> dict:
         if key in _CARD_NON_COMBO_SHARED:
             # author changes who reviews, never which combo runs: select_combo
             # reads the five CARD_VALUES fields and ignores this one.
-            out[key] = _check_author(val)
+            out[key] = _check_seat(val) if key == "seat" else _check_author(val)
             continue
         if val not in CARD_VALUES[key]:
             raise CardError("card %s=%r: expected one of %s" % (key, val, ", ".join(CARD_VALUES[key])))
@@ -294,6 +300,8 @@ def normalize_v2(card: dict) -> dict:
         out["spend"] = v1["spend"]
         if "author" in v1:
             out["author"] = _check_author(v1["author"])
+        if "seat" in v1:
+            out["seat"] = _check_seat(v1["seat"])
         return out
 
     for key in ("kind", "risk", "spec", "privacy", "mode", "task_type"):
@@ -301,6 +309,8 @@ def normalize_v2(card: dict) -> dict:
             out[key] = _check_choice(key, flat[key], CARD_V2_VALUES[key])
     if "author" in flat:
         out["author"] = _check_author(flat["author"])
+    if "seat" in flat:
+        out["seat"] = _check_seat(flat["seat"])
     if "deferrable" in flat:
         out["deferrable"] = _check_deferrable(flat["deferrable"])
     if "critical" in flat:

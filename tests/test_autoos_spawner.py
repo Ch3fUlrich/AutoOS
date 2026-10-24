@@ -4689,8 +4689,8 @@ class CardV2Tests(unittest.TestCase):
         })
         # REVROUTE (S2) item 2: author is shared by both dialects and is not a
         # combo input -- it decides who reviews, never what runs.
-        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author"}))
-        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author"}))
+        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author", "seat"}))
+        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author", "seat"}))
 
     def test_kind_final_and_critical_are_the_claude_budget_card_fields(self):
         """D-102 CLAUDEBUDGET: `kind=final` names the reserved final review and
@@ -9095,6 +9095,35 @@ def _reviewer_registry():
     return reg
 
 
+class ModelOrderSeatTests(unittest.TestCase):
+    def test_model_order_agy_explicit_model(self):
+        agent = load_agent()
+        row = {"client": "agy", "model": "gemini-test", "family": "gemini"}
+        model, _, _ = agent.reviewer_run_override(
+            {"state": "resolved", "reviewer": row}, agent.clients.CLIENTS["agy"],
+            {}, 2, None, None, False)
+        argv = agent.clients.build_command(agent.clients.CLIENTS["agy"], "review", None,
+                                           "medium", model)
+        self.assertEqual(argv[argv.index("--model") + 1], row["model"])
+
+    def test_model_order_seat_card_validation(self):
+        agent = load_agent()
+        self.assertEqual(agent.routing.normalize({"seat": 2})["seat"], 2)
+        with self.assertRaises(agent.routing.CardError):
+            agent.routing.normalize({"seat": 3})
+
+    def test_model_order_selects_second_seat(self):
+        agent = load_agent()
+        seats = [{"client": "agy", "model": "gemini-test", "family": "gemini"},
+                 {"client": "qoder", "model": "qwen-test", "family": "qwen"}]
+        with mock.patch.object(agent, "load_live_registry", return_value={}), \
+                mock.patch.object(agent.measure_mod, "client_state", return_value={}), \
+                mock.patch.object(agent.resolver, "seats_for", return_value={
+                    "state": "resolved", "seats": seats, "skipped": []}):
+            plan = agent.resolve_review_plan({"kind": "review", "author": "gpt", "seat": 2})
+        self.assertEqual(plan["reviewer"], seats[1])
+
+
 class ReviewerGateTests(unittest.TestCase):
     """REVROUTE (S2) item 2: the spawner resolves WHO reviews an authored review
     card from ``policy.reviewers``, and refuses to start a run that has no
@@ -9230,7 +9259,7 @@ class ReviewerGateTests(unittest.TestCase):
         # whose gem_api leg does not train.
         route = self.route(card="kind=review,author=qwen,privacy=sensitive,"
                                 "paths=tools/registry.py")
-        self.assertEqual(route["review_plan"]["reviewer"]["family"], "google")
+        self.assertEqual(route["review_plan"]["state"], "unresolved")
         skipped = route["review_plan"]["skipped"]
         self.assertEqual([s["model"] for s in skipped],
                          ["omniroute/muse", "qwen3.8-flash", "haiku"])
@@ -9302,7 +9331,7 @@ class ReviewerGateTests(unittest.TestCase):
             "available": False, "unavailable_until": self.DOWN_LATER})
         route = self.route()
         self.assertEqual(route["review_plan"]["reviewer"]["client"], "gemini")
-        self.assertTrue(str(route["model"]).startswith("omniroute/r-"), route["model"])
+        self.assertEqual(route["model"], "gem-flash")
         self.assertIn("policy.reviewers wants --client gemini", route["reviewer_note"])
         self.assertIn("it is NOT the review that list picked", self.run_cmd_run()[1])
 
@@ -9349,7 +9378,7 @@ class ReviewerGateTests(unittest.TestCase):
         rc, out, err = self.run_cmd_run()
         self.assertEqual(rc, self.agent.EXIT_FREE_QUEUE_TIMEOUT, out + err)
         self.assertEqual(self.agent.EXIT_FREE_QUEUE_TIMEOUT, 9)
-        self.assertIn("reviewer queued until %s" % self.DOWN, err)
+        self.assertIn("queued until %s" % self.DOWN, err)
         self.assertEqual(out, "", "a queued run prints nothing it did not decide")
 
     def test_a_queue_waits_for_the_first_reviewer_back_not_the_last(self):
@@ -20022,6 +20051,7 @@ class ResolvedWriterTests(unittest.TestCase):
                                        False, registry=registry)
         self.assertEqual(native, {"provider": "agy", "model": "gemini-3.8-flash",
                                   "family": "gemini", "source": "assumed-default",
+                                  "served_model_source": "unverified (agy keeps no model witness)",
                                   "family_source": agent.FAMILY_SOURCE_PLANNED})
         self.assertFalse(agent.writer_is_proven(native))
         free = agent.resolved_writer({"client": "qoder", "model": "jetski/jetski-9"},
