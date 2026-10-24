@@ -2018,6 +2018,9 @@ OPENHANDS_RETIRED_IDS = [
     "openrouter-nemotron-super", "openrouter-nemotron-ultra",
     "openrouter-nex-mini", "openrouter-nex-pro", "openrouter-north-mini-code",
     "deepseek-v4-flash",
+    # D-2594: retired so a push deletes the omniroute MiMo profiles (MiMo only
+    # via mimo/mimo-v2.6-*, never omniroute/mimo).
+    "mimo-v2.6-flash", "mimo-v2.6-pro",
 ]
 
 OPENHANDS_DIRECT_PROFILE_IDS = {}
@@ -2042,8 +2045,8 @@ OPENHANDS_TIER_ORDER = (
     "l2-worker-1m",
     "l3-driver-1m",
     "l3-driver-256k",
-    "mimo-v2.6-flash",
-    "mimo-v2.6-pro",
+    # D-2594: the mimo-v2.6-flash/pro tiers left with their openhands_profile
+    # (MiMo only via mimo/mimo-v2.6-*, never omniroute/mimo).
     "l2-worker-free-only",
     "deepseek-v4.1-flash",
     "l3-driver-free-only",
