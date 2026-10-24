@@ -115,7 +115,7 @@ byte-for-byte equal.
 
 `render ide` renders catalog/ide-models.json - the generated client list
 (rendered from catalog/ai-registry.json - do not edit) that feeds
-opencode.jsonc's AUTOOS-MANAGED blocks and Zed's own model lists (both via
+opencode.jsonc's AUTOOS-MANAGED blocks and OpenHands tier profiles (both via
 tools/sync-ide-models.py) - from a loaded catalog/ai-registry.json (spec 3.2
 phase 1, task A4c; docs/plans/2026-09-25-registry-mapping.md section 12
 documents the mapping; task A5f made the committed file byte-exact, so the old
@@ -1667,7 +1667,7 @@ def litellm_diff(rendered: dict, config_text: str) -> list:
 # this ordering is never exercised as a real tie-break today; it only fixes a
 # deterministic choice if that were ever to change. "openhands" is deliberately
 # excluded - it is never a key of ide-models.json's own `surfaces` field (that
-# file's surfaces map is gateway -> [opencode, zed, openhands] client lists, not
+# file's surfaces map is gateway -> [opencode, openhands] client lists, not
 # a third top-level gateway of its own); spark-1.3-contributor's standalone
 # surfaces.openhands.direct_profile (mapping doc section 6) is tier-profiles.json's
 # concern, not this render's.
@@ -1685,7 +1685,7 @@ IDE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
 # catalog/ide-models.json's own comment: "List order = picker order on every
 # surface" - unlike combos.json's `combos`/`retired` arrays (mapping doc section
 # 10, exception 2, proven insignificant by reading apply.sh/apply.ps1), nothing
-# in this repository establishes that opencode.jsonc's / Zed's menu order is
+# in this repository establishes that opencode.jsonc's menu order is
 # insignificant, so render_ide() reproduces today's hand-curated order exactly
 # rather than adding an equality exception for it. No registry field carries this
 # order (routes is a dict, and catalog/ai-registry.json's own routes keys are
@@ -4272,7 +4272,7 @@ def main(argv=None) -> int:
         help="exit 1 if a managed block differs byte-for-byte from --config")
 
     ide_parser = render_targets.add_parser(
-        "ide", help="render catalog/ide-models.json (opencode/Zed/OpenHands model lists)")
+        "ide", help="render catalog/ide-models.json (opencode/OpenHands model lists)")
     ide_parser.add_argument(
         "--registry", default=str(DEFAULT_REGISTRY_PATH),
         help="registry JSON to render from (default: %(default)s)")

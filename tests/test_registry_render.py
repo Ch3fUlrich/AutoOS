@@ -706,7 +706,7 @@ class IdeRenderMatchesTodayTests(unittest.TestCase):
         reg["routes"]["spark-1.3-contributor"].pop("unavailable_legs", None)
         rendered = registry.render_ide(reg)
         by_id = {m["id"]: m for m in rendered["models"]}
-        self.assertEqual(by_id["spark-1.3-contributor"]["surfaces"], {"omniroute": ["opencode", "zed", "openhands"]})
+        self.assertEqual(by_id["spark-1.3-contributor"]["surfaces"], {"omniroute": ["opencode", "openhands"]})
 
 
 class ALeglessRouteIsOfferedThroughNoComboTests(unittest.TestCase):
@@ -728,7 +728,7 @@ class ALeglessRouteIsOfferedThroughNoComboTests(unittest.TestCase):
         # config.yaml, not in a combo), so the route is offered there and nowhere
         # else - the shape l2-worker-paid and l3-driver-paid already have.
         paid = self.by_id()["l1-orchestrator-paid"]
-        self.assertEqual(paid["surfaces"], {"litellm": ["opencode", "zed"]}, paid)
+        self.assertEqual(paid["surfaces"], {"litellm": ["opencode"]}, paid)
 
     def test_a_route_no_gateway_offers_gets_no_entry(self):
         ids = [m["id"] for m in self.by_id().values()]

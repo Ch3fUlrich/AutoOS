@@ -485,25 +485,6 @@
           "homepage": "https://docs.astral.sh/uv/"
         },
         {
-          "id": "zed",
-          "name": "Zed",
-          "description": "Fast Rust editor with an AI agent panel",
-          "provider": "brew",
-          "package": "zed",
-          "cask": true,
-          "requires": [
-            "litellm"
-          ],
-          "postInstall": "route_zed_to_proxy",
-          "profiles": [
-            "workstation",
-            "ai-coding"
-          ],
-          "verify": "zed --help",
-          "homepage": "https://zed.dev/",
-          "notes": "Agent panel is pointed at the local OmniRoute gateway."
-        },
-        {
           "id": "qoder-desktop",
           "name": "Qoder",
           "description": "Qoder's agent-first desktop IDE",

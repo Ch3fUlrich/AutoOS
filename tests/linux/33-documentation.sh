@@ -20,13 +20,8 @@ if it "every docs page is linked from the index"; then
     assert_eq "$missing" ""
 fi
 
-if it "install_zed announces in dry run"; then
-    out="$( ( AUTOOS_DRY_RUN=1; install_zed ) 2>&1)"
-    if [[ "$out" == *"would install Zed"* ]]; then pass
-    else fail "no dry-run announcement"; fi
-fi
 
-# catalog/ide-models.json is read at install time by the Zed, OpenCode and
+# catalog/ide-models.json is read at install time by the OpenCode and
 # OpenHands writers. Missing or malformed, each must say so in ONE line that
 # names the file - no traceback, no half-written config, no stray backup.
 if it "a missing or malformed catalog/ide-models.json stops the IDE writers with one clear line (ide-models)"; then
@@ -36,19 +31,15 @@ if it "a missing or malformed catalog/ide-models.json stops the IDE writers with
     ok=1
     for catfile in "$d/missing.json" "$d/truncated.json" "$d/no-fields.json"; do
         home="$d/home-$(basename "$catfile" .json)"
-        mkdir -p "$home/.config/zed" "$home/.config/opencode"
-        printf '{"theme":"mine"}' >"$home/.config/zed/settings.json"
+        mkdir -p "$home/.config/opencode"
         printf '{"model": "anthropic/mine"}\n' >"$home/.config/opencode/opencode.json"
         out="$( ( SYS_HOME="$home" AUTOOS_DRY_RUN=0 AUTOOS_ROOT="$ROOT" AUTOOS_IDE_MODELS_FILE="$catfile"
                   unset OPENROUTER_API_KEY META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY
                   curl() { return 6; }
                   opencode_is_v2() { return 0; }
-                  route_zed_to_proxy; echo "zed_rc=$?"
                   setup_opencode_config; echo "oc_rc=$?" ) 2>&1)"
-        [[ "$out" == *"zed_rc=1"* ]] || { ok=0; echo "$catfile: zed writer did not fail: $out" >&2; }
-        [[ "$(grep -c "$catfile" <<<"$out")" -ge 2 ]] || { ok=0; echo "$catfile: path not named by both writers: $out" >&2; }
+        [[ "$(grep -c "$catfile" <<<"$out")" -ge 1 ]] || { ok=0; echo "$catfile: path not named by writer: $out" >&2; }
         [[ "$out" == *Traceback* ]] && { ok=0; echo "$catfile: traceback: $out" >&2; }
-        [[ "$(cat "$home/.config/zed/settings.json")" == '{"theme":"mine"}' ]] || { ok=0; echo "$catfile: zed settings changed" >&2; }
         [[ "$(cat "$home/.config/opencode/opencode.json")" == '{"model": "anthropic/mine"}' ]] || { ok=0; echo "$catfile: opencode config changed" >&2; }
         [[ -e "$home/.config/opencode/config.json" ]] && { ok=0; echo "$catfile: config.json written" >&2; }
         n="$(find "$home" -name '*.autoos-backup-*' | wc -l)"
@@ -70,16 +61,6 @@ if it "a missing or malformed catalog/ide-models.json stops the IDE writers with
     if (( ok )); then pass; else fail "a broken model catalog is not reported cleanly"; fi
 fi
 
-if it "zed routing reports a failed merge instead of success"; then
-    scratch="$(mktemp -d)"
-    mkdir -p "$scratch/.config/zed"
-    # A directory where the file belongs makes the python merge fail.
-    rm -rf "$scratch/.config/zed/settings.json"
-    mkdir "$scratch/.config/zed/settings.json"
-    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; route_zed_to_proxy >/dev/null 2>&1 ); rc=$?
-    rm -rf "$scratch"
-    assert_eq "$rc" "1"
-fi
 
 if it "existing nvim config keeps working and gains sidekick"; then
     scratch="$(mktemp -d)"
@@ -171,7 +152,7 @@ fi
 
 if it "the router declarations do not drift from each other"; then
     # tools/audit-router.py --offline compares combos.json against opencode.jsonc,
-    # both Zed writers and the OpenHands tier profiles, and rejects any
+    # and the OpenHands tier profiles, and rejects any
     # combo-bypassing direct ref. Live gateway/proxy probes are the operator
     # path (no --offline); CI stays deterministic.
     out="$(python3 tools/audit-router.py --offline 2>&1)"; rc=$?
@@ -1524,7 +1505,7 @@ for p in sorted(glob.glob("catalog/*.json")):
     profiles = set(d.get("profiles", {}).keys())
     for g in d.get("categories", []):
         for c in g.get("components", []):
-            if c["id"] not in ("zed", "litellm", "opencode-cli", "omniroute", "openhands-docker"):
+            if c["id"] not in ("litellm", "opencode-cli", "omniroute", "openhands-docker"):
                 continue
             for prof in c.get("profiles", []):
                 if prof not in profiles:
@@ -1540,7 +1521,7 @@ fi
 if it "ai-coding dry run plans the routing stack"; then
     out="$(bash setup.sh --profile ai-coding --dry-run --yes --no-color 2>&1)"
     ok=1
-    for name in "OmniRoute gateway" "LiteLLM tier router" "OpenCode CLI" "Zed"; do
+    for name in "OmniRoute gateway" "LiteLLM tier router" "OpenCode CLI"; do
         [[ "$out" == *"$name"* ]] || { ok=0; echo "missing: $name" >&2; }
     done
     if (( ok )); then pass; else fail "routing stack missing from the plan"; fi

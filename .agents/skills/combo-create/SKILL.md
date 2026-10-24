@@ -58,7 +58,7 @@ reference it; they do not restate it.
   `l1-orchestrator-clean` keeps declared+gated paid leg so it stays `omitted`,
   not legless. Never set provider available:false (drops `:free` too).
 - **New credit singles (class credit).** `vertex-gemini-3.8-flash`: single leg,
-  strategy priority, `surfaces.omniroute` (clients `[opencode, zed]`,
+  strategy priority, `surfaces.omniroute` (clients `[opencode]`,
   context/declared, display_name, output; no openhands_profile per groq/hf
   precedent).
   (`ovh-qwen3-coder-30b` was retired by OVHCODER-DROP 2026-10-08 — OVH withdrew

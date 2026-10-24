@@ -211,7 +211,7 @@ def route_names_for_client(registry_doc: dict, client: str) -> set[str]:
         surfaces = route.get("surfaces") or {}
         omni = surfaces.get("omniroute") or {} if isinstance(surfaces, dict) else {}
         clients = omni.get("clients") if isinstance(omni, dict) else None
-        if client in {"opencode", "zed"} and not isinstance(clients, list):
+        if client == "opencode" and not isinstance(clients, list):
             out.add(rid)
         elif client in (clients or []):
             out.add(rid)
@@ -388,26 +388,15 @@ def main(argv=None) -> int:
     # Unreadable registry must not silently exempt any combo from IDE checks.
     client_doc = reg_doc if isinstance(reg_doc, dict) else {}
     oc_exempt = ide_exempt(client_doc, "opencode")
-    zed_exempt = ide_exempt(client_doc, "zed")
     oc = opencode_models()
     for c in names:
         if c not in oc_exempt and c not in oc:
             drift.append(f"opencode.jsonc lacks model '{c}'")
     psm = (ROOT / "lib" / "windows" / "AutoOS.Install.psm1").read_text(encoding="utf-8")
     sh = (ROOT / "lib" / "linux" / "install.sh").read_text(encoding="utf-8")
-    # Both Zed writers project catalog/ide-models.json at run time, so the
-    # catalog's zed membership IS what they write (tools/sync-ide-models.py
-    # --check covers the static copies).
-    zed = ide_models("omniroute", "zed")
-    for c in names:
-        if c not in zed_exempt and c not in zed:
-            drift.append(f"catalog/ide-models.json does not offer '{c}' to zed")
-    for label, text in (("psm1", psm), ("install.sh", sh)):
-        if "ide-models.json" not in text:
-            drift.append(f"{label} Zed writer does not read catalog/ide-models.json")
     # auto/* are OmniRoute's built-in bootstraps; anything else a client
     # offers through the gateway must be a combo, or it cannot resolve.
-    for m in ide_models("omniroute", "opencode") + zed:
+    for m in ide_models("omniroute", "opencode"):
         if m not in names and not m.startswith("auto"):
             drift.append(f"catalog/ide-models.json offers '{m}' through omniroute but no combo has that name")
     tp = tier_profile_ids()

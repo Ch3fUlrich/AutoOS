@@ -623,7 +623,6 @@ install_script() {
         herdr-sessions)  install_herdr_sessions ;;
         google-chrome)   install_google_chrome ;;
         bitwarden-chrome) install_bitwarden_chrome ;;
-        zed)             install_zed ;;
         *) ui_err "no script installer for '$1'"; return 1 ;;
     esac
 }
@@ -2812,32 +2811,6 @@ PY
     ui_ok "sidekick extra enabled (<leader>aa toggles the opencode panel)"
 }
 
-install_zed() {
-    # Zed publishes no checksum for this installer, so the minimum bar (same
-    # as install_agy/install_uv/install_ollama, guard A14): download to a
-    # file, verify it is non-empty and actually looks like a script, and only
-    # then execute the FILE - never the pipe.
-    if (( AUTOOS_DRY_RUN )); then ui_muted "would install Zed via https://zed.dev/install.sh"; return 0; fi
-    local url="https://zed.dev/install.sh"
-    ui_muted "downloading Zed installer from $url"
-    local tmp; tmp="$(mktemp)"
-    if ! curl -fsSL -o "$tmp" "$url"; then
-        ui_err "failed to download Zed installer from $url"
-        rm -f "$tmp"
-        return 1
-    fi
-    if [[ ! -s "$tmp" || "$(head -c2 -- "$tmp")" != '#!' ]]; then
-        ui_err "Zed installer from $url does not look like a script - aborting"
-        rm -f "$tmp"
-        return 1
-    fi
-    local rc=0
-    sh "$tmp" || rc=$?
-    rm -f "$tmp"
-    if (( rc != 0 )); then return $rc; fi
-    ui_ok "Zed installed"
-}
-
 install_openhands() {
     # Pull the OpenHands image; the container itself is started on demand by
     # configuration/start-stack.sh openhands, wired to the OmniRoute gateway.
@@ -3089,7 +3062,7 @@ route_detected_clis_to_gateway() {
 
 # ide_models_file: this checkout's catalog/ide-models.json (rendered from
 # catalog/ai-registry.json - do not edit), the one list of gateway models
-# the Zed, OpenCode and OpenHands writers project.
+# the OpenCode and OpenHands writers project.
 # AUTOOS_IDE_MODELS_FILE overrides it (the suite points it at a broken copy).
 ide_models_file() {
     printf '%s\n' "${AUTOOS_IDE_MODELS_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/catalog/ide-models.json}"
@@ -3114,156 +3087,6 @@ PY
     fi
     ui_err "cannot use the gateway model list $1 (missing, not JSON, or an entry without id/name/context/output/surfaces) - $2"
     return 1
-}
-
-route_zed_to_proxy() {
-    # Point Zed's agent panel at the local OmniRoute gateway (:20128) plus
-    # the LiteLLM fallback (:4000). Only the provider ids
-    # 'autoos-omniroute' / 'autoos-litellm' are written; every other
-    # setting is kept. Keys NEVER go into settings.json (Zed docs: provider
-    # keys come from the keychain/UI or env). Zed derives the env name from
-    # the provider id, so export AUTOOS_OMNIROUTE_API_KEY and
-    # AUTOOS_LITELLM_API_KEY before starting Zed; missing keys warn here and
-    # the providers stay hidden until a restart picks them up.
-    local cfg_dir="$SYS_HOME/.config/zed"
-    local cfg="$cfg_dir/settings.json"
-    if (( AUTOOS_DRY_RUN )); then ui_muted "would route Zed agents to OmniRoute in $cfg"; return 0; fi
-    local ide
-    ide="$(ide_models_file)"
-    ide_models_readable "$ide" "Zed settings left unchanged" || return 1
-    mkdir -p "$cfg_dir"
-    if [[ -f "$cfg" ]] && ! backup_file "$cfg" >/dev/null; then
-        ui_err "could not back up $cfg - Zed settings left unchanged"
-        return 1
-    fi
-    # The omnigraph entry is written only from a resolved server URL; an
-    # unresolved one is skipped with a warning and the run fails at the end,
-    # after every other job this writer has (providers, keys, profiles).
-    local omni_base="" omni_ok=1
-    if ! omni_base="$(omnigraph_base_url)"; then
-        ui_warn "Zed: skipping omnigraph entry (OMNIGRAPH_BASE_URL is not set)"
-        omni_ok=0
-    fi
-    OMNI_BASE="$omni_base" python3 - "$cfg" "$AUTOOS_HARNESS" "$ide" <<'PY'
-import json, os, sys
-path = sys.argv[1]
-harness_file = sys.argv[2]
-ide_file = sys.argv[3]
-cfg = {}
-if os.path.exists(path):
-    with open(path, encoding="utf-8") as fh:
-        cfg = json.load(fh)
-pins = json.load(open(harness_file, encoding="utf-8"))["mcp_servers"]
-# Model ids, display names, context windows and membership come from
-# catalog/ide-models.json at run time (rendered from catalog/ai-registry.json)
-# - never inline tiers here: the two Zed writers once drifted from every other surface.
-# max_tokens is Zed's context window; reasoning_effort only where the
-# catalog sets one.
-with open(ide_file, encoding="utf-8") as fh:
-    ide_models = json.load(fh)["models"]
-
-
-def zed_models(gateway):
-    out = []
-    for m in ide_models:
-        if "zed" not in m["surfaces"].get(gateway, []):
-            continue
-        entry = {"name": m["id"], "display_name": m["name"], "max_tokens": m["context"]}
-        if m.get("reasoning_effort"):
-            entry["reasoning_effort"] = m["reasoning_effort"]
-        out.append(entry)
-    return out
-
-
-lm = cfg.setdefault("language_models", {})
-oc = lm.setdefault("openai_compatible", {})
-oc["autoos-omniroute"] = {
-    "api_url": "http://127.0.0.1:20128/v1",
-    "available_models": zed_models("omniroute"),
-}
-oc["autoos-litellm"] = {
-    "api_url": "http://127.0.0.1:4000/v1",
-    "available_models": zed_models("litellm"),
-}
-# MCP context servers for the agent panel (Settings -> AI -> MCP Servers
-# shows their status dots). Serena resolves its project per workspace at
-# call time (the agent activates by absolute path); graphify serves the
-# cwd-relative graph; omnigraph/playwright/context7 mirror the harness
-# pins. Pins match catalog/agent-harness.json.
-ctx = cfg.setdefault("context_servers", {})
-ctx["serena"] = {
-    "command": "uvx",
-    "args": ["--from", pins["serena"]["package"], "serena", "start-mcp-server"],
-}
-ctx["graphify"] = {
-    "command": "uv",
-    "args": ["run", "--with", pins["graphify"]["package"], "python",
-             "-m", "graphify.serve", "graphify-out/graph.json"],
-}
-# The bridge exits at start-up without a base URL and a graph id ("Connection
-# closed" in the panel). The token is never written here: Zed inherits it from
-# the session env (~/.config/environment.d, see write_omnigraph_env). No server
-# resolved (OMNI_BASE empty) writes nothing and keeps whatever the user has.
-if os.environ.get("OMNI_BASE"):
-    ctx["omnigraph"] = {
-        "command": "npx",
-        "args": ["-y", pins["omnigraph"]["package"]],
-        "env": {"OMNIGRAPH_BASE_URL": os.environ["OMNI_BASE"], "OMNIGRAPH_GRAPH_ID": "autoos"},
-    }
-ctx["playwright"] = {
-    "command": "npx",
-    "args": ["-y", pins["playwright"]["package"]],
-}
-ctx["context7"] = {
-    "command": "npx",
-    "args": ["-y", pins["context7"]["package"]],
-}
-_repo = os.path.dirname(os.path.dirname(os.path.abspath(harness_file)))
-ctx["autoos-agent"] = {
-    "command": "uv",
-    "args": ["--quiet", "run", "--no-project", "--with", pins["autoos-agent"]["package"], "python",
-             os.path.join(_repo, pins["autoos-agent"]["script"])],
-}
-# Bypass profile: every built-in tool on, no confirmations (global
-# tool_permissions.default allow). Existing profiles and per-tool rules stay.
-agent = cfg.setdefault("agent", {})
-profiles = agent.setdefault("profiles", {})
-bypass_tools = {t: True for t in [
-    "ask_user", "create_directory", "copy_path", "delete_path",
-    "diagnostics", "edit_file", "fetch", "find_path", "grep",
-    "list_directory", "move_path", "skill", "read_file", "spawn_agent",
-    "terminal", "search_web", "write_file"]}
-profiles["bypass"] = {
-    "name": "bypass",
-    "tools": bypass_tools,
-    "enable_all_context_servers": True,
-    "context_servers": {},
-    "default_model": {"provider": "autoos-omniroute", "model": "l1-orchestrator"},
-}
-tp = agent.setdefault("tool_permissions", {})
-tp["default"] = "allow"
-# omniroute-first: the litellm proxy currently has zero healthy endpoints,
-# so a default pointing at autoos-litellm/* is broken. Converge it to
-# {autoos-omniroute, l1-orchestrator}; never touch a default already on omniroute/*.
-_dm = agent.get("default_model")
-if isinstance(_dm, dict) and str(_dm.get("provider", "")).startswith("autoos-litellm"):
-    agent["default_model"] = {"provider": "autoos-omniroute", "model": "l1-orchestrator"}
-with open(path, "w", encoding="utf-8") as fh:
-    json.dump(cfg, fh, indent=2)
-PY
-    # A failed merge must not report success: setup.sh runs under set -e,
-    # but sourced/test contexts do not, so check explicitly.
-    if (( PIPESTATUS[0] != 0 )); then
-        ui_warn "could not update $cfg - is python3 working?"
-        return 1
-    fi
-    [[ -n "${AUTOOS_OMNIROUTE_API_KEY:-}" ]] || ui_warn "AUTOOS_OMNIROUTE_API_KEY not set - export the OmniRoute client key before starting Zed, or the provider stays hidden"
-    [[ -n "${AUTOOS_LITELLM_API_KEY:-}" ]] || ui_warn "AUTOOS_LITELLM_API_KEY not set - export the LiteLLM master key before starting Zed, or the fallback stays hidden"
-    ui_ok "Zed agents routed to OmniRoute + LiteLLM (keys via env, never settings.json)"
-    # Last, not first: the writer's other work is not the omnigraph skip's to
-    # undo, and the three routing tests read those warnings.
-    (( omni_ok )) || return 1
-    return 0
 }
 
 # ─── MCP wiring ─────────────────────────────────────────────────────────────
@@ -3994,7 +3817,7 @@ replace_stale_graphify_mcp_entry() {
 # session, browsing or not: Claude Code starts every stdio server at session start
 # and does not reconnect one that exited. tools/playwright_mcp_lazy.py is the entry
 # Claude Code talks to instead - it starts the docker backend on the first real
-# request and stops it when idle. Antigravity, Qoder, Zed, opencode and OpenHands
+# request and stops it when idle. Antigravity, Qoder, opencode and OpenHands
 # keep their own npx entries: they are other clients' stdio entries and not
 # touched here. Anchored like AUTOOS_HARNESS, so it is absolute and cwd-proof.
 AUTOOS_PLAYWRIGHT_PROXY="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}/tools/playwright_mcp_lazy.py"
@@ -4304,7 +4127,7 @@ print(json.dumps({"command": "npx", "args": ["-y", sys.argv[1]]}))
 # ~/.qoder/settings.json. Rewriting the client's JSON store to change one key is
 # the "overwrite a config wholesale" failure this repository has shipped before.
 #
-# Qoder cannot ride the OmniRoute gateway the way Zed and opencode do: its
+# Qoder cannot ride the OmniRoute gateway the way opencode does: its
 # Custom Models accept only a curated provider list (Alibaba Cloud Model
 # Studio, DeepSeek, Z.ai, Kimi, MiniMax, Xiaomi MIMO) with no arbitrary
 # OpenAI-compatible base URL, and the store is encrypted. There is therefore
@@ -4559,10 +4382,10 @@ PY
 # write_omnigraph_env <base-url> [token]
 # The per-user omnigraph env file, ~/.autoos-omnigraph.env, mode 600: the ONE
 # place the bearer token lives on this machine. Tracked configs name the token
-# (${OMNIGRAPH_TOKEN} in .mcp.json; opencode, Zed and OpenHands inherit it), so
+# (${OMNIGRAPH_TOKEN} in .mcp.json; opencode and OpenHands inherit it), so
 # something must put the value into the env of whatever launches a client. A
 # token exported only from an interactive ~/.zshrc reaches terminals and
-# nothing else: systemd user services, a desktop-launched Zed and `bash -c`
+# nothing else: systemd user services, a desktop-launched app and `bash -c`
 # agents got none, still showed omnigraph "connected" (the bridge answers
 # health without a token) and failed every read (measured 2026-09-24). So the
 # file is
@@ -4996,7 +4819,7 @@ install_omnigraph_client() {
     local omni_pkg omni_spec omni_base
     omni_pkg="$(mcp_package omnigraph)"
     # The base URL is resolved by the one helper (answer, environment, env file):
-    # it reaches python through the environment (as in the Zed writer), never
+    # it reaches python through the environment, never
     # spliced into the source. The token is deliberately today's rule — only an
     # OMNIGRAPH_TOKEN the user exported themselves: this file is world-readable
     # by default, so a keys-file secret must not be copied into it.
@@ -6566,7 +6389,7 @@ try:
 except KeyError:
     omni_key = None
 # LiteLLM master key for the litellm-tier* fallback profiles: env first
-# (LITELLM_MASTER_KEY, then the Zed-side AUTOOS_LITELLM_API_KEY), never argv.
+# (LITELLM_MASTER_KEY, then AUTOOS_LITELLM_API_KEY), never argv.
 _lit_key = os.environ.get("LITELLM_MASTER_KEY") or os.environ.get("AUTOOS_LITELLM_API_KEY")
 # A direct-provider tier (the effort-ladder surface, e.g. OpenRouter spark)
 # carries its own key: it does NOT go through either gateway.
