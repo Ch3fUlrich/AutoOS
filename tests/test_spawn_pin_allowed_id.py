@@ -9,8 +9,10 @@ an already-qualified pin.
 Runs with the stdlib only: `python3 tests/test_spawn_pin_allowed_id.py`.
 """
 import importlib.util
+import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -25,6 +27,13 @@ def load(name, file):
 
 
 class SpawnPinAllowedIdTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(dir=ROOT / "logs")
+        self.addCleanup(tmp.cleanup)
+        self.env = {k: v for k, v in os.environ.items()
+                    if not k.startswith("AUTOOS_")}
+        self.env.update(AUTOOS_WORKERS_DIR=tmp.name, AUTOOS_ADMISSION_OFF="1")
+
     @classmethod
     def setUpClass(cls):
         cls.agent = load("pin_agent", "autoos-agent.py")
@@ -52,6 +61,17 @@ class SpawnPinAllowedIdTests(unittest.TestCase):
         text = str(ctx.exception)
         self.assertIn("not declared in opencode.jsonc providers", text)
         self.assertNotIn("omniroute/bogus/none", text)
+
+    def test_typo_keeps_closest_declared_mid(self):
+        allowed = self.agent.allowed_ids_for_pin(
+            self.cfg, "omniroute/l3-implementer-flsh")
+        self.assertIn("omniroute/l3-implementer", allowed)
+
+    def test_clean_refusal_explains_nonclean_suggestion(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.agent.resolve_model(self.cfg, 3, True,
+                                     "opencode/glm-5.3-flash-free")
+        self.assertIn("drop --clean", str(ctx.exception))
 
     def test_allowed_ids_for_pin_on_a_synthetic_config(self):
         cfg = {"providers": {"p1": {"models": {"m-a": {}}},
@@ -81,7 +101,7 @@ class SpawnPinAllowedIdTests(unittest.TestCase):
             [sys.executable, str(ROOT / "tools/autoos-agent.py"), "run",
              "--model", "omniroute/deepseek-v4.1-flash-free", "--dry-run",
              "--isolate", "x"],
-            cwd=ROOT, capture_output=True, text=True)
+            cwd=ROOT, capture_output=True, text=True, env=self.env)
         self.assertNotEqual(plan.returncode, 0, plan.stdout)
         self.assertIn("opencode/deepseek-v4.1-flash-free", plan.stderr)
 
@@ -90,10 +110,18 @@ class SpawnPinAllowedIdTests(unittest.TestCase):
             [sys.executable, str(ROOT / "tools/autoos-agent.py"), "run", "--free",
              "--model", "opencode/glm-5.3-flash-fre", "--dry-run",
              "--isolate", "x"],
-            cwd=ROOT, capture_output=True, text=True)
+            cwd=ROOT, capture_output=True, text=True, env=self.env)
         self.assertEqual(plan.returncode, 2, plan.stdout + plan.stderr)
         self.assertIn("is not in the free pool for", plan.stderr)
         self.assertIn("opencode/glm-5.3-flash-free", plan.stderr)
+
+    def test_free_pool_without_close_mid_points_to_list(self):
+        plan = subprocess.run(
+            [sys.executable, str(ROOT / "tools/autoos-agent.py"), "run", "--free",
+             "--model", "unknown/zzzzzzzz", "--dry-run", "--isolate", "x"],
+            cwd=ROOT, capture_output=True, text=True, env=self.env)
+        self.assertEqual(plan.returncode, 2, plan.stdout + plan.stderr)
+        self.assertIn("see tools/autoos-agent.py list", plan.stderr)
 
 
 if __name__ == "__main__":

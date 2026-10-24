@@ -1,5 +1,10 @@
 import datetime
 import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -65,6 +70,67 @@ class RelaunchQuotaTests(unittest.TestCase):
         self.assertIsNone(self.call([progress]))
         self.assertIsNone(self.call([self.row(120), progress]))
         self.check.assert_not_called()
+
+    def test_killed_and_string_return_codes(self):
+        for rc in (-9, -15, 137, 143, 124, "10", "5"):
+            with self.subTest(rc=rc):
+                self.assertIsNotNone(self.call([self.row(state="exited", rc=rc)]))
+        for rc in (0, 1, 42, "0", None, "unknown"):
+            with self.subTest(rc=rc):
+                self.assertIsNone(self.call([self.row(state="exited", rc=rc)]))
+
+    def test_empty_identity_never_matches(self):
+        for identity in ("", None):
+            self.assertIsNone(self.agent.relaunch_quota_refusal(
+                self.sol, identity, [self.row(title="", lane="")],
+                self.now, self.check))
+        self.check.assert_not_called()
+
+    def test_registry_provider_namespace(self):
+        future = (datetime.datetime.now(datetime.timezone.utc)
+                  + datetime.timedelta(minutes=40)).isoformat()
+        for provider, group in (("cx", "codex"), ("cxa", "codex"),
+                                ("xiaomi_mimo", "mimo")):
+            with self.subTest(provider=provider):
+                state = {"providers": {provider: {"unavailable_until": future}}}
+                with patch.object(self.agent, "load_provider_state", return_value=state):
+                    self.assertFalse(self.agent.relaunch_quota_ok(group)[0])
+                    other = "mimo" if group == "codex" else "codex"
+                    self.assertTrue(self.agent.relaunch_quota_ok(other)[0])
+        for pin in ("other/not-mimo", "other/not-cx-gpt-model"):
+            self.assertEqual(self.agent.quota_group(pin), "other")
+
+    def test_cli_preview_enforcement_and_double_run(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / "logs") as tmp:
+            directory = Path(tmp)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            row = self.row(90)
+            row["started"] = (now - datetime.timedelta(minutes=90)).isoformat()
+            (directory / "previous-run.json").write_text(json.dumps(row), encoding="utf-8")
+            state = directory / "state.json"
+            state.write_text(json.dumps({"providers": {"cx": {
+                "unavailable_until": (now + datetime.timedelta(minutes=40)).isoformat()
+            }}}), encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("AUTOOS_")}
+            env.update(AUTOOS_WORKERS_DIR=tmp, AUTOOS_ADMISSION_OFF="1",
+                       AUTOOS_OMNIROUTE_KEY="test-not-a-key",
+                       AUTOOS_HOST_NAME="test-host",
+                       AUTOOS_PROVIDER_STATE_PATH=str(state))
+            cmd = [sys.executable, str(ROOT / "tools/autoos-agent.py"), "run",
+                   "--model", self.sol, "--title", "writer task", "--isolate", "x"]
+            sandboxes = ROOT / "logs" / "sandboxes"
+            before = set(sandboxes.iterdir()) if sandboxes.exists() else set()
+            for dry in (False, False, True):
+                result = subprocess.run(cmd + (["--dry-run"] if dry else []),
+                                        cwd=ROOT, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0 if dry else 15,
+                                 result.stdout + result.stderr)
+                if dry:
+                    self.assertIn("note: relaunch quota:", result.stdout)
+                else:
+                    self.assertTrue(result.stderr.startswith("relaunch quota:"), result.stderr)
+                after = set(sandboxes.iterdir()) if sandboxes.exists() else set()
+                self.assertEqual(before, after)
 
     def test_different_title(self):
         self.assertIsNone(self.call([self.row(title="another task")]))
