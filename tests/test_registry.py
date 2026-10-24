@@ -4539,6 +4539,45 @@ class ReviewLensRouteTests(unittest.TestCase):
         self.assertIsInstance(route, dict, "%s is not a declared route" % rid)
         return route
 
+    def test_unconnected_qoder_qwen_gateway_targets_are_absent(self):
+        # D-2641: qodercli ACP seats are not gateway connections. Vendor
+        # qwen/... model ids remain valid only behind another provider's leg.
+        targets = []
+        for rid, route in self.reg["routes"].items():
+            for leg in route.get("legs") or []:
+                targets.append((rid, leg))
+
+        def collect_seat_legs(value, owner):
+            if isinstance(value, dict):
+                if value.get("leg"):
+                    targets.append((owner, value["leg"]))
+                for child in value.values():
+                    collect_seat_legs(child, owner)
+            elif isinstance(value, list):
+                for child in value:
+                    collect_seat_legs(child, owner)
+
+        for role in ("reviewers", "writers"):
+            collect_seat_legs(self.reg["policy"].get(role, []), role)
+        for owner, leg in targets:
+            self.assertNotIn(leg.split("/", 1)[0], ("qoder", "qwen"),
+                             (owner, leg))
+        for mid in self.reg["models"]:
+            if mid.startswith(("qoder/", "qwen/")):
+                references = [leg for _, leg in targets
+                              if registry.resolve_leg(leg, self.reg)[1] == mid]
+                references += [leg for route in self.reg["routes"].values()
+                               for leg in route.get("unavailable_legs", {})
+                               if not leg.startswith(("qoder/", "qwen/"))
+                               and registry.resolve_leg(leg, self.reg)[1] == mid]
+                # Retired OpenRouter :free vendor slug is retained for pricing
+                # history, not a bare qwen gateway target (ORQWEN-DEAD).
+                if mid.endswith(":free"):
+                    self.assertEqual(self.reg["models"][mid].get("tier"), "free")
+                    continue
+                self.assertTrue(references,
+                                "unconnected gateway model row: " + mid)
+
     def test_every_lens_of_the_spec_is_a_route(self):
         for rid in self.LENSES:
             route = self._route(rid)

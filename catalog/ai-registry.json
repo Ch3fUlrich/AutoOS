@@ -1496,22 +1496,6 @@
       "reasoning": false,
       "tool_calls": "unproven"
     },
-    "qwen/qwen3-coder-flash": {
-      "$comment": "openrouter's coding-specialised sibling of qwen3.8-flash, same SPEED directive (operator 2026-09-26T15:44Z/15:49Z): S0-S1 small edits/docs/triage/lint fixes, measured 200 in 1.1-1.4s by L0. tier paid / trains_on_prompts false inherited from providers.openrouter. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
-      "context_advertised": 131072,
-      "context_usable": {
-        "source": "default",
-        "tokens": 65536
-      },
-      "effort_ladder": [],
-      "family": "qwen",
-      "id": "qwen/qwen3-coder-flash",
-      "output_max": 16384,
-      "price_in": 0.0,
-      "price_out": 0.0,
-      "reasoning": false,
-      "tool_calls": "proven"
-    },
     "qwen/qwen3.8-27b": {
       "$comment": "groq's vendor-prefixed spelling; true free tier (l3-driver-free-only). Q1 2026-09-26: openrouter/qwen/qwen3.8-27b (SPEED directive, S1-S2 worker routes) resolves to this SAME entry - price stays groq's-free 0.0 rather than openrouter's real paid price because one model id is shared by two providers with different commercial terms (tier/trains_on_prompts still resolve correctly per-leg via the provider fallback; only price is shared/imprecise). Probed 2026-09-26 (Q1 lane): openrouter/qwen/qwen3.8-27b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq's copy was not itself probed by this run - tools/autoos_resolver.py _tool_calls_value() already prefers the overlay's leg-specific verdict over this model default. FREEWIRE 2026-09-30 (free-probe evidence): groq's own copy is now probed too (ack 200 + one get_weather tool call ok, 420 ms), so the model default tool_calls is promoted to 'proven'. Q1 2026-09-26 16:4xZ revision: the openrouter/qwen/qwen3.8-27b leg added for the (withdrawn) SPEED directive is removed from every route - SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key. T1-CLEAN-3 2026-10-01: merged the case-only duplicate row 'Qwen/Qwen3.8-27B' into this canonical lowercase key (rule 1b hygiene; this spelling already carries every live leg, so no leg string and no wire spelling changes; resolve_leg fold-matches the retired casing). Kept this row's groq-vendor numbers (context 131072 / usable 65536 / output 16384 - what all live legs and rendered surfaces already use); the retired row's gateway-measured numbers were context 128000 / usable 64000 / output 32768 (both price 0.0, reasoning false, tool_calls proven). Retired row verbatim: FREEWIRE 2026-09-30 (free-probe evidence, L1-backlog/ws-free-probe-20260930, commit 6e978dd): ack 200 and one get_weather tool call ok (1276 ms) through the gateway at 127.0.0.1:20128; the gateway /v1/models row reported context_length 128000. The gateway serves this leg as 'huggingface/Qwen/Qwen3.8-27B'. context_advertised 128000 is the measured gateway row; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out 0.0 (huggingface free tier, no price on file - the FREEKEYS-1 convention). trains_on_prompts inherits providers.hugging_face (false). T1-CLEAN-3 case-merge (9e5ea48c) kept GROQ's context_advertised 131072 / output_max 16384 and DROPPED the huggingface sibling's (key Qwen/Qwen3.8-27B) 128000 / 32768, recorded per T1-CLEAN-4 K8; a huggingface leg is planned against groq's window until a provider-scoped context field exists.",
       "context_advertised": 131072,
@@ -1530,40 +1514,8 @@
       "prompt_cache": "unknown",
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
-    "qwen/qwen3.8-flash": {
-      "$comment": "openrouter's leg for the SPEED directive (operator 2026-09-26T15:44Z/15:49Z, common.md 'Model mix' UPDATE): S0-S1 small edits/docs/triage/lint fixes, measured 200 in 1.1-1.4s by L0. tier paid (providers.openrouter.tier), trains_on_prompts false inherited from providers.openrouter (no model-level override needed - the provider itself is already paid + non-training). Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
-      "context_advertised": 131072,
-      "context_usable": {
-        "source": "default",
-        "tokens": 65536
-      },
-      "effort_ladder": [],
-      "family": "qwen",
-      "id": "qwen/qwen3.8-flash",
-      "output_max": 16384,
-      "price_in": 0.0,
-      "price_out": 0.0,
-      "reasoning": false,
-      "tool_calls": "proven"
-    },
-    "qwen/qwen3.8-max-0902": {
-      "$comment": "openrouter's biggest Qwen 3.8 leg, SPEED directive (operator 2026-09-26T15:44Z/15:49Z): S2-S3 harder implement / cross-family reviews, measured 200 in 2.6s by L0. tier paid / trains_on_prompts false inherited from providers.openrouter. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
-      "context_advertised": 131072,
-      "context_usable": {
-        "source": "default",
-        "tokens": 65536
-      },
-      "effort_ladder": [],
-      "family": "qwen",
-      "id": "qwen/qwen3.8-max-0902",
-      "output_max": 16384,
-      "price_in": 0.0,
-      "price_out": 0.0,
-      "reasoning": false,
-      "tool_calls": "proven"
-    },
     "qwen3.8-flash": {
-      "$comment": "OCGO-PREFER (operator D-1840/D-1919, 2026-10-18 Go probe): the OpenCode Go copy, spelled exactly as the gateway serves it (`opencode-go/qwen3.8-flash`, answered 200 on 3/3 calls, median 1.54 s, /v1/models row reported context 200000). This is the bare key the Go leg resolves to; `qwen/qwen3.8-flash` above is OpenRouter's vendor-prefixed spelling of the same weights and stays untouched. context_advertised 200000 is the probe-measured gateway row; context_usable is the 50% default, not a measurement. output_max 16384 mirrors the sibling qwen rows (the probe reported none) — the registry's conservative unknown, not evidence the model stops there. reasoning false and effort_ladder empty follow the family's existing pattern and are unmeasured; tool_calls stays 'unproven' because no tool-call trial was answered for this id. Price 0.0 with a price_source: the plan is a flat subscription (providers.opencode_go.tier), so nothing is metered per token. trains_on_prompts inherits providers.opencode_go = true, which tools/registry.py private_safe() reads as never private-safe.",
+      "$comment": "OCGO-PREFER (operator D-1840/D-1919, 2026-10-18 Go probe): the OpenCode Go copy, spelled exactly as the gateway serves it (`opencode-go/qwen3.8-flash`, answered 200 on 3/3 calls, median 1.54 s, /v1/models row reported context 200000). This is the bare key the Go leg resolves to; D-2641 removed the unused vendor-prefixed sibling (no qwen gateway connection). context_advertised 200000 is the probe-measured gateway row; context_usable is the 50% default, not a measurement. output_max 16384 mirrors the sibling qwen rows (the probe reported none) — the registry's conservative unknown, not evidence the model stops there. reasoning false and effort_ladder empty follow the family's existing pattern and are unmeasured; tool_calls stays 'unproven' because no tool-call trial was answered for this id. Price 0.0 with a price_source: the plan is a flat subscription (providers.opencode_go.tier), so nothing is metered per token. trains_on_prompts inherits providers.opencode_go = true, which tools/registry.py private_safe() reads as never private-safe.",
       "context_advertised": 200000,
       "context_usable": {
         "source": "default",
@@ -4136,7 +4088,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'qoder' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'qoder', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "D-2641: qodercli ACP only; no gateway provider or gateway login. OS-QODER-PAT withdrawn. clients.qoder uses gateway_mode none; qoder reviewer seats remain legless. Supersedes the 2026-09-28 gateway probe; available is false."
     },
     "zcode": {
       "id": "zcode",
@@ -5503,7 +5455,7 @@
       }
     },
     "opencode-go/qwen3.8-flash": {
-      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go copy of Qwen3.8 Flash, preferred over the opencode free models for routes and seats (200 on 3/3, median 1.54 s, Go /v1/models row reports context 200000). Distinct from models.'qwen/qwen3.8-flash' (OpenRouter's vendor-prefixed spelling, referenced by no route since the 2026-09-26 BYOK withdrawal): this leg resolves to the new bare key models.'qwen3.8-flash'. Named route for the opencode.jsonc modelID, as in routes.'samba/MiniMax-M3'. tool_calls stays 'unproven' — the Go probe answered chat completions, not a tool-call trial — so a card that needs tools is not sent here on evidence it does not have. Not in a tier band (rule (f) cache gate; subscription ranks with paid under rule (b)). trains_on_prompts true (D-1919) keeps it off -clean routes and sensitive cards.",
+      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go copy of Qwen3.8 Flash, preferred over the opencode free models for routes and seats (200 on 3/3, median 1.54 s, Go /v1/models row reports context 200000). D-2641 removed the unused vendor-prefixed sibling; this leg resolves to the bare key models.'qwen3.8-flash'. Named route for the opencode.jsonc modelID, as in routes.'samba/MiniMax-M3'. tool_calls stays 'unproven' — the Go probe answered chat completions, not a tool-call trial — so a card that needs tools is not sent here on evidence it does not have. Not in a tier band (rule (f) cache gate; subscription ranks with paid under rule (b)). trains_on_prompts true (D-1919) keeps it off -clean routes and sensitive cards.",
       "class": "cheap",
       "id": "opencode-go/qwen3.8-flash",
       "legs": [

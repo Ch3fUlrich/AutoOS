@@ -1,5 +1,6 @@
 # Changelog
 
+- GW-QODER-401 (D-2641): keep Qoder on qodercli ACP only, withdraw gateway PAT login, remove unused Qwen flash/max/coder-flash registry rows, and guard routes and seats against unconnected qoder/qwen gateway targets while retaining referenced vendor model IDs.
 - OPENCODE-HC (D-2634, incident): the opencode compose healthcheck wrote its shell variable as `$c`, which compose interpolates to an empty string, so the probe rendered `[ -n "" ]` and reported unhealthy for every answer. Escape it as `$$c`, repair the comment spliced in D-2549, and add two red-first tests: no unescaped compose variable in the probe, and the exact probe as `docker compose config` renders it.
 - D-2148: enforce registry-owned newest-only Codex IDs; add read-only weekly bump proposals and align MCP availability. Remove superseded Sol credit route.
   - CODEX-NEWEST-ONLY (D-2488): keep the Google review seat first and cx carried, not first (router option B), preserving the default cross-family seat; D-2148 writer order still names cx first.
