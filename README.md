@@ -74,7 +74,7 @@ Full walkthrough and limits: [Browser UI](docs/web-ui.md).
 
 ### AI agents and model routing
 
-Every agent installed here — OpenCode, Zed's agent panel, Neovim + sidekick,
+Every agent installed here — OpenCode, Neovim + sidekick,
 OpenHands — talks to one local router (OmniRoute on `127.0.0.1:20128`), with
 LiteLLM on `:4000` as a manual fallback. Free legs go first; the `tierN-clean`
 twins are the paid-only, no-training chains for sensitive data.

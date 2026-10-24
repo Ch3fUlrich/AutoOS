@@ -217,7 +217,7 @@ read-only sandbox). Otherwise file edits are approved and anything else asks.
   and the Go seats train on prompts, so `--free` is public-only work — `--free --clean` and a
   `privacy=sensitive` card are refused.
 
-### Over MCP (OpenHands, Claude Code, opencode, Zed)
+### Over MCP (OpenHands, Claude Code, opencode)
 
 `tools/autoos_agent_mcp.py` is a stdio MCP server
 (`uv --quiet run --no-project --with 'mcp<2' python tools/autoos_agent_mcp.py`).
@@ -237,7 +237,6 @@ using the pin in `catalog/agent-harness.json`, in these places:
 - `.mcp.json` (the project server, approved in `.claude/settings.local.json`)
 - the `mcp` servers of `opencode.jsonc`
 - OpenHands `mcp_config`
-- Zed `context_servers`
 
 Only spawning roles list the server (orchestrator, suborchestrator).
 `agent_harness.py check` refuses a leaf role that does, and leaf agents get
@@ -348,11 +347,11 @@ your Tailscale IPv4.
 |---|---|---|
 | OpenHands | `http://<tail-ip>:3000` | PRIMARY agent UI (t1 inside) |
 | opencode serve | `http://<tail-ip>:4096` | FALLBACK if OpenHands breaks (`AUTOOS_OPENCODE_HOST=<your-address> opencode serve --hostname <your-address> --port 4096`; default is 127.0.0.1 and a wildcard is refused - D-2542) |
-| OmniRoute | `http://<tail-ip>:20128` | router for Zed/Desktop/nvim (client key via env, never URL) |
+| OmniRoute | `http://<tail-ip>:20128` | router for Desktop/nvim (client key via env, never URL) |
 | AutoOS `--serve` | loopback only unless elevated | installer UI; LAN bind needs `netsh http add urlacl url=http://+:8777/ user=<you>` from an elevated shell, then `setup.ps1 -Serve -Bind 0.0.0.0` |
 
 Fallback order when something breaks: OpenHands → opencode serve →
-Zed (autoos-omniroute provider) → opencode desktop → nvim+sidekick
+opencode desktop → nvim+sidekick
 (`<leader>aa`). Every leg routes through :20128, so a single client
 key restores all of them. Watchdog: `configuration/healthcheck.*`
 (probe :20128/:3000/:4096/:8777, `--fix` restarts via start-stack).
@@ -406,7 +405,7 @@ owning t2, one live `ack` probe per touched tier.
   the OPEN items. Resumable across sessions, reboots, machines.
 - **Watchdog auto-resume + human fallback ladder**: `healthcheck.*`
   probes :20128/:3000/:4096/:8777 log-only; `--fix`/`-Fix` resumes via
-  `Start-AutoOSStack`. Ladder: OpenHands → opencode serve → Zed →
+  `Start-AutoOSStack`. Ladder: OpenHands → opencode serve →
   Desktop → nvim+sidekick, all through :20128 with one client key.
 - **Next gaps**: `--fix` should also resume `opencode serve :4096`
   when down (currently only gateway + container); the web Router-tiers

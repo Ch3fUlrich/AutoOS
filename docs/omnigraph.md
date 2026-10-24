@@ -84,12 +84,11 @@ read fail while the client still shows it connected:
 |---|---|---|---|
 | Claude Code (this repo) | `.mcp.json`, project scope, approved via `.claude/settings.local.json` `enabledMcpjsonServers` | `autoos`, `${OMNIGRAPH_BASE_URL}` (no default: server start fails loudly if unset) | `${OMNIGRAPH_TOKEN}` expanded from Claude's env |
 | opencode | `opencode.jsonc` `mcp.servers.omnigraph` | `autoos`, `{env:OMNIGRAPH_BASE_URL}` (installers write the resolved URL into user config) | inherited from the process that started the opencode service |
-| Zed | installer → `context_servers.omnigraph` in Zed settings | `autoos`, resolved URL written by installer (or skips with a warning) | inherited from the desktop session env |
 | OpenHands | installer → `agent_settings.mcp_config.omnigraph` | `autoos`, `http://host.docker.internal:8080` (the app and its sandboxes run in Docker, where `localhost` is the container; the published server is reached through the host alias) | written into that (untracked) settings file from env or the env file |
 | Antigravity | installer → its `mcp_config.json` | `$OMNIGRAPH_GRAPH_ID` or `autoos` | written from env when set |
 | Neovim + sidekick | through the opencode CLI | as opencode | as opencode |
 
-Zed, OpenHands, Antigravity and a global opencode config are user-scope,
+OpenHands, Antigravity and a global opencode config are user-scope,
 so they pin `autoos` for every folder they open. The per-repo pin only
 exists for Claude Code and the repo's `opencode.jsonc`.
 
@@ -323,7 +322,7 @@ one real outage, two latent faults and one misleading log line:
    from `infra/mcp-servers/servers/omnigraph-mcp` (now in this repo), or switch
    those `.mcp.json` files to the npx form this repo uses. Claude Code in
    this repo was connected throughout.
-2. **Zed and Antigravity had no graph id** (Zed had no base URL either):
+2. **Antigravity had no graph id** (no base URL either):
    the bridge exits at start-up. Fixed in both installers.
 3. **The token lived only in an interactive `~/.zshrc`.** Everything
    started from that shell had it, so nothing failed that day, but a

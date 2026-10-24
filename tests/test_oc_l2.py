@@ -171,7 +171,7 @@ class ComboModelTest(unittest.TestCase):
     def test_combo_without_the_gateway_surface_refused(self):
         with tempfile.TemporaryDirectory(prefix="oc_l2_reg_") as td:
             p = Path(td) / "registry.json"
-            p.write_text(json.dumps({"routes": {"x": {"surfaces": {"zed": {}}}}}),
+            p.write_text(json.dumps({"routes": {"x": {"surfaces": {"other": {}}}}}),
                          encoding="utf-8")
             with self.assertRaises(oc_l2.L2Error) as cm:
                 oc_l2.combo_model("x", registry_path=p)

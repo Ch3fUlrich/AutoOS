@@ -91,7 +91,7 @@ CLEAN_SEAT_FIXTURE = {
             "id": CLEAN_SEAT_ROUTE_ID, "class": "cheap",
             "strategy": "priority", "legs": [CLEAN_SEAT_LEG],
             "surfaces": {"omniroute": {
-                "clients": ["opencode", "zed", "openhands"],
+                "clients": ["opencode", "openhands"],
                 "context": 1048576, "context_declared": "1M",
                 "display_name": "test · clean seat · 1M", "output": 32768}},
         },

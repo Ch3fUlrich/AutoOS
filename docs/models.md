@@ -1,6 +1,6 @@
 # Model routing — OmniRoute first, LiteLLM as fallback
 
-Every agent in this repo (OpenCode CLI/TUI, Zed Agent, OpenHands, Claude Code
+Every agent in this repo (OpenCode CLI/TUI, OpenHands, Claude Code
 Desktop, ad-hoc scripts) talks to **OmniRoute on `:20128`**, which routes
 across all connected free tiers with quota-aware auto-fallback. LiteLLM on
 `:4000` stays configured as the manual fallback for anyone who prefers it.
@@ -416,7 +416,6 @@ No extra binaries: each rung is already in the catalog or ships with the CLI.
 | 1 | OpenHands (Docker app, `:3000`) | `openai/l1-orchestrator` → `:20128` | Heavy autonomous runs with a sandbox |
 | 2 | opencode CLI/TUI (default `omniroute/l1-orchestrator`) | direct → `:20128` | OpenHands breaks or is overkill — same tiers, no container |
 | 3 | `opencode serve --port 4096` | same gateway, browser UI | Headless/remote use: drive opencode from a browser instead of the TUI |
-| 4 | Zed agent panel | `autoos-omniroute` provider → `:20128` | GUI editing with agents inline; needs a display |
 | 5 | Neovim + sidekick (`<leader>aa`) | inherits the repo opencode routing | Terminal editing, lowest resource rung (Pi, SSH) |
 
 OpenCode Desktop, if installed, reads the same `opencode.jsonc` routing and
@@ -451,8 +450,8 @@ curation rule, so cost and quality decide which models sit there and
 `catalog/ide-models.json` declares the clamped window (`128000` for `l1-orchestrator`,
 `128000` for l2-worker/l3-driver as the conservative minimum across each chain — since
 D-141 the free band is part of what those routes can fall to, and it advertises 128k) and
-every client surface projects it — `opencode.jsonc` `limit.context`, Zed
-`max_tokens`, OpenHands `max_input_tokens` — so compaction and the picker's context
+every client surface projects it — `opencode.jsonc` `limit.context`,
+OpenHands `max_input_tokens` — so compaction and the picker's context
 display agree with what actually answers, in every client alike.
 `auto/*` remains as a zero-setup bootstrap with the same conservative limit.
 
@@ -598,7 +597,6 @@ Bash equivalents use `./configuration/omniroute/apply.sh` and
 | App | Start (after keys are in) |
 |---|---|
 | OpenCode CLI / TUI | `.\configuration\start-stack.ps1 -App opencode` (or `opencode`) |
-| Zed | `.\configuration\start-stack.ps1 -App zed` (agent panel pre-routed) |
 | Neovim + sidekick | `.\configuration\start-stack.ps1 -App nvim`, then `<leader>aa` |
 | OpenHands | `.\configuration\start-stack.ps1 -App openhands` (needs Docker Desktop running) |
 | Any CLI, zero config | `omniroute run <tool> --model l2-worker` (injects env, writes nothing) |
@@ -696,10 +694,6 @@ bill private prompts to a training pool.
 - **OpenCode** — repo default already points at `:20128`
   (`omniroute/tierN`, `litellm/tierN` kept as fallback). Per session:
   `/models`. Unattended: V2 allow-permissions in global config (see below).
-- **Zed** — setup writes provider `autoos-omniroute` (`auto/smart` xhigh,
-  `auto`, `auto/cheap`) into Zed's `settings.json`; key via env, never file.
-  Zen-free is *not* available through Zed's native OpenCode provider — via
-  OmniRoute (`oc/…`, `auto`) it is.
 - **Neovim + sidekick** — `install_lazyvim` enables the `ai.sidekick` extra;
   `<leader>aa` runs opencode, which inherits the repo routing.
 - **Claude Code / Codex / others** — `omniroute run <tool>` injects env per
@@ -726,7 +720,7 @@ per-leg flags; the cost note is what that leg bills when it answers.
 flowchart TB
     subgraph clients["Agents — one client key (AUTOOS_OMNIROUTE_KEY)"]
         OC["opencode CLI/TUI\ndefault omniroute/l1-orchestrator\npins l1-orchestrator / l2-worker / t3-reviewer agents"]
-        LB["Zed · OpenHands · Neovim · scripts\nbase URL → :20128/v1"]
+        LB["OpenHands · Neovim · scripts\nbase URL → :20128/v1"]
         AUTO["auto/smart · auto · auto/cheap\nzero-setup bootstrap, live 16-factor scoring"]
     end
 
@@ -853,7 +847,7 @@ job. **Where they disagree, `combos.json` is right.**
 |---|---|---|
 | `configuration/omniroute/combos.json` | **The truth for tier leg order.** Every `tierN` / `tierN-clean` combo, in `priority` order, free legs before the paid overflow order. This is what `apply.*` pushes to `:20128` and what the agents actually call. | List providers without keys (apply skips them with a warning) or a model ID the live catalog does not know. |
 | `configuration/litellm/config.yaml` | **A static mirror of `l2-worker` and `l3-driver`** (plus `l1-orchestrator` spark), used only when the user deliberately types `litellm/tierN`. LiteLLM resolves its own `model_list` order, so the mirror is a fallback, never a second source of truth. | Introduce a leg that is not in `combos.json` for the same tier, or promise a window/limit `opencode.jsonc` does not declare. |
-| `catalog/ide-models.json` | **The client-facing model list**: which gateway model ids every surface offers (opencode, Zed, OpenHands), their display names and token windows. The 1M tier is `1000000` everywhere. | Decide which model answers, or carry leg order. |
+| `catalog/ide-models.json` | **The client-facing model list**: which gateway model ids every surface offers (opencode, OpenHands), their display names and token windows. The 1M tier is `1000000` everywhere. | Decide which model answers, or carry leg order. |
 | `opencode.jsonc` | The agent→tier pinning with spawn fences. Its `providers.omniroute/litellm.models` are a **generated copy** of the catalog between `// AUTOOS-MANAGED` markers. | Hand-edit inside the markers, or decide which model answers. |
 
 **The rule a sync script enforces** (the script itself is L2-B's; this is the
@@ -898,7 +892,7 @@ with `python3 tools/registry.py render ide --out catalog/ide-models.json`,
 then run `python3 tools/sync-ide-models.py`: it regenerates the
 `opencode.jsonc` model blocks and the token windows in
 `configuration/openhands/tier-profiles.json` and `config.toml`
-(`--check` shows drift, exit 1). The Zed writers and the OpenCode user-config
+(`--check` shows drift, exit 1). The OpenCode user-config
 writers read the catalog at install time. The OpenHands spec keeps its own
 profile **order** — the app holds at most 10 profiles, pushed in that order.
 

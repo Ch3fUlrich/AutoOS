@@ -2,19 +2,9 @@
 # sourced by tests/run-tests.sh; shares its harness and globals
 # shellcheck disable=SC2034,SC2154
 
-# ─── AI routing (omniroute / litellm / zed / opencode) ────────────────────
+# ─── AI routing (omniroute / litellm / opencode) ────────────────────
 describe "AI routing"
 
-if it "zed rides the script provider end to end"; then
-    ok=1
-    grep -q 'zed)             install_zed' lib/linux/install.sh || ok=0
-    grep -q 'zed)             has_bin zed' lib/linux/detect.sh || ok=0
-    # has_bin is stubbed so the test never depends on what this machine happens
-    # to have installed (Zed is present on the dev box via WSL interop).
-    ( has_bin() { return 1; }; script_is_installed zed ) >/dev/null 2>&1 && ok=0
-    ( has_bin() { return 0; }; script_is_installed zed ) >/dev/null 2>&1 || ok=0
-    if (( ok )); then pass; else fail "zed dispatch or detection is broken"; fi
-fi
 
 if it "openhands pulls the current image and announces in dry run"; then
     ok=1
@@ -119,20 +109,6 @@ PY
     assert_eq "$bad" ""
 fi
 
-if it "zed requires the router on every platform"; then
-    bad="$(python3 - 2>&1 <<'PY'
-import json, glob
-bad = []
-for p in sorted(glob.glob("catalog/*.json")):
-    for g in json.load(open(p, encoding="utf-8")).get("categories", []):
-        for c in g["components"]:
-            if c["id"] == "zed" and "litellm" not in c.get("requires", []):
-                bad.append(p)
-print(" ".join(bad))
-PY
-)"
-    assert_eq "$bad" ""
-fi
 
 if it "route_detected_clis_to_gateway announces in dry run and writes nothing"; then
     scratch="$(mktemp -d)"
@@ -161,13 +137,6 @@ if it "route_detected_clis_to_gateway bridges keys from the keys file"; then
     assert_eq "$out" "test-file-key|test-file-key"
 fi
 
-if it "zed routing announces in dry run and writes nothing"; then
-    scratch="$(mktemp -d)"
-    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=1; route_zed_to_proxy ) 2>&1)"
-    if [[ "$out" == *"would route"* && ! -e "$scratch/.config/zed/settings.json" ]]; then pass
-    else fail "dry run wrote or stayed silent"; fi
-    rm -rf "$scratch"
-fi
 
 # Claude Code gateway routing is opt-in and reversible (catalog prompt
 # claude_gateway_routing, default "login"). ANTHROPIC_BASE_URL/AUTH_TOKEN in
@@ -2213,103 +2182,7 @@ if it "script dispatch covers qodercli and devin-cli"; then
     if (( ok )); then pass; else fail "dispatch missing"; fi
 fi
 
-if it "zed routing merges one provider and keeps the rest"; then
-    scratch="$(mktemp -d)"
-    mkdir -p "$scratch/.config/zed"
-    printf '{"theme":"mine"}' >"$scratch/.config/zed/settings.json"
-    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
-      OMNIGRAPH_BASE_URL="http://omnigraph.test.invalid:8080" \
-      AUTOOS_OMNIROUTE_API_KEY="test-omni-key" AUTOOS_LITELLM_API_KEY="test-lit-key" route_zed_to_proxy >/dev/null 2>&1 )
-    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
-      OMNIGRAPH_BASE_URL="http://omnigraph.test.invalid:8080" \
-      AUTOOS_OMNIROUTE_API_KEY="test-omni-key" AUTOOS_LITELLM_API_KEY="test-lit-key" route_zed_to_proxy >/dev/null 2>&1 )
-    report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
-import json, sys
-cfg = json.load(open(sys.argv[1], encoding="utf-8"))
-oc = cfg.get("language_models", {}).get("openai_compatible", {})
-omni = oc.get("autoos-omniroute", {})
-lit = oc.get("autoos-litellm", {})
-# SHARDB: expectation moved by b9229fff (ide re-render to 1M after 20c4a816 moved gemini legs to 1048576; every servable t1 leg now advertises 1048576 so 1000000 is the honest promise).
-cat = json.load(open("catalog/ide-models.json", encoding="utf-8"))["models"]
-def want(gateway):
-    out = []
-    for m in cat:
-        if "zed" in m["surfaces"].get(gateway, []):
-            e = {"name": m["id"], "display_name": m["name"], "max_tokens": m["context"]}
-            if m.get("reasoning_effort"):
-                e["reasoning_effort"] = m["reasoning_effort"]
-            out.append(e)
-    return out
-got_models = {g: oc.get("autoos-" + g, {}).get("available_models") for g in ("omniroute", "litellm")}
-bad = [g for g in got_models if got_models[g] != want(g)]
-t1 = [m.get("max_tokens") for m in (got_models["omniroute"] or []) if m.get("name") == "l1-orchestrator"]
-# PROVFIX3 finding 1 still binds: the promise may only be as big as the smallest servable leg window (tools/registry.py clamp_route_context idea, as in the test_sync_ide_models wide-tier clamp).
-sys.path.insert(0, "tools")
-import registry as _shardb_reg
-_shardb_doc = json.load(open("catalog/ai-registry.json", encoding="utf-8"))
-_shardb_route = _shardb_doc["routes"]["l1-orchestrator"]
-_shardb_serv = _shardb_reg.gateway_legs(_shardb_route, _shardb_doc)
-_shardb_caps = [c for c in (_shardb_reg.leg_advertised_context(leg, _shardb_doc) for leg in _shardb_serv) if c is not None]
-_shardb_cat = [m["context"] for m in cat if m["id"] == "l1-orchestrator"]
-_shardb_min = min(_shardb_caps) if _shardb_caps else None
-_shardb_ok = (not bad and len(t1) == 1 and len(_shardb_cat) == 1 and len(_shardb_serv) > 0 and _shardb_min is not None and t1 == _shardb_cat and _shardb_cat[0] <= _shardb_min)
-models = "catalog-ok" if _shardb_ok else "MISMATCH:%s t1=%s cat=%s minleg=%s" % (",".join(bad), t1, _shardb_cat, _shardb_min)
-# Keys never land in settings.json (Zed docs: keychain/UI or env).
-# Pins come from the harness at runtime, never as literals in lib/.
-h = json.load(open("catalog/agent-harness.json", encoding="utf-8"))
-ctx = cfg.get("context_servers", {})
-pinok = ",".join(sorted(
-    "pin-ok" if h["mcp_servers"][n]["package"] in " ".join(ctx.get(n, {}).get("args", []))
-    else "MISSING:" + n
-    for n in ("serena", "graphify", "omnigraph", "playwright", "context7", "autoos-agent")))
-print("%s|%s|%s|%s|%s|%s|%s" % (
-    cfg.get("theme"), omni.get("api_url"), models,
-    "api_key" in omni, lit.get("api_url"), "api_key" in lit, pinok))
-bp = cfg.get("agent", {}).get("profiles", {}).get("bypass", {})
-btools = bp.get("tools", {})
-off = sorted(k for k, v in btools.items() if v is not True)
-print("bypass=%s|off=%s|provider=%s|model=%s|allow=%s|ctx=%s" % (
-    bp.get("name"), ",".join(off),
-    bp.get("default_model", {}).get("provider"),
-    bp.get("default_model", {}).get("model"),
-    cfg.get("agent", {}).get("tool_permissions", {}).get("default"),
-    ",".join(sorted(cfg.get("context_servers", {})))))
-PY
-)"
-    backups="$(ls "$scratch"/.config/zed/settings.json.autoos-backup-* 2>/dev/null | wc -l)"
-    leaks="$(grep -cE 'sk-[A-Za-z0-9]{10,}|_API_KEY|REPLACE' "$scratch/.config/zed/settings.json" || true)"
-    rm -rf "$scratch"
-    # Two prints = one newline inside $report; assert each line separately.
-    line1="$(printf '%s' "$report" | sed -n '1p')"
-    line2="$(printf '%s' "$report" | sed -n '2p')"
-    assert_eq "$line1" \
-        "mine|http://127.0.0.1:20128/v1|catalog-ok|False|http://127.0.0.1:4000/v1|False|pin-ok,pin-ok,pin-ok,pin-ok,pin-ok,pin-ok"
-    assert_eq "$line2" \
-        "bypass=bypass|off=|provider=autoos-omniroute|model=l1-orchestrator|allow=allow|ctx=autoos-agent,context7,graphify,omnigraph,playwright,serena"
-    assert_eq "leaks=$leaks" "leaks=0"
-    # Two runs share second-precision backup names: same second -> 1 file,
-    # straddling a boundary -> 2. Either proves backup-before-edit; an exact
-    # count would flake on wall-clock timing.
-    if (( backups >= 1 )); then pass; else fail "no backup written"; fi
-fi
 
-if it "zed routing without key env warns and stays key-free"; then
-    scratch="$(mktemp -d)"
-    mkdir -p "$scratch/.config/zed"
-    printf '{}' >"$scratch/.config/zed/settings.json"
-    out="$( ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0; unset AUTOOS_OMNIROUTE_API_KEY AUTOOS_LITELLM_API_KEY; route_zed_to_proxy ) 2>&1)"
-    report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
-import json, sys
-cfg = json.load(open(sys.argv[1], encoding="utf-8"))
-oc = cfg.get("language_models", {}).get("openai_compatible", {})
-print("%s|%s" % ("api_key" in oc.get("autoos-omniroute", {}),
-                 "api_key" in oc.get("autoos-litellm", {})))
-PY
-)"
-    rm -rf "$scratch"
-    if [[ "$report" == "False|False" && "$out" == *"stays hidden"* ]]; then pass
-    else fail "report=$report out=$(printf '%s' "$out" | tail -2)"; fi
-fi
 
 if it "litellm installer announces in dry run and detects presence"; then
     empty="$(mktemp -d)"

@@ -27,13 +27,13 @@ subshell-scoped env), so shards run concurrently from separate worktrees:
 ```bash
 bash tests/run-tests.sh --filter usb,cache,fetch,imagecache  # L1: usb + image cache
 bash tests/run-tests.sh --filter catalog,image,engine,registry  # L2: catalogs
-bash tests/run-tests.sh --filter openhands,litellm,zed,router,combo,opencode,tier,serena,mcp,gateway,apply,healthcheck  # L3: ai/router
+bash tests/run-tests.sh --filter openhands,litellm,router,combo,opencode,tier,serena,mcp,gateway,apply,healthcheck  # L3: ai/router
 bash tests/run-tests.sh --filter profile,state,undo,verify,web,menu,template,rescue,docs,shellcheck  # L4: core/web
 ```
 
 ```powershell
 pwsh tests/run-tests.ps1 -Filter usb  # W1
-pwsh tests/run-tests.ps1 -Filter litellm,zed,router,combo,opencode,tier,openhands,apply,provider,healthcheck  # W2
+pwsh tests/run-tests.ps1 -Filter litellm,router,combo,opencode,tier,openhands,apply,provider,healthcheck  # W2
 pwsh tests/run-tests.ps1 -Filter catalog,detect,serve,payload,menu  # W3
 pwsh tests/run-tests.ps1 -Filter profile,state,verify,serena,mcp  # W4
 ```

@@ -115,7 +115,7 @@ byte-for-byte equal.
 
 `render ide` renders catalog/ide-models.json - the generated client list
 (rendered from catalog/ai-registry.json - do not edit) that feeds
-opencode.jsonc's AUTOOS-MANAGED blocks and Zed's own model lists (both via
+opencode.jsonc's AUTOOS-MANAGED blocks and OpenHands tier profiles (both via
 tools/sync-ide-models.py) - from a loaded catalog/ai-registry.json (spec 3.2
 phase 1, task A4c; docs/plans/2026-09-25-registry-mapping.md section 12
 documents the mapping; task A5f made the committed file byte-exact, so the old
@@ -1667,7 +1667,7 @@ def litellm_diff(rendered: dict, config_text: str) -> list:
 # this ordering is never exercised as a real tie-break today; it only fixes a
 # deterministic choice if that were ever to change. "openhands" is deliberately
 # excluded - it is never a key of ide-models.json's own `surfaces` field (that
-# file's surfaces map is gateway -> [opencode, zed, openhands] client lists, not
+# file's surfaces map is gateway -> [opencode, openhands] client lists, not
 # a third top-level gateway of its own); spark-1.3-contributor's standalone
 # surfaces.openhands.direct_profile (mapping doc section 6) is tier-profiles.json's
 # concern, not this render's.
@@ -1685,7 +1685,7 @@ IDE_GENERATED_COMMENT = "generated from catalog/ai-registry.json - do not edit"
 # catalog/ide-models.json's own comment: "List order = picker order on every
 # surface" - unlike combos.json's `combos`/`retired` arrays (mapping doc section
 # 10, exception 2, proven insignificant by reading apply.sh/apply.ps1), nothing
-# in this repository establishes that opencode.jsonc's / Zed's menu order is
+# in this repository establishes that opencode.jsonc's menu order is
 # insignificant, so render_ide() reproduces today's hand-curated order exactly
 # rather than adding an equality exception for it. No registry field carries this
 # order (routes is a dict, and catalog/ai-registry.json's own routes keys are
@@ -3144,6 +3144,41 @@ def _check_writers(registry) -> list:
         return ["writers: policy.writers is missing - writer_allowed fails closed without it"]
     if not isinstance(writers, dict):
         return ["writers: policy.writers must be an object"]
+    order = writers.get("order")
+    # D-2540 r2 ruling: policy.writers.order is OPTIONAL. Absent, this registry
+    # declares no ranking and tools/autoos_ready_guards.py refuses with
+    # FALLBACK_WRITER_ORDER (D-2148) instead. Present, it is validated in full -
+    # a declared order that is malformed or names a forbidden writer is still
+    # read by rank_candidates() and the refusal, so it owes every check below.
+    if "order" not in writers:
+        pass
+    elif not isinstance(order, list) or not order:
+        problems.append("writers: policy.writers.order must be a non-empty list")
+    else:
+        seen = set()
+        for index, row in enumerate(order):
+            label = "writers: policy.writers.order[%d]" % index
+            if not isinstance(row, dict) or any(
+                    not isinstance(row.get(key), str) or not row[key].strip()
+                    for key in ("client", "model", "family")):
+                problems.append(label + " must have non-empty string client/model/family")
+                continue
+            # MED2 (D-2540): all three guards read the SAME five fields. A guard
+            # that searched only client/model let a forbidden writer hide in
+            # leg/provider/family, which is exactly where a route name lives.
+            blob = " ".join(str(row.get(key, ""))
+                            for key in ("client", "model", "leg", "provider", "family"))
+            if row["family"].lower() == "anthropic" or re.search(
+                    r"claude|sonnet|opus|haiku|anthropic", blob, re.I):
+                problems.append(label + " forbids Claude-family writers")
+            if re.search(r"gpt[-_. ]*5[-_. ]*6[-_. ]*sol", blob, re.I):
+                problems.append(label + " forbids stale gpt-5.6-sol")
+            if "ovh" in blob.lower():
+                problems.append(label + " forbids ovh writers")
+            pair = (row["client"], row["model"])
+            if pair in seen:
+                problems.append(label + " duplicate client/model pair")
+            seen.add(pair)
     subs = writers.get("sub40_models")
     if not isinstance(subs, list) or not subs or any(not isinstance(s, str) or not s for s in subs):
         problems.append("writers: policy.writers.sub40_models must list non-empty strings")
@@ -3163,6 +3198,23 @@ def _check_writers(registry) -> list:
 
 
 # ===========================================================================
+def rank_candidates(role, candidates, registry, benchmarks=None):
+    """benchmark-informed ranking arrives with OR-BENCH-SEED-SHIP; until then the registry order is the ranking.
+
+    Unknown candidates retain their input order after all registered candidates.
+    """
+    policy = _section(registry, "policy")
+    if role == "writer":
+        rows = policy.get("writers", {}).get("order", [])
+    elif role == "reviewer":
+        rows = policy.get("reviewers", [])
+    else:
+        raise ValueError("unknown ranking role %r" % role)
+    ranks = {(row["client"], row["model"]): index for index, row in enumerate(rows)}
+    return sorted(candidates, key=lambda row: ranks.get(
+        (row.get("client"), row.get("model")), len(ranks)))
+
+
 # rule 12 - the risk policy is a policy tools/autoos_risk.py can actually apply
 # ===========================================================================
 
@@ -4272,7 +4324,7 @@ def main(argv=None) -> int:
         help="exit 1 if a managed block differs byte-for-byte from --config")
 
     ide_parser = render_targets.add_parser(
-        "ide", help="render catalog/ide-models.json (opencode/Zed/OpenHands model lists)")
+        "ide", help="render catalog/ide-models.json (opencode/OpenHands model lists)")
     ide_parser.add_argument(
         "--registry", default=str(DEFAULT_REGISTRY_PATH),
         help="registry JSON to render from (default: %(default)s)")
