@@ -472,32 +472,6 @@
       }
     },
     {
-      "id": "mimo-v2.6-flash",
-      "name": "Xiaomi MiMo v2.6 Flash · 1M",
-      "context": 1048576,
-      "output": 65536,
-      "gateway_model_id": "mimo/mimo-v2.6-flash",
-      "surfaces": {
-        "omniroute": [
-          "zed",
-          "openhands"
-        ]
-      }
-    },
-    {
-      "id": "mimo-v2.6-pro",
-      "name": "Xiaomi MiMo v2.6 Pro · 1M",
-      "context": 1048576,
-      "output": 65536,
-      "gateway_model_id": "mimo/mimo-v2.6-pro",
-      "surfaces": {
-        "omniroute": [
-          "zed",
-          "openhands"
-        ]
-      }
-    },
-    {
       "id": "opencode-go/glm-5.3-flash",
       "name": "OpenCode Go · glm-5.3-flash (subscription, 1M)",
       "context": 1048576,
