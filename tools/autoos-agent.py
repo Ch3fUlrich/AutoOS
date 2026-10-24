@@ -3515,6 +3515,47 @@ def qualify_pinned_model(cfg: dict, model) -> str | None:
     return "%s/%s%s%s" % (owners[0], base, sep, variant)
 
 
+def allowed_ids_for_pin(cfg: dict, pin) -> list[str]:
+    """The declared `provider/mid` ids a pin could plausibly have meant (L3).
+
+    A refusal that only says "not declared" teaches the caller nothing: the
+    run this lesson came from launched `omniroute/mimo-v2.6-flash` where only
+    `mimo/mimo-v2.6-flash` was declared and failed five times before anyone
+    could read an allowed id off the error. So the refusal names its
+    candidates, computed here as a pure function over the cfg dict.
+
+    Two passes, both on the pin's MID (last path segment, ignoring a leading
+    provider, a trailing `-clean` and a `#variant` tail):
+
+    1. exact mid - every declared id whose mid equals the pin's mid: the id
+       the caller almost certainly meant, spelled under whichever providers
+       declare it.
+    2. vendor word - no exact hit, so every declared id whose mid shares the
+       pin's leading vendor word (first word of the mid, e.g. `deepseek`),
+       capped at 5 and sorted, so a typo cannot name the whole config.
+
+    [] means nothing is even suggestable; the caller then points at
+    `tools/autoos-agent.py list` instead of guessing a prefix.
+    """
+    def mid_of(value) -> str:
+        base = str(value or "").partition("#")[0]
+        segment = base.rsplit("/", 1)[-1]
+        return segment[:-len("-clean")] if segment.endswith("-clean") else segment
+
+    pin_mid = mid_of(pin)
+    if not pin_mid:
+        return []
+    declared = sorted(declared_models(cfg))
+    exact = [d for d in declared if mid_of(d) == pin_mid]
+    if exact:
+        return exact
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", pin_mid.lower()) if w]
+    if not words:
+        return []
+    return [d for d in declared
+            if words[0] in re.split(r"[^A-Za-z0-9]+", mid_of(d).lower())][:5]
+
+
 def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> str:
     agent = TIERS[tier]
     model = override or cfg["agents"][agent]["model"]
@@ -3533,9 +3574,20 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
     if clean and not base.endswith("-clean"):
         base += "-clean"
     if base not in declared_models(cfg):
-        raise ValueError("%s is not declared in opencode.jsonc providers "
-                         "(a bare pin needs the provider prefix that declares "
-                         "it, e.g. omniroute/%s)" % (base, base))
+        # L3: the refusal NAMES the ids allowed for this pin. For a qualified
+        # pin the old `e.g. omniroute/<pin>` hint printed a double-qualified
+        # nonsense id (omniroute/bogus/none), so it survives only for a bare
+        # pin the helper found nothing better than.
+        allowed = allowed_ids_for_pin(cfg, base)
+        if allowed:
+            raise ValueError("%s is not declared in opencode.jsonc providers; "
+                             "allowed: %s" % (base, ", ".join(allowed)))
+        tail = "see tools/autoos-agent.py list"
+        if "/" not in base:
+            tail = ("a bare pin needs the provider prefix that declares it, "
+                    "e.g. omniroute/%s; %s" % (base, tail))
+        raise ValueError("%s is not declared in opencode.jsonc providers (%s)"
+                         % (base, tail))
     return base + ("#" + variant if variant else "")
 
 
@@ -14182,17 +14234,23 @@ def cmd_run(args, cfg: dict) -> int:
             pin = getattr(args, attr, None)
             if pin and "/" in str(pin):
                 pin_str = str(pin)
+                # L3: this refusal names the declared ids the pin could have
+                # meant, the same candidates resolve_model's refusal gives.
+                allowed = allowed_ids_for_pin(cfg, pin_str)
+                allow_txt = ("; allowed: %s" % ", ".join(allowed)) if allowed else ""
                 # Skip F3 free pool check for opencode/ models when the pool is
                 # empty/absent: opencode/* free models are served by opencode itself
                 # and keep their old behaviour (they don't need a declared pool).
                 if client_free and pin_str not in client_free and pin_str not in declared:
-                    return refuse("%s is not in the free pool for %s (declared: %s)"
-                                  % (pin_str, client.name, ", ".join(client_free) or "none"), 2)
+                    return refuse("%s is not in the free pool for %s (declared: %s)%s"
+                                  % (pin_str, client.name,
+                                     ", ".join(client_free) or "none", allow_txt), 2)
                 # When pool is empty/absent, still refuse non-opencode pins
                 # (e.g. foo/bar) that are not declared.
                 if not client_free and pin_str not in declared and not pin_str.startswith("opencode/"):
-                    return refuse("%s is not in the free pool for %s (declared: %s)"
-                                  % (pin_str, client.name, ", ".join(client_free) or "none"), 2)
+                    return refuse("%s is not in the free pool for %s (declared: %s)%s"
+                                  % (pin_str, client.name,
+                                     ", ".join(client_free) or "none", allow_txt), 2)
         # Then qualify bare pins (no '/' in original)
         for attr in ("model", "free_model"):
             pin = getattr(args, attr, None)
