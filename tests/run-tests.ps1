@@ -5235,6 +5235,39 @@ Test-Case 'autoos-agent spawner unit tests: card routing, clients, depth' {
     Assert-Equal $rc 0 "spawner unit tests failed: $out"
 }
 
+Test-Case 'runner pool unit tests: core, gate, proc, slot loop, CLI' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_cli.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_cli.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_core.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_core.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_core_b.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_core_b.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_core_c.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_core_c.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_gate.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_gate.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_proc.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_proc.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_slot.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_slot.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_strict.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_strict.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_seatc.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_seatc.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_runner_pool_e2e.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_runner_pool_e2e.py failed: $out"
+        $out = & $py.Source (Join-Path $Root 'tests\test_api_client.py') 2>&1 | Out-String; $rc = $LASTEXITCODE
+        Assert-Equal $rc 0 "test_api_client.py failed: $out"
+    }
+    finally { $ErrorActionPreference = $prev }
+}
+
 Test-Case 'autoos_redact span: PEM block masking keeps the report and its VERDICT (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -12397,14 +12430,14 @@ Test-Case 'ci-runner: no file under tools/ci-runner hardcodes a host path' {
 
 Test-Case 'ci-runner: Get-CiRunnerDockerArgs -CacheVolumes adds the three cache mounts and sccache envs' {
     $cbase = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
-    $cmounts = @('ci-cargo-registry:/home/runner/.cargo/registry',
-                 'ci-cargo-git:/home/runner/.cargo/git',
-                 'ci-sccache:/home/runner/.cache/sccache')
+    $cmounts = @('ci-cargo-registry-workst-plangraph:/home/runner/.cargo/registry',
+                 'ci-cargo-git-workst-plangraph:/home/runner/.cargo/git',
+                 'ci-sccache-workst-plangraph:/home/runner/.cache/sccache')
     $cenvs = @('RUSTC_WRAPPER=/usr/local/bin/sccache',
                'SCCACHE_DIR=/home/runner/.cache/sccache',
                'SCCACHE_CACHE_SIZE=30G')
     $cwant = $cmounts + $cenvs
-    $cwith = Get-CiRunnerDockerArgs @cbase -CacheVolumes
+    $cwith = Get-CiRunnerDockerArgs @cbase -CacheVolumes -CacheScope 'workst-plangraph'
     $cep = [array]::IndexOf([string[]]$cwith, '--entrypoint')
     Assert-True ($cep -ge 0) '--entrypoint missing'
     # each mount appears as the exact pair '-v','<volume>:<path>'
@@ -12433,17 +12466,54 @@ Test-Case 'ci-runner: Get-CiRunnerDockerArgs -CacheVolumes adds the three cache 
 }
 
 Test-Case 'ci-runner: Get-CiCacheVolumes returns the three cache volume names in order' {
-    $cvols = @(Get-CiCacheVolumes)
+    $cvols = @(Get-CiCacheVolumes -Scope 'workst-plangraph')
     Assert-Equal $cvols.Count 3
-    Assert-Equal $cvols[0] 'ci-cargo-registry'
-    Assert-Equal $cvols[1] 'ci-cargo-git'
-    Assert-Equal $cvols[2] 'ci-sccache'
+    Assert-Equal $cvols[0] 'ci-cargo-registry-workst-plangraph'
+    Assert-Equal $cvols[1] 'ci-cargo-git-workst-plangraph'
+    Assert-Equal $cvols[2] 'ci-sccache-workst-plangraph'
     # single source of truth: -CacheVolumes mounts exactly these volumes, in this order
-    $cargs = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -CacheVolumes
+    $cargs = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -CacheVolumes -CacheScope 'workst-plangraph'
     $cgot = @()
     for ($k = 0; $k -lt $cargs.Count - 1; $k++) { if ($cargs[$k] -eq '-v') { $cgot += ($cargs[$k + 1] -split ':')[0] } }
     Assert-Equal $cgot.Count 3
     for ($k = 0; $k -lt 3; $k++) { Assert-Equal $cgot[$k] $cvols[$k] }
+}
+
+Test-Case 'ci-runner: different repository cache scopes have disjoint volume names' {
+    $first = @(Get-CiCacheVolumes -Scope 'workst-a')
+    $second = @(Get-CiCacheVolumes -Scope 'workst-b')
+    Assert-Equal $first.Count 3
+    Assert-Equal $second.Count 3
+    foreach ($volume in $first) { Assert-True (-not ($second -contains $volume)) "shared volume: $volume" }
+}
+
+Test-Case 'ci-runner: cache volume scope is mandatory and rejects invalid values' {
+    $binding = @((Get-Command Get-CiCacheVolumes).Parameters['Scope'].Attributes | Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] })
+    Assert-True ($binding[0].Mandatory) 'Scope must be mandatory'
+    foreach ($scope in @('', 'Bad Scope!', 'Uppercase', '-leading', "valid`n")) {
+        $threw = $false
+        try { Get-CiCacheVolumes -Scope $scope | Out-Null } catch { $threw = $true }
+        Assert-True $threw "invalid scope accepted: '$scope'"
+    }
+}
+
+Test-Case 'ci-runner: -CacheVolumes throws for empty or invalid CacheScope' {
+    $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'x'; Memory = '4g'; Image = 'im:1' }
+    $threw = $false
+    try { Get-CiRunnerDockerArgs @base -CacheVolumes | Out-Null } catch { $threw = $true }
+    Assert-True $threw 'missing CacheScope accepted with -CacheVolumes'
+    foreach ($scope in @('', 'Bad Scope!', 'Uppercase', '-leading', "valid`n")) {
+        $threw = $false
+        try { Get-CiRunnerDockerArgs @base -CacheVolumes -CacheScope $scope | Out-Null } catch { $threw = $true }
+        Assert-True $threw "invalid CacheScope accepted: '$scope'"
+    }
+}
+
+Test-Case 'ci-runner: no cache switch and no scope still builds uncached argv' {
+    $args = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1'
+    Assert-Contains $args '--entrypoint'
+    Assert-True (-not ($args -contains '-v')) 'cache mount without -CacheVolumes'
+    Assert-True (-not ($args -contains 'SCCACHE_DIR=/home/runner/.cache/sccache')) 'cache env without -CacheVolumes'
 }
 
 Test-Case 'ci-runner: Get-CiPrepullImages returns the config prepull array, empty when absent' {

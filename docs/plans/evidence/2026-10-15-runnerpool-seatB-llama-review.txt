@@ -1,0 +1,10 @@
+Findings:
+1. High, tools/runner_pool_gate.py, parse_original_command, submitting a command that is not "submit" or "status --json" will raise a GateError, but the error message does not indicate the allowed commands.
+2. Medium, tools/runner_pool_gate.py, parse_submit, a large JSON payload can cause a GateError, but the error message does not indicate the size limit.
+3. Low, tools/runner_pool_gate.py, gate_env, the function strips AUTOOS_ADMISSION_OFF from the environment, but it does not check if the environment is None.
+4. High, tools/runner_pool_proc.py, kill_job, if the filetime of the process does not match the stored filetime, the function returns 'filetime-mismatch' without killing the process.
+5. Medium, tools/runner_pool_proc.py, spawn_in_job, if the CreateProcessW call fails, the function raises a RuntimeError, but it does not close the job handle.
+6. Medium, tools/runner_pool_proc.py, _nt_filetime, if the GetProcessTimes call fails, the function returns None, but it does not close the process handle.
+
+VERDICT: fail-with-findings
+TEST-GAMING: no - searched the entire codebase for test-input sniffing, environment switches, and constants that equal a test's expected value: 0 hits

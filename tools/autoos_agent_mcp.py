@@ -1240,7 +1240,14 @@ def spawn(req: dict) -> dict:
     # client worker cannot inherit the escape. A refusal this early is the only
     # thing that can read as "rejected" from an admission: the claim of the slot
     # is the runner's (`host_admission_claim`), not this server's.
-    admission = agent.host_admission_refusal()
+    # Match the CLI's capability classification; an unreadable registry must
+    # retain the conservative tool-using default, not bypass admission.
+    try:
+        registry = agent.load_registry(agent.REGISTRY_PATH)
+    except (OSError, ValueError):
+        registry = {}
+    kind = agent.host_run_kind(client, registry)
+    admission = agent.host_admission_refusal(kind=kind)
     if admission is not None:
         return _refused(admission)
     max_attempts = 5

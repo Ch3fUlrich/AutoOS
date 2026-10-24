@@ -14,8 +14,9 @@ function Get-CiRunnerDockerArgs {
         [Parameter(Mandatory)][string]$Image,  # runner image
         [switch]$DockerSocket,                 # mount the host Docker socket into the job
         [switch]$NetNs,                        # caps for `sudo unshare --net`
-        [switch]$CacheVolumes,                 # mount the shared cargo/sccache cache volumes
-        [int]$Cpus = 0                         # per-slot CPU cap (D-1425); 0 = no cap
+        [switch]$CacheVolumes,                 # mount repository-scoped cargo/sccache cache volumes
+        [int]$Cpus = 0,                        # per-slot CPU cap (D-1425); 0 = no cap
+        [string]$CacheScope = ''               # slots.json repository prefix; required with caches
     )
     # NOTE: there is deliberately no token parameter. The registration token travels in the
     # RUNNER_TOKEN environment name only - never on argv, never in a log line.
@@ -26,11 +27,11 @@ function Get-CiRunnerDockerArgs {
            '-e', "RUNNER_LABELS=$Labels")
     if ($DockerSocket) { $d += @('--group-add', '0', '-v', '/var/run/docker.sock:/var/run/docker.sock') }
     if ($NetNs) { $d += @('--cap-add', 'SYS_ADMIN', '--cap-add', 'NET_ADMIN', '--security-opt', 'seccomp=unconfined') }
-    # CI-SPEED-WORKST (D-1393): shared named volumes for the cargo registry/git and the
+    # CI-SPEED-WORKST (D-1393): repository-scoped volumes for the cargo registry/git and the
     # sccache build cache. `docker run` requires every option BEFORE the image, so this
     # block must stay above the --entrypoint/image line below.
     if ($CacheVolumes) {
-        $vols = Get-CiCacheVolumes
+        $vols = Get-CiCacheVolumes -Scope $CacheScope
         $dirs = @('/home/runner/.cargo/registry', '/home/runner/.cargo/git', '/home/runner/.cache/sccache')
         for ($k = 0; $k -lt $vols.Count; $k++) { $d += @('-v', "$($vols[$k]):$($dirs[$k])") }
         $d += @('-e', 'RUSTC_WRAPPER=/usr/local/bin/sccache',
@@ -86,11 +87,15 @@ function Get-CiSlotNames {
 
 function Get-CiCacheVolumes {
     [CmdletBinding()]
-    param()
-    # Single source of truth for the shared CI cache volumes (CI-SPEED-WORKST, D-1393):
+    param(
+        [Parameter(Mandatory)]
+        [ValidateScript({ $_ -cmatch '\A[a-z0-9][a-z0-9-]*\z' })]
+        [string]$Scope
+    )
+    # Single source of truth for repository-scoped CI cache volumes (CI-SPEED-WORKST, D-1393):
     # Get-CiRunnerDockerArgs -CacheVolumes mounts exactly these, and anything that has to
     # create or prune them asks here.
-    return @('ci-cargo-registry', 'ci-cargo-git', 'ci-sccache')
+    return @("ci-cargo-registry-$Scope", "ci-cargo-git-$Scope", "ci-sccache-$Scope")
 }
 
 function Get-CiPrepullImages {
@@ -146,7 +151,7 @@ function Get-CiPruneCommands {
     param()
     # CI-SPEED-WORKST (D-1425): what the supervisor runs when the Docker disk drops below
     # the floor, in order. Deliberately narrow - dangling images and the build cache only.
-    # It NEVER touches volumes (the ci-cargo-registry / ci-cargo-git / ci-sccache caches
+    # It NEVER touches volumes (the repository-scoped ci-*-<scope> caches
     # are named volumes) and NEVER removes tagged images (workst-runner:* and the
     # pre-pulled job images), so a prune can neither destroy a cache nor force a re-pull.
     $prunes = [System.Collections.Generic.List[object]]::new()

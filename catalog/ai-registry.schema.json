@@ -30,7 +30,7 @@
     },
     "clients": {
       "type": "object",
-      "description": "One entry per agent CLI (spec 3.1): opencode, claude, qwen, gemini, codex, agy, qoder.",
+      "description": "One entry per agent client (spec 3.1): opencode, claude, qwen, gemini, codex, agy, qoder, api.",
       "additionalProperties": { "$ref": "#/$defs/client" }
     },
     "host_admission": {
@@ -39,6 +39,29 @@
       "additionalProperties": false,
       "properties": {
         "$comment": { "$ref": "#/$defs/comment" },
+        "kinds": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "max_live_workers": { "type": "integer", "minimum": 1 },
+              "mem_available_floor_mb": { "type": "integer", "minimum": 1 }
+            }
+          }
+        },
+        "by_platform": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "max_live_workers": { "type": "integer", "minimum": 1 },
+              "mem_available_floor_mb": { "type": "integer", "minimum": 1 },
+              "commit_charge_max_pct": { "type": "integer", "minimum": 1, "maximum": 100 }
+            }
+          }
+        },
         "max_live_workers": {
           "type": "integer",
           "description": "Live worker records (ps state 'running': a live pid) this host may hold while the spawner still admits. Equal is refused."
