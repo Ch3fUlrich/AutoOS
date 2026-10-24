@@ -854,7 +854,16 @@ def implicit_policy_writer(req: dict) -> bool:
     return (not req.get("client") and not req.get("model")
             and not req.get("free_model") and not req.get("free")
             and req.get("tier") is None and not req.get("read_only")
-            and is_write_role(req))
+            and is_write_role(req) and _policy_writers_declared())
+
+
+def _policy_writers_declared() -> bool:
+    """No policy.writers.order (an old or test registry) keeps the opencode default."""
+    try:
+        registry = agent.load_registry(agent.REGISTRY_PATH)
+    except (OSError, ValueError):
+        return False
+    return bool(((registry.get("policy") or {}).get("writers") or {}).get("order"))
 
 
 def spawn_client(req: dict) -> str:
@@ -1236,6 +1245,8 @@ def spawn(req: dict) -> dict:
             # spawn's own declaration -- so the exception is one call wide instead of an
             # AUTOOS_CLAUDE_CRITICAL the server holds for every caller that follows.
             reason=req.get("claude_reason"))
+    except agent.PolicyWriterUnavailable as exc:
+        return _refused(str(exc))
     except (OSError, ValueError) as exc:
         return _refused("cannot read the Claude budget: %s" % exc)
     if budget_refusal is not None:
