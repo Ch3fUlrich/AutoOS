@@ -66,12 +66,13 @@ training-data rules: [docs/models.md](../docs/models.md). Phone reachability:
 ## opencode serve (phone fallback web UI)
 
 ```bash
-./configuration/autostart/run-opencode-serve.sh --detach   # 0.0.0.0:4096, background
+./configuration/autostart/run-opencode-serve.sh --detach   # 127.0.0.1:4096, background (AUTOOS_OPENCODE_HOST names another address; a wildcard is refused)
 ./configuration/start-stack.sh opencode-serve              # same, no-op when up
 ```
 
 opencode V2 serves its UI to anyone and guards `/api/*` with HTTP Basic auth:
-user **`opencode`**, password from `OPENCODE_PASSWORD`. Without that variable
+user **`opencode`**, password from `OPENCODE_PASSWORD` (`OPENCODE_SERVER_PASSWORD`
+carries the same value — one source, both names). Without that variable
 it invents a new password on every start, so the value is pinned in
 `configuration/api-keys.yml` → `opencode_password` — the single source, edited
 there or in the browser UI's **Logins and keys** card. The wrapper reads that key
@@ -106,7 +107,7 @@ it after moving the checkout or upgrading node:
 |---|---|---|
 | `autoos-omniroute` | `omniroute serve` (notify + watchdog) | `0.0.0.0:20128` |
 | `autoos-litellm` | `configuration/litellm/start-litellm.sh --foreground` | `127.0.0.1:4000` |
-| `autoos-opencode` | `configuration/autostart/run-opencode-serve.sh` | `0.0.0.0:4096` |
+| `autoos-opencode` | `configuration/autostart/run-opencode-serve.sh` | `127.0.0.1:4096` by default (`AUTOOS_OPENCODE_HOST` names another address; a wildcard is refused) |
 | `autoos-stack` | `Start-AutoOSStack.sh` (oneshot: OpenHands container, anything down) | - |
 
 A service somebody started by hand keeps running: its unit is enabled (it

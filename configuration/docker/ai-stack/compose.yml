@@ -143,6 +143,11 @@ services:
     # OPENCODE_PASSWORD (Basic auth on /api/*), the gateway client key and the
     # other {env:...} keys the rendered config references. Only these: the
     # agent's shell can read this container's environment.
+    # OPENCODE_PASSWORD and OPENCODE_SERVER_PASSWORD are the ONE
+    # configuration/api-keys.yml `opencode_password` value under both names
+    # (D-2542): either name alone authenticates, and with both set
+    # OPENCODE_PASSWORD wins - a build reading only the other name must not
+    # 401 against the value the operator was given.
     env_file:
       - ${AUTOOS_STACK_CONFIG:?run ai-stack.sh init}/opencode.env
     environment:
@@ -158,7 +163,14 @@ services:
       # omnigraph-server is published on the host's :8080.
       - host.docker.internal:host-gateway
     ports:
-      - "${AUTOOS_STACK_BIND:-0.0.0.0}:4096:4096"
+      # D-2542: opencode's own publish address, loopback by default. The root
+      # UI answers 200 to anyone, so :4096 must never ride AUTOOS_STACK_BIND
+      # (that keeps :20128 and :3000) and never default to a wildcard. A
+      # deliberate LAN/tail publish names the address here instead -
+      # ai-stack.sh refuses a wildcard before compose runs. The `command`
+      # above still says 0.0.0.0 because that is the CONTAINER-side listen
+      # address docker's port mapping forwards to; publishing is this line.
+      - "${AUTOOS_OPENCODE_PUBLISH_IP:-127.0.0.1}:4096:4096"
     # mem_limit removed 2026-09-29 (operator): the 1536m cap was OOM-killing
     # PID 1 (opencode serve) repeatedly and every restart cut every in-flight
     # run across the fleet. pids_limit mirrors the live `docker update`
@@ -166,8 +178,19 @@ services:
     # above is the actual cure, the higher ceiling only buys headroom.
     pids_limit: 4096
     healthcheck:
-      # The UI answers 200 without the password; /api/* is what is guarded.
-      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:4096/"]
+      # The UI answers 200 without the password (measured on 2.0.19), so
+      # curling the open root only proves *a* file server is there. Probe the
+      # guarded /api/session instead, carrying the configured password under
+      # either name (measured: either alone works, OPENCODE_PASSWORD wins when
+      # both are set). A 401 still counts as alive: it proves the auth layer
+      # answers, and opencode invents a random password when neither name is
+      # set - anything stricter would restart-loop that container forever
+      # under autoheal. User `opencode` is upstream's constant:
+      # anomalyco/opencode#45856 (OPENCODE_SERVER_USERNAME ignored; measured
+      # 2.0.19 in-container, host builds 2.0.32 and 2.1.1).
+      # `$$` is compose's escape for a literal `$`: the container's shell
+      # expands these, not compose.
+      test: ["CMD-SHELL", "c=$(curl -sS -o /dev/null -w '%{http_code}' -u \"opencode:$${OPENCODE_PASSWORD:-$${OPENCODE_SERVER_PASSWORD}}\" http://127.0.0.1:4096/api/session 2>/dev/null); [ \"$c\" = 200 ] || [ \"$c\" = 401 ]"]
       interval: 30s
       timeout: 5s
       start_period: 30s

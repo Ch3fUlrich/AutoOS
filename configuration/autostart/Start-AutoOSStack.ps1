@@ -150,7 +150,9 @@ if (Test-OpencodeServe) {
     Write-Host 'opencode is not installed - run setup.ps1 -Only opencode-cli -Yes once, then re-run this.'
 } else {
     Write-Host 'Starting opencode serve in the background...'
-    Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', '0.0.0.0', '--port', '4096' -WindowStyle Hidden
+    # D-2549: loopback, never a wildcard - opencode's root UI answers without a
+    # password, so 0.0.0.0 would hand every host the agent's web UI.
+    Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', '127.0.0.1', '--port', '4096' -WindowStyle Hidden
     $tries = 0
     while ((-not (Test-OpencodeServe)) -and ($tries -lt 24)) { Start-Sleep 5; $tries++ }
     if (Test-OpencodeServe) { Write-Host 'opencode serve OK on :4096.' }

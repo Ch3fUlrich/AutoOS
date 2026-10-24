@@ -7,6 +7,10 @@
 # password on every start, so a phone could never log in twice. This wrapper
 # pins one: generated once into a 0600 file, never printed.
 #
+# Because the root UI needs no password, the BIND is what keeps the LAN out of
+# the agent's sessions (incident D-2542): 127.0.0.1 unless AUTOOS_OPENCODE_HOST
+# names an allowlisted address, and a wildcard (0.0.0.0, ::, *) refused outright.
+#
 # It also exports the keys the global opencode config references as {env:...}
 # (setup_opencode_config writes references, never values): every entry of
 # configuration/litellm/.env, read literally, plus the omniroute client key
@@ -22,7 +26,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
-HOST="${AUTOOS_OPENCODE_HOST:-0.0.0.0}"
+HOST="${AUTOOS_OPENCODE_HOST:-127.0.0.1}"
 PORT="${AUTOOS_OPENCODE_PORT:-4096}"
 PW_FILE="${AUTOOS_OPENCODE_PASSWORD_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/autoos/opencode-serve.password}"
 KEYS_FILE="${AUTOOS_KEYS_FILE:-$REPO/configuration/api-keys.yml}"
@@ -35,10 +39,25 @@ for arg in "$@"; do
     case "$arg" in
         --dry-run) DRY=1 ;;
         --detach)  DETACH=1 ;;
-        -h|--help) sed -n '2,21p' "${BASH_SOURCE[0]}"; exit 0 ;;
+        -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) echo "Unknown option: $arg"; exit 2 ;;
     esac
 done
+
+# D-2542: opencode's root UI answers without a password, so a wildcard bind
+# hands every interface on the network the agent's web UI. Loopback is the
+# default; an address the operator names in AUTOOS_OPENCODE_HOST is the
+# allowlist; a wildcard is never an answer. Checked before anything runs, so a
+# --dry-run plan can never print a wildcard bind either.
+case "$HOST" in
+    0.0.0.0|::|'*')
+        echo "Refusing to serve opencode on $HOST:$PORT: the root UI needs no password, so a"
+        echo "wildcard bind exposes the agent's sessions to every host on the network."
+        echo "Use the default 127.0.0.1, or name an allowlisted address in AUTOOS_OPENCODE_HOST."
+        exit 3
+        ;;
+esac
+
 [[ $DRY -eq 1 ]] && echo "This is a dry run - nothing is started or written."
 
 # shellcheck source=../env-file.sh
@@ -120,7 +139,11 @@ if [[ -n "$KEYS_PW" ]]; then
 else
     OPENCODE_PASSWORD="$(cat "$PW_FILE")"
 fi
-export OPENCODE_PASSWORD
+# One value, both names (D-2542): either name alone authenticates, and with
+# both set OPENCODE_PASSWORD wins - so a build reading only the other name
+# must get this password, not a 401 against the value the operator was given.
+OPENCODE_SERVER_PASSWORD="$OPENCODE_PASSWORD"
+export OPENCODE_PASSWORD OPENCODE_SERVER_PASSWORD
 
 # From $HOME, as the unit does: the serve process's cwd becomes its default
 # project, and the caller's checkout is not the phone's project.
