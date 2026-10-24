@@ -443,14 +443,15 @@ if it "Antigravity: an unresolved base URL stops before mcp_config.json"; then
     if (( ok )); then pass; else fail "install_omnigraph_client writes an Antigravity omnigraph entry it cannot resolve"; fi
 fi
 
-if it "omnigraph: no Linux writer keeps a localhost default, and all three share the resolver"; then
+if it "omnigraph: no Linux writer keeps a localhost default, and both share the resolver"; then
     ok=1
     grep -qF 'http://localhost:8080' lib/linux/install.sh \
         && { ok=0; echo "lib/linux/install.sh still carries the localhost default" >&2; }
     grep -qF '"OMNIGRAPH_BASE_URL": "{env:OMNIGRAPH_BASE_URL}"' opencode.jsonc \
         || { ok=0; echo "opencode.jsonc does not point at the variable (a public repo cannot hold the site URL)" >&2; }
     callers="$(grep -c '\$(omnigraph_base_url)' lib/linux/install.sh)"
-    (( callers >= 3 )) || { ok=0; echo "only $callers of the three writers call the resolver" >&2; }
+    # ZED-SETUP-REMOVE (D-2598): the Zed writer was the third caller; install_omnigraph_client and the OpenCode merge remain.
+    (( callers >= 2 )) || { ok=0; echo "only $callers of the two writers call the resolver" >&2; }
     if (( ok )); then pass; else fail "an omnigraph writer can still invent a server"; fi
 fi
 

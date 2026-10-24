@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Start the AutoOS AI stack: OmniRoute gateway, then the app you pick.
 
