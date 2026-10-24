@@ -571,6 +571,61 @@ def plan_of(*args, env=None):
 
 
 class WriterPolicyPickTests(unittest.TestCase):
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = self.agent.load_registry(str(ROOT / "catalog/ai-registry.json"))
+        self.state = {name: {"installed": True, "signed_in": True}
+                      for name in clients.CLIENTS}
+        for target, value in (("load_live_registry", self.registry),):
+            patcher = mock.patch.object(self.agent, target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(self.agent.measure_mod, "client_state", return_value=self.state)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_writer_policy_skips_disabled_row(self):
+        self.registry["policy"]["writers"]["order"][0]["available"] = False
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        self.assertEqual(decision["model"], "mimo/mimo-v2.6-flash")
+        self.assertIn("unavailable", decision["writer_skips"][0]["reason"])
+
+    def test_writer_policy_missing_client_is_recorded(self):
+        self.state["opencode"]["installed"] = False
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        self.assertEqual(decision["client"], "qoder")
+        self.assertEqual(len(decision["writer_skips"]), 3)
+        self.assertIn("not installed", decision["writer_skips"][0]["reason"])
+
+    def test_writer_policy_route_leg_bench_is_used(self):
+        leg = "cx/gpt-6.1-sol"
+        self.registry["routes"]["fixture"] = {
+            "legs": [leg], "unavailable_legs": {leg: {"available": False}}}
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        self.assertNotEqual(decision["model"], "omniroute/cx-gpt-6.1-sol")
+
+    def test_writer_policy_sensitive_replacement_is_checked(self):
+        with self.assertRaisesRegex(self.agent.PrivacyRefused, "privacy"):
+            self.agent.policy_writer_route({"privacy": "sensitive"}, eligible=True,
+                                          registry=self.registry, client_state=self.state)
+
+    def test_writer_policy_pricing_without_hand_row(self):
+        self.assertIs(self.agent.spawn_spends_claude(
+            "opencode", "omniroute/cx-gpt-6.1-sol", self.registry,
+            source="policy.writers.order", cfg={}), False)
+
+    def test_writer_policy_log_records_skips(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        skips = [{"entry": {"model": "fixture"}, "reason": "unavailable"}]
+        plan = {"client": "opencode", "agent": "worker", "model": "fixture",
+                "route": {"combo": "fixture", "reason": "policy.writers.order"},
+                "depth": (1, 2), "sandbox": None, "writer_skips": skips}
+        with mock.patch.object(self.agent, "ROOT", directory):
+            self.agent.log_run(plan, 0, 1, False)
+        log = next(Path(directory, "logs").glob("orch-*.log")).read_text()
+        self.assertIn(json.dumps(skips, sort_keys=True), log)
+
     def test_writer_policy_mapping(self):
         agent = load_agent()
         registry = agent.load_registry(str(ROOT / "catalog/ai-registry.json"))
@@ -583,16 +638,17 @@ class WriterPolicyPickTests(unittest.TestCase):
         self.assertIsNone(agent.writer_launch_adapter({"client": "unknown", "model": "x"}, registry))
 
     def test_writer_policy_default_dry_run(self):
-        result = plan_of("implement a small fix")
+        with mock.patch.object(load_agent(), "load_live_registry", return_value=self.registry):
+            result = plan_of("implement a small fix")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("omniroute/cx-gpt-6.1-sol", result.stdout)
 
     def test_writer_policy_cooldown_records_skip(self):
-        agent = load_agent()
+        agent = self.agent
         until = (datetime.datetime.now(datetime.timezone.utc)
                  + datetime.timedelta(hours=1)).isoformat()
         args = argparse.Namespace(
-            client="opencode", default_client=True, tier=None, card=None,
+            client=None, tier=None, card=None,
             task="implement a fix", free=False, model=None, clean=False,
             allow_training=False, max_depth=None, title=None, isolate=False,
             auto=True, lean=False, joinable=False)
@@ -18961,7 +19017,7 @@ class CreditGuardWiringTests(unittest.TestCase):
 
         def spy(card, brief, repo, orchestrator_model, now, registry, overlay,
                 track_record, client_state, client="opencode", env=None,
-                overlay_missing_at=None, credit_guards=None):
+                overlay_missing_at=None, credit_guards=None, apply_writer_policy=False):
             seen.append(credit_guards)
             return {"route": "l2-worker", "state": "ready", "reason": "stub",
                     "bucket": "S1", "defer_until": None, "explain": [],
@@ -22111,10 +22167,10 @@ class FreeOnlyComboTests(unittest.TestCase):
         self.assertNotIn("route: l3-driver ", out)
 
     def test_a_paid_strong_card_keeps_its_paid_combo(self):
-        out = self._route_line("--card",
+        out = self._route_line("--model", "omniroute/l1-orchestrator", "--card",
                                "complexity=hard,ctx=128k,privacy=public,"
                                "role=implement,spend=free-ok", "t")
-        self.assertRegex(out, r"route: cx-gpt-6.1-sol reason=policy.writers.order")
+        self.assertIn("route: l1-orchestrator", out)
         self.assertNotIn("free-only", out)
 
     def test_the_build_plan_route_combo_is_the_free_only_one_too(self):

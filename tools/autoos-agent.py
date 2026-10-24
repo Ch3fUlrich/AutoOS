@@ -3760,6 +3760,9 @@ def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
             # answers it for whatever leg IT picks too, so a re-build that dropped
             # the argument re-admits the fenced family one leg after it was refused.
             next_plan = build_plan(args, cfg, sandbox=plan["sandbox"], fence=fence)
+        except PolicyWriterUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            return None, None, None
         except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
                 ValueError):
             return None, None, None  # the guard says no: exit 8 below
@@ -4380,6 +4383,12 @@ def spawn_spends_claude(client_name: str, model, registry: dict,
             # about; it was wrong for one it has a priced row for. An
             # anthropic-family row answers Claude whatever its name says.
             row = (registry.get("models") or {}).get(combo)
+            if row is None:
+                # Policy aliases are model identities, not undeclared combos.
+                # Price their declared leg even without an opencode hand row.
+                for writer in registry.get("policy", {}).get("writers", {}).get("order", []):
+                    if writer.get("model") == model and writer.get("leg"):
+                        return _leg_is_claude(writer["leg"], registry)
             if isinstance(row, dict):
                 if (row.get("family") or "").lower() in ("anthropic", "claude"):
                     return True
@@ -8504,37 +8513,70 @@ def writer_launch_adapter(entry, registry):
     return None
 
 
-def pick_policy_writer(provider_cooldown=None):
+class PolicyWriterUnavailable(ValueError):
+    """The policy has no launchable writer; preserve this cause on retries."""
+
+
+def pick_policy_writer(provider_cooldown=None, *, registry=None, client_state=None, now=None):
     """Pick once using the resolver's live availability, preserving skipped rows."""
-    now = datetime.datetime.now(datetime.timezone.utc)
-    registry = load_live_registry()
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    registry = load_live_registry() if registry is None else registry
+    client_state = measure_mod.client_state(clients) if client_state is None else client_state
     if provider_cooldown:
         registry = apply_provider_state(registry, {"providers": provider_cooldown}, now)
     rows = registry.get("policy", {}).get("writers", {}).get("order", [])
     skips = []
     for entry in rank_candidates("writer", rows, registry):
         launch = writer_launch_adapter(entry, registry)
-        reason = None
+        reason = "unavailable: policy row" if unavailable_now(entry, now) else None
         if launch is None:
             reason = "no launch adapter for " + entry["client"]
         else:
             client, model = launch
-            client_entry = registry.get("clients", {}).get(client, {})
-            if unavailable_now(client_entry, now):
-                reason = resolver._unavailable_reason(client_entry, client)
-            leg = model.removeprefix("omniroute/")
+            # No public reason-returning API exists for these resolver filters.
+            # Native clients (notably qoder) use client availability, not a
+            # fictitious gateway provider inferred from their model spelling.
+            reason = reason or resolver._client_reason(client_state, client, registry, now)
+            leg = entry.get("leg") or model.removeprefix("omniroute/")
+            try:
+                leg_provider, leg_model = resolve_leg(leg, registry)
+                leg = (registry["providers"][leg_provider].get("model_prefix") or leg_provider) + "/" + leg_model
+            except ValueError:
+                pass
+            unavailable = {}
+            for route in registry.get("routes", {}).values():
+                unavailable.update(route.get("unavailable_legs") or {})
+            notes = []
             for provider_id, provider in registry.get("providers", {}).items():
                 prefix = provider.get("model_prefix") or provider_id
                 if leg.startswith(prefix + "/") or leg.startswith(prefix + "-"):
-                    provider_reason, _ = resolver._leg_availability(
-                        leg, provider_id, registry.get("unavailable_legs", {}), registry, now)
+                    provider_reason, notes = resolver._leg_availability(
+                        leg, provider_id, unavailable, registry, now)
                     reason = reason or provider_reason
                     break
             if reason is None:
                 return {"entry": entry, "client": client, "model": model,
-                        "writer_skips": skips}
+                        "writer_skips": skips, "availability_notes": notes}
         skips.append({"entry": entry, "reason": reason})
-    raise ValueError("no available policy writer: %s" % skips)
+    raise PolicyWriterUnavailable("no available policy writer: %s" % skips)
+
+
+def policy_writer_route(route, *, eligible, provider_cooldown=None,
+                        registry=None, client_state=None, now=None, allow_training=False):
+    """Apply the same writer decision to run and preflight before launch gates."""
+    if not eligible or route.get("review") or route.get("read_only"):
+        return route, None
+    registry = load_live_registry() if registry is None else registry
+    decision = pick_policy_writer(provider_cooldown, registry=registry,
+                                  client_state=client_state, now=now)
+    picked = decision["model"]
+    combo = model_route_id(picked)
+    if route.get("privacy") == "sensitive" and not allow_training:
+        reason = sensitive_combo_refusal(combo, registry)
+        if reason:
+            raise PrivacyRefused(reason)
+    return dict(route, model=picked, combo=combo, reason="policy.writers.order",
+                writer_decision=decision), decision
 
 
 def build_plan(args, cfg: dict, exclude_routes: set | None = None,
@@ -8552,13 +8594,16 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     commit and its work stay on one branch. ``fence`` (FAMILYFENCE) is the family
     fence, applied to whatever leg this plan picks — see `family_fence`.
     """
+    if args.client is None:
+        args.default_client = True
+        args.client = choose_client(required_capabilities(args))
     client = clients.CLIENTS[args.client]
     route = resolve_route(args, cfg, client, exclude_routes, provider_cooldown, fence)
-    writer_decision = None
-    if (getattr(args, "default_client", False) and not args.model
-            and not args.free and args.tier is None and not route["review"]
-            and not route.get("read_only")):
-        writer_decision = pick_policy_writer(provider_cooldown)
+    route, writer_decision = policy_writer_route(
+        route, eligible=(getattr(args, "default_client", False) and not args.model
+                         and not args.free and args.tier is None),
+        provider_cooldown=provider_cooldown, allow_training=args.allow_training)
+    if writer_decision:
         client = clients.CLIENTS[writer_decision["client"]]
         picked = writer_decision["model"]
         if fence_blocks_model(picked, load_live_registry(), fence):
@@ -10323,7 +10368,7 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
                    client_state: dict, client: str = "opencode",
                    env: dict | None = None,
                    overlay_missing_at: str | None = None,
-                   credit_guards: dict | None = None) -> dict:
+                   credit_guards: dict | None = None, apply_writer_policy=False) -> dict:
     """card -> route_plan (spec 6.1/6.2): the CLI `route` subcommand and the MCP
     `route` tool's shared, pure-ish core.
 
@@ -10352,7 +10397,18 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     features = measure_mod.measure(normalized, repo, brief or "")
     result = resolver.plan(normalized, features, client_state, registry,
                            overlay, track_record, orchestrator_model, now,
-                           client, env, credit_guards)
+                            client, env, credit_guards)
+    if (apply_writer_policy and registry.get("policy", {}).get("writers", {}).get("order")
+            and client == "opencode" and normalized.get("role") not in
+            ("review", "read", "research") and not normalized.get("model")
+            and result.get("route")):
+        picked_route, decision = policy_writer_route(
+            {"privacy": normalized.get("privacy"), "review": result.get("review")},
+            eligible=True, registry=registry, client_state=client_state, now=now)
+        if decision:
+            result = dict(result, route=picked_route["combo"], model=decision["model"],
+                          client=decision["client"], writer_decision=decision,
+                          writer_skips=decision["writer_skips"], reason=picked_route["reason"])
     # OVERLAYHOME: with no overlay file at all, "tool_calls: ... unproven" is
     # the machine's missing data, not the legs' verdict - say which.
     if (overlay_missing_at and result.get("state") == "input_required"
@@ -10401,7 +10457,7 @@ def cmd_route(args) -> int:
                                 track_record, client_state,
                                 getattr(args, "client", None) or "opencode",
                                 os.environ, overlay_missing_at=overlay_missing_at,
-                                credit_guards=plan_credit_guards(registry))
+                                 credit_guards=plan_credit_guards(registry), apply_writer_policy=True)
     except (routing.CardError, ValueError) as exc:
         return refuse(str(exc))
     if args.explain:
@@ -10428,6 +10484,7 @@ def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:
         plan["model"], route["combo"] or "-", route["reason"], routing.ROUTING_VERSION, card,
         plan["depth"][0], plan["depth"][1], int(free),
         (plan["sandbox"] or {}).get("path", "-"), rc, secs)
+    line = line.rstrip("\n") + " writer_skips=" + json.dumps(plan.get("writer_skips", []), sort_keys=True) + "\n"
     with io.open(os.path.join(logs, "orch-%s.log" % datetime.date.today().isoformat()), "a", encoding="utf-8") as fh:
         fh.write(line)
 
@@ -13432,6 +13489,8 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None, *, kind
         "id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
         "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
         "client": plan.get("client"), "model": plan.get("model"),
+        "writer_skips": plan.get("writer_skips", []),
+        "writer_decision": plan.get("writer_decision"),
         "kind": kind,
         # FAMILYFENCE-b: the row names the model the run was ASKED to use and where
         # that ask came from, so a default never reads as a pin. What actually
@@ -14149,7 +14208,10 @@ def cmd_run(args, cfg: dict) -> int:
                            else load_registry(getattr(args, "registry", None) or REGISTRY_PATH))
     except (OSError, ValueError) as exc:
         return refuse("cannot load client availability: %s" % exc)
-    _avail_entry = ((_avail_registry.get("clients") or {}).get(args.client) or {})
+    _policy_pending = (args.default_client and not args.model and not args.free
+                       and args.tier is None)
+    _avail_entry = ({} if _policy_pending else
+                    ((_avail_registry.get("clients") or {}).get(args.client) or {}))
     _avail_now = datetime.datetime.now(datetime.timezone.utc)
     if unavailable_now(_avail_entry, _avail_now):
         _avail_until = _avail_entry.get("unavailable_until")
@@ -14377,8 +14439,15 @@ def cmd_run(args, cfg: dict) -> int:
     except (RouteInputRequired, RouteDeferred, PrivacyRefused, GeminiRefused,
             ReviewBaseRefused) as exc:  # plan's / PRIV3's / D-255's / P1's own
         return refuse(str(exc))                        # message, no suffix added
+    except PolicyWriterUnavailable as exc:
+        return refuse(str(exc))
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
+    client = clients.CLIENTS[plan["client"]]
+    picked_reason = resolver._client_reason(
+        {client.name: {"installed": True}}, client.name, _avail_registry)
+    if picked_reason:
+        return refuse(picked_reason)
     # The early gate read the flags; the plan may have rewritten the model
     # since (a re-resolved route, a fenced free head), so the gate reads the
     # plan it would actually launch on, not just the argv.
@@ -15063,6 +15132,9 @@ def cmd_run(args, cfg: dict) -> int:
                                                    sandbox=plan["sandbox"],
                                                    provider_cooldown=provider_cooldown,
                                                    fence=fence)
+                        except PolicyWriterUnavailable as exc:
+                            print(str(exc), file=sys.stderr)
+                            next_plan = None
                         except (clients.DepthError, RouteInputRequired, RouteDeferred,
                                 PrivacyRefused, ValueError):
                             next_plan = None  # no route left (or unplannable): exit 8
