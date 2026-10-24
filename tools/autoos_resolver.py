@@ -2420,6 +2420,14 @@ def author_family(author, registry):
                   "knows, and not a family it declares" % name)
 
 
+def _reviewer_outage(entry, name):
+    """Keep the provider's diagnosis alongside the time-aware outage reason."""
+    reason = _unavailable_reason(entry, name)
+    details = [entry.get(key) for key in ("note", "reason")
+               if isinstance(entry, dict) and entry.get(key)]
+    return "; ".join([reason] + [str(text) for text in details])
+
+
 def _reviewer_rejections(entry, family, registry, client_state, now, risk,
                          privacy):
     """``(reasons, resolved_leg)`` for one reviewer entry; empty reasons = usable.
@@ -2431,6 +2439,8 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
     """
     reasons = []
     reviewer_family = entry.get("family")
+    if family_key(reviewer_family) == "qwen" and entry.get("client") != "qoder":
+        reasons.append("D-2641: qwen only via qodercli")
     if not reviewer_family:
         reasons.append("no family: cannot check the different-family rule")
     elif family_key(reviewer_family) == family:
@@ -2449,6 +2459,16 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
     if client_reason:
         reasons.append(client_reason)
 
+    # Measured overlay entries supplement registry outages; never lose the
+    # upstream diagnosis when a quota makes a reviewer unavailable.
+    client = entry.get("client")
+    for data in (((registry.get("clients") or {}).get(client) or {}),
+                 ((client_state or {}).get(client) or {}), entry):
+        if unavailable_now(data, now):
+            outage = _reviewer_outage(data, client)
+            if outage not in reasons:
+                reasons.append(outage)
+
     leg = entry.get("leg")
     resolved = None
     if leg:
@@ -2464,7 +2484,12 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
         resolved = (provider_id, model_id)
         provider = registry["providers"].get(provider_id) or {}
         if unavailable_now(provider, now):
-            reasons.append(_unavailable_reason(provider, provider_id))
+            reasons.append(_reviewer_outage(provider, provider_id))
+        for section in ("providers", "legs"):
+            name = provider_id if section == "providers" else leg
+            data = ((client_state or {}).get(section) or {}).get(name) or {}
+            if unavailable_now(data, now):
+                reasons.append(_reviewer_outage(data, name))
         bound = (registry["models"].get(model_id) or {}).get("client_bound")
         if bound and bound != entry.get("client"):
             reasons.append("client_bound: %s needs %s, not %s"

@@ -3272,6 +3272,97 @@ class FreeAiResolverTests(unittest.TestCase):
         self.assertIn("privacy:", " ".join(removed["l3-driver-free-only"]))
 
 
+class RealCatalogSeatTests(unittest.TestCase):
+    NOW = datetime(2026, 10, 24, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.registry = json.loads((Path(__file__).resolve().parents[1] /
+                                    "catalog/ai-registry.json").read_text(encoding="utf-8"))
+        self.entries = self.registry["policy"]["reviewers"]
+        self.state = {e["client"]: {"installed": True, "signed_in": True}
+                      for e in self.entries}
+        # Availability is injected, not inherited from today's provider outages.
+        for section in ("clients", "providers"):
+            for entry in self.registry[section].values():
+                entry.pop("unavailable_until", None)
+                entry["available"] = True
+
+    def pick(self, author="cx/gpt-6.1-sol", **kwargs):
+        return r.seats_for(author, self.registry, self.state, self.NOW, **kwargs)
+
+    def test_real_catalog_independence_and_google_first(self):
+        result = self.pick()
+        self.assertEqual(result["state"], "resolved")
+        self.assertEqual(len(result["seats"]), 2)
+        families = {e["family"] for e in result["seats"]}
+        self.assertEqual(len(families), 2)
+        self.assertNotIn("openai", families)
+        self.assertEqual(result["seats"][0], self.entries[0])
+        self.assertEqual(result["seats"][0]["family"], "google")
+        self.assertNotIn("qwen", {e["family"] for e in self.pick("qwen3.8-flash")["seats"]})
+        self.assertNotEqual(self.pick(risk="high")["seats"][0]["family"], "anthropic")
+
+    def test_real_catalog_qwen_only_via_qoder(self):
+        result = self.pick()
+        for entry in self.entries:
+            if entry["family"] != "qwen":
+                continue
+            reasons, _ = r._reviewer_rejections(
+                entry, "openai", self.registry, self.state, self.NOW, "normal", "public")
+            if entry["client"] == "qoder":
+                self.assertEqual(reasons, [])
+            else:
+                self.assertIn("D-2641: qwen only via qodercli", reasons)
+                skipped = next(e for e in result["skipped"] if e["model"] == entry["model"])
+                self.assertIn("D-2641: qwen only via qodercli", skipped["reasons"])
+
+    def test_provider_bench_preserves_own_text(self):
+        provider, _ = r.resolve_leg(self.entries[0]["leg"], self.registry)
+        self.registry["providers"][provider].update(
+            available=False, unavailable_until="2026-10-25T00:00:00Z",
+            note="Provider quota exhausted; wait for daily reset")
+        skipped = next(e for e in self.pick()["skipped"] if e["client"] == "gemini")
+        self.assertIn("Provider quota exhausted; wait for daily reset", " ".join(skipped["reasons"]))
+
+    def test_go_and_free_available_then_rate_limited(self):
+        candidates = [e for e in self.entries if e.get("leg", "").startswith("opencode-go/")
+                      or (e.get("leg", "").startswith("opencode-zen/") and e["leg"].endswith("-free"))]
+        for entry in candidates:
+            if entry["family"] == "qwen":
+                continue  # D-2641 is independent of availability.
+            with self.subTest(leg=entry["leg"]):
+                registry = json.loads(json.dumps(self.registry))
+                registry["policy"]["reviewers"] = [entry, self.entries[0]]
+                self.assertIn(entry, r.seats_for("cx/gpt-6.1-sol", registry, self.state, self.NOW)["seats"])
+                provider, _ = r.resolve_leg(entry["leg"], registry)
+                registry["providers"][provider].update(available=False, reason="HTTP 429: quota reset pending")
+                result = r.seats_for("cx/gpt-6.1-sol", registry, self.state, self.NOW)
+                skipped = next(e for e in result["skipped"] if e["model"] == entry["model"])
+                self.assertIn("HTTP 429: quota reset pending", " ".join(skipped["reasons"]))
+
+    def test_client_and_leg_overlay_preserve_outage_text(self):
+        for location in ("client", "leg", "provider", "registry-client", "reviewer"):
+            with self.subTest(location=location):
+                state = json.loads(json.dumps(self.state))
+                registry = json.loads(json.dumps(self.registry))
+                outage = {"available": False, "unavailable_until": "2026-10-25T00:00:00Z",
+                          "reason": "HTTP 429: measured review quota exhausted"}
+                if location == "client":
+                    state["gemini"].update(outage)
+                elif location == "leg":
+                    state["legs"] = {self.entries[0]["leg"]: outage}
+                elif location == "provider":
+                    provider, _ = r.resolve_leg(self.entries[0]["leg"], registry)
+                    state["providers"] = {provider: outage}
+                elif location == "registry-client":
+                    registry["clients"]["gemini"].update(outage)
+                else:
+                    registry["policy"]["reviewers"][0].update(outage)
+                result = r.seats_for("cx/gpt-6.1-sol", registry, state, self.NOW)
+                skipped = next(e for e in result["skipped"] if e["client"] == "gemini")
+                self.assertIn(outage["reason"], " ".join(skipped["reasons"]))
+
+
 class TwoSeatSelectionTests(unittest.TestCase):
     NOW = datetime(2026, 10, 24, tzinfo=timezone.utc)
 
