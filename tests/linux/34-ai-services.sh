@@ -4729,7 +4729,7 @@ if it "aistack: the opencode image is rebuilt when its Dockerfile or base image 
     t="$d/tree/configuration"
     mkdir -p "$t/docker/ai-stack"
     cp "$AISTACK/ai-stack.sh" "$AISTACK/compose.yml" "$AISTACK/opencode.Dockerfile" "$t/docker/ai-stack/"
-    cp "$ROOT/configuration/env-file.sh" "$t/"
+    cp "$ROOT/configuration/env-file.sh" "$ROOT/configuration/opencode-bind.py" "$t/"
     mkdir -p "$d/cfg"; printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
     : >"$d/image-exists"; printf 'stale\n' >"$d/opencode-label"
     ok=1
@@ -5112,7 +5112,7 @@ if it "aistack: the omniroute image is rebuilt when its label, base digest or Do
     t="$d/tree/configuration"
     mkdir -p "$t/docker/ai-stack" "$d/cfg"
     cp "$AISTACK/ai-stack.sh" "$AISTACK/compose.yml" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
-    cp "$ROOT/configuration/env-file.sh" "$t/"
+    cp "$ROOT/configuration/env-file.sh" "$ROOT/configuration/opencode-bind.py" "$t/"
     printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
     _omni_up() { rm -f "$d/docker.log" "$d/run-autoos-omniroute"; _AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack "$d" up omniroute >/dev/null; }
     _omni_builds() { grep -c '^build' "$d/docker.log" 2>/dev/null || true; }
@@ -5660,7 +5660,7 @@ if it "aistack: verify checks the gateway container has qodercli: ok, FAIL, or s
     t="$d/tree/configuration"
     mkdir -p "$t/docker/ai-stack"
     cp "$AISTACK/ai-stack.sh" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
-    cp "$ROOT/configuration/env-file.sh" "$t/"
+    cp "$ROOT/configuration/env-file.sh" "$ROOT/configuration/opencode-bind.py" "$t/"
     sed 's/^    container_name: autoos-omniroute$/&\n    profiles: ["gateway"]/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
     out="$(_AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack_verify "$d" verify)" && rc=0 || rc=$?
     grep -qx '  skip  omniroute has qodercli - the omniroute service is not enabled' <<<"$out" || { ok=0; echo "profile off: no skip line: $(grep qodercli <<<"$out")" >&2; }
@@ -5721,7 +5721,7 @@ if it "aistack: verify follows the compose profiles: a disabled openhands is ski
         t="$d/tree/configuration"
         mkdir -p "$t/docker/ai-stack"
         cp "$AISTACK/ai-stack.sh" "$AISTACK/opencode.Dockerfile" "$t/docker/ai-stack/"
-        cp "$ROOT/configuration/env-file.sh" "$t/"
+        cp "$ROOT/configuration/env-file.sh" "$ROOT/configuration/opencode-bind.py" "$t/"
         if [[ "$style" == inline ]]; then
             sed 's/^    container_name: openhands-app$/&\n    profiles: ["extras", "openhands"]/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
         else
