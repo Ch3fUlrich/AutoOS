@@ -1460,13 +1460,20 @@ m = oc["providers"]["omniroute"]["models"]
 # that makes a route servable, or fails it closed, needs no re-pin here
 # (lesson PROVPIN 2026-09-27).
 ide = json.load(io.open("catalog/ide-models.json", encoding="utf-8"))["models"]
-expected = {x["id"]: x["context"] for x in ide
+# Each entry's `gateway_model_id` is the id the GATEWAY serves when that is
+# not the route id (D-2461: the two pinned MiMo singles are addressed by their
+# direct gateway leg, `mimo/mimo-v2.6-*`, while their key and the combo of the
+# same name keep the bare route id). An entry that declares none is served
+# under its own id, so the modelID == id rule still covers every other model
+# exactly as before - the field defaults to the id.
+expected = {x["id"]: (x.get("gateway_model_id") or x["id"], x["context"])
+            for x in ide
             if "opencode" in ((x.get("surfaces") or {}).get("omniroute") or [])}
 combos = json.load(io.open("configuration/omniroute/combos.json", encoding="utf-8"))
 problems = []
 for name in sorted(expected):
-    ctx = expected[name]
-    if name not in m or m[name]["modelID"] != name or m[name]["limit"]["context"] != ctx:
+    served, ctx = expected[name]
+    if name not in m or m[name]["modelID"] != served or m[name]["limit"]["context"] != ctx:
         problems.append(name)
 if not expected:
     problems.append("ide-models-empty")

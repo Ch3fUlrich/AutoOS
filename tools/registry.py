@@ -1778,6 +1778,12 @@ def render_ide(registry: dict) -> dict:
     `routes.<id>.surfaces.<gateway>` (a dict carrying "clients" - excludes a
     standalone surfaces.openhands entry, which is not this render's concern);
     `surfaces` is rebuilt as {gateway: clients} for every such gateway present.
+    `gateway_model_id` is carried through verbatim when that surface declares
+    one (D-2461: the id the gateway serves for a route it does NOT serve under
+    the route id - the two pinned MiMo singles, addressed by their direct
+    gateway leg); a surface without one renders no such key, so the route id
+    stays the served id for every other route and the field never becomes a
+    second copy of the id.
 
     Each entry's `effort_ladder` is derived from the first GATEWAY-SERVABLE leg's
     model-registry entry (via resolve_leg), filtered to omit "none" - never the
@@ -1885,6 +1891,17 @@ def render_ide(registry: dict) -> dict:
                 route, registry, canonical.get("context"), servable_legs),
             "output": canonical.get("output"),
         }
+        # D-2461: the id the gateway SERVES when it is not the route id (the
+        # two pinned MiMo singles, addressed by their direct gateway leg).
+        # Carried only when the surface declares it, so every other entry is
+        # byte-identical to before and id stays the served spelling.
+        served = canonical.get("gateway_model_id")
+        if served is not None:
+            if not isinstance(served, str) or not served:
+                raise ValueError(
+                    "routes.%s.surfaces: gateway_model_id must be a non-empty string (got %r)"
+                    % (route_id, served))
+            model["gateway_model_id"] = served
         if effort is not None and (not head_ladder or effort in head_ladder):
             # An effort the served head does not carry is dropped, never
             # forwarded - the picker would send a level the leg rejects.

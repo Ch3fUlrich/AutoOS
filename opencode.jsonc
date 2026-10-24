@@ -561,6 +561,12 @@
             { "id": "xhigh", "settings": { "reasoningEffort": "xhigh" } }
           ]
         },
+        // D-2459/D-2461: the two mimo entries below keep their key but serve
+        // the DIRECT mimo leg - they declare the SERVED gateway id
+        // (mimo/mimo-v2.6-flash / mimo/mimo-v2.6-pro) as their modelID.
+        // routes.<id>.surfaces.omniroute.gateway_model_id in
+        // catalog/ai-registry.json is the source; this region regenerates from
+        // it, so edit the registry, not these lines.
         // AUTOOS-MANAGED-START omniroute
         "l1-orchestrator": {
           "modelID": "l1-orchestrator",
@@ -747,7 +753,6 @@
             { "id": "high", "settings": { "reasoningEffort": "high" } }
           ]
         },
-        // D-2459/D-2461: these keys keep their name, but serve the DIRECT mimo leg.
         "mimo-v2.6-flash": {
           "modelID": "mimo/mimo-v2.6-flash",
           "name": "Xiaomi MiMo v2.6 Flash · 1M",

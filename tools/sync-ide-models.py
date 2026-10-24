@@ -17,6 +17,13 @@ registry) - the Zed and V1 OpenCode writers in lib/ still read catalog/ide-
 models.json directly at run time on the target machine and need no sync
 either way.
 
+Every generated opencode entry's `modelID` is the SERVED gateway id, not
+necessarily the key it sits under: `served_model_id()` returns a surface's
+`gateway_model_id` when it declares one (D-2461: the two pinned MiMo singles
+are addressed by their direct gateway leg `mimo/mimo-v2.6-*` while their key
+and the combo keep the bare route id) and the id itself otherwise, which is
+what every other entry has always written.
+
 This tool regenerates the static copies:
 
   opencode.jsonc
@@ -140,6 +147,10 @@ def _validate_models(models, label):
                 raise ConfigError(f"{label}: {model_label}: effort_ladder contains duplicate rungs")
         if not m["surfaces"]:
             raise ConfigError(f"{label}: {model_label}: surfaces is empty")
+        served = m.get("gateway_model_id")
+        if served is not None and (not isinstance(served, str) or not served):
+            raise ConfigError(
+                f"{label}: {model_label}: gateway_model_id must be a non-empty string")
         for gateway, surfaces in m["surfaces"].items():
             if gateway not in GATEWAYS:
                 raise ConfigError(f"{label}: {model_label}: unknown gateway {gateway!r} (known: {', '.join(GATEWAYS)})")
@@ -190,6 +201,20 @@ def load_from_registry(path):
 def offered(models, gateway, surface):
     """Catalog models `surface` lists through `gateway`, in picker order."""
     return [m for m in models if surface in m["surfaces"].get(gateway, ())]
+
+
+def served_model_id(m):
+    """The model id the gateway serves for this entry, i.e. what a client's
+    `modelID` must name.
+
+    D-2461: a surface may declare `gateway_model_id` for a route the gateway
+    does not serve under its own id - the two pinned MiMo singles are
+    addressed by their direct gateway leg (`mimo/mimo-v2.6-flash`, the
+    providers.xiaomi_mimo.model_prefix spelling of `xiaomi_mimo/<model>`)
+    while their opencode key and the combos.json combo of the same name keep
+    the bare route id. With no such declaration the id IS the served id, so
+    every other entry writes modelID == id exactly as before."""
+    return m.get("gateway_model_id") or m["id"]
 
 
 # ------------------------------------------------------------ opencode.jsonc
@@ -272,7 +297,7 @@ def render_entries(models, indent, trailing_comma):
         ladder = m.get("effort_ladder")
         entry = [
             f"{indent}{json.dumps(m['id'], ensure_ascii=False)}: {{",
-            f'{indent}  "modelID": {json.dumps(m["id"], ensure_ascii=False)},',
+            f'{indent}  "modelID": {json.dumps(served_model_id(m), ensure_ascii=False)},',
             f'{indent}  "name": {json.dumps(m["name"], ensure_ascii=False)},',
             f'{indent}  "limit": {limit}' + ("," if ladder else ""),
         ]
@@ -335,7 +360,7 @@ def rewrite_opencode(text, models, warn=None):
         got = ((parsed.get("providers") or {}).get(gateway) or {}).get("models") or {}
         for m in members:
             entry = got.get(m["id"]) or {}
-            if entry.get("modelID") != m["id"]:
+            if entry.get("modelID") != served_model_id(m):
                 raise ConfigError(
                     f"opencode.jsonc: {START} {gateway} is not inside providers.{gateway}.models")
     return new_text, changed
