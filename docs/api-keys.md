@@ -66,7 +66,7 @@ which entry to fill in (`meta_api` is that case today).
 | `navyai` | `navy` | FREEKEYS-1: connection registers and is active, catalog serves `navy/*`, but **no leg answered** (5x HTTP 400, 1x 403) → `available: false`. Entitlement is the operator's to fix |
 | `arcee` | `arcee-ai` | FREEKEYS-1: connection registers, **the catalog lists zero models for it** → nothing to probe, `available: false`. Keys for `arcee-ai/*` only appear via `openrouter`/`free-ai`/`together` resellers |
 | `bluesminds` | `bluesminds` | FREEKEYS-1: free tier, catalog prefix **`bm`**. 49 canonical ids (most are `claude-*`/`gpt-*` resale, denied by `policy.leg_rules` `deny-claude-paid-api`), **none answered** (400/410/transport) → `available: false` |
-| `agentrouter` | `agentrouter` | FREEKEYS-1: free tier, 13 ids of which 12 are `claude-*` (budget-held, D-102 — never probed here); the one non-Claude id `gpt-5.6-sol` answered 400 → `available: false` |
+| `agentrouter` | `agentrouter` | FREEKEYS-1: free tier, 13 ids of which 12 are `claude-*` (budget-held, D-102 — never probed here); the one non-Claude id the superseded Sol id answered 400 → `available: false` |
 | `novita_ai` | `novita` | FREEKEYS-1: free tier, 121 canonical ids, **every probe 403** (stopped at 3 consecutive) → `available: false`: the key authenticates at the connection level but the account has no model entitlement |
 | `scaleway` | `scaleway` | FREEKEYS-1: free tier (EU "🆓" pool), catalog prefix **`scw`**. 6 ids, **3 proven** (`qwen3-235b-a22b-instruct-2507`, `gpt-oss-120b`, `mistral-small-3.2-24b-instruct-2506`) |
 | `nebius` | `nebius` | FREEKEYS-1: free tier, 27 canonical ids, **3 proven** (`zai-org/GLM-5.1`, `/GLM-5.2`, `/GLM-5.3-Flash`); the Moonshot ids 404 (listed but not served) |

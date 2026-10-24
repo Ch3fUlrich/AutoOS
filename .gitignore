@@ -93,6 +93,10 @@ desktop.ini
 .vscode/
 # ─── Agent worktrees (scratch; never tracked) ────────────────────────────────
 .claude/worktrees/
+# The weekly Codex newest-only proposal (tools/codex-newest-check.py exit 3):
+# review output the tool prints to stdout as well. scratch/ holds a few tracked
+# files already, so the file itself is named rather than the directory (B4).
+scratch/codex-newest-proposal.md
 
 # ─── Local-only helpers (not wired into setup.ps1/catalog) ───────────────────
 # additional_Features/ holds personal admin scripts (e.g. a Windows cleanup
