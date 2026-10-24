@@ -106,16 +106,13 @@ usual cause is a PATH entry this shell predates: open a new terminal (Windows) o
 log out and back in (Linux/macOS) and re-run — a second run is a no-op that
 reports everything as already present.
 
-**Models missing, or 401s, right after setup (opencode / Zed / desktop app)**
+**Models missing, or 401s, right after setup (opencode / desktop app)**
 Almost always stale process environment: `setx` (or any installer that persists
-keys) only reaches processes started *afterwards*. A running Zed, opencode TUI
+keys) only reaches processes started *afterwards*. A running opencode TUI
 or desktop app keeps the old, keyless environment until it is fully quit and
 reopened; new terminals inherit the new values immediately. The desktop app
 shares the CLI's config files (`~/.config/opencode/opencode.json` + the repo's
 `opencode.jsonc`), so there is no separate desktop key store — restart the app.
-Zed additionally derives provider env names from the provider id
-(`autoos-omniroute` → `AUTOOS_OMNIROUTE_API_KEY`); `api_key` in settings.json
-is ignored by Zed and stays hidden providers hidden.
 
 **Where are the logs?**
 `logs/autoos-<timestamp>.log`, plain text with the colour stripped.
@@ -123,10 +120,16 @@ is ignored by Zed and stays hidden providers hidden.
 ## Phone over Tailscale (remote UIs)
 
 Verified 2026-09-20: OpenHands `:3000` (dual-stack `::`, reachable on both
-interfaces), opencode serve `:4096` and the OmniRoute gateway `:20128` (both
-`0.0.0.0`) all answer on the Tailscale and LAN addresses below. No secrets
+interfaces) and the OmniRoute gateway `:20128` (both `0.0.0.0`) all answer on
+the Tailscale and LAN addresses below. No secrets
 here — every UI still needs its own credential (OpenHands login, opencode
 pairing, OmniRoute client key, AutoOS token).
+
+opencode serve `:4096` is the exception since incident D-2542: its root UI
+needs no password, so it binds `127.0.0.1` by default and only answers the
+phone when you name the address it publishes on
+(`AUTOOS_OPENCODE_HOST=… opencode serve …`, or `AUTOOS_OPENCODE_PUBLISH_IP`
+for the docker stack; a wildcard is refused).
 
 | UI | Phone URL (Tailscale) | Phone URL (LAN) |
 |---|---|---|
@@ -140,5 +143,6 @@ Check first when the phone cannot reach one: `configuration/healthcheck.ps1`
 is Automatic startup — verify with `tailscale ip -4`. The AutoOS browser UI
 row only answers while `setup.ps1 -Serve -Bind 0.0.0.0` runs (elevated shell,
 prints a per-run token); opencode serve only answers while
-`opencode serve --hostname 0.0.0.0 --port 4096` runs (see
+`opencode serve --hostname <your-address> --port 4096` runs with that address
+named (the wrapper refuses `0.0.0.0`; see
 [configuration/README](../configuration/README.md)).

@@ -371,34 +371,3 @@ PY
     fi
 fi
 
-if it "zed default_model converges litellm to omniroute (zed routing)"; then
-    scratch="$(mktemp -d)"
-    mkdir -p "$scratch/.config/zed"
-    printf '{"agent":{"default_model":{"provider":"autoos-litellm","model":"l3-driver-paid"}}}' >"$scratch/.config/zed/settings.json"
-    ( SYS_HOME="$scratch" AUTOOS_DRY_RUN=0
-      AUTOOS_OMNIROUTE_API_KEY="k1" AUTOOS_LITELLM_API_KEY="k2" route_zed_to_proxy >/dev/null 2>&1 )
-    report="$(python3 - "$scratch/.config/zed/settings.json" <<'PY'
-import json, sys
-cfg = json.load(open(sys.argv[1], encoding="utf-8"))
-dm = cfg.get("agent", {}).get("default_model", {})
-print("%s|%s" % (dm.get("provider"), dm.get("model")))
-PY
-)"
-    # A default already on omniroute must survive untouched.
-    scratch2="$(mktemp -d)"
-    mkdir -p "$scratch2/.config/zed"
-    printf '{"agent":{"default_model":{"provider":"autoos-omniroute","model":"l2-worker"}}}' >"$scratch2/.config/zed/settings.json"
-    ( SYS_HOME="$scratch2" AUTOOS_DRY_RUN=0
-      AUTOOS_OMNIROUTE_API_KEY="k1" AUTOOS_LITELLM_API_KEY="k2" route_zed_to_proxy >/dev/null 2>&1 )
-    report2="$(python3 - "$scratch2/.config/zed/settings.json" <<'PY'
-import json, sys
-cfg = json.load(open(sys.argv[1], encoding="utf-8"))
-dm = cfg.get("agent", {}).get("default_model", {})
-print("%s|%s" % (dm.get("provider"), dm.get("model")))
-PY
-)"
-    rm -rf "$scratch" "$scratch2"
-    assert_eq "$report" "autoos-omniroute|l1-orchestrator"
-    assert_eq "$report2" "autoos-omniroute|l2-worker"
-fi
-

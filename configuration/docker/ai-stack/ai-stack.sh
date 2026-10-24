@@ -79,6 +79,11 @@ UNITS_BEFORE=()
 OH_REPLACED=0
 # Filled by opencode_password_sync; read by cmd_init.
 OC_PW=""
+# 1 when opencode.env was already newer than api-keys.yml when the password
+# sync STARTED (a copy the operator owns - left alone, D-2542). Snapshotted
+# there: this run's own append would otherwise make the file look newer than
+# the yml within the same init and the second password name would never land.
+OC_ENV_NEWER=0
 
 DRY=0
 YES=0
@@ -286,12 +291,42 @@ env_replace_value() {
     fi
 }
 
+# sync_opencode_password_env <file> <KEY> <value> <what>: make one derived
+# copy of the single source (configuration/api-keys.yml `opencode_password`)
+# agree, never replacing - or adding to - a copy newer than the yml. Called
+# once per password name so OPENCODE_PASSWORD and OPENCODE_SERVER_PASSWORD
+# can never drift apart (incident D-2542). Prints the key's `what` label,
+# never a value.
+sync_opencode_password_env() {
+    local file="$1" key="$2" val="$3" what="$4" cur has=0
+    if file_has_key "$file" "$key"; then
+        has=1
+        cur="$(env_value "$file" "$key")"
+    fi
+    if (( has )) && [[ "$cur" == "$val" ]]; then
+        echo "  = $file $what up to date (skipped)"
+    elif (( OC_ENV_NEWER )); then
+        if (( has )); then
+            echo "  ! $file holds a newer $what than $KEYS_FILE - left as is; put it into opencode_password there and re-run init"
+        else
+            echo "  ! $file is newer than $KEYS_FILE - $key not added; put it into opencode_password there and re-run init"
+        fi
+    elif (( has )) && [[ $DRY -eq 1 ]]; then
+        echo "  - would update the $what in $file from $KEYS_FILE"
+    elif (( has )); then
+        env_replace_value "$file" "$key" "$val" || return 1
+        echo "  + $file $what updated from $KEYS_FILE"
+    else
+        ensure_env_file "$file" "$key" "$val" || return 1
+    fi
+}
+
 # opencode_password_sync: make configuration/api-keys.yml's `opencode_password`
 # the single source of the opencode serve Basic-auth password. Y is read from
 # the yml (quotes and CR stripped; a REPLACE_WITH_* placeholder counts as
 # empty). When empty it migrates the value once - from the native serve file,
 # then the docker opencode.env OPENCODE_PASSWORD, then a fresh 32-char value -
-# appending it to the yml. It then makes the two derived copies agree, never
+# appending it to the yml. It then makes the derived copies agree, never
 # overwriting a copy newer than the yml. Sets OC_PW. Only file names, never a
 # value, are printed.
 opencode_password_sync() {
@@ -324,22 +359,21 @@ opencode_password_sync() {
     fi
     OC_PW="$y"
 
-    # Derived copy 1: the docker opencode.env OPENCODE_PASSWORD.
-    if ! file_has_key "$keys_env" OPENCODE_PASSWORD; then
-        ensure_env_file "$keys_env" OPENCODE_PASSWORD "$y" || return 1
-    else
-        cur="$(env_value "$keys_env" OPENCODE_PASSWORD)"
-        if [[ "$cur" == "$y" ]]; then
-            echo "  = $keys_env opencode password up to date (skipped)"
-        elif [[ -f "$KEYS_FILE" && "$keys_env" -nt "$KEYS_FILE" ]]; then
-            echo "  ! $keys_env holds a newer opencode password than $KEYS_FILE - left as is; put it into opencode_password there and re-run init"
-        elif [[ $DRY -eq 1 ]]; then
-            echo "  - would update the opencode password in $keys_env from $KEYS_FILE"
-        else
-            env_replace_value "$keys_env" OPENCODE_PASSWORD "$y" || return 1
-            echo "  + $keys_env opencode password updated from $KEYS_FILE"
-        fi
+    # Snapshot the newer-copy verdict before this run touches anything: a
+    # write below would make opencode.env look newer than the yml (nsec
+    # mtimes) and the second password name would then never be added.
+    OC_ENV_NEWER=0
+    if [[ -f "$KEYS_FILE" && -f "$keys_env" && "$keys_env" -nt "$KEYS_FILE" ]]; then
+        OC_ENV_NEWER=1
     fi
+
+    # Derived copy 1: the docker opencode.env - under BOTH names (D-2542).
+    # Either name alone authenticates, and with both set OPENCODE_PASSWORD
+    # wins, so a build reading only the other name must still get this value
+    # rather than a 401 against the password the operator was given. One
+    # routine keeps both in step from the one source.
+    sync_opencode_password_env "$keys_env" OPENCODE_PASSWORD "$y" "opencode password" || return 1
+    sync_opencode_password_env "$keys_env" OPENCODE_SERVER_PASSWORD "$y" "opencode password (OPENCODE_SERVER_PASSWORD)" || return 1
 
     # Derived copy 2: the native serve password file (0600 under a 0700 dir).
     if [[ ! -s "$PW_FILE" ]]; then
@@ -399,6 +433,19 @@ effective_bind() {
     printf '%s' "${b:-0.0.0.0}"
 }
 
+# opencode's own publish address (incident D-2542): :4096 no longer rides
+# AUTOOS_STACK_BIND, because opencode answers its root UI to anyone - the bind
+# is the only thing keeping the LAN out of the agent's sessions. Loopback
+# unless the operator names an address here (the config allowlist), and
+# dc() hands compose exactly this value for the same reason as above: an
+# exported AUTOOS_OPENCODE_PUBLISH_IP beats --env-file, so only one decided
+# value can ever reach the port mapping.
+effective_opencode_publish() {
+    local b="${AUTOOS_OPENCODE_PUBLISH_IP:-}"
+    [[ -n "$b" ]] || b="$(env_value "$STACK_ENV" AUTOOS_OPENCODE_PUBLISH_IP)"
+    printf '%s' "${b:-127.0.0.1}"
+}
+
 # ─── optional ZCode remote-server bundle ───────────────────────────────────
 # The ZCode desktop app installs its remote-server bundle (server/node,
 # server/zcode-server.cjs) - and stores the ZCode login in the same directory -
@@ -451,15 +498,21 @@ zcode_decide() {
 dc() {
     zcode_decide
     local args=(--project-name autoos-ai --env-file "$STACK_ENV" -f "$HERE/compose.yml")
+    if [[ "$(effective_opencode_publish)" != 127.0.0.1 ]]; then
+        args+=(-f "$HERE/compose.loopback.yml")
+    fi
     if [[ -n "$ZCODE_DIR" ]]; then
         args+=(-f "$HERE/compose.zcode.yml")
         # Both variables are exported for this compose call only, so the
         # override's ${...} interpolation reads exactly what was validated.
-        AUTOOS_STACK_BIND="$(effective_bind)" AUTOOS_ZCODE_DIR="$ZCODE_DIR" \
+        AUTOOS_STACK_BIND="$(effective_bind)" \
+            AUTOOS_OPENCODE_PUBLISH_IP="$(effective_opencode_publish)" \
+            AUTOOS_ZCODE_DIR="$ZCODE_DIR" \
             AUTOOS_ZCODE_MOUNT_MODE="$ZCODE_MODE" \
             "$DOCKER" compose "${args[@]}" "$@"
     else
         AUTOOS_STACK_BIND="$(effective_bind)" \
+            AUTOOS_OPENCODE_PUBLISH_IP="$(effective_opencode_publish)" \
             "$DOCKER" compose "${args[@]}" "$@"
     fi
 }
@@ -562,13 +615,37 @@ bind_guard() {
         BIND_OK=1
         return 0
     fi
-    echo "  ! refusing to publish :20128, :4096 and :3000 on $bind: coding-agents-fw.service is not"
+    echo "  ! refusing to publish :20128 and :3000 on $bind: coding-agents-fw.service is not"
     echo "    active, so nothing limits LAN clients to the reverse proxy (OpenHands has no login and"
     echo "    holds the docker socket). Start that firewall unit, or set AUTOOS_STACK_BIND=127.0.0.1"
     echo "    (host only), or accept the exposure with AUTOOS_STACK_ALLOW_LAN=1 - both in $STACK_ENV"
     [[ -n "${AUTOOS_STACK_BIND:-}" ]] && echo "    (this shell exports AUTOOS_STACK_BIND=$bind, which wins over the file)"
+    echo "    (:4096 is separate - opencode_publish_guard below always decides it)"
     if [[ $DRY -eq 1 ]]; then echo "    (dry run: a real run stops here)"; return 0; fi
     return 1
+}
+
+# opencode_publish_guard(): the one guard that has no allow-the-exposure
+# escape. bind_guard can be waved through behind the firewall unit or
+# AUTOOS_STACK_ALLOW_LAN=1 because :20128 needs a client key and :3000 is
+# behind the proxy; opencode's root UI answers 200 with no password at all
+# (measured on 2.0.19), so a wildcard :4096 hands every host the agent's web
+# UI. Loopback or an address the operator named in stack.env - never
+# 0.0.0.0, :: or *. Runs before every `compose up -d`, like bind_guard.
+OC_PUBLISH_OK=0
+opencode_publish_guard() {
+    local pub
+    (( OC_PUBLISH_OK )) && return 0
+    pub="$(effective_opencode_publish)"
+    if ! python3 "$HERE/../../opencode-bind.py" "$pub"; then
+            echo "  ! refusing to publish :4096 on $pub: opencode's root UI answers without a"
+            echo "    password, so a wildcard bind exposes the agent's sessions to every host on the"
+            echo "    network. Set AUTOOS_OPENCODE_PUBLISH_IP=127.0.0.1 (default) or to one"
+            echo "    allowlisted address in $STACK_ENV."
+            [[ -n "${AUTOOS_OPENCODE_PUBLISH_IP:-}" ]] && echo "    (this shell exports AUTOOS_OPENCODE_PUBLISH_IP=$pub, which wins over the file)"
+            return 1
+    fi
+    OC_PUBLISH_OK=1
 }
 
 # dc_up [args...]: `docker compose up -d`, never past a refusing bind guard.
@@ -624,6 +701,7 @@ public_url_guard() {
 # built, stopped or recreated.
 preflight() {
     bind_guard || return 1
+    opencode_publish_guard || return 1
     public_url_guard
 }
 
@@ -676,6 +754,7 @@ cmd_init() {
         AUTOOS_CODE_DIR "$CODE_DIR" AUTOOS_STACK_DATA "$DATA_DIR" \
         AUTOOS_STACK_CONFIG "$CONFIG_DIR" AUTOOS_OPENHANDS_DIR "$OH_DIR" \
         AUTOOS_STACK_BIND 0.0.0.0 \
+        AUTOOS_OPENCODE_PUBLISH_IP 127.0.0.1 \
         OMNIROUTE_MEMORY_MB 1536 OMNIROUTE_MEM_LIMIT 2560m \
         OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT 6 \
         OMNIROUTE_CHAT_ADMISSION_QUEUE_MS 60000 \
@@ -711,7 +790,16 @@ cmd_init() {
     # opencode_password_sync writes both derived copies and sets OC_PW.
     opencode_password_sync || return 1
     password="$OC_PW"
-    pairs=(OPENCODE_PASSWORD "$password" AUTOOS_OMNIROUTE_KEY "$client_key")
+    if (( OC_ENV_NEWER )); then
+        # An opencode.env that was already newer than the yml when the sync
+        # started was just left alone by opencode_password_sync - bolting the
+        # password names onto it here would fork exactly the copy the guard
+        # protects (incident D-2542). The other keys keep their normal
+        # read-modify-write.
+        pairs=(AUTOOS_OMNIROUTE_KEY "$client_key")
+    else
+        pairs=(OPENCODE_PASSWORD "$password" OPENCODE_SERVER_PASSWORD "$password" AUTOOS_OMNIROUTE_KEY "$client_key")
+    fi
     pairs+=(OMNIGRAPH_TOKEN "${OMNIGRAPH_TOKEN:-$(env_value "$OMNIGRAPH_ENV" OMNIGRAPH_TOKEN)}")
     for n in "${names[@]}"; do
         [[ "$n" == AUTOOS_OMNIROUTE_KEY ]] && continue

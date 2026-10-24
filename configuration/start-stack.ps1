@@ -7,14 +7,14 @@
      (starts it in the background when needed).
   2. Requires $env:AUTOOS_OMNIROUTE_KEY (client key from the OmniRoute
      dashboard -> api-manager). Pass -App to launch it wired:
-     opencode | zed | nvim | openhands
+     opencode | nvim | openhands
 
 .EXAMPLE
   $env:AUTOOS_OMNIROUTE_KEY = 'sk-...'
   .\configuration\start-stack.ps1 -App opencode
 #>
 [CmdletBinding()]
-param([ValidateSet('opencode', 'zed', 'nvim', 'openhands', 'opencode-serve', 'none')][string]$App = 'none')
+param([ValidateSet('opencode', 'nvim', 'openhands', 'opencode-serve', 'none')][string]$App = 'none')
 
 $ErrorActionPreference = 'Stop'
 $Gateway = 'http://127.0.0.1:20128'
@@ -250,8 +250,8 @@ $env:AUTOOS_OMNIROUTE_URL = $Gateway
 try { $Key = Get-AutoOSClientKey -KeysFile $keysFile }
 finally { if ($null -eq $savedGatewayUrl) { Remove-Item Env:AUTOOS_OMNIROUTE_URL -ErrorAction SilentlyContinue } else { $env:AUTOOS_OMNIROUTE_URL = $savedGatewayUrl } }
 if ($null -eq $Key) { exit 1 }
-# Export so the launched apps inherit it: opencode.jsonc and the Zed settings
-# carry no key by design ("key via env"), so without this the apps the script
+# Export so the launched apps inherit it: opencode.jsonc
+# carries no key by design ("key via env"), so without this the apps the script
 # launches would start unauthenticated.
 $env:AUTOOS_OMNIROUTE_KEY = $Key
 # END key-block
@@ -342,7 +342,6 @@ Write-Host "Gateway OK on $Gateway"
 
 switch ($App) {
     'opencode'  { & opencode }
-    'zed'       { & "$env:LOCALAPPDATA\Programs\Zed\zed.exe" . }
     'nvim'      { & nvim }
     'openhands' {
         # Docker Desktop must be running; the container reaches the gateway via
@@ -380,7 +379,7 @@ switch ($App) {
                     }
                     # BOM-free on every host: PS 5.1 Set-Content -Encoding
                     # utf8 emits a BOM, which breaks the container's json
-                    # parse (same reason the Zed writer asserts no BOM).
+                    # parse (asserts no BOM).
                     [IO.File]::WriteAllText($ohSettings, ($ohJson | ConvertTo-Json -Depth 20), [Text.UTF8Encoding]::new($false))
                     Write-Host "Repaired OpenHands settings (agent_settings.schema_version $ohAgentVer -> $($ohJson.agent_settings.schema_version), stripped enabled keys). Backup: $backup."
                 }
@@ -444,10 +443,14 @@ switch ($App) {
         Write-Host 'OpenHands UI: http://localhost:3000'
     }
     'opencode-serve' {
+        . (Join-Path $PSScriptRoot 'opencode-bind.ps1')
+        # AUTOOS_OPENCODE_HOST is validated before probing or spawning.
+        $ocHost = Get-AutoOSOpencodeHost
+        $ocAuthority = if ($ocHost.Contains(':')) { "[$ocHost]" } else { $ocHost }
         # Phone fallback UI (docs/openhands-runbook.md rung 2): resume when
         # down, no-op when up. 401 without pairing credentials = alive.
         $ocUp = $false
-        try { $ocUp = (Invoke-WebRequest -Uri 'http://127.0.0.1:4096/' -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }
+        try { $ocUp = (Invoke-WebRequest -Uri "http://${ocAuthority}:4096/" -UseBasicParsing -TimeoutSec 5).StatusCode -in 200, 401 }
         catch {
             $r = $_.Exception.Response
             if ($null -ne $r) { $ocUp = ([int]$r.StatusCode) -in 200, 401 }
@@ -458,13 +461,20 @@ switch ($App) {
         } else {
             $pw = Get-AutoOSKeyValue -Path $keysFile -Name 'opencode_password'
             if ($pw) {
+                # One value, both names (D-2542): either name alone authenticates and
+                # OPENCODE_PASSWORD wins when both are set, so a build reading only the
+                # other name must get this password, not a 401 against the operator's.
                 $env:OPENCODE_PASSWORD = $pw
+                $env:OPENCODE_SERVER_PASSWORD = $pw
                 Write-Host "Serve password: from $keysFile (user: opencode)."
             } else {
                 Write-Host "No opencode_password in $keysFile - opencode serve picks a new random password every start; add one (see docs/web-services.md#logins-and-secrets)."
             }
             Write-Host 'Starting opencode serve in the background...'
-            Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', '0.0.0.0', '--port', '4096' -WindowStyle Hidden
+            # D-2549: loopback, never a wildcard. opencode's root UI answers without a
+            # password, so 0.0.0.0 would hand every host on the network the agent's web
+            # UI; a phone or proxy reaches it through a named address instead.
+            Start-Process -FilePath 'opencode' -ArgumentList 'serve', '--hostname', $ocHost, '--port', '4096' -WindowStyle Hidden
             Write-Host 'opencode serve should answer on http://localhost:4096 (401 = alive, pair via: opencode pair).'
         }
     }

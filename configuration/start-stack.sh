@@ -2,7 +2,7 @@
 # Start the AutoOS AI stack: OmniRoute gateway, then the app you pick.
 #
 #   export AUTOOS_OMNIROUTE_KEY='sk-...'   # dashboard -> api-manager
-#   ./configuration/start-stack.sh opencode|zed|nvim|openhands|opencode-serve
+#   ./configuration/start-stack.sh opencode|nvim|openhands|opencode-serve
 set -euo pipefail
 
 # Source the shared gateway key functions from install.sh
@@ -112,7 +112,6 @@ echo "Gateway OK on $GATEWAY"
 
 case "$APP" in
     opencode)  opencode ;;
-    zed)       zed . ;;
     nvim)      nvim ;;
     openhands)
         # Docker must be running; the container reaches the gateway via host IP.

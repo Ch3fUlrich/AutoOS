@@ -23,7 +23,7 @@ if it "Pi keeps its whole set: light profile and router stack on arm64"; then
     for id in $(catalog_profile_defaults light); do
         catalog_index_of "$id" >/dev/null 2>&1 || missing+="$id "
     done
-    for id in nodejs omniroute opencode-cli neovim litellm zed; do
+    for id in nodejs omniroute opencode-cli neovim litellm; do
         catalog_index_of "$id" >/dev/null 2>&1 || missing+="$id "
     done
     catalog_load catalog/linux.json x64 0

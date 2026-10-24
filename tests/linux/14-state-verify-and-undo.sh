@@ -463,25 +463,6 @@ if it "backup: the Qwen Code routing does not run when settings.json cannot be b
     if (( ok )); then pass; else fail "Qwen Code routing edits a settings.json it could not back up"; fi
 fi
 
-if it "backup: route_zed_to_proxy leaves settings.json alone and fails when its backup cannot be made"; then
-    home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
-    mkdir -p "$home/.config/zed"; printf '{"theme":"mine"}' >"$home/.config/zed/settings.json"
-    cp "$home/.config/zed/settings.json" "$home/.config/zed/settings.json.orig"   # no final newline: a rewrite that ADDS one must fail too
-    out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; PATH="$bin:$PATH"; route_zed_to_proxy ) 2>&1 )"; rc=$?
-    cmp -s "$home/.config/zed/settings.json" "$home/.config/zed/settings.json.orig" || { ok=0; echo "settings.json was modified without a backup: [$(cat "$home/.config/zed/settings.json")]" >&2; }
-    [[ "$out" == *"could not back up $home/.config/zed/settings.json"* ]] || { ok=0; echo "no warning naming the file: [${out:0:400}]" >&2; }
-    (( rc != 0 )) || { ok=0; echo "rc=0 for a routing that did not happen" >&2; }
-    [[ "$out" != *"routed to OmniRoute"* ]] || { ok=0; echo "reported success" >&2; }
-    [[ "$(backup_count "$home")" == 0 ]] || { ok=0; echo "a partial backup was left behind" >&2; }
-    # Control: with a working cp the merge lands and the original is kept.
-    out="$( ( SYS_HOME="$home"; AUTOOS_DRY_RUN=0; route_zed_to_proxy ) 2>&1 )"; rc=$?
-    { (( rc == 0 )) && grep -q 'autoos-omniroute' "$home/.config/zed/settings.json" \
-        && [[ "$(cat "$home"/.config/zed/settings.json.autoos-backup-*)" == '{"theme":"mine"}' ]]; } \
-        || { ok=0; echo "control run: rc=$rc out=[${out:0:300}]" >&2; }
-    rm -rf "$home" "$bin"
-    if (( ok )); then pass; else fail "route_zed_to_proxy edits a settings.json it could not back up"; fi
-fi
-
 if it "backup: register_antigravity_mcp_server leaves the config alone when its backup cannot be made"; then
     home="$(mktemp -d)"; bin="$(backup_fail_bin)"; ok=1
     cfg="$home/.gemini/config/mcp_config.json"

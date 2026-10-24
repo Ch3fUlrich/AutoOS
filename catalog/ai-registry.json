@@ -1496,22 +1496,6 @@
       "reasoning": false,
       "tool_calls": "unproven"
     },
-    "qwen/qwen3-coder-flash": {
-      "$comment": "openrouter's coding-specialised sibling of qwen3.8-flash, same SPEED directive (operator 2026-09-26T15:44Z/15:49Z): S0-S1 small edits/docs/triage/lint fixes, measured 200 in 1.1-1.4s by L0. tier paid / trains_on_prompts false inherited from providers.openrouter. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
-      "context_advertised": 131072,
-      "context_usable": {
-        "source": "default",
-        "tokens": 65536
-      },
-      "effort_ladder": [],
-      "family": "qwen",
-      "id": "qwen/qwen3-coder-flash",
-      "output_max": 16384,
-      "price_in": 0.0,
-      "price_out": 0.0,
-      "reasoning": false,
-      "tool_calls": "proven"
-    },
     "qwen/qwen3.8-27b": {
       "$comment": "groq's vendor-prefixed spelling; true free tier (l3-driver-free-only). Q1 2026-09-26: openrouter/qwen/qwen3.8-27b (SPEED directive, S1-S2 worker routes) resolves to this SAME entry - price stays groq's-free 0.0 rather than openrouter's real paid price because one model id is shared by two providers with different commercial terms (tier/trains_on_prompts still resolve correctly per-leg via the provider fallback; only price is shared/imprecise). Probed 2026-09-26 (Q1 lane): openrouter/qwen/qwen3.8-27b specifically -> proven, 3/3 trials; kept as a LEG-scoped overlay entry (logs/routing/measured.json), not promoted to this shared model's own tool_calls default, since groq's copy was not itself probed by this run - tools/autoos_resolver.py _tool_calls_value() already prefers the overlay's leg-specific verdict over this model default. FREEWIRE 2026-09-30 (free-probe evidence): groq's own copy is now probed too (ack 200 + one get_weather tool call ok, 420 ms), so the model default tool_calls is promoted to 'proven'. Q1 2026-09-26 16:4xZ revision: the openrouter/qwen/qwen3.8-27b leg added for the (withdrawn) SPEED directive is removed from every route - SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key. T1-CLEAN-3 2026-10-01: merged the case-only duplicate row 'Qwen/Qwen3.8-27B' into this canonical lowercase key (rule 1b hygiene; this spelling already carries every live leg, so no leg string and no wire spelling changes; resolve_leg fold-matches the retired casing). Kept this row's groq-vendor numbers (context 131072 / usable 65536 / output 16384 - what all live legs and rendered surfaces already use); the retired row's gateway-measured numbers were context 128000 / usable 64000 / output 32768 (both price 0.0, reasoning false, tool_calls proven). Retired row verbatim: FREEWIRE 2026-09-30 (free-probe evidence, L1-backlog/ws-free-probe-20260930, commit 6e978dd): ack 200 and one get_weather tool call ok (1276 ms) through the gateway at 127.0.0.1:20128; the gateway /v1/models row reported context_length 128000. The gateway serves this leg as 'huggingface/Qwen/Qwen3.8-27B'. context_advertised 128000 is the measured gateway row; output_max 32768 is the registry's conservative unknown (the gateway reported none). price_in/price_out 0.0 (huggingface free tier, no price on file - the FREEKEYS-1 convention). trains_on_prompts inherits providers.hugging_face (false). T1-CLEAN-3 case-merge (9e5ea48c) kept GROQ's context_advertised 131072 / output_max 16384 and DROPPED the huggingface sibling's (key Qwen/Qwen3.8-27B) 128000 / 32768, recorded per T1-CLEAN-4 K8; a huggingface leg is planned against groq's window until a provider-scoped context field exists.",
       "context_advertised": 131072,
@@ -1530,40 +1514,8 @@
       "prompt_cache": "unknown",
       "prompt_cache_source": "probe D-657 2026-10-08 central+workstation"
     },
-    "qwen/qwen3.8-flash": {
-      "$comment": "openrouter's leg for the SPEED directive (operator 2026-09-26T15:44Z/15:49Z, common.md 'Model mix' UPDATE): S0-S1 small edits/docs/triage/lint fixes, measured 200 in 1.1-1.4s by L0. tier paid (providers.openrouter.tier), trains_on_prompts false inherited from providers.openrouter (no model-level override needed - the provider itself is already paid + non-training). Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
-      "context_advertised": 131072,
-      "context_usable": {
-        "source": "default",
-        "tokens": 65536
-      },
-      "effort_ladder": [],
-      "family": "qwen",
-      "id": "qwen/qwen3.8-flash",
-      "output_max": 16384,
-      "price_in": 0.0,
-      "price_out": 0.0,
-      "reasoning": false,
-      "tool_calls": "proven"
-    },
-    "qwen/qwen3.8-max-0902": {
-      "$comment": "openrouter's biggest Qwen 3.8 leg, SPEED directive (operator 2026-09-26T15:44Z/15:49Z): S2-S3 harder implement / cross-family reviews, measured 200 in 2.6s by L0. tier paid / trains_on_prompts false inherited from providers.openrouter. Unsourced (D20): no live fetch of OpenRouter's public model page was attempted for this fictional/future model id (2026-09-26 environment) - context/output mirror the sibling qwen entries already in this registry (qwen-3.8-27b, qwen/qwen3.8-27b); price_in/price_out recorded as 0.0, not a real free-tier guarantee, matching the existing 'vendor price not sourced' convention (see qwen-3.8-27b's own $comment). reasoning/effort_ladder default to the whole Qwen family's existing pattern (reasoning: false, no ladder) - unmeasured, not evidence the model lacks reasoning. Probed 2026-09-26 (Q1 lane): tools/probe-toolcalls.py --trials 3 -> proven, 3/3 trials (single-call + round-trip) passed; raw output kept at logs/routing/measured.json (overlay) - see this lane's REPORT for the full probe transcript path. tool_calls promoted from the registry default 'unproven' to 'proven' here (a manual, reviewed promote per spec 3.1's 'registry.py promote' description - that command is not implemented yet). SUPERSEDED 2026-09-26 16:4xZ (operator 'Claude budget' revision, briefs/common.md): the 16:0xZ SPEED-via-OpenRouter-credits directive this leg was added for was withdrawn - OpenRouter has NO shared credit (BYOK only); this leg would spend the operator's own key on a 402. Model entry kept (as instructed) but referenced by no route - pending L1-routing's separate OpenRouter-BYOK evaluation of which providers/legs are worth routing through OpenRouter on the operator's own key.",
-      "context_advertised": 131072,
-      "context_usable": {
-        "source": "default",
-        "tokens": 65536
-      },
-      "effort_ladder": [],
-      "family": "qwen",
-      "id": "qwen/qwen3.8-max-0902",
-      "output_max": 16384,
-      "price_in": 0.0,
-      "price_out": 0.0,
-      "reasoning": false,
-      "tool_calls": "proven"
-    },
     "qwen3.8-flash": {
-      "$comment": "OCGO-PREFER (operator D-1840/D-1919, 2026-10-18 Go probe): the OpenCode Go copy, spelled exactly as the gateway serves it (`opencode-go/qwen3.8-flash`, answered 200 on 3/3 calls, median 1.54 s, /v1/models row reported context 200000). This is the bare key the Go leg resolves to; `qwen/qwen3.8-flash` above is OpenRouter's vendor-prefixed spelling of the same weights and stays untouched. context_advertised 200000 is the probe-measured gateway row; context_usable is the 50% default, not a measurement. output_max 16384 mirrors the sibling qwen rows (the probe reported none) — the registry's conservative unknown, not evidence the model stops there. reasoning false and effort_ladder empty follow the family's existing pattern and are unmeasured; tool_calls stays 'unproven' because no tool-call trial was answered for this id. Price 0.0 with a price_source: the plan is a flat subscription (providers.opencode_go.tier), so nothing is metered per token. trains_on_prompts inherits providers.opencode_go = true, which tools/registry.py private_safe() reads as never private-safe.",
+      "$comment": "OCGO-PREFER (operator D-1840/D-1919, 2026-10-18 Go probe): the OpenCode Go copy, spelled exactly as the gateway serves it (`opencode-go/qwen3.8-flash`, answered 200 on 3/3 calls, median 1.54 s, /v1/models row reported context 200000). This is the bare key the Go leg resolves to; D-2641 removed the unused vendor-prefixed sibling (no qwen gateway connection). context_advertised 200000 is the probe-measured gateway row; context_usable is the 50% default, not a measurement. output_max 16384 mirrors the sibling qwen rows (the probe reported none) — the registry's conservative unknown, not evidence the model stops there. reasoning false and effort_ladder empty follow the family's existing pattern and are unmeasured; tool_calls stays 'unproven' because no tool-call trial was answered for this id. Price 0.0 with a price_source: the plan is a flat subscription (providers.opencode_go.tier), so nothing is metered per token. trains_on_prompts inherits providers.opencode_go = true, which tools/registry.py private_safe() reads as never private-safe.",
       "context_advertised": 200000,
       "context_usable": {
         "source": "default",
@@ -3147,7 +3099,34 @@
       "gemini-3.8-flash"
     ],
     "writers": {
-      "$comment": "AO-WRITER-GUARDS P1 (2026-10-09, docs/decisions/0007 follow-up): the pre-spawn writer allow-list tools/autoos_writer_rule.py reads. sub40_models are free-model name fragments matched by containment on the normalized id; with no R3 key R3 falls back to the R2 chain (R3 = writer as R2 + all review lenses) while an explicit empty R3 list denies, first usable leg wins (qoder/qwen3.8-max is out of credits, so vertex/gemini-3.8-flash at high effort writes).",
+      "order": [
+        {
+          "client": "opencode",
+          "model": "omniroute/cx-gpt-6.1-sol",
+          "family": "openai",
+          "leg": "cx/gpt-6.1-sol",
+          "source": "operator D-2148"
+        },
+        {
+          "client": "mimo",
+          "model": "mimo-v2.6-flash",
+          "family": "xiaomi",
+          "source": "operator D-2148"
+        },
+        {
+          "client": "opencode",
+          "model": "omniroute/deepseek-direct-flash",
+          "family": "deepseek",
+          "source": "operator D-2148"
+        },
+        {
+          "client": "qoder",
+          "model": "qwen3.8-flash",
+          "family": "qwen",
+          "source": "operator D-2148"
+        }
+      ],
+      "$comment": "D-2148 writer order; AO-WRITER-GUARDS P1 (2026-10-09, docs/decisions/0007 follow-up): the pre-spawn writer allow-list tools/autoos_writer_rule.py reads. sub40_models are free-model name fragments matched by containment on the normalized id; with no R3 key R3 falls back to the R2 chain (R3 = writer as R2 + all review lenses) while an explicit empty R3 list denies, first usable leg wins (qoder/qwen3.8-max is out of credits, so vertex/gemini-3.8-flash at high effort writes).",
       "sub40_models": [
         "nemotron-3-super",
         "laguna",
@@ -4136,7 +4115,7 @@
       "credit_usd": 0,
       "trains_on_prompts": null,
       "available": false,
-      "$comment": "FREEKEYS-1 (2026-09-28, read-only GET /v1/models plus tools/probe-toolcalls.py-style trials through the gateway at <= 1 request/3 s): the OmniRoute connection 'qoder' is registered and active, its catalog exposes 1 canonical model id(s) under prefix 'qoder', 0 answered a tool-call trial end to end. Statuses measured: 400 x1. trains_on_prompts is null = UNVERIFIED (the vendor's terms were never read); tools/registry.py's private_safe() treats anything but exactly false as not private-safe, so it is deliberately not guessed to false. litellm_env is null: the primary path is the OmniRoute connection (the key lives in the gateway DB), so tools/mirror-litellm-env.py keeps no .env line for it; the LiteLLM render of the two legs falls back to the env name XIAOMI_MIMO_API_KEY, which a LiteLLM-only host would have to supply itself. No leg answered, so available is false and no models row is registered. The credential/entitlement on the connection is the operator's to fix before FREEKEYS-2 can put a leg here in a combo."
+      "$comment": "D-2641: qodercli ACP only; no gateway provider or gateway login. OS-QODER-PAT withdrawn. clients.qoder uses gateway_mode none; qoder reviewer seats remain legless. Supersedes the 2026-09-28 gateway probe; available is false."
     },
     "zcode": {
       "id": "zcode",
@@ -4176,8 +4155,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "display_name": "bootstrap: auto balanced",
@@ -4194,8 +4172,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "display_name": "bootstrap: auto cheapest",
@@ -4212,8 +4189,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "display_name": "bootstrap: auto smart (no combo needed)",
@@ -4233,8 +4209,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "context_declared": "128k",
@@ -4254,8 +4229,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "context_declared": "128k",
@@ -4349,7 +4323,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 1048576,
@@ -4387,7 +4360,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 1048576,
@@ -4409,7 +4381,7 @@
       }
     },
     "groq-qwen3.8-27b": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence L1-backlog/ws-free-probe-20260930, commit 6e978dd: ack 200 + one get_weather tool call ok, 420 ms): pinned single-provider free combo for groq/qwen/qwen3.8-27b. opencode/zed only (no openhands_profile, the cheaperinference/kimi-k3 precedent for a pinned route).",
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence L1-backlog/ws-free-probe-20260930, commit 6e978dd: ack 200 + one get_weather tool call ok, 420 ms): pinned single-provider free combo for groq/qwen/qwen3.8-27b. opencode only (no openhands_profile, the cheaperinference/kimi-k3 precedent for a pinned route).",
       "class": "free",
       "id": "groq-qwen3.8-27b",
       "legs": [
@@ -4419,8 +4391,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "context_declared": "128k",
@@ -4430,7 +4401,7 @@
       }
     },
     "hf-glm-5.2": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1132 ms): pinned single-provider free combo for huggingface/zai-org/GLM-5.2. The declared 256k is clamped by the shared models.'zai-org/GLM-5.2' row (context_advertised 128000, the nebius measurement), so the combo renders 128k. opencode/zed only. B2-HF 2026-10-01: legs retained declared + provider-gated (available:false) so route lands in omitted (not legless) and apply prunes live stale combo; nothing routable.",
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1132 ms): pinned single-provider free combo for huggingface/zai-org/GLM-5.2. The declared 256k is clamped by the shared models.'zai-org/GLM-5.2' row (context_advertised 128000, the nebius measurement), so the combo renders 128k. opencode only. B2-HF 2026-10-01: legs retained declared + provider-gated (available:false) so route lands in omitted (not legless) and apply prunes live stale combo; nothing routable.",
       "class": "free",
       "id": "hf-glm-5.2",
       "legs": [
@@ -4440,8 +4411,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "context_declared": "128k",
@@ -4451,7 +4421,7 @@
       }
     },
     "hf-qwen3.8-27b": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1276 ms): pinned single-provider free combo for huggingface/Qwen/Qwen3.8-27B (gateway /v1/models context_length 128000, output 32768). opencode/zed only. B2-HF 2026-10-01: legs retained declared + provider-gated (available:false) so route lands in omitted (not legless) and apply prunes live stale combo; nothing routable.",
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1276 ms): pinned single-provider free combo for huggingface/Qwen/Qwen3.8-27B (gateway /v1/models context_length 128000, output 32768). opencode only. B2-HF 2026-10-01: legs retained declared + provider-gated (available:false) so route lands in omitted (not legless) and apply prunes live stale combo; nothing routable.",
       "class": "free",
       "id": "hf-qwen3.8-27b",
       "legs": [
@@ -4461,8 +4431,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "context_declared": "128k",
@@ -4472,7 +4441,7 @@
       }
     },
     "or-laguna-s-2.1-free": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1961 ms): pinned single-provider free combo for openrouter/poolside/laguna-s-2.1:free (gateway /v1/models context_length 262144, output 32768). The :free id is $0 at OpenRouter. opencode/zed only.",
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 1961 ms): pinned single-provider free combo for openrouter/poolside/laguna-s-2.1:free (gateway /v1/models context_length 262144, output 32768). The :free id is $0 at OpenRouter. opencode only.",
       "class": "free",
       "id": "or-laguna-s-2.1-free",
       "legs": [
@@ -4482,8 +4451,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 262144,
           "context_declared": "256k",
@@ -4493,7 +4461,7 @@
       }
     },
     "or-nemotron-3-super-free": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 801 ms): pinned single-provider free combo for openrouter/nvidia/nemotron-3-super-120b-a12b:free (gateway /v1/models context_length 262144, output 235929). The :free id is $0 at OpenRouter. opencode/zed only.",
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 801 ms): pinned single-provider free combo for openrouter/nvidia/nemotron-3-super-120b-a12b:free (gateway /v1/models context_length 262144, output 235929). The :free id is $0 at OpenRouter. opencode only.",
       "class": "free",
       "id": "or-nemotron-3-super-free",
       "legs": [
@@ -4503,8 +4471,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 262144,
           "context_declared": "256k",
@@ -4514,7 +4481,7 @@
       }
     },
     "or-north-mini-code-free": {
-      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 809 ms): pinned single-provider free combo for openrouter/cohere/north-mini-code:free (gateway /v1/models context_length 256000, output 64000). The :free id is $0 at OpenRouter. opencode/zed only.",
+      "$comment": "FREEWIRE 2026-09-30 (free-probe evidence: ack 200 + one get_weather tool call ok, 809 ms): pinned single-provider free combo for openrouter/cohere/north-mini-code:free (gateway /v1/models context_length 256000, output 64000). The :free id is $0 at OpenRouter. opencode only.",
       "class": "free",
       "id": "or-north-mini-code-free",
       "legs": [
@@ -4524,8 +4491,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 256000,
           "context_declared": "256k",
@@ -4545,8 +4511,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "context_declared": "128k",
@@ -4566,8 +4531,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "context_declared": "128k",
@@ -4588,7 +4552,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 1000000,
@@ -4627,7 +4590,6 @@
         "litellm": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 1000000,
@@ -4644,7 +4606,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 1000000,
@@ -4671,7 +4632,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 1000000,
@@ -4705,7 +4665,6 @@
         "litellm": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 1000000,
@@ -4722,7 +4681,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 1000000,
@@ -4746,8 +4704,7 @@
       "surfaces": {
         "litellm": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 1000000,
           "display_name": "L1 · l1-orchestrator-paid · 1M",
@@ -4755,8 +4712,7 @@
         },
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 1000000,
           "context_declared": "1M",
@@ -4777,7 +4733,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 1048576,
@@ -4808,7 +4763,6 @@
         "litellm": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 131072,
@@ -4825,7 +4779,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 131072,
@@ -4852,7 +4805,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 128000,
@@ -4881,7 +4833,6 @@
         "litellm": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 131072,
@@ -4898,7 +4849,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 131072,
@@ -4922,8 +4872,7 @@
       "surfaces": {
         "litellm": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "display_name": "L2 · l2-worker-paid · 128k",
@@ -4950,7 +4899,6 @@
         "litellm": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 131072,
@@ -4967,7 +4915,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 131072,
@@ -4994,7 +4941,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 128000,
@@ -5028,7 +4974,6 @@
         "litellm": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 131072,
@@ -5045,7 +4990,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 131072,
@@ -5069,8 +5013,7 @@
       "surfaces": {
         "litellm": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "display_name": "L3 · l3-driver-paid · 128k",
@@ -5079,7 +5022,7 @@
       }
     },
     "t4-rag": {
-      "$comment": "RAG grounded QA over supplied cohere documents (quotes/citations), not reasoning or codegen. Trial keys (cohere free eval terms); output clamped to 4096 (measured cohere caps 2026-10-07: command-a 8192, command-r-plus 4096). opencode/zed + openhands clients. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the two cohere legs are one rate-limit domain, which rule (g) refuses back-to-back, so openrouter nemotron-3-super :free (probe: ack+tool ok, prompt_cache true) sits between them. command-r-plus-08-2025 heads; both cohere legs' tool_calls is now 'proven' on the D-657 probe evidence.",
+      "$comment": "RAG grounded QA over supplied cohere documents (quotes/citations), not reasoning or codegen. Trial keys (cohere free eval terms); output clamped to 4096 (measured cohere caps 2026-10-07: command-a 8192, command-r-plus 4096). opencode + openhands clients. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): the two cohere legs are one rate-limit domain, which rule (g) refuses back-to-back, so openrouter nemotron-3-super :free (probe: ack+tool ok, prompt_cache true) sits between them. command-r-plus-08-2025 heads; both cohere legs' tool_calls is now 'proven' on the D-657 probe evidence.",
       "class": "cheap",
       "id": "t4-rag",
       "legs": [
@@ -5091,8 +5034,7 @@
       "surfaces": {
         "litellm": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "display_name": "t4-rag · 128k (cohere trial)",
@@ -5101,7 +5043,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 131072,
@@ -5119,7 +5060,7 @@
     "l2-researcher": {
       "class": "free",
       "id": "l2-researcher",
-      "$comment": "Read-only researcher tier (proposal 2026-09-30): wide-context free legs for read-only research/review cards. gemini/gemini-3.8-flash heads (1M context per Google AI Studio model card) so the first attempt gets wide context; the combo clamps to 128k because free_ai/qwen7b (the stopgap last leg) caps at 128k. Every leg is a distinct provider so a 429 fall-through lands on another provider. class free: every leg is a free tier or free grant (L0 every tier keeps a free leg). Small output budget 8192: research reports are short. Not served to openhands (opencode+zed only): the combo is a proposal, not wired into select_combo or the v2 resolver; the leaf-researcher OpenHands agent uses deepseek-flash directly (catalog/agent-harness.json). Mirrors l3-driver-free-only's free band minus the dead groq/cerebras legs, leading with gemini for wide context. GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): an l2-* route is cache-gated like the worker band, so the read-only researcher tier is the two cached free legs (bazaarlink ds-v4-flash :free 1M, openrouter nemotron-3-super :free 256k) - wide context, $0, distinct providers. gemini/gemini-3.8-flash (401), opencode_gateway/glm-5.3-flash (402), ainative/llama-4-maverick (429) and free_ai/qwen7b (tool call failed on both gateways, and spec SS2 drops free-ai) all left.",
+      "$comment": "Read-only researcher tier (proposal 2026-09-30): wide-context free legs for read-only research/review cards. gemini/gemini-3.8-flash heads (1M context per Google AI Studio model card) so the first attempt gets wide context; the combo clamps to 128k because free_ai/qwen7b (the stopgap last leg) caps at 128k. Every leg is a distinct provider so a 429 fall-through lands on another provider. class free: every leg is a free tier or free grant (L0 every tier keeps a free leg). Small output budget 8192: research reports are short. Not served to openhands (opencode only): the combo is a proposal, not wired into select_combo or the v2 resolver; the leaf-researcher OpenHands agent uses deepseek-flash directly (catalog/agent-harness.json). Mirrors l3-driver-free-only's free band minus the dead groq/cerebras legs, leading with gemini for wide context. GLM55/AINATIVE 2026-10-05 (operator): oc/glm-5.3-flash (expiring OpenCode grant, front per the D-346 pattern) and ainative/llama-4-maverick (FREEKEYS-proven tool calls; the $9.79 trial is burned for development before 2026-11-02) join the implementation band. DeepSeek stays the paid bulk leg until its credits run out; deepseek remains LAST in every combo that carries it. D657-CHAIN 2026-10-08 (AO-DENYLEGS D2): an l2-* route is cache-gated like the worker band, so the read-only researcher tier is the two cached free legs (bazaarlink ds-v4-flash :free 1M, openrouter nemotron-3-super :free 256k) - wide context, $0, distinct providers. gemini/gemini-3.8-flash (401), opencode_gateway/glm-5.3-flash (402), ainative/llama-4-maverick (429) and free_ai/qwen7b (tool call failed on both gateways, and spec SS2 drops free-ai) all left.",
       "legs": [
         "bazaarlink/deepseek/deepseek-v4-flash-0731free:free",
         "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
@@ -5128,8 +5069,7 @@
       "surfaces": {
         "litellm": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "display_name": "L2 · l2-researcher · 128k",
@@ -5137,8 +5077,7 @@
         },
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "context_declared": "128k",
@@ -5148,7 +5087,7 @@
       }
     },
     "vertex-gemini-3.8-flash": {
-      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for vertex/gemini-3.8-flash (live 1048576 matches registry 1048576; unpriced grant (price 0), unproven - renders but resolver refuses until priced/proven, same stance as morph/deepinfra tails; leg uses vertex/ spelling (live id) not vertex_ai/ (which gateway_ref would emit verbatim and live does not know), same as routes.gemini-3.8-flash). Class credit. opencode/zed only.",
+      "$comment": "TORDER 2026-10-01: pinned single-provider credit combo for vertex/gemini-3.8-flash (live 1048576 matches registry 1048576; unpriced grant (price 0), unproven - renders but resolver refuses until priced/proven, same stance as morph/deepinfra tails; leg uses vertex/ spelling (live id) not vertex_ai/ (which gateway_ref would emit verbatim and live does not know), same as routes.gemini-3.8-flash). Class credit. opencode only.",
       "class": "credit",
       "id": "vertex-gemini-3.8-flash",
       "legs": [
@@ -5158,8 +5097,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 1048576,
           "context_declared": "1M",
@@ -5179,7 +5117,6 @@
         "omniroute": {
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "context": 1048576,
@@ -5218,8 +5155,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context_declared": "128k",
           "display_name": "L3 · l3-implementer · 128k",
@@ -5239,8 +5175,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context_declared": "128k",
           "display_name": "L3 · l3-implementer-clean · 128k",
@@ -5262,8 +5197,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context_declared": "1M",
           "display_name": "L3 · l3-researcher · 1M",
@@ -5283,8 +5217,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context_declared": "1M",
           "display_name": "L3 · l3-researcher-clean · 1M",
@@ -5305,8 +5238,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context_declared": "128k",
           "display_name": "L3 · l3-review-diff · 128k",
@@ -5327,8 +5259,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context_declared": "1M",
           "display_name": "L3 · l3-review-tests · 1M",
@@ -5349,8 +5280,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context_declared": "1M",
           "display_name": "L3 · l3-review-codebase · 1M",
@@ -5368,8 +5298,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context_declared": "1M",
           "display_name": "L3 · l3-review-transcript · 1M",
@@ -5389,8 +5318,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 1048576,
           "context_declared": "1M",
@@ -5402,7 +5330,7 @@
       "$comment": " D657-CLEAN 2026-10-08 (AO-DENYLEGS D2): spec 3.1 rule 3 (private_safe) admits only a paid/subscription/credit leg whose provider proves trains_on_prompts false, and the D-657 ack gate leaves exactly one gateway leg that is both: vertex/gemini-3.8-flash (vertex_ai tier credit, trains_on_prompts false, cache documented). Every free leg is therefore illegal here - tools/registry.py private_safe() rejects a free pool even when it declares no training (PRIV/PRIV2), and rule (b-or) forces every servable openrouter leg to be :free, so the openrouter band can never be clean. This chain is one leg and one provider by evidence, not by choice; the gap is in the lane REPORT (no invented legs). Layer twin of routes.l2-orchestrator for a privacy=sensitive card; it drops the bazaarlink free leg that route heads with."
     },
     "mimo-v2.6-flash": {
-      "$comment": "Xiaomi MiMo v2.6 Flash direct single-model route (1M context). D-2461: surfaces.omniroute.gateway_model_id carries the SERVED spelling - mimo/mimo-v2.6-flash, exactly gateway_ref() of the one leg through providers.xiaomi_mimo.model_prefix - while this route id and the combos.json combo of the same name stay bare; tools/sync-ide-models.py writes that served id as opencode's modelID and tests/linux/33-documentation.sh compares against it. D-2589/D-2590 (MIMO-PROVIDER-PERMANENT): opencode is NOT a client of this surface - omniroute/mimo-v2.6-* is the path D-2459/D-2461 forbade; opencode reaches MiMo only through providers.mimo as mimo/mimo-v2.6-flash|pro.",
+      "$comment": "Xiaomi MiMo v2.6 Flash direct single-model route (1M context). D-2461: surfaces.omniroute.gateway_model_id carries the SERVED spelling - mimo/mimo-v2.6-flash, exactly gateway_ref() of the one leg through providers.xiaomi_mimo.model_prefix - while this route id and the combos.json combo of the same name stay bare; tools/sync-ide-models.py writes that served id as opencode's modelID and tests/linux/33-documentation.sh compares against it. D-2589/D-2590/D-2594 (MIMO-PROVIDER-PERMANENT): no client (opencode, openhands) is offered this surface - omniroute/mimo-v2.6-* is the path D-2459/D-2461 forbade; the route stays gateway-only (combos.json keeps the combo) and clients reach MiMo only as mimo/mimo-v2.6-flash|pro (opencode providers.mimo).",
       "id": "mimo-v2.6-flash",
       "class": "cheap",
       "strategy": "priority",
@@ -5416,20 +5344,12 @@
           "output": 65536,
           "display_name": "Xiaomi MiMo v2.6 Flash · 1M",
           "gateway_model_id": "mimo/mimo-v2.6-flash",
-          "clients": [
-            "zed",
-            "openhands"
-          ],
-          "openhands_profile": {
-            "max_input_tokens": 1048576,
-            "max_output_tokens": 65536,
-            "reasoning": true
-          }
+          "clients": []
         }
       }
     },
     "mimo-v2.6-pro": {
-      "$comment": "Xiaomi MiMo v2.6 Pro direct single-model route (1M context). D-2461: surfaces.omniroute.gateway_model_id carries the SERVED spelling - mimo/mimo-v2.6-pro, exactly gateway_ref() of the one leg through providers.xiaomi_mimo.model_prefix - while this route id and the combos.json combo of the same name stay bare; tools/sync-ide-models.py writes that served id as opencode's modelID and tests/linux/33-documentation.sh compares against it. D-2589/D-2590 (MIMO-PROVIDER-PERMANENT): opencode is NOT a client of this surface - omniroute/mimo-v2.6-* is the path D-2459/D-2461 forbade; opencode reaches MiMo only through providers.mimo as mimo/mimo-v2.6-flash|pro.",
+      "$comment": "Xiaomi MiMo v2.6 Pro direct single-model route (1M context). D-2461: surfaces.omniroute.gateway_model_id carries the SERVED spelling - mimo/mimo-v2.6-pro, exactly gateway_ref() of the one leg through providers.xiaomi_mimo.model_prefix - while this route id and the combos.json combo of the same name stay bare; tools/sync-ide-models.py writes that served id as opencode's modelID and tests/linux/33-documentation.sh compares against it. D-2589/D-2590/D-2594 (MIMO-PROVIDER-PERMANENT): no client (opencode, openhands) is offered this surface - omniroute/mimo-v2.6-* is the path D-2459/D-2461 forbade; the route stays gateway-only (combos.json keeps the combo) and clients reach MiMo only as mimo/mimo-v2.6-flash|pro (opencode providers.mimo).",
       "id": "mimo-v2.6-pro",
       "class": "mid",
       "strategy": "priority",
@@ -5443,15 +5363,7 @@
           "output": 65536,
           "display_name": "Xiaomi MiMo v2.6 Pro · 1M",
           "gateway_model_id": "mimo/mimo-v2.6-pro",
-          "clients": [
-            "zed",
-            "openhands"
-          ],
-          "openhands_profile": {
-            "max_input_tokens": 1048576,
-            "max_output_tokens": 65536,
-            "reasoning": true
-          }
+          "clients": []
         }
       }
     },
@@ -5466,8 +5378,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 1048576,
           "context_declared": "1M",
@@ -5487,8 +5398,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "context_declared": "128k",
@@ -5508,8 +5418,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 131072,
           "context_declared": "128k",
@@ -5519,7 +5428,7 @@
       }
     },
     "opencode-go/qwen3.8-flash": {
-      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go copy of Qwen3.8 Flash, preferred over the opencode free models for routes and seats (200 on 3/3, median 1.54 s, Go /v1/models row reports context 200000). Distinct from models.'qwen/qwen3.8-flash' (OpenRouter's vendor-prefixed spelling, referenced by no route since the 2026-09-26 BYOK withdrawal): this leg resolves to the new bare key models.'qwen3.8-flash'. Named route for the opencode.jsonc modelID, as in routes.'samba/MiniMax-M3'. tool_calls stays 'unproven' — the Go probe answered chat completions, not a tool-call trial — so a card that needs tools is not sent here on evidence it does not have. Not in a tier band (rule (f) cache gate; subscription ranks with paid under rule (b)). trains_on_prompts true (D-1919) keeps it off -clean routes and sensitive cards.",
+      "$comment": "OCGO-PREFER pinned single-model route (operator D-1840 and D-1919, 2026-10-18): the OpenCode Go copy of Qwen3.8 Flash, preferred over the opencode free models for routes and seats (200 on 3/3, median 1.54 s, Go /v1/models row reports context 200000). D-2641 removed the unused vendor-prefixed sibling; this leg resolves to the bare key models.'qwen3.8-flash'. Named route for the opencode.jsonc modelID, as in routes.'samba/MiniMax-M3'. tool_calls stays 'unproven' — the Go probe answered chat completions, not a tool-call trial — so a card that needs tools is not sent here on evidence it does not have. Not in a tier band (rule (f) cache gate; subscription ranks with paid under rule (b)). trains_on_prompts true (D-1919) keeps it off -clean routes and sensitive cards.",
       "class": "cheap",
       "id": "opencode-go/qwen3.8-flash",
       "legs": [
@@ -5529,8 +5438,7 @@
       "surfaces": {
         "omniroute": {
           "clients": [
-            "opencode",
-            "zed"
+            "opencode"
           ],
           "context": 200000,
           "context_declared": "200k",
@@ -5558,7 +5466,6 @@
           "display_name": "L3 · l3-driver-1m · 1M",
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "openhands_profile": {
@@ -5588,7 +5495,6 @@
           "display_name": "L3 · l3-driver-256k · 256k",
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "openhands_profile": {
@@ -5617,7 +5523,6 @@
           "display_name": "L2 · l2-worker-1m · 1M",
           "clients": [
             "opencode",
-            "zed",
             "openhands"
           ],
           "openhands_profile": {

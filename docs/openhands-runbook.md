@@ -74,8 +74,7 @@ request to `<gateway>/v1/chat/completions` with that combo's name as the model (
 ## 6. Fallback ladder (when a rung breaks, step down one)
 
 OpenHands `:3000` → `opencode serve :4096` (`start-stack.sh
-opencode-serve`, pair via `opencode pair`) → Zed (`autoos-omniroute`
-provider) → opencode desktop → nvim+sidekick (`<leader>aa`). Every rung
+opencode-serve`, pair via `opencode pair`) → opencode desktop → nvim+sidekick (`<leader>aa`). Every rung
 routes through `:20128` with the one client key (`AUTOOS_OMNIROUTE_KEY`).
 
 ---

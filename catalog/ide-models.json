@@ -9,12 +9,10 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ],
         "litellm": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -32,7 +30,6 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -44,8 +41,7 @@
       "output": 32768,
       "surfaces": {
         "litellm": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -57,12 +53,10 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ],
         "litellm": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -75,12 +69,10 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ],
         "litellm": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -98,7 +90,6 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -110,8 +101,7 @@
       "output": 32768,
       "surfaces": {
         "litellm": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -123,12 +113,10 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ],
         "litellm": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -141,7 +129,6 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -158,8 +145,7 @@
       ],
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -171,7 +157,6 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -184,12 +169,10 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ],
         "litellm": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -207,7 +190,6 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -219,8 +201,7 @@
       "output": 16384,
       "surfaces": {
         "litellm": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -232,12 +213,10 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ],
         "litellm": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -250,7 +229,6 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -263,7 +241,6 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -275,8 +252,7 @@
       "output": 8192,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -292,8 +268,7 @@
       ],
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -304,8 +279,7 @@
       "output": 32768,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -321,8 +295,7 @@
       ],
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -333,8 +306,7 @@
       "output": 16384,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -345,8 +317,7 @@
       "output": 16384,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -362,8 +333,7 @@
       ],
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -375,12 +345,10 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ],
         "litellm": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -391,12 +359,10 @@
       "output": 8192,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ],
         "litellm": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -413,7 +379,6 @@
       "surfaces": {
         "omniroute": [
           "opencode",
-          "zed",
           "openhands"
         ]
       }
@@ -425,8 +390,7 @@
       "output": 235929,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -437,8 +401,7 @@
       "output": 64000,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -449,8 +412,7 @@
       "output": 32768,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -466,34 +428,7 @@
       ],
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
-        ]
-      }
-    },
-    {
-      "id": "mimo-v2.6-flash",
-      "name": "Xiaomi MiMo v2.6 Flash · 1M",
-      "context": 1048576,
-      "output": 65536,
-      "gateway_model_id": "mimo/mimo-v2.6-flash",
-      "surfaces": {
-        "omniroute": [
-          "zed",
-          "openhands"
-        ]
-      }
-    },
-    {
-      "id": "mimo-v2.6-pro",
-      "name": "Xiaomi MiMo v2.6 Pro · 1M",
-      "context": 1048576,
-      "output": 65536,
-      "gateway_model_id": "mimo/mimo-v2.6-pro",
-      "surfaces": {
-        "omniroute": [
-          "zed",
-          "openhands"
+          "opencode"
         ]
       }
     },
@@ -504,8 +439,7 @@
       "output": 32768,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -516,8 +450,7 @@
       "output": 16384,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -528,8 +461,7 @@
       "output": 32768,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -540,8 +472,7 @@
       "output": 16384,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -553,8 +484,7 @@
       "reasoning_effort": "xhigh",
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -565,8 +495,7 @@
       "output": 32768,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     },
@@ -577,8 +506,7 @@
       "output": 16384,
       "surfaces": {
         "omniroute": [
-          "opencode",
-          "zed"
+          "opencode"
         ]
       }
     }

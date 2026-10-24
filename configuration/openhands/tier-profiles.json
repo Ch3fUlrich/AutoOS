@@ -79,7 +79,9 @@
     "openrouter-nex-mini",
     "openrouter-nex-pro",
     "openrouter-north-mini-code",
-    "deepseek-v4-flash"
+    "deepseek-v4-flash",
+    "mimo-v2.6-flash",
+    "mimo-v2.6-pro"
   ],
   "tiers": [
     {
@@ -158,20 +160,6 @@
       "max_input_tokens": 256000,
       "max_output_tokens": 16384,
       "reasoning": false
-    },
-    {
-      "id": "mimo-v2.6-flash",
-      "model": "openai/mimo-v2.6-flash",
-      "max_input_tokens": 1048576,
-      "max_output_tokens": 65536,
-      "reasoning": true
-    },
-    {
-      "id": "mimo-v2.6-pro",
-      "model": "openai/mimo-v2.6-pro",
-      "max_input_tokens": 1048576,
-      "max_output_tokens": 65536,
-      "reasoning": true
     },
     {
       "id": "l2-worker-free-only",
