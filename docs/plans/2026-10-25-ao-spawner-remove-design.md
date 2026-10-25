@@ -54,7 +54,7 @@ item per D-2739 rule 1), historical `docs/plans`, `docs/handoff`, `CHANGELOG.md`
 | autoos:SEAT-BLIND-QUOTED | KEEP | `tools/autoos_verdict.py _blind_statement` is ready-gate code, which stays |
 | autoos:AO-LEDGER-DRYRUN | KEEP | ready/ledger path stays |
 | autoos:AO-READY-MULTI-BRIEF | KEEP, amend V3 | V1/V2/V4-V6 are ready-gate only. V3 ("each brief maps to a real writer run in the record") must read the PLANGRAPH run record for new runs (AutoOS writes no records after S5); old AutoOS records via `autoos_run_records` (S1) |
-| autoos:AO-SPAWN-PATCH-ID | CANCEL in AutoOS, fold into AO-READY-MULTI-BRIEF V3 | its "spawner writes patch-ids into logs/kill/<run>.json" half needs the AutoOS spawner. If routing wants the patch-id record, it belongs to the plangraph spawner run record (router's call; no new AutoOS item) |
+| autoos:AO-SPAWN-PATCH-ID | CANCELLED (D-2813); patch-id record dropped | it needed the AutoOS spawner to write patch-ids into logs/kill/<run>.json; commit identity in the plangraph run record would be a plangraph item |
 | autoos:LAUNCHER-CPU-GATE | CANCEL in AutoOS | the launcher is the AutoOS spawner. Port only if plangraph host admission lacks a load/RAM gate (router checks against plangraph admission) |
 | autoos:AO-AUTO-FANOUT | KEEP | gateway auto-combo candidate cap + autoos-omniroute restart loop: gateway, not spawner |
 | `prune-sandboxes` verb (3120-3185) | KEEP (small, self-contained) | still cleans legacy AutoOS sandboxes (the legacy sandbox dir still holds many). Removal later once the dir is drained |
@@ -102,13 +102,13 @@ inventory). CHANGELOG entry per slice.
 
 ## 8. Slices (ordered; each green on its own)
 
-Line-cap reading (GO-REQ to routing, see §9): D-2739 rule 3 counts ADDED + MODIFIED lines (<= ~400). Pure deletion hunks of
+Line-cap reading (APPROVED D-2813, see §9): D-2739 rule 3 counts ADDED + MODIFIED lines (<= ~400). Pure deletion hunks of
 whole functions/files do not count toward the cap but each slice deletes ONE cohesive region, and every deletion is proven by the
 I6 grep gate + I3/I5 suites. Without this reading the ~16k deleted lines would need ~40 slices of mechanical deletion.
 
 | Slice | Content | Adds/mods (est) | Deletes (est) | Tests |
 |---|---|---|---|---|
-| S1 decouple | new `tools/autoos_run_records.py` (workers_dir, worker_writer, read_kill_record, kill_store_*) and `tools/autoos_client_keys.py` (key_files, client_key, zen_key, ENV_KEY); `autoos-agent.py` re-imports them (no behavior change); repoint `autoos_writer_ledger.py:760-829`, `autoos_recovery.py:524-555`, `probe_common.py:254-260` (+ the ~15 probe scripts if they touch more than `client_key`/`key_files`/`ENV_KEY`); contract test I1+I2; record-reader test I4 | ~300 | ~200 (moved) | ledger, recovery, probes, new tests, suite wiring |
+| S1 decouple | new `tools/autoos_run_records.py` (workers_dir, worker_writer, read_kill_record, kill_store_*) and `tools/autoos_client_keys.py` (key_files, client_key, zen_key, ENV_KEY); `autoos-agent.py` re-imports them (no behavior change); repoint `autoos_writer_ledger.py:760-829`, `autoos_recovery.py:524-555`, `probe_common.py:254-260` (+ the ~15 probe scripts if they touch more than `client_key`/`key_files`/`ENV_KEY`); contract test I1+I2 (I2 = plangraph `opencode_overlay.py` providers read, D-2813); record-reader test I4 | ~300 | ~200 (moved) | ledger, recovery, probes, new tests, suite wiring |
 | S2a unwire config | `.mcp.json`, `opencode.jsonc` MCP entry + deny rules (providers untouched, I2), `catalog/agent-harness.json`, `lib/agent_harness.py` SPAWNER, openhands profiles, `oc-l1.example.json`, installers (bash + psm1), `oc_l1.py:325` default, `oc_l1_render.py:169-200` | ~250 | ~80 | harness/catalog/installer parts 17/18, `test_oc_l1_render` |
 | S2b skills/docs | §7 | ~350 | ~150 | docs checks (`check-changelog-docs` if present), skill size cap |
 | S3 MCP server | delete `tools/autoos_agent_mcp.py` + `test_agent_mcp_tool_profile`, `test_mcp_stdin_devnull`, `test_mcp_writer_policy`; unwire parts 33:961, 34:4911, `run-tests.ps1` | ~40 | ~2,600 | wiring, part 33/34 |
@@ -123,12 +123,14 @@ deleted; S5c last because S5a/S5b delete tests class by class. S2b can run in pa
 Writer per slice: plangraph spawner (D-2749); fixer mimo/mimo-v2.6-pro (D-2739 rule 5); 2 text seats per slice of families !=
 writer. Main merged into the lane ONCE before each slice's final review (rule 7).
 
-## 9. Open questions for routing
+## 9. Routing rulings (D-2813)
 
-1. GO-REQ: the deletion line-cap reading in §8 (added+modified <= 400; pure deletions uncapped but one cohesive region per slice).
-2. Fleet MCP configs outside the repo (user `~/.claude.json` / project `.mcp.json` files, host opencode configs) that still
-   register autoos-agent: the done line needs them gone. Editing a user/host MCP config is harness config, not auth, but it touches
-   other sessions' tools. Proposal: S6 lists them (read only); the owning L1 of each host removes its own entry after S3 merges.
-3. AO-SPAWN-PATCH-ID patch-id record: plangraph spawner run record or dropped? (§4)
-</content>
-</invoke>
+1. APPROVED: deletion-heavy slices count only added + modified lines (<= ~400). Pure deletions are uncapped, but each slice
+   deletes ONE cohesive region, proven by the S6-style grep gate + the kept suites green. Seats still read the FULL diff,
+   deletions included, for dangling references.
+2. APPROVED: S6 lists the out-of-repo fleet MCP configs (user `~/.claude.json` / project `.mcp.json` files, host opencode
+   configs) read only; after S3 merges, each host's owning L1 removes its own autoos-agent entry (routing routes the list).
+3. Patch-id record DROPPED. If the plangraph spawner run record later needs commit identity, that is a plangraph item, not
+   AutoOS work. AO-MCP-CWD-INDEPENDENT, AO-SPAWN-PATCH-ID and LAUNCHER-CPU-GATE are cancelled.
+4. I2 is part of S1's invariants: S1 must not break plangraph `routing_support/opencode_overlay.py`'s read of the
+   `opencode.jsonc` `providers` block (S1 adds the contract test and runs it).
