@@ -3546,16 +3546,20 @@ def allowed_ids_for_pin(cfg: dict, pin, clean=False) -> list[str]:
     if not pin_mid:
         return []
     declared = sorted(declared_models(cfg))
-    declared = [d for d in declared if not d.endswith("-clean") or clean]
-    if clean:
-        declared = [d for d in declared if d.endswith("-clean") or d + "-clean" not in declared]
     exact = [d for d in declared if mid_of(d) == pin_mid]
     if exact:
-        return exact
+        if clean:
+            filtered = [d for d in exact if d.endswith("-clean") or d + "-clean" not in exact]
+        else:
+            filtered = [d for d in exact if not d.endswith("-clean") or d[:-len("-clean")] not in exact]
+        return filtered or exact
+    candidates = [d for d in declared if not d.endswith("-clean") or clean]
+    if clean:
+        candidates = [d for d in candidates if d.endswith("-clean") or d + "-clean" not in candidates]
     import difflib
     closest = difflib.get_close_matches(
-        pin_mid, sorted({mid_of(d) for d in declared}), n=3, cutoff=0.6)
-    return [d for mid in closest for d in declared if mid_of(d) == mid]
+        pin_mid, sorted({mid_of(d) for d in candidates}), n=3, cutoff=0.6)
+    return [d for mid in closest for d in candidates if mid_of(d) == mid]
 
 
 def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> str:
@@ -13642,6 +13646,8 @@ def quota_group(model):
 
 def relaunch_quota_ok(group):
     """Read recorded cooldowns only; absent state does not block a launch."""
+    if os.environ.get("AUTOOS_RELAUNCH_QUOTA_OFF", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True, "override"
     try:
         state = load_provider_state(os.environ.get("AUTOOS_PROVIDER_STATE_PATH")
                                     or PROVIDER_STATE_PATH)
@@ -13668,13 +13674,21 @@ def relaunch_quota_ok(group):
 
 def relaunch_quota_refusal(model, title, workers, now, quota_ok):
     # A stalled writer must check quota first: switching sol to luna shares it.
-    if not title or os.environ.get("AUTOOS_RELAUNCH_QUOTA_OFF") == "1":
+    if not title or os.environ.get("AUTOOS_RELAUNCH_QUOTA_OFF", "").strip().lower() in ("1", "true", "yes", "on"):
         return None
     group = quota_group(model)
     earlier = []
     for row in workers:
         if not isinstance(row, dict):
             continue
+        try:
+            row_rc = int(row.get("rc"))
+        except (TypeError, ValueError):
+            row_rc = None
+        # A refusal is not a run; skip so next attempt is still refused while window holds.
+        if row_rc in (13, 15) or row.get("state") == "rejected":
+            continue
+        # Title-only identity stands: two lanes sharing a title share a chain; rows with only a lane never match.
         identity = row.get("title")
         started = _iso_utc(row.get("started"))
         if (identity and identity == title and quota_group(row.get("model")) == group
@@ -13692,7 +13706,12 @@ def relaunch_quota_refusal(model, title, workers, now, quota_ok):
     if (row.get("state") != "died"
             and not (rc is not None and (rc < 0 or rc in (5, 6, 10, 137, 143, 124)))):
         return None
-    activity = _iso_utc(row.get("ended")) if row.get("ended") else started
+    ended = row.get("ended")
+    if isinstance(ended, str) and ended.strip() in ("", "0"):
+        ended = None
+    elif ended == 0:
+        ended = None
+    activity = _iso_utc(ended) or started
     if activity is None:
         return None
     minutes = (now - activity).total_seconds() / 60

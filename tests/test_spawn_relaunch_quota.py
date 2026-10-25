@@ -206,6 +206,71 @@ class RelaunchQuotaTests(unittest.TestCase):
                          case._deps(spawn=lambda *args: 15)), "requeued-rc15")
         self.assertTrue((case.root / "queue/quota-job.json").exists())
 
+    def test_refusal_rows_skipped_in_relaunch_quota_refusal(self):
+        older_died = self.row(60, state="died", rc=None)
+        refused_15 = self.row(10, state="exited rc=15", rc=15)
+        refused_13 = self.row(10, state="exited rc=13", rc=13)
+        rejected = self.row(10, state="rejected", rc=None)
+        for refusal_row in (refused_15, refused_13, rejected):
+            with self.subTest(row=refusal_row):
+                text = self.call([older_died, refusal_row])
+                self.assertIsNotNone(text)
+                self.assertIn("previous-run", text)
+
+    def test_two_consecutive_cli_refusals_leave_no_worker_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            row = self.row(90)
+            row["started"] = (now - datetime.timedelta(minutes=90)).isoformat()
+            (directory / "previous-run.json").write_text(json.dumps(row), encoding="utf-8")
+            state = directory / "state.json"
+            state.write_text(json.dumps({"providers": {"cx": {
+                "unavailable_until": (now + datetime.timedelta(minutes=40)).isoformat()
+            }}}), encoding="utf-8")
+            env = {k: v for k, v in os.environ.items() if not k.startswith("AUTOOS_")}
+            env.update(AUTOOS_WORKERS_DIR=tmp, AUTOOS_ADMISSION_OFF="1",
+                       AUTOOS_OMNIROUTE_KEY="test-not-a-key",
+                       AUTOOS_HOST_NAME="test-host",
+                       AUTOOS_PROVIDER_STATE_PATH=str(state))
+            cmd = [sys.executable, str(ROOT / "tools/autoos-agent.py"), "run",
+                   "--model", self.sol, "--title", "writer task", "--isolate", "x"]
+            res1 = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
+            self.assertEqual(res1.returncode, 15)
+            worker_files = [f.name for f in directory.iterdir() if f.name.endswith(".json")]
+            self.assertEqual(sorted(worker_files), ["previous-run.json", "state.json"])
+            res2 = subprocess.run(cmd, cwd=ROOT, env=env, capture_output=True, text=True)
+            self.assertEqual(res2.returncode, 15)
+
+    def test_activity_unparseable_blank_or_zero_ended_falls_back_to_started(self):
+        for bad_ended in ("garbage", "", "   ", "0", 0):
+            with self.subTest(ended=bad_ended):
+                row = self.row(60, ended=bad_ended)
+                text = self.call([row])
+                self.assertIsNotNone(text)
+                self.assertIn("60 min", text)
+
+    def test_relaunch_quota_off_values_and_quota_ok(self):
+        future = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=1)).isoformat()
+        state = {"providers": {"cx": {"unavailable_until": future}}}
+        with patch.object(self.agent, "load_provider_state", return_value=state):
+            for val in ("1", "true", "True", "YES", "yes", "on", "ON"):
+                with self.subTest(val=val), patch.dict(os.environ, AUTOOS_RELAUNCH_QUOTA_OFF=val):
+                    self.assertEqual(self.agent.relaunch_quota_ok("codex"), (True, "override"))
+                    self.assertIsNone(self.call([self.row(60)]))
+
+    def test_title_only_identity_and_shared_lane(self):
+        row_lane_a = self.row(60, title="shared title", lane="lane-a")
+        text = self.agent.relaunch_quota_refusal(
+            self.sol, "shared title", [row_lane_a], self.now, self.check)
+        self.assertIsNotNone(text)
+
+        row_only_lane = self.row(60, title="", lane="writer")
+        text2 = self.agent.relaunch_quota_refusal(
+            self.sol, "writer", [row_only_lane], self.now, self.check)
+        self.assertIsNone(text2)
+
+
 
 if __name__ == "__main__":
     unittest.main()

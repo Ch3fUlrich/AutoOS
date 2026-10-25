@@ -136,6 +136,13 @@ class SpawnPinAllowedIdTests(unittest.TestCase):
         self.assertEqual(self.agent.allowed_ids_for_pin(cfg, "wrong/model-a"), ["p/model-a"])
         self.assertEqual(self.agent.allowed_ids_for_pin(cfg, "wrong/model-a", clean=True), ["p/model-a-clean"])
 
+    def test_clean_only_declaration_without_clean_flag(self):
+        cfg = {"providers": {"p": {"models": {"model-only-clean": {}}}}}
+        self.assertEqual(self.agent.allowed_ids_for_pin(cfg, "wrong/model-only"),
+                         ["p/model-only-clean"])
+        self.assertEqual(self.agent.allowed_ids_for_pin(cfg, "wrong/model-only-clean"),
+                         ["p/model-only-clean"])
+
 
 if __name__ == "__main__":
     unittest.main()
