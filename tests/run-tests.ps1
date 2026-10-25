@@ -5277,6 +5277,19 @@ Test-Case 'autoos-agent spawner windows prompt delivery and shim resolution (uni
     Assert-Equal $rc 0 "win prompt spawn unit tests failed: $out"
 }
 
+Test-Case 'autoos-agent seat prompt and clause (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try {
+        foreach ($test in @('test_spawn_seat_prompt.py', 'test_spawn_seat_clause.py')) {
+            $out = & $py.Source (Join-Path $Root "tests\$test") 2>&1 | Out-String
+            Assert-Equal $LASTEXITCODE 0 "seat unit tests failed: $out"
+        }
+    }
+    finally { $ErrorActionPreference = $prev }
+}
+
 Test-Case 'claude_cli_lag: host Claude Code version vs the newest release, the autoupdater state, no pin (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }

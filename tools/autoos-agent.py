@@ -5769,7 +5769,34 @@ _NO_FREE_LEG_SPACES_RE = re.compile(r"[_\s]+")
 # P12b (D-1116): the two things a seat can have RUN. `ran=` is only asked for when the
 # lane is HIGH (R3), but a value outside this list is refused in every lane — a typo
 # would otherwise read as the evidence the gate exists to demand.
+SEAT_FIRST_LINE = ("You have NO tools and no repository access. Everything you need is below. "
+                   "Answer in plain text only.")
 SEAT_RAN_VALUES = ("tests", "live")
+
+
+def seat_prompt(task, is_seat):
+    """Add the seat's no-tools boundary once, preserving all existing text."""
+    if not is_seat:
+        return task, False
+    if task == SEAT_FIRST_LINE or task.startswith((SEAT_FIRST_LINE + "\n", SEAT_FIRST_LINE + "\r\n")):
+        return task, False
+    return SEAT_FIRST_LINE + "\n\n" + task, True
+
+
+def is_seat_run(args):
+    """Classify review seats without consulting repository or host state."""
+    try:
+        tier = int(getattr(args, "tier", None))
+    except (ValueError, TypeError):
+        tier = None
+    if (getattr(args, "review_base", None) or getattr(args, "review_of", None)
+            or tier == 3):
+        return True
+    try:
+        card = routing.parse_card(getattr(args, "card", None) or "")
+    except (ValueError, KeyError, TypeError):
+        card = {}
+    return bool(isinstance(card, dict) and _card_asks_review(card))
 REVIEW_ENTRY_HINT = ("AutoOS-Review: kind=cross-family author=<model> "
                      "reviewer=<model> [family=<family>] "
                      "verdict=<ready|pass|ship|lgtm|accept|...> [evidence=<path>] "
@@ -9408,6 +9435,167 @@ def registry_family_names(registry):
         if key and key not in out:
             out.append(key)
     return out
+
+
+_HUNK_RE = re.compile(r"^@@\s+-\d+(?:,(\d+))?\s+\+\d+(?:,(\d+))?\s+@@")
+_GIT_METADATA_PREFIXES = (
+    "diff --git",
+    "index ",
+    "new file mode ",
+    "deleted file mode ",
+    "old mode ",
+    "new mode ",
+    "similarity index ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+    "Binary files ",
+    "--- ",
+    "+++ ",
+)
+
+
+def _seat_item_text(text):
+    """Keep item prose only: reviewed code is evidence, not seat instructions."""
+    lines = []
+    fenced = None
+    patch = False
+    in_hunk = False
+    in_malformed_hunk = False
+    old_count = 0
+    new_count = 0
+
+    for line in (text or "").splitlines():
+        fence = line.lstrip()[:3]
+        if fence in ("```", "~~~") and (fenced is None or fence == fenced):
+            fenced = fence if fenced is None else None
+            patch = False
+            in_hunk = False
+            in_malformed_hunk = False
+            lines.append("")
+            continue
+
+        if fenced:
+            lines.append("")
+            continue
+
+        if not patch:
+            if line.startswith(("diff --git", "--- a/", "+++ b/")):
+                patch = True
+                in_hunk = False
+                in_malformed_hunk = False
+                lines.append("")
+                continue
+            lines.append(line)
+            continue
+
+        if line.startswith(r"\ No newline"):
+            lines.append("")
+            continue
+
+        if in_hunk:
+            if line.startswith(" ") or line == "":
+                if old_count > 0:
+                    old_count -= 1
+                if new_count > 0:
+                    new_count -= 1
+                if old_count == 0 and new_count == 0:
+                    in_hunk = False
+                lines.append("")
+                continue
+            if line.startswith("-"):
+                if old_count > 0:
+                    old_count -= 1
+                if old_count == 0 and new_count == 0:
+                    in_hunk = False
+                lines.append("")
+                continue
+            if line.startswith("+"):
+                if new_count > 0:
+                    new_count -= 1
+                if old_count == 0 and new_count == 0:
+                    in_hunk = False
+                lines.append("")
+                continue
+
+            in_hunk = False
+
+        if in_malformed_hunk:
+            if line.startswith(("+", "-", " ")):
+                lines.append("")
+                continue
+            in_malformed_hunk = False
+
+        if line.startswith("@@"):
+            m = _HUNK_RE.match(line)
+            if m:
+                old_count = int(m.group(1)) if m.group(1) is not None else 1
+                new_count = int(m.group(2)) if m.group(2) is not None else 1
+                in_hunk = (old_count > 0 or new_count > 0)
+                in_malformed_hunk = False
+            else:
+                in_hunk = False
+                in_malformed_hunk = True
+            lines.append("")
+            continue
+
+        if any(line.startswith(p) for p in _GIT_METADATA_PREFIXES):
+            lines.append("")
+            continue
+
+        patch = False
+        lines.append(line)
+
+    return "\n".join(lines)
+
+
+def _seat_clause_matches(text):
+    """Yield family and original clause text without reading host or registry state."""
+    text = _seat_item_text(text)
+    # Known limits: qwen L1/L2/L5/L6/L7/L8 (fence conflicts, task-only, dry-run delivery, Python prerequisite, explicit seat triggers, model/task/log coupling) and agy colon-prefix LOW.
+    count = r"(?:[0-9]*[1-9][0-9]*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|both|all|a|an|the)"
+    noun = r"(?:seats?|famil(?:y|ies)|reviewers?|verdicts?)"
+    negative = r"(?:non[-\s]+|not-|not\s+)([a-z]+)\b"
+    # Match requirements, not nearby mentions of reviewers or vendor compatibility.
+    patterns = (
+        rf"\b(?:{count}\s+)?{negative}\s+(?:[a-z]+\s+)?{noun}\b(?:\s+only\b)?",
+        rf"^\s*(?:{count}\s+)?{noun}(?:\s+(?:clause|rule|requirement))?\s*(?::|=| - )\s*{negative}",
+        rf"(?:^\s*|:\s*|\b{count}\s+)no\s+([a-z]+)\s+{noun}\b",
+    )
+    known = {resolver.family_key(fam) for fam, _ in FAMILY_VENDORS}
+    for sentence in re.split(r"[.;\n]", text):
+        matches = sorted((match for pattern in patterns
+                          for match in re.finditer(pattern, sentence, re.IGNORECASE)),
+                         key=lambda match: match.start())
+        if re.search(rf"\b{noun}\b", sentence, re.IGNORECASE):
+            matches += list(re.finditer(
+                r"\bnot\s+(?:use|choose|select|pick|include|assign)\s+([a-z]+)\b",
+                sentence, re.IGNORECASE))
+        for match in matches:
+            name = resolver.family_key(match.group(1))
+            family = vendor_family_name_unique(name) or name
+            if family in known:
+                yield family, match.group().strip()
+
+
+def seat_clause_exclusions(text) -> list[str]:
+    """Family keys excluded by explicit seat clauses, in task order."""
+    return list(dict.fromkeys(family for family, _ in _seat_clause_matches(text)))
+
+
+def seat_clause_refusal(task, seat_family, excluded) -> str | None:
+    """Refuse an excluded (or unplaceable) seat, without any I/O."""
+    if not excluded:
+        return None
+    if not seat_family:
+        return "seat model family unknown, cannot satisfy the clause; pick a seat from another family"
+    family = resolver.family_key(seat_family)
+    if family not in excluded:
+        return None
+    phrase = next((phrase for fam, phrase in _seat_clause_matches(task) if fam == family), task)
+    return ("seat clause %r excludes family %s; pick a seat from another family"
+            % (phrase, family))
 
 
 def fence_name_refusal(unknown, known):
@@ -14386,6 +14574,10 @@ def cmd_run(args, cfg: dict) -> int:
     # a worker chatted twice before the route planner caught it).
     if not args.task or not args.task.strip():
         return refuse("task is empty or whitespace-only", 2)
+    seat = is_seat_run(args)
+    args.task, changed = seat_prompt(args.task, seat)
+    if changed:
+        print("seat-prompt: prepended the no-tools first line", file=sys.stderr)
     # FLEETP0b: `--run-id` names a directory, a branch and a header, so a shape
     # that is not the canonical one is refused here - before any clone, record or
     # client start (and before the MCP server's own state dir is created for it).
@@ -14600,6 +14792,19 @@ def cmd_run(args, cfg: dict) -> int:
     if any(not str(v).strip() for v in not_family_values(args)):
         return refuse(fence_blank_refusal(), 2)
     fence = family_fence(args)
+    if seat:
+        excluded = seat_clause_exclusions(args.task)
+        if excluded:
+            seat_model, _ = effective_spawn_model(
+                client.name, args.model, args.card, _avail_registry, cfg,
+                args.tier, bool(args.free), args.free_model, bool(args.clean))
+            seat_family = fence_family_of(seat_model, _avail_registry)
+            clause_refusal = seat_clause_refusal(args.task, seat_family, excluded)
+            if clause_refusal:
+                detail = "; the seat model is %s (%s); pick a seat from another family" % (
+                    seat_model, seat_family or "unknown")
+                return refuse(clause_refusal.replace(
+                    "; pick a seat from another family", detail), 2)
     # `--no-fallthrough` is read once, here, so the pin cannot be seen differently
     # by the branch that announces it and the branch that re-plans. The default is
     # False, which is what the flag's absence means to argparse too.
