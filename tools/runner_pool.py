@@ -415,7 +415,7 @@ def _run_claimed(root, n, deps, claimed_path, now):
     rc = deps.spawn(argv, str(log_path), env)
     ended = deps.now()
 
-    if rc == 13:
+    if rc in (13, 15):
         qpath = queue_dir / f"{job['id']}.json"
         if not rpc.write_json_atomic(str(qpath), job):
             return 'requeue-failed'
@@ -425,7 +425,7 @@ def _run_claimed(root, n, deps, claimed_path, now):
             except OSError:
                 pass
         write_slot_state(root, n, 'idle', None, now, deps.pid, deps.filetime)
-        return 'requeued-rc13'
+        return f'requeued-rc{rc}'
 
     risk = deps.risk_of(job)
     diff_empty, tests_skipped = deps.diff_info(job)
