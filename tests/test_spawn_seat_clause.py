@@ -58,9 +58,87 @@ class SeatClauseTests(unittest.TestCase):
             ("non-Claude independent seats", ["anthropic"]),
             ("seats = not Claude", ["anthropic"]),
             ("seat requirement - non-anthropic", ["anthropic"]),
+            ("do not use python seats", []),
+            ("do not use tabs for this seat", []),
+            ("do not choose unknownvendor reviewers", []),
         ]:
             with self.subTest(text=text):
                 self.assertEqual(agent.seat_clause_exclusions(text), expected)
+
+    def test_hunk_accounting(self):
+        # 1. Blank context line inside a hunk followed by a '+ # non-gemini reviewers' line (ignored)
+        task_blank_ctx = (
+            "Review diff\n"
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1,3 +1,3 @@\n"
+            " def foo():\n"
+            "\n"
+            "+    # non-gemini reviewers\n"
+            "     return True\n"
+        )
+        self.assertEqual(agent.seat_clause_exclusions(task_blank_ctx), [])
+
+        # 2. Metadata line 'rename from docs/not-use-claude-seats.md' (ignored)
+        task_rename = (
+            "Review diff\n"
+            "diff --git a/docs/not-use-claude-seats.md b/docs/claude-seats.md\n"
+            "similarity index 100%\n"
+            "rename from docs/not-use-claude-seats.md\n"
+            "rename to docs/claude-seats.md\n"
+        )
+        self.assertEqual(agent.seat_clause_exclusions(task_rename), [])
+
+        # 3. Prose clause after the patch ('2 non-Claude seats') still honoured
+        task_prose_after = (
+            "Review diff\n"
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+new\n"
+            "\n"
+            "2 non-Claude seats\n"
+        )
+        self.assertEqual(agent.seat_clause_exclusions(task_prose_after), ["anthropic"])
+
+        # 4. Two files in one patch
+        task_two_files = (
+            "Review diff\n"
+            "diff --git a/f1.py b/f1.py\n"
+            "--- a/f1.py\n"
+            "+++ b/f1.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-all non-qwen verdicts\n"
+            "+valid code\n"
+            "diff --git a/f2.py b/f2.py\n"
+            "--- a/f2.py\n"
+            "+++ b/f2.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-old\n"
+            "+all non-gemini reviewers\n"
+            "\n"
+            "2 non-Claude seats\n"
+        )
+        self.assertEqual(agent.seat_clause_exclusions(task_two_files), ["anthropic"])
+
+        # 5. A hunk with '\ No newline'
+        task_no_newline = (
+            "Review diff\n"
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1,1 +1,1 @@\n"
+            "-all non-qwen verdicts\n"
+            "\\ No newline at end of file\n"
+            "+all non-gemini reviewers\n"
+            "\\ No newline at end of file\n"
+            "\n"
+            "2 non-Claude seats\n"
+        )
+        self.assertEqual(agent.seat_clause_exclusions(task_no_newline), ["anthropic"])
 
     def test_refusal(self):
         task = "2 non-Claude seats"

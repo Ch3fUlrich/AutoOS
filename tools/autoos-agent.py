@@ -9218,25 +9218,116 @@ def registry_family_names(registry):
     return out
 
 
+_HUNK_RE = re.compile(r"^@@\s+-\d+(?:,(\d+))?\s+\+\d+(?:,(\d+))?\s+@@")
+_GIT_METADATA_PREFIXES = (
+    "diff --git",
+    "index ",
+    "new file mode ",
+    "deleted file mode ",
+    "old mode ",
+    "new mode ",
+    "similarity index ",
+    "rename from ",
+    "rename to ",
+    "copy from ",
+    "copy to ",
+    "Binary files ",
+    "--- ",
+    "+++ ",
+)
+
+
 def _seat_item_text(text):
     """Keep item prose only: reviewed code is evidence, not seat instructions."""
     lines = []
     fenced = None
     patch = False
+    in_hunk = False
+    in_malformed_hunk = False
+    old_count = 0
+    new_count = 0
+
     for line in (text or "").splitlines():
         fence = line.lstrip()[:3]
         if fence in ("```", "~~~") and (fenced is None or fence == fenced):
             fenced = fence if fenced is None else None
+            patch = False
+            in_hunk = False
+            in_malformed_hunk = False
             lines.append("")
-        else:
-            if not fenced and line.startswith(("diff --git", "--- a/", "+++ b/")):
+            continue
+
+        if fenced:
+            lines.append("")
+            continue
+
+        if not patch:
+            if line.startswith(("diff --git", "--- a/", "+++ b/")):
                 patch = True
+                in_hunk = False
+                in_malformed_hunk = False
                 lines.append("")
                 continue
-            if not line.strip():
-                patch = False
-            hunk = patch and line.startswith(("+", "-", " ", "@@"))
-            lines.append("" if fenced or hunk else line)
+            lines.append(line)
+            continue
+
+        if line.startswith(r"\ No newline"):
+            lines.append("")
+            continue
+
+        if in_hunk:
+            if line.startswith(" ") or line == "":
+                if old_count > 0:
+                    old_count -= 1
+                if new_count > 0:
+                    new_count -= 1
+                if old_count == 0 and new_count == 0:
+                    in_hunk = False
+                lines.append("")
+                continue
+            if line.startswith("-"):
+                if old_count > 0:
+                    old_count -= 1
+                if old_count == 0 and new_count == 0:
+                    in_hunk = False
+                lines.append("")
+                continue
+            if line.startswith("+"):
+                if new_count > 0:
+                    new_count -= 1
+                if old_count == 0 and new_count == 0:
+                    in_hunk = False
+                lines.append("")
+                continue
+
+            in_hunk = False
+
+        if in_malformed_hunk:
+            if line.startswith(("+", "-", " ")):
+                lines.append("")
+                continue
+            in_malformed_hunk = False
+
+        if line.startswith("@@"):
+            m = _HUNK_RE.match(line)
+            if m:
+                old_count = int(m.group(1)) if m.group(1) is not None else 1
+                new_count = int(m.group(2)) if m.group(2) is not None else 1
+                in_hunk = (old_count > 0 or new_count > 0)
+                in_malformed_hunk = False
+            else:
+                in_hunk = False
+                in_malformed_hunk = True
+            lines.append("")
+            continue
+
+        if any(line.startswith(p) for p in _GIT_METADATA_PREFIXES):
+            lines.append("")
+            continue
+
+        patch = False
+        lines.append(line)
+
     return "\n".join(lines)
 
 
