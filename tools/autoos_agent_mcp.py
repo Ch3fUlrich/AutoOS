@@ -1588,7 +1588,7 @@ def _verdict_value(stripped: str) -> str | None:
 
 
 def review_verdict(text: str) -> str | None:
-    """ACCEPT/REJECT/HOLD or this reader's legacy words; ambiguous seats return None."""
+    """Shared decisions: differing words fail closed, including seat/legacy conflicts."""
     return transcript_verdict(text, LEGACY_AGENT_VERDICTS)
 
 

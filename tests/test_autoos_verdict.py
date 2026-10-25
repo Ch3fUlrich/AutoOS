@@ -42,8 +42,7 @@ class VerdictGrammarTests(unittest.TestCase):
             echoes = ("", "VERDICT: " + grammar, prompt,
                       "VERDICT: <" + grammar + ">",
                       "VERDICT: " + " / ".join(v.VERDICTS),
-                      "VERDICT: " + ", ".join(v.VERDICTS[:-1]) + " or " + v.VERDICTS[-1],
-                      "VERDICT: [" + v.VERDICTS[0] + "]")
+                       "VERDICT: " + ", ".join(v.VERDICTS[:-1]) + " or " + v.VERDICTS[-1])
             for echo in (line + chr(10) if line else "" for line in echoes):
                 with self.subTest(word=word, echo=echo):
                     got = v.parse_verdict(harness + "\n" + echo + "VERDICT: " + word
@@ -92,8 +91,7 @@ class VerdictGrammarTests(unittest.TestCase):
             got = v.parse_verdict(text)
             self.assertTrue(got["valid"], (text, got["reason"]))
             self.assertEqual(want, got["verdict"], text)
-        for text, why in (("prose\nVERDICT: ACCEPT\nmore\nVERDICT: ACCEPT\n", "two"),
-                          ("prose only, the word verdict: accept inside a sentence\n",
+        for text, why in (("prose only, the word verdict: accept inside a sentence\n",
                            "no verdict line"),
                           ("I reviewed it.\nVERDICT: SHIP\n", "SHIP"),
                           # mimo seat d15v: a lone fenced verdict with no conclusion of the

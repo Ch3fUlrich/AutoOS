@@ -372,7 +372,7 @@ def _indent_columns(line: str) -> int:
 
 
 def review_verdict(text: str) -> str | None:
-    """ACCEPT/REJECT/HOLD or this reader's legacy words; ambiguous seats return None."""
+    """Shared decisions: differing words yield None (stdout missing, evidence null)."""
     return transcript_verdict(text, LEGACY_CALL_VERDICTS)
 
 
