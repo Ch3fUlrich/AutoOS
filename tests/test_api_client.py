@@ -66,7 +66,20 @@ class TestApiClient(unittest.TestCase):
             self.assertIsNotNone(self._model_matches(m))
 
     def test_max_tokens_cap(self):
-        self.assertEqual(api.MAX_TOKENS_CAP, 8000)
+        self.assertEqual(api.MAX_TOKENS_CAP, 128000)
+
+    def test_build_argv_clamps_to_model_ceiling(self):
+        prompt = self._make_prompt()
+        out = self._make_out()
+        # ovh/gpt-oss-120b has ceiling 32768 in catalog/ai-registry.json
+        argv = api.build_argv('ovh/gpt-oss-120b', str(prompt), str(out), str(self.root))
+        self.assertEqual(argv[11], '32768')
+        # qoder/glm-5.2 has ceiling 16384
+        argv_q = api.build_argv('qoder/glm-5.2', str(prompt), str(out), str(self.root))
+        self.assertEqual(argv_q[11], '16384')
+        # No clamp below ceiling
+        argv_low = api.build_argv('ovh/gpt-oss-120b', str(prompt), str(out), str(self.root), max_tokens=1000)
+        self.assertEqual(argv_low[11], '1000')
 
     def test_model_id_re_charset(self):
         self.assertIsNotNone(self._model_matches('abc.DEF-123_:/'))
@@ -136,7 +149,7 @@ class TestApiClient(unittest.TestCase):
             'python', expected_script, '--model', VALID_MODEL,
             '--prompt-file', os.path.realpath(str(prompt)),
             '--out-dir', os.path.realpath(str(out)),
-            '--title', 'api', '--max-tokens', '8000',
+            '--title', 'api', '--max-tokens', '128000',
         ]
         self.assertEqual(argv, expected)
         self.assertEqual(len(argv), 12)
@@ -169,7 +182,7 @@ class TestApiClient(unittest.TestCase):
     def test_build_argv_rejects_bad_max_tokens(self):
         prompt = self._make_prompt()
         out = self._make_out()
-        for bad in (True, False, '8000', 8000.0, 0, -1, 8001):
+        for bad in (True, False, '128000', 128000.0, 0, -1, 128001):
             with self.subTest(bad=bad):
                 with self.assertRaises(ValueError):
                     api.build_argv(VALID_MODEL, str(prompt), str(out), str(self.root), max_tokens=bad)
@@ -209,7 +222,7 @@ class TestApiClient(unittest.TestCase):
         self.assertEqual(argv[8], '--title')
         self.assertEqual(argv[9], ident)
         self.assertEqual(argv[10], '--max-tokens')
-        self.assertEqual(argv[11], '8000')
+        self.assertEqual(argv[11], '128000')
         self.assertTrue(prompt.exists(), prompt)
         self.assertEqual(prompt.read_text(encoding='utf-8'), task)
         self.assertTrue(out_dir.is_dir())

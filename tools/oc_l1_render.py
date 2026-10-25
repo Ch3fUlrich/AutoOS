@@ -46,7 +46,11 @@ import json
 import os
 import re
 import shlex
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from autoos_tokens import DEFAULT_MAX_TOKENS, clamp_max_tokens
 
 ENV_URL = "AUTOOS_OMNIROUTE_URL"
 REGISTRY_RELPATH = Path("catalog") / "ai-registry.json"
@@ -86,7 +90,7 @@ ENV_L2_LANE = "AUTOOS_L2_LANE"
 RENDERED_FILENAME = "opencode.json"
 PROVIDER_NPM = "@ai-sdk/openai-compatible"
 PROVIDER_NAME = "workstation gateway"
-MODEL_LIMIT = {"context": 131072, "output": 16000}
+MODEL_LIMIT = {"context": 131072, "output": DEFAULT_MAX_TOKENS}
 PERMISSIONS = {"bash": "allow", "edit": "allow", "read": "allow",
                "autoos-agent_*": "allow"}
 # Lane c (render keys, 2026-10-05): opencode prunes old tool outputs ONLY on
@@ -299,16 +303,22 @@ def render(lane, repo_config_path):
     def _limit(raw, model_id):
         """muse-spark seat 2026-10-06, finding 4: a pinned limit is rendered
         straight into the client config - validate its shape here (positive
-        int context/output) instead of passing any dict through."""
+        int context/output) instead of passing any dict through.
+
+        D-2694: unpinned output limit defaults to 128000 and clamps to the
+        model's real registry output_max ceiling."""
         if not isinstance(raw, dict):
             window = _registry_window(model_id)
-            return {"context": window, "output": MODEL_LIMIT["output"]} if window else dict(MODEL_LIMIT)
+            out = clamp_max_tokens(model_id, MODEL_LIMIT["output"])
+            return {"context": window or MODEL_LIMIT["context"], "output": out}
         ctx, out = raw.get("context"), raw.get("output")
         if isinstance(ctx, bool) or not isinstance(ctx, int) or ctx <= 0:
             window = _registry_window(model_id)
             ctx = window or MODEL_LIMIT["context"]
         if isinstance(out, bool) or not isinstance(out, int) or out <= 0:
-            out = MODEL_LIMIT["output"]
+            out = clamp_max_tokens(model_id, MODEL_LIMIT["output"])
+        else:
+            out = clamp_max_tokens(model_id, out)
         return {"context": ctx, "output": out}
 
     limit = _limit(m.get("limit"), mid)
