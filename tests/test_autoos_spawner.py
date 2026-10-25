@@ -105,12 +105,41 @@ def allow_in_place(case, agent):
 _WORKERS_TMP = None
 _MEMINFO_TMP = None
 _HOST_PINS = None
+_WRITER_PROBE = None
+_CLIENT_BIN = None
+_CLIENT_PATH_PATCH = None
+
+
+def writer_fixture_state():
+    """D-2148: unrelated tests have one writer, regardless of host installs."""
+    return {name: {"installed": name == "opencode", "signed_in": True,
+                   "reason": "test fixture"} for name in clients.CLIENTS}
 
 
 def setUpModule():
-    global _WORKERS_TMP, _MEMINFO_TMP, _HOST_PINS
+    global _WORKERS_TMP, _MEMINFO_TMP, _HOST_PINS, _WRITER_PROBE, _CLIENT_BIN
+    global _CLIENT_PATH_PATCH
     _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-workers-test-")
     os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
+    # Patch the shared probe (fresh agents and MCP's cached agent both use it).
+    # Policy tests can still replace the probe or pass an explicit snapshot.
+    import autoos_measure
+    _WRITER_PROBE = mock.patch.object(autoos_measure, "client_state",
+                                      side_effect=lambda *a, **k: writer_fixture_state())
+    _WRITER_PROBE.start()
+    # Subprocess CLI tests cannot inherit mocks. Shadow only opencode; it has
+    # no sign-in probe, so an inert executable supplies the same availability.
+    _CLIENT_BIN = os.path.join(_WORKERS_TMP, "bin")
+    os.mkdir(_CLIENT_BIN)
+    if os.name != "nt":
+        stub = Path(_CLIENT_BIN, "opencode")
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+    else:
+        Path(_CLIENT_BIN, "opencode.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
+    _CLIENT_PATH_PATCH = mock.patch.dict(os.environ, {
+        "PATH": _CLIENT_BIN + os.pathsep + os.environ.get("PATH", os.defpath)})
+    _CLIENT_PATH_PATCH.start()
     # HOSTADMISSION reads the host's MemAvailable, and a runner with less free
     # memory than the floor would refuse every real-launch test in this file for
     # a reason none of them is about. Pin the source to a healthy fake; the
@@ -137,6 +166,10 @@ def setUpModule():
 
 
 def tearDownModule():
+    if _WRITER_PROBE is not None:
+        _WRITER_PROBE.stop()
+    if _CLIENT_PATH_PATCH is not None:
+        _CLIENT_PATH_PATCH.stop()
     # `uninstall` first: it puts back what `install` found, which includes the two
     # names this module set before it, so the pops below have to come after it or
     # it would put them back and leave the next test file pointing at this dir.
@@ -159,6 +192,7 @@ def pinned_env(**extra):
     fixtures itself; this is the one place that says what they are (AO-ADMISSION-2).
     """
     env = dict(_host_env_pins())
+    env["PATH"] = _CLIENT_BIN + os.pathsep + os.defpath
     env.update(extra)
     return env
 
@@ -195,6 +229,8 @@ def clean_env(**extra):
     dropped = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_SESSION_TAG")
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k not in dropped}
+    if _CLIENT_BIN is not None:
+        env["PATH"] = _CLIENT_BIN + os.pathsep + env.get("PATH", os.defpath)
     env.update(extra)
     return env
 
@@ -568,6 +604,201 @@ class ClientMatrixTests(unittest.TestCase):
 def plan_of(*args, env=None):
     r = run_agent("run", "--dry-run", *args, env=env)
     return r
+
+
+class WriterPolicyPickTests(unittest.TestCase):
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = self.agent.load_registry(str(ROOT / "catalog/ai-registry.json"))
+        self.state = {name: {"installed": True, "signed_in": True}
+                      for name in clients.CLIENTS}
+        for target, value in (("load_live_registry", self.registry),):
+            patcher = mock.patch.object(self.agent, target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(self.agent.measure_mod, "client_state", return_value=self.state)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_writer_policy_skips_disabled_row(self):
+        self.registry["policy"]["writers"]["order"][0]["available"] = False
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        self.assertEqual(decision["model"], "mimo/mimo-v2.6-flash")
+        self.assertIn("unavailable", decision["writer_skips"][0]["reason"])
+
+    def test_writer_policy_missing_client_is_recorded(self):
+        self.state["opencode"]["installed"] = False
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        self.assertEqual(decision["client"], "qoder")
+        self.assertEqual(len(decision["writer_skips"]), 3)
+        self.assertIn("not installed", decision["writer_skips"][0]["reason"])
+
+    def test_writer_policy_route_leg_bench_is_used(self):
+        leg = "cx/gpt-6.1-sol"
+        self.registry["routes"]["fixture"] = {
+            "legs": [leg], "unavailable_legs": {leg: {"available": False}}}
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        self.assertNotEqual(decision["model"], "omniroute/cx-gpt-6.1-sol")
+
+    def test_writer_policy_sensitive_replacement_is_checked(self):
+        with self.assertRaisesRegex(self.agent.PrivacyRefused, "privacy"):
+            self.agent.policy_writer_route({"privacy": "sensitive"}, eligible=True,
+                                          registry=self.registry, client_state=self.state)
+
+    def test_writer_policy_pricing_without_hand_row(self):
+        self.assertIs(self.agent.spawn_spends_claude(
+            "opencode", "omniroute/cx-gpt-6.1-sol", self.registry,
+            source="policy.writers.order", cfg={}), False)
+
+    def test_writer_policy_deepseek_row_prices_from_its_declared_leg(self):
+        # opencode.jsonc deepseek-direct-flash -> modelID deepseek/deepseek-flash
+        self.assertIs(self.agent.spawn_spends_claude(
+            "opencode", "omniroute/deepseek-direct-flash", self.registry,
+            source="policy.writers.order", cfg={}), False)
+
+    def test_writer_policy_unverified_alias_pricing_refuses_honestly(self):
+        agent = self.agent
+        self.registry["policy"]["claude_budget"]["mode"] = "budget"
+        plan = {"client": "opencode"}
+        with mock.patch.object(agent, "plan_launch_models", return_value=[
+                ("omniroute/no-leg-alias", "policy.writers.order")]), mock.patch.object(
+                agent.resolver, "claude_allowed", return_value=(False, "held")):
+            refusal, _ = agent.claude_plan_refusal(argparse.Namespace(), plan, {}, self.registry, {})
+        self.assertIn("unverified policy alias", refusal)
+        self.assertNotIn("holds for finals", refusal)
+
+    def test_writer_policy_log_records_skips(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        skips = [{"entry": {"model": "fixture"}, "reason": "unavailable"}]
+        plan = {"client": "opencode", "agent": "worker", "model": "fixture",
+                "route": {"combo": "fixture", "reason": "policy.writers.order"},
+                "depth": (1, 2), "sandbox": None, "writer_skips": skips}
+        with mock.patch.object(self.agent, "ROOT", directory):
+            self.agent.log_run(plan, 0, 1, False)
+        log = next(Path(directory, "logs").glob("orch-*.log")).read_text()
+        self.assertIn(json.dumps(skips, sort_keys=True), log)
+
+    def test_writer_policy_mapping(self):
+        agent = load_agent()
+        registry = agent.load_registry(str(ROOT / "catalog/ai-registry.json"))
+        rows = registry["policy"]["writers"]["order"]
+        self.assertEqual([agent.writer_launch_adapter(row, registry) for row in rows], [
+            ("opencode", "omniroute/cx-gpt-6.1-sol"),
+            ("opencode", "mimo/mimo-v2.6-flash"),
+            ("opencode", "omniroute/deepseek-direct-flash"),
+            ("qoder", "qwen3.8-flash")])
+        self.assertIsNone(agent.writer_launch_adapter({"client": "unknown", "model": "x"}, registry))
+
+    def test_writer_policy_default_dry_run(self):
+        with mock.patch.object(_runner_agent(), "load_live_registry", return_value=self.registry):
+            result = plan_of("implement a small fix")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("omniroute/cx-gpt-6.1-sol", result.stdout)
+
+    def test_writer_policy_probe_cached(self):
+        with mock.patch.object(self.agent.measure_mod, "client_state", return_value=self.state) as probe:
+            self.agent.pick_policy_writer(registry=self.registry)
+            self.agent.pick_policy_writer(registry=self.registry)
+        self.assertEqual(probe.call_count, 1)
+
+    def test_writer_policy_cmd_run_qoder_post_plan_client(self):
+        runner = _runner_agent()
+        self.state["opencode"]["installed"] = False
+        with mock.patch.object(runner, "load_live_registry", return_value=self.registry), mock.patch.object(
+                runner, "writer_client_state", return_value=self.state), mock.patch.object(
+                runner.resolver, "_client_reason", wraps=runner.resolver._client_reason) as availability, mock.patch.object(
+                runner, "daily_gate_refusal", side_effect=lambda args, plan=None: "picked-client=" + plan["client"] if plan else None):
+            result = plan_of("implement a fix")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("picked-client=qoder", result.stderr)
+        self.assertEqual(availability.call_args.args[1], "qoder")
+
+    def test_writer_policy_cmd_run_plain_unavailable(self):
+        runner = _runner_agent()
+        with mock.patch.object(runner, "build_plan", side_effect=runner.PolicyWriterUnavailable("no available policy writer: fixture")):
+            result = plan_of("implement a fix")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no available policy writer: fixture", result.stderr)
+        self.assertNotIn("see: tools", result.stderr)
+
+    def test_writer_policy_fallthrough_prints_cause(self):
+        agent = self.agent
+        args = argparse.Namespace(free_model="first")
+        output = io.StringIO()
+        with mock.patch.object(agent, "build_plan", side_effect=agent.PolicyWriterUnavailable("no available policy writer: fixture")), contextlib.redirect_stderr(output):
+            result = agent._free_fallthrough_plan(args, {}, {"model": "first", "sandbox": None},
+                                                  ["first", "second"], set())
+        self.assertEqual(result, (None, None, None))
+        self.assertIn("no available policy writer: fixture", output.getvalue())
+
+    def test_writer_policy_worker_record_persists_decision(self):
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        plan = dict(run_id="fixture", client=decision["client"], model=decision["model"],
+                    depth=(1, 2), writer_decision=decision, writer_skips=decision["writer_skips"])
+        with mock.patch.object(self.agent, "_write_worker_record") as write:
+            _, record = self.agent._worker_record_start(plan, argparse.Namespace(title="fixture", task="fix"), ".", kind="worker")
+        self.assertEqual(record["writer_decision"], decision)
+        self.assertEqual(record["writer_skips"], decision["writer_skips"])
+        self.assertEqual(write.call_args.args[1], record)
+
+    def test_writer_policy_row_reason_names_entry_and_until(self):
+        row = self.registry["policy"]["writers"]["order"][0]
+        row["unavailable_until"] = "2999-01-01T00:00:00Z"
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        reason = decision["writer_skips"][0]["reason"]
+        self.assertIn(row["model"], reason)
+        self.assertIn(row["unavailable_until"], reason)
+
+    def test_writer_policy_preflight_kind_pins_and_metadata(self):
+        agent = self.agent
+        old = dict(route="fixture", leg="old/model", effort="high", max_tokens=99,
+                   context_budget=88, expected_cost=77)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for card, eligible in [({"kind": "review"}, False),
+                               ({"kind": "implement", "override": {"client": "qoder"}}, False),
+                               ({"kind": "implement", "override": {"route": "fixture"}}, False),
+                               ({"kind": "implement"}, True)]:
+            with self.subTest(card=card), mock.patch.object(agent.measure_mod, "measure", return_value={}), mock.patch.object(agent.resolver, "plan", return_value=old):
+                result = agent.route_plan_for(card, "", ".", "fixture", now,
+                                              self.registry, {}, [], self.state,
+                                              apply_writer_policy=True)
+            self.assertEqual("writer_decision" in result, eligible)
+            if eligible:
+                self.assertEqual(result["model"], agent.pick_policy_writer(registry=self.registry, client_state=self.state)["model"])
+                for field in ("effort", "max_tokens", "context_budget", "expected_cost"):
+                    self.assertIsNone(result[field], field)
+                self.assertNotEqual(result["leg"], old["leg"])
+
+    def test_writer_policy_cooldown_records_skip(self):
+        agent = self.agent
+        until = (datetime.datetime.now(datetime.timezone.utc)
+                 + datetime.timedelta(hours=1)).isoformat()
+        args = argparse.Namespace(
+            client=None, tier=None, card=None,
+            task="implement a fix", free=False, model=None, clean=False,
+            allow_training=False, max_depth=None, title=None, isolate=False,
+            auto=True, lean=False, joinable=False)
+        cfg = {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
+               "providers": {"omniroute": {"models": {"l2-worker": {}}}}}
+        plan = agent.build_plan(args, cfg, provider_cooldown={
+            "cx": {"unavailable_until": until}})
+        decision = plan["writer_decision"]
+        self.assertEqual((decision["client"], decision["model"]),
+                         ("opencode", "mimo/mimo-v2.6-flash"))
+        self.assertEqual(decision["writer_skips"][0]["entry"]["model"],
+                         "omniroute/cx-gpt-6.1-sol")
+        self.assertIn("unavailable", decision["writer_skips"][0]["reason"])
+        self.assertIn("mimo/mimo-v2.6-flash", plan["cmd"])
+        self.assertEqual(plan["writer_skips"], decision["writer_skips"])
+        self.assertEqual(agent.plan_launch_models(plan, args, cfg),
+                         [("mimo/mimo-v2.6-flash", "policy.writers.order")])
+
+    def test_writer_policy_model_pin_unaffected(self):
+        result = plan_of("--model", "omniroute/l2-worker", "implement a fix")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("omniroute/l2-worker", result.stdout)
+        self.assertNotIn("omniroute/cx-gpt-6.1-sol", result.stdout)
 
 
 class InProcessEquivalenceTests(unittest.TestCase):
@@ -966,14 +1197,23 @@ class ClientCapabilityTests(unittest.TestCase):
         self.assertIn("qodercli", r.stdout)
 
     def test_an_isolated_run_without_a_client_auto_picks_a_capable_one(self):
-        r = plan_of("--isolate", "edit README.md")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("would run: opencode", r.stdout)
+        # No installed writer is a refusal, not an implicit opencode default.
+        runner = _runner_agent()
+        absent = {name: {"installed": False, "signed_in": None}
+                  for name in clients.CLIENTS}
+        with mock.patch.object(runner, "writer_client_state", return_value=absent):
+            r = plan_of("--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no available policy writer", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertNotIn("would run:", r.stdout)
 
     def test_the_no_client_default_is_still_opencode(self):
         r = plan_of("t")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("would run: opencode", r.stdout)
+        self.assertIn("omniroute/cx-gpt-6.1-sol", r.stdout)
+        self.assertIn("policy.writers.order", r.stdout)
 
 
 class ReviewFindingTests(unittest.TestCase):
@@ -4494,8 +4734,9 @@ class CardV2Tests(unittest.TestCase):
         })
         # REVROUTE (S2) item 2: author is shared by both dialects and is not a
         # combo input -- it decides who reviews, never what runs.
-        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author"}))
-        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author"}))
+        # SPAWNER-ITEM-KEY: item_key is shared by both dialects; MODEL-ORDER: so is seat.
+        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author", "item_key", "seat"}))
+        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author", "item_key", "seat"}))
 
     def test_kind_final_and_critical_are_the_claude_budget_card_fields(self):
         """D-102 CLAUDEBUDGET: `kind=final` names the reserved final review and
@@ -8900,6 +9141,60 @@ def _reviewer_registry():
     return reg
 
 
+class ModelOrderSeatTests(unittest.TestCase):
+    def seat_plan(self, seat):
+        harness = ReviewerGateTests()
+        harness.setUp()
+        self.addCleanup(harness.doCleanups)
+        harness.registry["policy"]["reviewers"] = [
+            {"client": "agy", "model": "gemini-3.8-flash", "family": "gemini"},
+            {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen"}]
+        harness.client_state["agy"] = {"installed": True, "signed_in": True}
+        return harness.agent.build_plan(harness.args(
+            card="kind=review,author=meta,seat=%d,paths=tools/registry.py" % seat),
+            harness.cfg())
+
+    def test_model_order_agy_explicit_model(self):
+        argv = self.seat_plan(1)["cmd"]
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash")
+        self.assertNotIn(clients.AGY_DEFAULT_MODEL, argv)
+
+    def test_model_order_seat_card_validation(self):
+        agent = load_agent()
+        self.assertEqual(agent.routing.normalize({"seat": 2})["seat"], 2)
+        with self.assertRaises(agent.routing.CardError):
+            agent.routing.normalize({"seat": 3})
+
+    def test_model_order_selects_second_seat(self):
+        argv = self.seat_plan(2)["cmd"]
+        self.assertEqual(argv[argv.index("--model") + 1], "qwen3.8-flash")
+
+    def test_model_order_gateway_seat_leg(self):
+        harness = ReviewerGateTests()
+        harness.setUp()
+        self.addCleanup(harness.doCleanups)
+        harness.registry["policy"]["reviewers"] = [
+            {"client": "gemini", "model": "gem-flash", "family": "gemini",
+             "leg": "gem_api/gem-flash"},
+            {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen"}]
+        harness.client_state["gemini"] = {"installed": True, "signed_in": True}
+        plan = harness.agent.build_plan(harness.args(
+            card="kind=review,author=meta,seat=2,paths=tools/registry.py"),
+            harness.cfg())
+        argv = plan["cmd"]
+        self.assertEqual(argv[argv.index("--model") + 1], "gem_api/gem-flash")
+
+    def test_hand_built_card_rejects_out_of_range_seat(self):
+        agent = load_agent()
+        with self.assertRaisesRegex(routing.CardError, "seat"):
+            agent.resolve_review_plan({"kind": "review", "author": "gpt", "seat": 3})
+        with self.assertRaisesRegex(routing.CardError, "seat"):
+            agent.route_plan_for({"kind": "review", "author": "gpt", "seat": 3},
+                                 "review this", str(ROOT), "orch", None,
+                                 agent.load_registry(agent.REGISTRY_PATH),
+                                 {}, [], {})
+
+
 class ReviewerGateTests(unittest.TestCase):
     """REVROUTE (S2) item 2: the spawner resolves WHO reviews an authored review
     card from ``policy.reviewers``, and refuses to start a run that has no
@@ -9035,7 +9330,7 @@ class ReviewerGateTests(unittest.TestCase):
         # whose gem_api leg does not train.
         route = self.route(card="kind=review,author=qwen,privacy=sensitive,"
                                 "paths=tools/registry.py")
-        self.assertEqual(route["review_plan"]["reviewer"]["family"], "google")
+        self.assertEqual(route["review_plan"]["state"], "unresolved")
         skipped = route["review_plan"]["skipped"]
         self.assertEqual([s["model"] for s in skipped],
                          ["omniroute/muse", "qwen3.8-flash", "haiku"])
@@ -9107,9 +9402,9 @@ class ReviewerGateTests(unittest.TestCase):
             "available": False, "unavailable_until": self.DOWN_LATER})
         route = self.route()
         self.assertEqual(route["review_plan"]["reviewer"]["client"], "gemini")
-        self.assertTrue(str(route["model"]).startswith("omniroute/r-"), route["model"])
-        self.assertIn("policy.reviewers wants --client gemini", route["reviewer_note"])
-        self.assertIn("it is NOT the review that list picked", self.run_cmd_run()[1])
+        self.assertEqual(route["model"], "gem-flash")
+        self.assertIn("policy.reviewers switches this run to --client gemini", route["reviewer_note"])
+        self.assertIn("switches this run to --client", self.run_cmd_run()[1])
 
     def test_a_review_plan_is_carried_through_the_route_cli_explain_output(self):
         # route --explain must show the skipped reviewers, not only the run's own
@@ -9154,7 +9449,7 @@ class ReviewerGateTests(unittest.TestCase):
         rc, out, err = self.run_cmd_run()
         self.assertEqual(rc, self.agent.EXIT_FREE_QUEUE_TIMEOUT, out + err)
         self.assertEqual(self.agent.EXIT_FREE_QUEUE_TIMEOUT, 9)
-        self.assertIn("reviewer queued until %s" % self.DOWN, err)
+        self.assertIn("queued until %s" % self.DOWN, err)
         self.assertEqual(out, "", "a queued run prints nothing it did not decide")
 
     def test_a_queue_waits_for_the_first_reviewer_back_not_the_last(self):
@@ -16144,6 +16439,93 @@ class RunIdRecordTests(_WorkerRecordBase):
         self.assertIsNone(row["parent_run_id"])
 
 
+class CliItemKeyTests(RunIdRecordTests):
+    """SPAWNER-ITEM-KEY (D-2345/D-2664): CLI run accepts --item-key and card item_key;
+    records on worker record and runner-private record; invalid key refused with rc 2."""
+
+    def setUp(self):
+        super().setUp()
+        self.old_state = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+        self.addCleanup(self._restore_state)
+
+    def _restore_state(self):
+        if self.old_state is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self.old_state
+
+    def cfg(self):
+        names = list(routing.ALL_COMBOS) + ["r-free", "r-cheap"]
+        return {"providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def test_cli_run_with_explicit_item_key(self):
+        plan = self._plan(item_key="autoos:CLI-EXPLICIT")
+        rc, rec, _ = self._cmd_run(plan, run_id=self.GIVEN_ID)
+        self.assertEqual(rec.get("item_key"), "autoos:CLI-EXPLICIT")
+        if os.name != "nt":
+            kill_rec = self.agent.read_kill_record(self.GIVEN_ID)
+            self.assertEqual(kill_rec.get("item_key"), "autoos:CLI-EXPLICIT")
+
+    def test_cli_run_with_card_item_key(self):
+        plan = self._plan(item_key="autoos:CLI-CARD")
+        rc, rec, _ = self._cmd_run(plan, run_id=self.GIVEN_ID)
+        self.assertEqual(rec.get("item_key"), "autoos:CLI-CARD")
+        if os.name != "nt":
+            kill_rec = self.agent.read_kill_record(self.GIVEN_ID)
+            self.assertEqual(kill_rec.get("item_key"), "autoos:CLI-CARD")
+
+    def test_cli_build_plan_resolves_card_item_key_and_explicit_wins(self):
+        # 1. card item_key is placed on plan
+        args = self._args()
+        args.card = "role=implement,item_key=autoos:CARD-KEY"
+        args.tier = None
+        p = self.agent.build_plan(args, self.cfg())
+        self.assertEqual(p.get("item_key"), "autoos:CARD-KEY")
+
+        # 2. explicit item_key wins over card item_key
+        args = self._args()
+        args.card = "role=implement,item_key=autoos:CARD-KEY"
+        args.item_key = "autoos:EXPLICIT-KEY"
+        args.tier = None
+        p = self.agent.build_plan(args, self.cfg())
+        self.assertEqual(p.get("item_key"), "autoos:EXPLICIT-KEY")
+
+        # 3. no item_key -> no field
+        args = self._args()
+        args.card = "role=implement"
+        args.tier = None
+        p = self.agent.build_plan(args, self.cfg())
+        self.assertNotIn("item_key", p)
+
+    def test_cli_run_without_item_key_has_no_field(self):
+        plan = self._plan()
+        rc, rec, _ = self._cmd_run(plan, run_id=self.GIVEN_ID)
+        self.assertNotIn("item_key", rec)
+        if os.name != "nt":
+            kill_rec = self.agent.read_kill_record(self.GIVEN_ID)
+            self.assertNotIn("item_key", kill_rec or {})
+
+    def test_cli_run_invalid_item_key_refused(self):
+        args = self._args()
+        args.item_key = "invalid-key"
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            rc = self.agent.cmd_run(args, self.cfg())
+        self.assertEqual(rc, 2)
+        self.assertIn("item_key", err.getvalue())
+
+    def test_cli_run_card_invalid_item_key_refused(self):
+        args = self._args()
+        args.card = "role=implement,item_key=invalid-key"
+        args.tier = None
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            rc = self.agent.cmd_run(args, self.cfg())
+        self.assertEqual(rc, 2)
+        self.assertIn("item_key", err.getvalue())
+
+
 class PsTreeTests(_WorkerRecordBase):
     """FLEETSPEC P0 item 2: `ps --tree` shows the spawn tree, not a flat list."""
 
@@ -18913,7 +19295,7 @@ class CreditGuardWiringTests(unittest.TestCase):
 
         def spy(card, brief, repo, orchestrator_model, now, registry, overlay,
                 track_record, client_state, client="opencode", env=None,
-                overlay_missing_at=None, credit_guards=None):
+                overlay_missing_at=None, credit_guards=None, apply_writer_policy=False):
             seen.append(credit_guards)
             return {"route": "l2-worker", "state": "ready", "reason": "stub",
                     "bucket": "S1", "defer_until": None, "explain": [],
@@ -19827,6 +20209,7 @@ class ResolvedWriterTests(unittest.TestCase):
                                        False, registry=registry)
         self.assertEqual(native, {"provider": "agy", "model": "gemini-3.8-flash",
                                   "family": "gemini", "source": "assumed-default",
+                                  "served_model_source": "unverified (agy keeps no model witness)",
                                   "family_source": agent.FAMILY_SOURCE_PLANNED})
         self.assertFalse(agent.writer_is_proven(native))
         free = agent.resolved_writer({"client": "qoder", "model": "jetski/jetski-9"},
@@ -20936,6 +21319,143 @@ class McpReviewBasePlumbingTests(unittest.TestCase):
                 if t.name == "spawn"][0]
         self.assertIn("review_base", tool.inputSchema["properties"])
         self.assertIn("review_base", tool.description)
+
+
+class ItemKeyRoutingTests(unittest.TestCase):
+    """SPAWNER-ITEM-KEY (D-2345/D-2664): routing card supports shared item_key field,
+    validated as <project>:<ID> (project [a-z0-9-]+, ID [A-Z0-9][A-Z0-9-]*)."""
+
+    def test_item_key_is_shared_card_field(self):
+        self.assertIn("item_key", routing.CARD_SHARED)
+        self.assertIn("item_key", routing._CARD_NON_COMBO_SHARED)
+        self.assertIn("item_key", routing.CARD_V2_KNOWN)
+
+    def test_item_key_validation_valid(self):
+        for valid in ("autoos:SPAWNER-ITEM-KEY", "proj-1:ITEM-1", "a:1", "p:A", "foo-bar:A-B-1"):
+            self.assertEqual(routing.check_item_key(valid), valid)
+
+    def test_item_key_validation_invalid_refused(self):
+        for bad in ("", "   ", "autoos", "autoos:", ":ITEM", "autoos:item",
+                    "AUTOOS:ITEM", "autoos:-ITEM", "autoos:ITEM_1", "auto_os:ITEM", 123, None):
+            with self.assertRaises((routing.CardError, ValueError), msg=repr(bad)):
+                routing.check_item_key(bad)
+
+    def test_v1_card_with_item_key(self):
+        out = routing.normalize(routing.parse_card("role=implement,item_key=autoos:TEST-1"))
+        self.assertEqual(out["item_key"], "autoos:TEST-1")
+
+    def test_v1_card_without_item_key_has_no_field(self):
+        out = routing.normalize(routing.parse_card("role=implement"))
+        self.assertNotIn("item_key", out)
+
+    def test_v2_card_with_item_key(self):
+        out = routing.normalize_v2(routing.parse_card("kind=implement,item_key=autoos:TEST-2"))
+        self.assertEqual(out["item_key"], "autoos:TEST-2")
+
+    def test_v2_card_without_item_key_has_no_field(self):
+        out = routing.normalize_v2(routing.parse_card("kind=implement"))
+        self.assertNotIn("item_key", out)
+
+    def test_card_with_invalid_item_key_refused(self):
+        with self.assertRaises(routing.CardError):
+            routing.normalize(routing.parse_card("role=implement,item_key=invalid-key"))
+        with self.assertRaises(routing.CardError):
+            routing.normalize_v2(routing.parse_card("kind=implement,item_key=invalid-key"))
+
+
+class McpItemKeyPlumbingTests(unittest.TestCase):
+    """SPAWNER-ITEM-KEY (D-2345/D-2664): MCP spawn and build_argv accept item_key,
+    validated as <project>:<ID>; an invalid key is refused (_refused);
+    explicit item_key wins over card; job.json request.item_key equals it;
+    passed down to child argv as --item-key; no key -> no field."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            os.environ.pop(k, None) if v is None else os.environ.update({k: v})
+
+    def _spawn(self, **over):
+        return mcp_server.spawn(dict({"task": "t", "cwd": str(ROOT), "dry_run": True,
+                                      "card": {"role": "implement"}}, **over))
+
+    def test_spawn_with_explicit_item_key_records_in_job_json_and_argv(self):
+        out = self._spawn(item_key="autoos:EXPLICIT-1")
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertEqual(job["request"]["item_key"], "autoos:EXPLICIT-1")
+        self.assertIn("--item-key", job["argv"])
+        self.assertEqual(job["argv"][job["argv"].index("--item-key") + 1], "autoos:EXPLICIT-1")
+        if os.name != "nt":
+            rec = mcp_server.read_kill_record(out["id"])
+            self.assertEqual(rec["item_key"], "autoos:EXPLICIT-1")
+
+    def test_spawn_with_card_item_key_records_in_job_json_and_argv(self):
+        out = self._spawn(card={"role": "implement", "item_key": "autoos:CARD-1"})
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertEqual(job["request"]["item_key"], "autoos:CARD-1")
+        self.assertIn("--item-key", job["argv"])
+        self.assertEqual(job["argv"][job["argv"].index("--item-key") + 1], "autoos:CARD-1")
+        if os.name != "nt":
+            rec = mcp_server.read_kill_record(out["id"])
+            self.assertEqual(rec["item_key"], "autoos:CARD-1")
+
+    def test_spawn_explicit_item_key_wins_over_card_item_key(self):
+        out = self._spawn(item_key="autoos:EXPLICIT-WIN",
+                          card={"role": "implement", "item_key": "autoos:CARD-LOSE"})
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertEqual(job["request"]["item_key"], "autoos:EXPLICIT-WIN")
+        self.assertEqual(job["argv"][job["argv"].index("--item-key") + 1], "autoos:EXPLICIT-WIN")
+        if os.name != "nt":
+            rec = mcp_server.read_kill_record(out["id"])
+            self.assertEqual(rec["item_key"], "autoos:EXPLICIT-WIN")
+
+    def test_spawn_without_item_key_has_no_field(self):
+        out = self._spawn()
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertNotIn("item_key", job["request"])
+        self.assertNotIn("--item-key", job["argv"])
+        if os.name != "nt":
+            rec = mcp_server.read_kill_record(out["id"])
+            self.assertNotIn("item_key", rec or {})
+
+    def test_spawn_with_explicit_none_item_key_has_no_field(self):
+        # The registered MCP tool always sends item_key (default None).
+        out = self._spawn(item_key=None)
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertNotIn("item_key", job["request"])
+
+    def test_spawn_invalid_item_key_refused(self):
+        for bad in ("bad-key", "autoos:", ":ITEM", "autoos:lower"):
+            with self.subTest(bad=bad):
+                out = self._spawn(item_key=bad)
+                self.assertEqual(out.get("state"), "rejected", out)
+                self.assertIn("error", out)
+                self.assertIn("item_key", out["error"])
+
+    def test_spawn_card_with_invalid_item_key_refused(self):
+        out = self._spawn(card={"role": "implement", "item_key": "bad-key"})
+        self.assertEqual(out.get("state"), "rejected", out)
+        self.assertIn("error", out)
+        self.assertIn("item_key", out["error"])
+
+    def test_spawn_tool_schema_and_docstring_advertise_item_key(self):
+        import asyncio
+        if not importlib.util.find_spec("mcp"):
+            self.skipTest("the mcp package is not installed")
+        tool = [t for t in asyncio.run(mcp_server.build_server().list_tools())
+                if t.name == "spawn"][0]
+        self.assertIn("item_key", tool.inputSchema["properties"])
+        self.assertIn("item_key", tool.description)
 
 
 class FamilyFenceRecordTests(unittest.TestCase):
@@ -22063,10 +22583,10 @@ class FreeOnlyComboTests(unittest.TestCase):
         self.assertNotIn("route: l3-driver ", out)
 
     def test_a_paid_strong_card_keeps_its_paid_combo(self):
-        out = self._route_line("--card",
+        out = self._route_line("--model", "omniroute/l1-orchestrator", "--card",
                                "complexity=hard,ctx=128k,privacy=public,"
                                "role=implement,spend=free-ok", "t")
-        self.assertRegex(out, r"route: l1-orchestrator reason=")
+        self.assertIn("route: l1-orchestrator", out)
         self.assertNotIn("free-only", out)
 
     def test_the_build_plan_route_combo_is_the_free_only_one_too(self):
@@ -23741,9 +24261,11 @@ class VerdictLineTests(unittest.TestCase):
 
     def test_template_echoes_are_ignored(self):
         for line in ("VERDICT: <ready|fix-first|NOT READY>\n",
-                     "VERDICT: [ready]\n",
                      "> VERDICT: ready\n"):
             self.assertIsNone(self.verdict(line), line)
+        # REVIEW-VERDICT-PARSE r3: a bracketed SINGLE choice is a decision, not an
+        # echo (only two or more verdict words make a template echo).
+        self.assertEqual(self.verdict("VERDICT: [ready]\n"), "ready")
 
     def test_a_verdict_inside_a_code_fence_is_ignored(self):
         text = ("```text\n"
@@ -23860,8 +24382,12 @@ class VerdictLineTests(unittest.TestCase):
         self.assertEqual(self.verdict(text), "ready")
 
     def test_the_last_valid_line_wins(self):
+        # REVIEW-VERDICT-PARSE r3: two DIFFERENT decisions fail closed (the seat
+        # re-runs) instead of last-wins; identical repeats still read as one.
         text = "VERDICT: ready\n...more work...\n**VERDICT**: fix-first\n"
-        self.assertEqual(self.verdict(text), "fix-first")
+        self.assertIsNone(self.verdict(text))
+        self.assertEqual(self.verdict("VERDICT: fix-first\n...\n**VERDICT**: fix-first\n"),
+                         "fix-first")
 
     def test_a_verdict_far_from_the_tail_is_still_read(self):
         # A long reviewer session: the verdict is the deliverable, and it can sit

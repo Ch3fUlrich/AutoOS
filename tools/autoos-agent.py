@@ -325,7 +325,7 @@ import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
 import autoos_verdict as seat_verdict  # noqa: E402  (AO-SEAT-VERDICT-GRAMMAR)
 import autoos_writer_ledger as writer_ledger  # noqa: E402  (AO-LEDGER-WRITE P6)
-from registry import private_safe, registry_ref, resolve_leg, unavailable_now  # noqa: E402
+from registry import private_safe, registry_ref, resolve_leg, unavailable_now, rank_candidates  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIERS = {1: "l1-orchestrator", 2: "l2-worker", 3: "t3-reviewer"}
@@ -3819,6 +3819,9 @@ def _free_fallthrough_plan(args, cfg: dict, plan: dict, chain: list | None,
             # answers it for whatever leg IT picks too, so a re-build that dropped
             # the argument re-admits the fenced family one leg after it was refused.
             next_plan = build_plan(args, cfg, sandbox=plan["sandbox"], fence=fence)
+        except PolicyWriterUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            return None, None, None
         except (clients.DepthError, RouteInputRequired, RouteDeferred, PrivacyRefused,
                 ValueError):
             return None, None, None  # the guard says no: exit 8 below
@@ -4439,6 +4442,12 @@ def spawn_spends_claude(client_name: str, model, registry: dict,
             # about; it was wrong for one it has a priced row for. An
             # anthropic-family row answers Claude whatever its name says.
             row = (registry.get("models") or {}).get(combo)
+            if row is None:
+                # Policy aliases are model identities, not undeclared combos.
+                # Price their declared leg even without an opencode hand row.
+                for writer in registry.get("policy", {}).get("writers", {}).get("order", []):
+                    if writer.get("model") == model and writer.get("leg"):
+                        return _leg_is_claude(writer["leg"], registry)
             if isinstance(row, dict):
                 if (row.get("family") or "").lower() in ("anthropic", "claude"):
                     return True
@@ -4581,7 +4590,7 @@ def claude_spawn_refusal(client_name: str, env: dict, registry: dict | None = No
     spends the allowance is the model that answers, and three other ways reach a
     Claude model than naming the client: `--model sonnet` on any client, a combo
     route whose legs are all Claude, and a client whose own configured default IS
-    Claude (`clients.AGY_DEFAULT_MODEL` is `claude-opus-4-6-thinking` today). So
+    Claude (`clients.AGY_DEFAULT_MODEL` is `claude-opus-5-5-medium` today). So
     the gate reads the effective model through `effective_spawn_model` and
     `spawn_spends_claude`, and refuses when it cannot tell what will answer --
     guessing free is the side that spends.
@@ -4715,6 +4724,10 @@ def plan_launch_models(plan, args=None, cfg: dict | None = None,
     source, so a default compiled into the adapter is still read by name; every
     other value is priced as a caller-named model, the strict reading.
     """
+    decision = (plan or {}).get("writer_decision")
+    if decision:
+        # The explicit policy argv overrides the tier-agent's configured default.
+        return [(decision["model"], "policy.writers.order")]
     client = (plan or {}).get("client") or getattr(args, "client", None) or ""
     eff, eff_source = effective_spawn_model(
         client, getattr(args, "model", None), getattr(args, "card", None),
@@ -4823,6 +4836,13 @@ def claude_plan_refusal(args, plan, env: dict | None = None, registry: dict | No
                 "and `list` prints the values a card may take)" % exc), None
     spends = []
     for value, source in pairs:
+        # A policy alias without a declared leg has no registry price. Do not turn
+        # a missing price into a claim about Claude allowance.
+        if (source == "policy.writers.order" and value.startswith("omniroute/")
+                and not any(row.get("model") == value and row.get("leg")
+                            for row in registry.get("policy", {}).get("writers", {}).get("order", []))):
+            return ("pricing refusal: unverified policy alias %s has no declared leg; "
+                    "cannot establish its price from the registry" % value), None
         verdict = spawn_spends_claude(client, value, registry, source)
         if verdict is not False:
             spends.append((value, source, verdict))
@@ -5598,6 +5618,11 @@ class RouteDeferred(ValueError):
     """A v2 card's resolver plan is deferred and --no-defer was not given."""
 
 
+def review_seat(card):
+    """Validate even hand-built cards before indexing a resolved seat pair."""
+    return routing.normalize({"seat": card.get("seat", 1)})["seat"]
+
+
 def resolve_review_plan(card: dict, now=None) -> dict | None:
     """The ``policy.reviewers`` decision for an authored review card.
 
@@ -5611,11 +5636,16 @@ def resolve_review_plan(card: dict, now=None) -> dict | None:
     """
     if not _card_asks_review(card) or not card.get("author"):
         return None
+    seat = review_seat(card)
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    return resolver.reviewer_for(
+    result = resolver.seats_for(
         card["author"], load_live_registry(),
         measure_mod.client_state(clients), now,
         risk=card.get("risk", "normal"), privacy=card.get("privacy", "public"))
+    result = dict(result)
+    result["reviewer"] = (result["seats"][seat - 1]
+                          if result["state"] == "resolved" else None)
+    return result
 
 
 def _card_asks_review(card: dict) -> bool:
@@ -8169,13 +8199,12 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free,
         return model, None, "note: --free keeps its promo model, not policy.reviewers (%s)" % asked
     if entry.get("client") != client.name:
         return (model, None,
-                "note: policy.reviewers wants --client %s --model %s; this run stays on %s, "
-                "so it is NOT the review that list picked"
+                "note: policy.reviewers switches this run to --client %s --model %s "
+                "from %s"
                 % (entry.get("client"), entry.get("model"), client.name))
     if not client.gateway:
-        return (model, None,
-                "note: %s is not a gateway client, so --model stays the caller's; "
-                "policy.reviewers picked %s" % (client.name, asked))
+        _fence_check_reviewer(asked, entry["model"], fence)
+        return entry["model"], None, "reviewer-model: %s" % asked
     # FAMILYFENCE-5 item 1: both returns below put the reviewer's own spelling on
     # the run, so the fence is asked HERE — the resolver's route was fenced
     # upstream, the reviewer that replaces it never was.
@@ -8548,6 +8577,100 @@ def model_mismatch_refusal(plan) -> str | None:
     return model_mismatch_text(requested, launched)
 
 
+def writer_launch_adapter(entry, registry):
+    """Translate a policy identity into its supported spawner launch path."""
+    name, model = entry["client"], entry["model"]
+    if name in clients.CLIENTS:
+        return name, model
+    if any(provider.get("model_prefix") == name
+           for provider in registry.get("providers", {}).values()):
+        return "opencode", name + "/" + model
+    return None
+
+
+class PolicyWriterUnavailable(ValueError):
+    """The policy has no launchable writer; preserve this cause on retries."""
+
+
+_writer_client_snapshot = None
+_writer_client_snapshot_at = 0.0
+
+
+def writer_client_state():
+    """Share a short-lived, non-secret probe snapshot across one spawn's gates."""
+    global _writer_client_snapshot, _writer_client_snapshot_at
+    stamp = time.monotonic()
+    if _writer_client_snapshot is None or stamp - _writer_client_snapshot_at >= 60:
+        _writer_client_snapshot = measure_mod.client_state(clients)
+        _writer_client_snapshot_at = stamp
+    return _writer_client_snapshot
+
+
+def pick_policy_writer(provider_cooldown=None, *, registry=None, client_state=None, now=None):
+    """Pick once using the resolver's live availability, preserving skipped rows."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    registry = load_live_registry() if registry is None else registry
+    client_state = writer_client_state() if client_state is None else client_state
+    if provider_cooldown:
+        registry = apply_provider_state(registry, {"providers": provider_cooldown}, now)
+    rows = registry.get("policy", {}).get("writers", {}).get("order", [])
+    skips = []
+    for entry in rank_candidates("writer", rows, registry):
+        launch = writer_launch_adapter(entry, registry)
+        reason = ("unavailable: policy row %s until %s" %
+                  (entry["model"], entry.get("unavailable_until", "unspecified"))
+                  if unavailable_now(entry, now) else None)
+        if launch is None:
+            reason = "no launch adapter for " + entry["client"]
+        else:
+            client, model = launch
+            # No public reason-returning API exists for these resolver filters.
+            # Native clients (notably qoder) use client availability, not a
+            # fictitious gateway provider inferred from their model spelling.
+            reason = reason or resolver._client_reason(client_state, client, registry, now)
+            leg = entry.get("leg") or model.removeprefix("omniroute/")
+            try:
+                leg_provider, leg_model = resolve_leg(leg, registry)
+                leg = (registry["providers"][leg_provider].get("model_prefix") or leg_provider) + "/" + leg_model
+            except ValueError:
+                pass
+            unavailable = {}
+            # Fail safe: a leg benched on ANY route is benched for policy writers.
+            for route in registry.get("routes", {}).values():
+                unavailable.update(route.get("unavailable_legs") or {})
+            notes = []
+            for provider_id, provider in registry.get("providers", {}).items():
+                prefix = provider.get("model_prefix") or provider_id
+                if leg.startswith(prefix + "/") or leg.startswith(prefix + "-"):
+                    provider_reason, notes = resolver._leg_availability(
+                        leg, provider_id, unavailable, registry, now)
+                    reason = reason or provider_reason
+                    break
+            if reason is None:
+                return {"entry": entry, "client": client, "model": model,
+                        "writer_skips": skips, "availability_notes": notes}
+        skips.append({"entry": entry, "reason": reason})
+    raise PolicyWriterUnavailable("no available policy writer: %s" % skips)
+
+
+def policy_writer_route(route, *, eligible, provider_cooldown=None,
+                        registry=None, client_state=None, now=None, allow_training=False):
+    """Apply the same writer decision to run and preflight before launch gates."""
+    if not eligible or route.get("review") or route.get("read_only"):
+        return route, None
+    registry = load_live_registry() if registry is None else registry
+    decision = pick_policy_writer(provider_cooldown, registry=registry,
+                                  client_state=client_state, now=now)
+    picked = decision["model"]
+    combo = model_route_id(picked)
+    if route.get("privacy") == "sensitive" and not allow_training:
+        reason = sensitive_combo_refusal(combo, registry)
+        if reason:
+            raise PrivacyRefused(reason)
+    return dict(route, model=picked, combo=combo, reason="policy.writers.order",
+                writer_decision=decision), decision
+
+
 def build_plan(args, cfg: dict, exclude_routes: set | None = None,
                sandbox: dict | None = None,
                provider_cooldown: dict | None = None,
@@ -8563,8 +8686,29 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     commit and its work stay on one branch. ``fence`` (FAMILYFENCE) is the family
     fence, applied to whatever leg this plan picks — see `family_fence`.
     """
+    if args.client is None:
+        args.default_client = True
+        args.client = choose_client(required_capabilities(args))
     client = clients.CLIENTS[args.client]
     route = resolve_route(args, cfg, client, exclude_routes, provider_cooldown, fence)
+    review = route.get("review_plan")
+    if (review and review.get("state") == "resolved" and review.get("reviewer")
+            and not args.model and not args.free):
+        entry = review["reviewer"]
+        client = clients.CLIENTS[entry["client"]]
+        _fence_check_reviewer(entry["model"], entry["model"], fence)
+        route["model"] = entry["model"]
+        if client.gateway and client.name != "opencode":
+            route["combo"] = entry.get("combo") or entry.get("leg") or entry["model"]
+    route, writer_decision = policy_writer_route(
+        route, eligible=(getattr(args, "default_client", False) and not args.model
+                         and not args.free and args.tier is None),
+        provider_cooldown=provider_cooldown, allow_training=args.allow_training)
+    if writer_decision:
+        client = clients.CLIENTS[writer_decision["client"]]
+        picked = writer_decision["model"]
+        if fence_blocks_model(picked, load_live_registry(), fence):
+            raise FamilyFenceRefused(fence_refusal(fence))
     if not client.gateway:
         # FAMILYFENCE-3 N4: an own-account run answers on the client's OWN model -
         # `build_command` hands it the pin or the registry default and never names a
@@ -8658,7 +8802,10 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         # the checks above acted on is the one they were read from.
         level = clients.seat_level(client, level, isolate=bool(args.isolate),
                                    read_only=bool(route.get("read_only")))
-        model = args.model if not client.gateway else None
+        model = (writer_decision["model"] if writer_decision else
+                 route["model"] if review and review.get("state") == "resolved"
+                 and review.get("reviewer") and not args.model and not args.free
+                 and not client.gateway else args.model if not client.gateway else None)
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         # KEYDENY3g item 3: a leaf that runs on a CLI with its own spawn gate has
         # that gate denied in argv; opencode's gate is the overlay below.
@@ -8868,7 +9015,9 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # the client.
     _free_model = getattr(args, "free_model", None)
     requested_model = args.model or (_free_model if args.free and _free_model else None) or ""
-    return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
+    plan = {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
+            "writer_decision": writer_decision,
+            "writer_skips": writer_decision["writer_skips"] if writer_decision else [],
             # FAMILYFENCE-b: the ask and its witness, kept beside the ask so a
             # reader never has to re-derive one from the other. `client_session_id`
             # is the join key into the client's own transcript; `model_source` is
@@ -8892,6 +9041,14 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             # SEAT-PYTEST (P4): worker_env applies it only if it recomputes to this.
             "user_site_path": user_site,
             "session_tag": tag}
+    item_key = getattr(args, "item_key", None)
+    if item_key is None:
+        c = route.get("card")
+        if isinstance(c, dict):
+            item_key = c.get("item_key")
+    if item_key is not None:
+        plan["item_key"] = item_key
+    return plan
 
 
 # --- RUNMODEL (D-103, SB-B item 4): who ACTUALLY served this run -------------
@@ -9132,6 +9289,9 @@ def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
     result = {"provider": provider or WRITER_UNRESOLVED,
               "model": model or WRITER_UNRESOLVED,
               "source": source or WRITER_UNRESOLVED}
+    if client == "agy":
+        result["served_model_source"] = (source if source == WRITER_SOURCE_REPORT else
+                                          "unverified (agy keeps no model witness)")
     # REJECT 3: the family is read off the id above, so its witness is that id's.
     # A run that died before answering has no witness for its model, and the family
     # under it is the plan's claim — `planned-model`, which opens no gate — whatever
@@ -10320,7 +10480,7 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
                    client_state: dict, client: str = "opencode",
                    env: dict | None = None,
                    overlay_missing_at: str | None = None,
-                   credit_guards: dict | None = None) -> dict:
+                   credit_guards: dict | None = None, apply_writer_policy=False) -> dict:
     """card -> route_plan (spec 6.1/6.2): the CLI `route` subcommand and the MCP
     `route` tool's shared, pure-ish core.
 
@@ -10345,11 +10505,37 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     closed on it.
     """
     parsed = routing.parse_card(card) if isinstance(card, str) else dict(card or {})
+    seat = review_seat(parsed)
     normalized = routing.normalize_v2(parsed)
     features = measure_mod.measure(normalized, repo, brief or "")
     result = resolver.plan(normalized, features, client_state, registry,
                            overlay, track_record, orchestrator_model, now,
                            client, env, credit_guards)
+    if _card_asks_review(normalized) and normalized.get("author"):
+        review = resolver.seats_for(normalized["author"], registry, client_state, now,
+                                    risk=normalized.get("risk", "normal"),
+                                    privacy=normalized.get("privacy", "public"))
+        review = dict(review)
+        review["reviewer"] = (review["seats"][seat - 1]
+                              if review["state"] == "resolved" else None)
+        result["review"] = review
+        result["explain"] = list(result.get("explain") or []) + resolver.reviewer_explain_lines(review)
+    if (apply_writer_policy and registry.get("policy", {}).get("writers", {}).get("order")
+            and client == "opencode" and normalized.get("kind") in
+            ("implement", "debug", "bulk")
+            and not any(normalized.get("override", {}).get(key) for key in ("route", "client"))
+            and result.get("route")):
+        picked_route, decision = policy_writer_route(
+            {"privacy": normalized.get("privacy"), "review": result.get("review")},
+            eligible=True, registry=registry, client_state=client_state, now=now)
+        if decision:
+            result = dict(result, route=picked_route["combo"], model=decision["model"],
+                          client=decision["client"], writer_decision=decision,
+                          writer_skips=decision["writer_skips"], reason=picked_route["reason"])
+            # Resolver sizing/cost belonged to the discarded leg, not this pick.
+            result.update(leg=decision["entry"].get("leg"), effort=None,
+                          max_tokens=None, context_budget=None, expected_cost=None,
+                          writer_metadata_note="policy pick: sizing and cost not estimated")
     # OVERLAYHOME: with no overlay file at all, "tool_calls: ... unproven" is
     # the machine's missing data, not the legs' verdict - say which.
     if (overlay_missing_at and result.get("state") == "input_required"
@@ -10398,7 +10584,8 @@ def cmd_route(args) -> int:
                                 track_record, client_state,
                                 getattr(args, "client", None) or "opencode",
                                 os.environ, overlay_missing_at=overlay_missing_at,
-                                credit_guards=plan_credit_guards(registry))
+                                credit_guards=plan_credit_guards(registry),
+                                apply_writer_policy=getattr(args, "client", None) is None)
     except (routing.CardError, ValueError) as exc:
         return refuse(str(exc))
     if args.explain:
@@ -10425,6 +10612,7 @@ def log_run(plan: dict, rc: int, secs: float, free: bool) -> None:
         plan["model"], route["combo"] or "-", route["reason"], routing.ROUTING_VERSION, card,
         plan["depth"][0], plan["depth"][1], int(free),
         (plan["sandbox"] or {}).get("path", "-"), rc, secs)
+    line = line.rstrip("\n") + " writer_skips=" + json.dumps(plan.get("writer_skips", []), sort_keys=True) + "\n"
     with io.open(os.path.join(logs, "orch-%s.log" % datetime.date.today().isoformat()), "a", encoding="utf-8") as fh:
         fh.write(line)
 
@@ -12134,7 +12322,7 @@ def write_kill_record(run_id: str, record: dict) -> bool:
                     "toolhome_bytes_before", "toolhome_bytes_after"):
             if record.get(key) is not None:
                 merged[key] = record[key]
-        for key in ("mode", "scope", "dry_run", "allow_mode_only", "lane"):
+        for key in ("mode", "scope", "dry_run", "allow_mode_only", "lane", "item_key"):
             if record.get(key) is not None:
                 merged.setdefault(key, record[key])
         tmp = "%s.tmp-%d" % (path, os.getpid())
@@ -13429,6 +13617,8 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None, *, kind
         "id": wid, "pid": pid, "pid_start": _proc_starttime(pid),
         "started": utc_now_iso(), "session_tag": plan.get("session_tag"),
         "client": plan.get("client"), "model": plan.get("model"),
+        "writer_skips": plan.get("writer_skips", []),
+        "writer_decision": plan.get("writer_decision"),
         "kind": kind,
         # FAMILYFENCE-b: the row names the model the run was ASKED to use and where
         # that ask came from, so a default never reads as a pin. What actually
@@ -13466,6 +13656,9 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None, *, kind
     mismatch = model_mismatch_refusal(plan)
     if mismatch is not None:
         record["reason"] = mismatch
+    item_key = plan.get("item_key") or getattr(args, "item_key", None)
+    if item_key:
+        record["item_key"] = item_key
     _write_worker_record(os.path.join(directory, wid + ".json"), record)
     return wid, record
 
@@ -14201,6 +14394,13 @@ def cmd_run(args, cfg: dict) -> int:
                       "(YYYYMMDD-HHMMSS-<slug up to %d chars>-<6 hex>, as minted by "
                       "the spawner or the MCP server's spawn)"
                       % (args.run_id, RUN_ID_SLUG_CAP), 2)
+    # SPAWNER-ITEM-KEY (D-2345/D-2664): validate explicit --item-key
+    if getattr(args, "item_key", None) is not None:
+        try:
+            routing.check_item_key(args.item_key)
+        except routing.CardError as exc:
+            return refuse("invalid item_key %r: expected <project>:<ID> "
+                          "(project [a-z0-9-]+, ID [A-Z0-9][A-Z0-9-]*)" % (args.item_key,), 2)
     # T2-RECORD-PIN item 5 (D-284): the pins this lane may not launch, refused
     # on the way IN - before the budget prices a model, before a route is burned
     # and before anything is cloned. Both pins are read: --free-model only when
@@ -14227,6 +14427,7 @@ def cmd_run(args, cfg: dict) -> int:
             registry = load_registry(REGISTRY_PATH)
         except (OSError, ValueError) as exc:
             return refuse("cannot load client capabilities: %s" % exc)
+    args.default_client = args.client is None
     if args.client is None:
         args.client = choose_client(required, registry)
         if args.client is None:
@@ -14247,7 +14448,10 @@ def cmd_run(args, cfg: dict) -> int:
                            else load_registry(getattr(args, "registry", None) or REGISTRY_PATH))
     except (OSError, ValueError) as exc:
         return refuse("cannot load client availability: %s" % exc)
-    _avail_entry = ((_avail_registry.get("clients") or {}).get(args.client) or {})
+    _policy_pending = (args.default_client and not args.model and not args.free
+                       and args.tier is None)
+    _avail_entry = ({} if _policy_pending else
+                    ((_avail_registry.get("clients") or {}).get(args.client) or {}))
     _avail_now = datetime.datetime.now(datetime.timezone.utc)
     if unavailable_now(_avail_entry, _avail_now):
         _avail_until = _avail_entry.get("unavailable_until")
@@ -14483,8 +14687,15 @@ def cmd_run(args, cfg: dict) -> int:
     except (RouteInputRequired, RouteDeferred, PrivacyRefused, GeminiRefused,
             ReviewBaseRefused) as exc:  # plan's / PRIV3's / D-255's / P1's own
         return refuse(str(exc))                        # message, no suffix added
+    except PolicyWriterUnavailable as exc:
+        return refuse(str(exc))
     except ValueError as exc:  # CardError, NoRoute, an undeclared model
         return refuse("%s (see: tools/autoos-agent.py list)" % exc)
+    client = clients.CLIENTS[plan["client"]]
+    picked_reason = resolver._client_reason(
+        {client.name: {"installed": True}}, client.name, _avail_registry)
+    if picked_reason:
+        return refuse(picked_reason)
     # The early gate read the flags; the plan may have rewritten the model
     # since (a re-resolved route, a fenced free head), so the gate reads the
     # plan it would actually launch on, not just the argv.
@@ -14908,6 +15119,8 @@ def cmd_run(args, cfg: dict) -> int:
             worker_id, worker_rec = _worker_record_start(plan, args, workers,
                                                          attempt=fallthroughs + cooldown_retries + 1,
                                                          kind=kind)
+            if plan.get("run_id") and plan.get("item_key"):
+                write_kill_record(plan.get("run_id"), {"item_key": plan["item_key"]})
         except Exception as exc:  # noqa: BLE001
             print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
         scope_rec = (worker_rec or {}).get("scope") or scope_rec
@@ -15179,6 +15392,9 @@ def cmd_run(args, cfg: dict) -> int:
                                                    sandbox=plan["sandbox"],
                                                    provider_cooldown=provider_cooldown,
                                                    fence=fence)
+                        except PolicyWriterUnavailable as exc:
+                            print(str(exc), file=sys.stderr)
+                            next_plan = None
                         except (clients.DepthError, RouteInputRequired, RouteDeferred,
                                 PrivacyRefused, ValueError):
                             next_plan = None  # no route left (or unplannable): exit 8
@@ -15733,6 +15949,9 @@ def _parser_run(sub):
                           "(100644 <-> 100755): the MODEFLIP refusal is what an "
                           "artifact of the checkout looks like, and this says the "
                           "diff is the task")
+    run.add_argument("--item-key", dest="item_key",
+                     help="task item key (<project>:<ID>) for this run; validated as "
+                          "project [a-z0-9-]+, ID [A-Z0-9][A-Z0-9-]*")
     run.add_argument("--title")
     run.add_argument("--run-id", dest="run_id", metavar="ID",
                      help="use this id (a canonical one, as minted by the MCP server's spawn) "

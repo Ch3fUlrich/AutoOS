@@ -79,15 +79,14 @@ CARD_V2_ONLY = frozenset({"kind", "risk", "spec", "mode", "deferrable",
 # privacy and author belong to both dialects: REVROUTE (S2) item 2 put the
 # author on the card so a review can be resolved to a different-family
 # reviewer, and role=review is how most lanes already spell a review.
-CARD_SHARED = frozenset({"privacy", "author"})
+# SPAWNER-ITEM-KEY (D-2345/D-2664): item_key is shared by both dialects;
+# MODEL-ORDER-D1704: seat (1|2) picks which seats_for seat a review launches.
+CARD_SHARED = frozenset({"privacy", "author", "item_key", "seat"})
 # The shared fields that are not one of v1's five combo inputs. privacy is
-# shared AND an input (it hard-filters routes); author is shared and never one
-# (it changes who reviews, not what runs) -- so normalize() validates it
-# separately instead of choice-checking it against CARD_VALUES.
-_CARD_NON_COMBO_SHARED = CARD_SHARED - frozenset(CARD_VALUES)
-# The shared fields that are not one of v1's five validated combo inputs.
-# privacy is in both sets, so it stays choice-checked by normalize(); author is
-# the only member and is checked by _check_author instead.
+# shared AND an input (it hard-filters routes); author and item_key are shared
+# and never one (author changes who reviews, item_key is the task tracking key)
+# -- so normalize() validates them separately instead of choice-checking them
+# against CARD_VALUES.
 _CARD_NON_COMBO_SHARED = CARD_SHARED - frozenset(CARD_VALUES)
 CARD_V2_KNOWN = CARD_V1_ONLY | CARD_V2_ONLY | CARD_SHARED
 OVERRIDE_FIELDS = ("route", "client", "effort")
@@ -144,6 +143,27 @@ def _check_author(value) -> str:
     return value.strip()
 
 
+def _check_seat(value):
+    if isinstance(value, bool) or str(value) not in ("1", "2"):
+        raise CardError("card seat=%r: expected 1 or 2" % (value,))
+    return int(value)
+
+
+_ITEM_KEY_RE = re.compile(r"^[a-z0-9-]+:[A-Z0-9][A-Z0-9-]*$")
+
+
+def check_item_key(value) -> str:
+    """A card's item_key: <project>:<ID> (project [a-z0-9-]+, ID [A-Z0-9][A-Z0-9-]*).
+
+    F2 strict (D-2345): plangraph keeper mints run tokens only when job.json
+    request.item_key equals the item key.
+    """
+    if not isinstance(value, str) or not _ITEM_KEY_RE.match(value.strip()):
+        raise CardError("card item_key=%r: expected <project>:<ID> "
+                        "(project [a-z0-9-]+, ID [A-Z0-9][A-Z0-9-]*)" % (value,))
+    return value.strip()
+
+
 def normalize(card: dict) -> dict:
     unknown = sorted(set(card) - set(CARD_VALUES) - _CARD_NON_COMBO_SHARED)
     if unknown:
@@ -156,7 +176,13 @@ def normalize(card: dict) -> dict:
         if key in _CARD_NON_COMBO_SHARED:
             # author changes who reviews, never which combo runs: select_combo
             # reads the five CARD_VALUES fields and ignores this one.
-            out[key] = _check_author(val)
+            # item_key is the task tracking key; seat picks the seats_for seat.
+            if key == "author":
+                out[key] = _check_author(val)
+            elif key == "item_key":
+                out[key] = check_item_key(val)
+            elif key == "seat":
+                out[key] = _check_seat(val)
             continue
         if val not in CARD_VALUES[key]:
             raise CardError("card %s=%r: expected one of %s" % (key, val, ", ".join(CARD_VALUES[key])))
@@ -294,6 +320,10 @@ def normalize_v2(card: dict) -> dict:
         out["spend"] = v1["spend"]
         if "author" in v1:
             out["author"] = _check_author(v1["author"])
+        if "seat" in v1:
+            out["seat"] = _check_seat(v1["seat"])
+        if "item_key" in v1:
+            out["item_key"] = check_item_key(v1["item_key"])
         return out
 
     for key in ("kind", "risk", "spec", "privacy", "mode", "task_type"):
@@ -301,6 +331,10 @@ def normalize_v2(card: dict) -> dict:
             out[key] = _check_choice(key, flat[key], CARD_V2_VALUES[key])
     if "author" in flat:
         out["author"] = _check_author(flat["author"])
+    if "seat" in flat:
+        out["seat"] = _check_seat(flat["seat"])
+    if "item_key" in flat:
+        out["item_key"] = check_item_key(flat["item_key"])
     if "deferrable" in flat:
         out["deferrable"] = _check_deferrable(flat["deferrable"])
     if "critical" in flat:

@@ -47,11 +47,13 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 TOOLS = ROOT / "tools"
+sys.path.insert(0, str(TOOLS))
 TOOL = TOOLS / "review-call.py"
 GATEWAY_KEY = TOOLS / "autoos_gateway_key.py"
 
@@ -74,7 +76,7 @@ PROMPT = "REVIEW-PROMPT-SENTINEL: paste of the diff to review.\nExplain it.\n"
 STANDING = review_call.STANDING_QUESTION
 STANDING_ANSWER = "TEST-GAMING: no - searched src/ for __eq__: 0 hits"
 # Two VERDICT lines: the LAST qualifying one wins (neither value outside
-# pass / fail-with-findings counts - see VerdictParseTests). Every existing
+# ACCEPT/REJECT/HOLD and legacy pass/fail-with-findings count - see VerdictParseTests). Every existing
 # answer also carries the mandatory standing-question line.
 ANSWER = ("first pass\nVERDICT: pass\nthen a finding\n"
           "VERDICT: fail-with-findings\n" + STANDING_ANSWER + "\n")
@@ -247,7 +249,7 @@ class ReviewCallTests(unittest.TestCase):
         self.assertEqual(lines[1], "evidence.json: " + str(self.out_dir / "evidence.json"))
         self.assertEqual(lines[2], "model: " + SERVED_MODEL)
         self.assertEqual(lines[3],
-                         "VERDICT: fail-with-findings")  # the LAST verdict
+                         "VERDICT: missing")  # conflicting decisions fail closed
         self.assertEqual(lines[4], "TEST-GAMING: no")  # the standing answer
 
         review = (self.out_dir / "review.txt").read_text(encoding="utf-8")
@@ -255,6 +257,7 @@ class ReviewCallTests(unittest.TestCase):
         self.assert_no_leak(result)
 
         ev = self.read_evidence()
+        self.assertIsNone(ev["verdict"])
         self.assertEqual(ev["requested_model"], MODEL)
         self.assertEqual(ev["served_model"], SERVED_MODEL)  # from the response
         self.assertEqual(ev["status"], 200)
@@ -667,13 +670,93 @@ class ReviewCallTests(unittest.TestCase):
 
 
 class VerdictParseTests(unittest.TestCase):
-    """verdict_line() called DIRECTLY on the loaded module: the tolerant
-    D-337 parse (copied from tools/autoos_agent_mcp.py's review_verdict /
-    _verdict_value), no gateway, no subprocess.
+    """In-process parser and mocked MCP record integration, without client binaries.
 
-    Every case returns the NORMALISED line: `VERDICT: pass` /
-    `VERDICT: fail-with-findings` / `VERDICT: missing`.
+    Seat words are ACCEPT/REJECT/HOLD; call legacy words are pass/fail-with-findings.
     """
+
+    def test_shared_decision_table(self):
+        import autoos_agent_mcp as agent_mcp
+        from autoos_verdict import parse_verdict
+        cases = []
+        for negative in ("**VERDICT**: REJECT", "*VERDICT*: REJECT",
+                         "VERDICT: [REJECT]", "VERDICT: <REJECT>",
+                         "VERDICT: (REJECT)", "VERDICT: REJECT | see findings",
+                         "VERDICT: fix-first", "VERDICT: fail-with-findings"):
+            cases.append(("VERDICT: ACCEPT\n" + negative, None))
+        for line in ("**VERDICT**: REJECT", "*VERDICT*: REJECT",
+                     "VERDICT: [REJECT]", "VERDICT: (REJECT)",
+                     "VERDICT: REJECT | see findings"):
+            cases.append((line, "REJECT"))
+        cases += [("VERDICT: ACCEPT\nVERDICT: ACCEPT", "ACCEPT"),
+                  ("```\nVERDICT: REJECT\n```\nVERDICT: ACCEPT", "ACCEPT"),
+                  # round-3 seat MED: an indented REJECT undercuts a real ACCEPT
+                  # (fail closed); a real negative stays the answer.
+                  ("VERDICT: ACCEPT\n    VERDICT: REJECT", None),
+                  ("VERDICT: REJECT\n    VERDICT: ACCEPT", "REJECT")]
+        for echo in ("VERDICT: ACCEPT|REJECT|HOLD", "VERDICT: [ACCEPT / REJECT]",
+                     "VERDICT: <ready|fix-first>", "VERDICT: (pass or fail-with-findings)"):
+            cases += [(echo, None), (echo + "\nVERDICT: ACCEPT", "ACCEPT")]
+        for text, want in cases:
+            with self.subTest(text=text):
+                parsed = parse_verdict(text)
+                self.assertEqual(want, parsed["verdict"] if parsed["valid"] else None)
+                for reader in (review_call.review_verdict, agent_mcp.review_verdict):
+                    self.assertEqual(want, reader(text), reader.__module__)
+                if want is None:
+                    self.assertEqual("VERDICT: missing", review_call.verdict_line(text))
+
+    def test_seat_words_survive_harness_and_prompt_echo_in_both_readers(self):
+        import autoos_agent_mcp as agent_mcp
+        harness = "\n".join(("route: review", "run-id: sample", "sandbox: isolated",
+                              "model: seat", "notice: starting", "client: ready",
+                              "mode: review", "status: running", "answer:"))
+        for reader in (review_call.review_verdict, agent_mcp.review_verdict):
+            for word in ("ACCEPT", "REJECT", "HOLD"):
+                with self.subTest(reader=reader.__module__, word=word):
+                    text = (harness + chr(10) + "VERDICT: " + "|".join(review_call.VERDICTS) + chr(10) + "VERDICT: "
+                            + word + "\nFindings: reviewed the change.\nstatus: ended\n")
+                    self.assertEqual(word, reader(text))
+                    text_lower = (harness + chr(10) + "VERDICT: " + "|".join(review_call.VERDICTS) + chr(10) + "VERDICT: "
+                                  + word.lower() + "\nFindings: reviewed the change.\nstatus: ended\n")
+                    self.assertEqual(word, reader(text_lower))
+
+    def test_exact_echo_shapes_in_both_readers(self):
+        import autoos_agent_mcp as agent_mcp
+        from autoos_verdict import VERDICTS, seat_prompt
+        grammar = "|".join(VERDICTS)
+        prompt = next(line for line in seat_prompt("seat", "criteria", "base").splitlines()
+                      if line.strip().startswith("VERDICT:"))
+        echoes = ("VERDICT: " + grammar, prompt, "VERDICT: <" + grammar + ">",
+                  "VERDICT: " + " / ".join(VERDICTS),
+                  "VERDICT: " + ", ".join(VERDICTS[:-1]) + " or " + VERDICTS[-1])
+        for reader in (review_call.review_verdict, agent_mcp.review_verdict):
+            for echo in echoes:
+                with self.subTest(reader=reader.__module__, echo=echo):
+                    self.assertEqual("ACCEPT", reader(echo + chr(10) + "VERDICT: ACCEPT"))
+
+    def test_pipe_finding_never_preserves_accept(self):
+        import autoos_agent_mcp as agent_mcp
+        for reader in (review_call.review_verdict, agent_mcp.review_verdict):
+            self.assertIsNone(reader("VERDICT: ACCEPT" + chr(10)
+                                     + "VERDICT: REJECT | see findings"))
+        self.assertIsNone(agent_mcp.review_verdict("VERDICT: pass"))
+        self.assertIsNone(review_call.review_verdict("VERDICT: ready"))
+
+    def test_review_run_record_keeps_accept_and_reject_instead_of_no_verdict(self):
+        import autoos_agent_mcp as agent_mcp
+        for word in ("ACCEPT", "REJECT"):
+            with self.subTest(word=word), mock.patch.object(
+                    agent_mcp, "_read_json", side_effect=lambda path:
+                    {"rc": 0} if path.endswith("exit.json") else {}), mock.patch.object(
+                    agent_mcp, "read_kill_record", return_value={"mode": "review"}), mock.patch.object(
+                    agent_mcp, "_stdout_channel", return_value={}), mock.patch.object(
+                    agent_mcp, "_read_tail", return_value=chr(10).join(("route: review", "run-id: sample", "sandbox: isolated", "model: seat", "notice: starting", "client: ready", "mode: review", "status: running", "answer:", "VERDICT: " + "|".join(review_call.VERDICTS), "VERDICT: " + word, "Findings: reviewed the change."))):
+                with tempfile.TemporaryDirectory() as run_dir:
+                    result = agent_mcp._state(run_dir)
+                self.assertEqual("completed", result["state"])
+                self.assertEqual("done", result["detail"])
+                self.assertEqual(word, result.get("verdict"))
 
     def verdict(self, text):
         return review_call.verdict_line(text)
@@ -720,11 +803,11 @@ class VerdictParseTests(unittest.TestCase):
                 " done\n")
         self.assertEqual(self.verdict(text), "VERDICT: missing")
 
-    def test_two_verdicts_the_last_qualifying_line_wins(self):
+    def test_different_legacy_verdicts_fail_closed(self):
         text = ("VERDICT: pass\n"
                 "changed my mind after re-reading the hunk\n"
                 "VERDICT: fail-with-findings\n")
-        self.assertEqual(self.verdict(text), "VERDICT: fail-with-findings")
+        self.assertEqual(self.verdict(text), "VERDICT: missing")
 
     def test_an_unclosed_fence_fails_closed_to_the_earlier_verdict(self):
         text = "VERDICT: pass\n```json\n{\"a\": 1}\n"
@@ -768,8 +851,8 @@ class IndentedAndEmphasisVerdictTests(unittest.TestCase):
         self.assertEqual(self.raw("_Verdict_: fail-with-findings"),
                          "fail-with-findings")
 
-    def test_unbalanced_emphasis_stays_missing(self):
-        self.assertIsNone(self.raw("*VERDICT: pass\n"))
+    def test_markup_characters_are_normalised(self):
+        self.assertEqual("pass", self.raw("*VERDICT: pass\n"))
 
     def test_list_item_bold_verdict_still_counts(self):
         self.assertEqual(self.raw("- **Verdict:** pass"), "pass")
