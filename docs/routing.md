@@ -50,7 +50,7 @@ two seats whose families differ from the writer and from each other, skipping
 rate-limited or unavailable entries and recording the provider's text. Qwen is
 only via qodercli ACP (D-2641); other clients are skipped with
 `D-2641: qwen only via qodercli`. Opencode Go/free rows remain in the policy but
-are skipped while rate-limited (D-2148). Every seat launches with its row's model as an explicit `--model` (an agy seat
+are skipped while rate-limited (D-2148). Every native-client seat (agy, qoder, claude) launches with its row's model as an explicit `--model`, a gateway seat with the row's leg (an agy seat
 never falls back to its Claude adapter default, L22/D-2654). agy keeps no served-model
 witness, so an agy seat's record says `served_model_source: unverified`; qoder and claude seats
 are checked against their own transcripts.

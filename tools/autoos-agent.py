@@ -4531,7 +4531,7 @@ def claude_spawn_refusal(client_name: str, env: dict, registry: dict | None = No
     spends the allowance is the model that answers, and three other ways reach a
     Claude model than naming the client: `--model sonnet` on any client, a combo
     route whose legs are all Claude, and a client whose own configured default IS
-    Claude (`clients.AGY_DEFAULT_MODEL` is `claude-opus-4-6-thinking` today). So
+    Claude (`clients.AGY_DEFAULT_MODEL` is `claude-opus-5-5-medium` today). So
     the gate reads the effective model through `effective_spawn_model` and
     `spawn_spends_claude`, and refuses when it cannot tell what will answer --
     guessing free is the side that spends.
