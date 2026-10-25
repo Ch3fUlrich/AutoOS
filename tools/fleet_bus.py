@@ -2,18 +2,47 @@
 """fleet_bus.py - tailnet-only relay listener (D-2024 OCGO-FLEET-BUS, pull mode).
 
 One stdlib HTTP server per host, bound to the tailnet address only. The bind
-address comes from --bind or FLEET_BUS_BIND; the public default is loopback
-because a site address is never a literal in this public repository. The
-coding-side poller pulls; this side never dials out, so no round-trip is
-wasted: a single GET carries everything new since the poller's cursor.
+address is this host's endpoint host part as the keeper hosts registry
+reports it (this host is named by --host / FLEET_BUS_HOST; the registry is
+read from --keeper-url / FLEET_KEEPER_URL, authenticated with the token in
+the 0600 file --keeper-token-file / FLEET_KEEPER_TOKEN_FILE). --bind /
+FLEET_BUS_BIND is the explicit transition override. There is no literal
+default: discovery that cannot answer fails closed (exit code 3, one line,
+no traceback) and never guesses an address, so loopback happens only when
+the operator types --bind 127.0.0.1. A wildcard bind is refused from every
+source - it would put the open read path on every interface - and the
+address is RESOLVED first, so every spelling of the all-zeros address goes
+with it ("0", "0.0", "000.000.000.000", "0x0", "0.0.0.0", "::", "::0",
+"0:0:0:0:0:0:0:0" and the empty value). An address the OS will not hand out
+(unowned, unresolvable, wrong family) is the same one-line status-3 error,
+never a traceback, as are a port past the socket layer's range (bind()'s
+OverflowError joins the same one-line arm), a bind value that cannot be
+encoded (a lone surrogate is refused as a bad bind in check_bind /
+endpoint_host, before the OS's own encoding in getaddrinfo can raise
+UnicodeEncodeError), a garbled keeper response (an
+http.client.HTTPException), a keeper that answers with a redirect (never
+followed: the bearer token must not be re-sent to another host), a
+malformed keeper endpoint, a keeper URL that is not http(s) (a scheme-less
+value would make Request(...) itself raise, and file:/ftp:/data: are not
+keeper reads) and a keeper read that a proxy environment
+variable tries to hijack (the opener carries ProxyHandler({}), so the one
+request carrying the bearer token always travels direct). The coding-side
+poller pulls; apart
+from that one keeper GET at startup this side never dials out, so no
+round-trip is wasted: a single GET carries everything new since the
+poller's cursor.
 
 Contract (the only two routes):
   POST /inbox   JSON {"from","to","ts","nonce","text"} plus header X-Fleet-Sig
                   = HMAC-SHA256(secret, "ts|nonce|from|to|sha256(text)").
-                  ts is unix epoch seconds (int); |now-ts| <= 60 or 401.
+                  ts is unix epoch seconds (int, finite and int-representable:
+                  "1e400" and friends are the same 400 as a malformed body,
+                  never an OverflowError through the handler);
+                  |now-ts| <= 60 or 401.
                   nonce is single-use (LRU, cap 10000) or 401.
-                  body <= 4096 bytes or 413. text is scrubbed to one line
-                  <= 2000 chars. -> 200 {"id","ts"} | 400 | 401 | 413.
+                  body <= 4096 bytes or 413 (a negative Content-Length is a
+                  400: read(-1) would block to EOF). text is scrubbed to one
+                  line <= 2000 chars. -> 200 {"id","ts"} | 400 | 401 | 413.
   GET /outbox?since=<cursor>
                 -> 200 {"cursor": <last id or the echo>, "records": [...]},
                 records [{id,ts,from,to,text}] in insertion order after the
@@ -25,61 +54,355 @@ Contract (the only two routes):
 Storage: an in-memory ring (cap 1000, oldest evicted) carries the full
 scrubbed text; the append-only log <logdir>/YYYY-MM-DD.jsonl carries records
 WITHOUT text ({"id","ts","from","to","len"}) per D-2024 (privacy: logs never
-hold message text). A restart drops undelivered bodies by design
-(best-effort relay: 10 s client timeout, no auto-retry).
+hold message text) and refusals as {"id","ts","event":"refused","reason"}
+- the reason a 401 names (key file paths, host names, never key contents
+and never message text) lives there and nowhere else. The refusal rows are
+capped (REFUSAL_LOG_CAP per process, then one "refusal log capped" row and
+silence): any unauthenticated caller can trigger one, and the log write
+must stay bounded. The refusal-log write is best-effort: an unwritable
+log dir or a full disk drops the row (counted silently), never the 401
+answer. A restart drops
+undelivered bodies by design (best-effort relay: 10 s client timeout, no
+auto-retry).
 
-Secrets travel by NAME and FILE only, never in output: the HMAC secret is read
-once from --secret-file (0600, owner-only) into memory. --open skips HMAC for
-probe-only dry runs (15 min TTL throwaway); it must never carry live traffic.
+Secrets travel by NAME and FILE only, never in output: every sending host
+has its own HMAC key in a 0600 file, named by the inventory JSON
+(--inventory / FLEET_BUS_INVENTORY:
+{"hosts": {"<host>": {"key_file": "<path>"}}}). A POST is verified with the
+key of the envelope's "from" host - an unknown from-host or an unreadable
+or non-UTF-8 key file is a 401 like any other, and its wire body is always
+the generic {"error": "unauthorized"} so the response never enumerates key
+file paths or host names (the full reason is in the metadata log) - and
+each key file is read once into memory. --secret-file stays as the explicit
+single-key override of the transition. --open skips HMAC for probe-only dry
+runs (15 min TTL throwaway); it must never carry live traffic.
 """
 
 import argparse
 import hashlib
 import hmac
+import http.client
+import ipaddress
 import json
+import math
 import os
+import socket
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import OrderedDict
 from collections import deque
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlunsplit
 
 BODY_MAX = 4096
 TEXT_MAX = 2000
 SKEW_S = 60
 NONCE_CAP = 10000
 RING_CAP = 1000
+# The refusal log is capped: log_refusal runs on every 401, which any
+# unauthenticated caller can trigger, and an unbounded append to the jsonl
+# log is a disk-fill lever. At most this many refusal rows per process,
+# then one "refusal log capped" row and silence.
+REFUSAL_LOG_CAP = 1000
 DEFAULT_PORT = 58690
-# Loopback is the only safe public default: the live relay takes its tailnet
-# address from FLEET_BUS_BIND (or --bind), so no site address is a literal in
-# this public tree (AutoOS Hard Rule 1).
-DEFAULT_BIND = "127.0.0.1"
+KEEPER_TIMEOUT_S = 5
+# The wildcard: binding it exposes the open read path on every interface.
+# Its spelling is never compared as a string - "0", "0.0", "000.000.000.000"
+# and "0x0" are 0.0.0.0 to inet_aton, and "::0" / "0:0:0:0:0:0:0:0" are the
+# IPv6 wildcard - so every check RESOLVES the address first (see
+# is_wildcard_bind).
+WILDCARD_ZERO4 = b"\0\0\0\0"
+# The one 401 body that goes on the wire: it never enumerates key file
+# paths or host names. The full reason is kept in the metadata-only log.
+UNAUTHORIZED = "unauthorized"
+# There is no literal default bind in this public tree (AutoOS Hard Rule 1):
+# the address comes from the keeper hosts registry entry for --host, or from
+# the explicit --bind / FLEET_BUS_BIND override. Loopback only happens when
+# the operator types it.
 BIND_ENV = "FLEET_BUS_BIND"
-
-
-def bind_default(env=None):
-    """The relay bind address: ``FLEET_BUS_BIND``, else loopback.
-
-    The live host names its tailnet address in its own 0600 environment or
-    unit file; this public tree ships no site-shaped default.
-    """
-    source = os.environ if env is None else env
-    value = (source.get(BIND_ENV) or "").strip()
-    # A set-but-empty systemd Environment= line must not become "":
-    # HTTPServer binds "" to INADDR_ANY, which would expose the relay.
-    return value or DEFAULT_BIND
+HOST_ENV = "FLEET_BUS_HOST"
+KEEPER_URL_ENV = "FLEET_KEEPER_URL"
+KEEPER_TOKEN_ENV = "FLEET_KEEPER_TOKEN_FILE"
+INVENTORY_ENV = "FLEET_BUS_INVENTORY"
 
 
 class FleetBusError(Exception):
-    """A refused request: carries the HTTP status, never a secret."""
+    """A refused request: carries the HTTP status, never a secret.
+
+    Startup uses it too: status 2 for a configuration error, status 3 for
+    fail-closed discovery (printed as one line, never a traceback).
+    """
 
     def __init__(self, status, reason):
         super().__init__(reason)
         self.status = status
         self.reason = reason
+
+
+def bind_override(env=None):
+    """The explicit transition override: ``--bind`` / ``FLEET_BUS_BIND``.
+
+    None means "discover from the keeper registry". A set-but-empty
+    systemd Environment= line is not a *value* here either, because
+    HTTPServer binds "" to INADDR_ANY, which would expose the relay: main()
+    refuses it as the wildcard "" rather than silently discovering, so the
+    operator finds out at startup.
+    """
+    source = os.environ if env is None else env
+    return (source.get(BIND_ENV) or "").strip() or None
+
+
+def is_wildcard_bind(value):
+    """True when `value` names the all-zeros (wildcard) address.
+
+    The address is RESOLVED, not string-compared: to the OS "0", "0.0",
+    "000.000.000.000", "0x0" and "0.0.0.0" are all 0.0.0.0, and "::",
+    "::0" and "0:0:0:0:0:0:0:0" are the IPv6 wildcard. "" is refused too:
+    HTTPServer binds it to INADDR_ANY. Anything that resolves elsewhere
+    (including a name that resolves nowhere) is not the wildcard here.
+    """
+    if not value:
+        return True
+    try:
+        if socket.inet_aton(value) == WILDCARD_ZERO4:
+            return True
+    except OSError:
+        pass
+    except ValueError:
+        # inet_aton raises ValueError (not OSError) on an embedded NUL.
+        # Fail closed and treat it as the wildcard so check_bind refuses it
+        # with the same one-line error and exit code as every other bad bind
+        # instead of a traceback - and so the value never reaches a C
+        # resolver, which would truncate it at the NUL and could bind the
+        # wildcard after all.
+        return True
+    try:
+        return ipaddress.ip_address(value).is_unspecified
+    except ValueError:
+        return False
+
+
+def check_bind(bind, source, status):
+    """Return the stripped bind address, or refuse a wildcard one.
+
+    Every spelling of the all-zeros address (see is_wildcard_bind) would
+    put the relay's open read path on every interface - "" binds
+    INADDR_ANY in HTTPServer just like "0.0.0.0" and "0x0" do. Every
+    source - the explicit --bind / FLEET_BUS_BIND override or a discovered
+    keeper endpoint - fails closed instead of binding one; `status` is 2
+    for a configuration error, 3 for a fail-closed discovery.
+
+    A value that cannot be encoded (a lone surrogate) is refused here as
+    a bad bind, before it can reach the OS's own encoding in getaddrinfo -
+    that UnicodeEncodeError would escape main() as a traceback - and with
+    the same one-line error and exit code as every other bad bind. It is
+    not the wildcard and must never be misdiagnosed as one.
+    """
+    value = (bind or "").strip()
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        raise FleetBusError(status, "refusing bad bind (%s) from %s"
+                            % (value, source))
+    if is_wildcard_bind(value):
+        raise FleetBusError(status, "refusing wildcard bind (%s) from %s"
+                            % (value if value else "empty", source))
+    return value
+
+
+def display_url(url):
+    """The URL without userinfo, so a message never carries credentials.
+
+    Never raises: a malformed URL (urlparse's ValueError) degrades to the
+    part after the last "@", which is the same no-credentials promise.
+    """
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return str(url).rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1],
+                       parts.path, parts.query, parts.fragment))
+
+
+def endpoint_host(endpoint):
+    """The host part of a keeper endpoint (a URL or bare host[:port]).
+
+    A malformed endpoint - say, unbalanced brackets - is not a traceback:
+    urlparse's ValueError becomes a one-line fail-closed status-3 error.
+    A host that cannot be encoded (a lone surrogate) is refused the same
+    way, as a bad bind: the OS's own later encoding in getaddrinfo would
+    raise UnicodeEncodeError straight through main() otherwise.
+    """
+    try:
+        parsed = urlparse(endpoint if "://" in endpoint else "//" + endpoint)
+        host = (parsed.hostname or "").strip()
+    except ValueError:
+        raise FleetBusError(3, "keeper endpoint is malformed")
+    try:
+        host.encode("utf-8")
+    except UnicodeError:
+        # never a traceback: refuse the unencodable host here - the wire
+        # names the host only, never the endpoint (its userinfo could
+        # carry credentials)
+        raise FleetBusError(3, "refusing bad bind (%s) from the keeper endpoint"
+                            % host)
+    return host
+
+
+def read_secret(path, what="secret file"):
+    """First line of a 0600 file. Names the failure, never the value.
+
+    A file that is not valid UTF-8 is the same one-line refusal (and never
+    a traceback), because the caller may be a request handler that must
+    answer 401 rather than drop the connection.
+    """
+    try:
+        if os.name != "nt" and os.stat(path).st_mode & 0o077:
+            raise FleetBusError(2, "%s must be owner-only (0600): %s" % (what, path))
+        with open(path, encoding="utf-8-sig") as f:
+            value = f.readline().strip()
+    except OSError:
+        raise FleetBusError(2, "%s unreadable: %s" % (what, path))
+    except UnicodeDecodeError:
+        raise FleetBusError(2, "%s is not valid UTF-8: %s" % (what, path))
+    if not value:
+        raise FleetBusError(2, "%s empty: %s" % (what, path))
+    return value.encode("utf-8")
+
+
+def read_keeper_token(path):
+    """The keeper bearer token (0600 file). Names the path, never the value."""
+    try:
+        return read_secret(path, "keeper token file")
+    except FleetBusError as e:
+        raise FleetBusError(3, e.reason)
+    except UnicodeDecodeError:
+        raise FleetBusError(3, "keeper token file is not valid UTF-8: %s" % path)
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """A 3xx is an answer, not an invitation.
+
+    Following one would re-send the Authorization header (the keeper
+    bearer token) to whatever the Location names, so the redirect is
+    refused and surfaces as the same fail-closed non-200 answer. The
+    refused response is closed here - nothing will ever read its body, and
+    the opener would otherwise leave that connection dangling - and the
+    raised HTTPError carries no open fp with it.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if fp is not None:
+            fp.close()
+        raise urllib.error.HTTPError(req.full_url, code,
+                                     msg or "redirect refused", headers, None)
+
+
+def fetch_keeper_hosts(keeper_url, token):
+    """GET <keeper>/v1/hosts -> the registry list. The token is never printed.
+
+    The read goes DIRECT: the opener carries ProxyHandler({}), so an
+    http(s)_proxy in the environment never routes the bearer token through
+    a third host. No redirect is ever followed (see _RefuseRedirects) and
+    no protocol error escapes: http.client.HTTPException (a garbled status
+    line, a truncated response) is the same one-line fail-closed "keeper
+    unreachable" as a refused connection - and so is a ValueError from
+    Request(...) itself ('unknown url type' on a URL that slipped past
+    check_keeper_url), which must never escape as a traceback either.
+    """
+    url = keeper_url.rstrip("/") + "/v1/hosts"
+    # ProxyHandler({}) REPLACES the default env-reading proxy handler: the
+    # one request that carries the bearer token must never be handed to a
+    # proxy an environment variable names
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _RefuseRedirects())
+    try:
+        request = urllib.request.Request(
+            url, headers={"Authorization": "Bearer " + token.decode("utf-8")})
+        with opener.open(request, timeout=KEEPER_TIMEOUT_S) as response:
+            status, raw = response.getcode(), response.read()
+    except urllib.error.HTTPError as e:
+        raise FleetBusError(3, "keeper answered HTTP %d: %s"
+                           % (e.code, display_url(keeper_url)))
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
+        raise FleetBusError(3, "keeper unreachable: %s" % display_url(keeper_url))
+    if status != 200:
+        raise FleetBusError(3, "keeper answered HTTP %d: %s"
+                           % (status, display_url(keeper_url)))
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+        hosts = doc["hosts"]
+        if not isinstance(hosts, list):
+            raise ValueError
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+        raise FleetBusError(3, "keeper hosts response is not valid JSON: %s"
+                           % display_url(keeper_url))
+    return hosts
+
+
+def check_keeper_url(url):
+    """The keeper base URL must be http or https - checked at config time.
+
+    A scheme-less value ("keeper.example.invalid:8765", or no colon at all)
+    makes Request(...) itself raise ValueError('unknown url type'), and an
+    ftp:/file:/data: URL is not a keeper read at all (urllib's own handlers
+    would answer it, file: with no network and no auth). The scheme is
+    refused here - at startup, before any request carries the bearer token -
+    as the same one-line fail-closed status-3 error as every other discovery
+    failure, never a traceback.
+    """
+    try:
+        scheme = urlparse(url).scheme
+    except ValueError:
+        raise FleetBusError(3, "keeper URL is malformed: %s" % display_url(url))
+    if scheme.lower() not in ("http", "https"):
+        raise FleetBusError(3, "keeper URL must be http or https: %s"
+                           % display_url(url))
+
+
+def discover_bind(host, keeper_url, token_file):
+    """This host's bind address: the host part of its keeper endpoint.
+
+    Fail closed (status 3, one line) whenever the keeper cannot answer -
+    unset URL/token/host, a keeper URL that is not http(s), an unreachable
+    or non-200 keeper, bad JSON, an unknown or unhealthy host, a missing
+    endpoint - and never fall back to an IP or loopback guess.
+    """
+    host = (host or "").strip()
+    keeper_url = (keeper_url or "").strip()
+    token_file = (token_file or "").strip()
+    if not keeper_url:
+        raise FleetBusError(3, "keeper URL not set (--keeper-url or %s)"
+                           % KEEPER_URL_ENV)
+    if not token_file:
+        raise FleetBusError(3, "keeper token file not set (--keeper-token-file "
+                               "or %s)" % KEEPER_TOKEN_ENV)
+    if not host:
+        raise FleetBusError(3, "host name not set (--host or %s)" % HOST_ENV)
+    check_keeper_url(keeper_url)
+    entries = fetch_keeper_hosts(keeper_url, read_keeper_token(token_file))
+    match = [e for e in entries if isinstance(e, dict) and e.get("host") == host]
+    if not match:
+        raise FleetBusError(3, "host not in the keeper registry: %s" % host)
+    entry = match[0]
+    if entry.get("health") != "healthy":
+        raise FleetBusError(3, "host %s is not healthy in the keeper registry "
+                               "(health=%s)" % (host, entry.get("health") or "unknown"))
+    endpoint = entry.get("endpoint")
+    if not isinstance(endpoint, str) or not endpoint.strip():
+        raise FleetBusError(3, "keeper entry for %s has no endpoint" % host)
+    try:
+        bind = endpoint_host(endpoint.strip())
+    except ValueError:
+        # urlparse's own ValueError (malformed endpoint): one line, status 3
+        raise FleetBusError(3, "keeper endpoint for %s is malformed" % host)
+    if not bind:
+        raise FleetBusError(3, "keeper endpoint for %s names no host" % host)
+    return bind
 
 
 def scrub_text(text):
@@ -99,31 +422,129 @@ def sign(secret, ts, nonce, frm, to, text):
                     hashlib.sha256).hexdigest()
 
 
-def check_post(secret, body, sig, now, seen):
+def load_inventory(path):
+    """The per-host key map {"<host>": "<key_file>"} from the inventory JSON."""
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            hosts = json.load(f)["hosts"]
+        if not isinstance(hosts, dict) or not hosts:
+            raise ValueError
+        for host, entry in hosts.items():
+            if (not isinstance(host, str) or not host
+                    or not isinstance(entry, dict)
+                    or not isinstance(entry.get("key_file"), str)
+                    or not entry.get("key_file")):
+                raise ValueError
+        return {host: entry["key_file"] for host, entry in hosts.items()}
+    except (OSError, ValueError, KeyError, TypeError):
+        raise FleetBusError(2, "inventory unreadable or malformed: %s" % path)
+
+
+class Keyring:
+    """The /inbox HMAC keys: per-host key files, or one explicit override.
+
+    A key file is read once (first line, 0600) and cached in memory; an
+    unknown from-host or an unreadable or non-UTF-8 key file is a 401 like
+    any other (the wire body is generic; the reason names the path and
+    host, never the value, and lives in the metadata log). `override` is
+    the transition's explicit single-key mode: it answers for every sender
+    and skips the inventory.
+    """
+
+    def __init__(self, override=None, inventory=None):
+        self._override = override
+        self._inventory = dict(inventory or {})
+        self._lock = threading.Lock()
+        self._cache = {}
+
+    def key_for(self, host):
+        """The HMAC key for the envelope's "from" host. Raises (401)."""
+        if self._override is not None:
+            return self._override
+        path = self._inventory.get(host)
+        if not path:
+            raise FleetBusError(401, "unknown from host: %s" % host)
+        with self._lock:
+            if host not in self._cache:
+                try:
+                    self._cache[host] = read_secret(
+                        path, "key file for host %s" % host)
+                except FleetBusError as e:
+                    raise FleetBusError(401, e.reason)
+                except UnicodeDecodeError:
+                    # never a traceback through the request handler: a key
+                    # file that cannot be read is a 401, not a dropped
+                    # connection
+                    raise FleetBusError(
+                        401, "key file for host %s is not valid UTF-8: %s"
+                        % (host, path))
+            return self._cache[host]
+
+
+def check_post(keyring, body, sig, now, seen):
     """Validate a parsed /inbox body. Returns the scrubbed record fields.
 
-    Raises FleetBusError(400) for malformed bodies, (401) for bad
-    signature, skew or replay. `seen` is the server's nonce LRU.
+    Raises FleetBusError(400) for malformed bodies, (401) for an unknown
+    from-host, a bad signature, skew or replay. `keyring` is None only in
+    --open mode; `seen` is the server's nonce LRU.
+
+    A ts that is not a finite, int-representable number is a malformed
+    field like any other: `float("1e400")` is inf and `int(inf)` raises
+    OverflowError, and a 400-digit JSON integer overflows the float
+    conversion - none of that may escape as a traceback through do_POST.
+    The same holds for a string field that cannot be UTF-8-encoded (a lone
+    surrogate): the canonical form's own encode would raise
+    UnicodeEncodeError through do_POST, so it is refused as a 400 first.
     """
     if not isinstance(body, dict):
         raise FleetBusError(400, "body must be a JSON object")
     try:
         frm, to = body["from"], body["to"]
         nonce, text = body["nonce"], body["text"]
-        ts = int(float(body["ts"]))
-    except (KeyError, TypeError, ValueError):
+        ts_value = float(body["ts"])
+        if not math.isfinite(ts_value):
+            raise ValueError("ts is not finite")
+        ts = int(ts_value)
+    except (KeyError, TypeError, ValueError, OverflowError):
         raise FleetBusError(400, "body needs from/to/ts/nonce/text")
     for name, value, cap in (("from", frm, 64), ("to", to, 64),
                              ("nonce", nonce, 128)):
         if not isinstance(value, str) or not value or len(value) > cap:
             raise FleetBusError(400, "bad %s" % name)
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            # a lone surrogate ("\ud800") is not UTF-8: refuse the field now,
+            # before the canonical form's own encode can raise it through
+            # do_POST as a traceback
+            raise FleetBusError(400, "bad %s" % name)
     if not isinstance(body["text"], str):
+        raise FleetBusError(400, "bad text")
+    try:
+        body["text"].encode("utf-8")
+    except UnicodeEncodeError:
+        # same lone-surrogate refusal for the text (fix round 4 item 3):
+        # treat it as a 400 like any malformed field, never a traceback and
+        # never a dropped connection
         raise FleetBusError(400, "bad text")
     if abs(int(now) - ts) > SKEW_S:
         raise FleetBusError(401, "timestamp outside the skew window")
-    if secret is not None:
-        if not isinstance(sig, str) or not hmac.compare_digest(
-                sign(secret, ts, nonce, frm, to, body["text"]), sig):
+    if keyring is not None:
+        secret = keyring.key_for(frm)
+        try:
+            expected = sign(secret, ts, nonce, frm, to, body["text"])
+        except UnicodeEncodeError:
+            # unreachable past the field checks above - but nothing escapes
+            # do_POST as a traceback
+            raise FleetBusError(400, "bad text")
+        try:
+            matched = (isinstance(sig, str)
+                       and hmac.compare_digest(expected, sig))
+        except TypeError:
+            # compare_digest refuses non-ASCII strings: a garbage
+            # X-Fleet-Sig is a bad signature (401), never a traceback
+            matched = False
+        if not matched:
             raise FleetBusError(401, "bad signature")
     if nonce in seen:
         raise FleetBusError(401, "replayed nonce")
@@ -141,7 +562,31 @@ class FleetBusStore:
         self._records = deque(maxlen=RING_CAP)
         self._seen = OrderedDict()
         self._seq = 0
+        self._refusals = 0
+        self._log_drops = 0
         self._logdir = logdir
+
+    def _log(self, row):
+        """Append one metadata-only jsonl row (caller holds the lock)."""
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        os.makedirs(self._logdir, exist_ok=True)
+        with open(os.path.join(self._logdir, day + ".jsonl"), "a",
+                  encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+
+    def _try_log(self, row):
+        """Best-effort append for the refusal path (caller holds the lock).
+
+        The refusal-log write can fail - an unwritable log dir (a path
+        under a regular file), a full disk - and an OSError escaping
+        log_refusal would drop the 401 answer the caller is waiting for.
+        The log is best-effort: a failed write is counted as one drop in
+        self._log_drops and swallowed silently.
+        """
+        try:
+            self._log(row)
+        except OSError:
+            self._log_drops += 1
 
     def append(self, fields):
         """Store a checked record; returns it with its id. Logs metadata only."""
@@ -152,14 +597,44 @@ class FleetBusStore:
                       "from": fields["from"], "to": fields["to"],
                       "text": fields["text"]}
             self._records.append(record)
-            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            os.makedirs(self._logdir, exist_ok=True)
-            with open(os.path.join(self._logdir, day + ".jsonl"), "a",
-                      encoding="utf-8") as f:
-                f.write(json.dumps({"id": record["id"], "ts": record["ts"],
-                                    "from": record["from"], "to": record["to"],
-                                    "len": len(record["text"])}) + "\n")
+            self._log({"id": record["id"], "ts": record["ts"],
+                       "from": record["from"], "to": record["to"],
+                       "len": len(record["text"])})
             return dict(record)
+
+    def log_refusal(self, reason):
+        """The full refusal reason in the metadata-only log.
+
+        This is where the reason a 401 names lives - key file paths and host
+        names are fine here, key contents and message text never are - since
+        the wire body of a 401 is generic (D-2024: logs never hold text).
+
+        The write is capped at REFUSAL_LOG_CAP refusal rows per process:
+        this runs on every 401, which any unauthenticated caller can
+        trigger, so an unbounded append would be a disk-fill lever. Past the
+        cap exactly one "refusal log capped" row is written and every later
+        refusal drops silently - the 401 answers themselves never stop.
+
+        The write is best-effort too: an OSError from an unwritable log dir
+        or a full disk is counted as one silent drop (see _try_log) and
+        never stops the 401 answer from going out.
+        """
+        with self._lock:
+            if self._refusals >= REFUSAL_LOG_CAP:
+                if self._refusals == REFUSAL_LOG_CAP:
+                    self._refusals += 1
+                    self._seq += 1
+                    self._try_log({"id": "%d-%06d"
+                                   % (int(time.time() * 1000), self._seq),
+                                   "ts": int(time.time()),
+                                   "event": "refusal log capped"})
+                return
+            self._refusals += 1
+            self._seq += 1
+            self._try_log({"id": "%d-%06d" % (int(time.time() * 1000),
+                                              self._seq),
+                           "ts": int(time.time()), "event": "refused",
+                           "reason": reason})
 
     def since(self, cursor):
         """Records after `cursor` (insertion order); unknown cursor -> all."""
@@ -189,6 +664,10 @@ class FleetBusHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or "")
         except ValueError:
             raise FleetBusError(400, "Content-Length required")
+        # a negative length passes the cap below and would make read(-1)
+        # block to EOF: refuse it like any malformed header
+        if length < 0:
+            raise FleetBusError(400, "Content-Length must not be negative")
         if length > BODY_MAX:
             raise FleetBusError(413, "body over the 4 KB cap")
         try:
@@ -201,13 +680,21 @@ class FleetBusHandler(BaseHTTPRequestHandler):
             if urlparse(self.path).path != "/inbox":
                 raise FleetBusError(404, "not found")
             body = self._read_json()
-            fields = check_post(self.server.secret, body,
+            fields = check_post(self.server.keys, body,
                                 self.headers.get("X-Fleet-Sig"),
                                 time.time(), self.server.nonces)
             record = self.server.store.append(fields)
             self._send(200, {"id": record["id"], "ts": record["ts"]})
         except FleetBusError as e:
-            self._send(e.status, {"error": e.reason})
+            if e.status == 401:
+                # The wire body is generic: a 401 must not enumerate key
+                # file paths or host names. The full reason (paths and host
+                # names, never key contents, never message text) goes to the
+                # metadata-only jsonl log.
+                self.server.store.log_refusal(e.reason)
+                self._send(401, {"error": UNAUTHORIZED})
+            else:
+                self._send(e.status, {"error": e.reason})
 
     def do_GET(self):  # noqa: N802 (http.server names the method)
         try:
@@ -228,10 +715,10 @@ class FleetBusServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address, secret, logdir):
+    def __init__(self, address, keys, logdir):
         super().__init__(address, FleetBusHandler)
         self.timeout = 0.5
-        self.secret = secret
+        self.keys = keys
         self.nonces = OrderedDict()
         self.store = FleetBusStore(logdir)
 
@@ -246,30 +733,51 @@ class FleetBusServer(ThreadingHTTPServer):
         self.server_close()
 
 
-def read_secret(path):
-    """First line of a 0600 file. Names the failure, never the value."""
-    try:
-        with open(path, encoding="utf-8-sig") as f:
-            value = f.readline().strip()
-    except OSError:
-        raise FleetBusError(2, "secret file unreadable: %s" % path)
-    if not value:
-        raise FleetBusError(2, "secret file empty: %s" % path)
-    return value.encode("utf-8")
+def build_keys(args):
+    """The HMAC keyring from the CLI: the per-host inventory, or the explicit
+    single-key --secret-file override. Errors name paths, never values.
+    """
+    if args.secret_file and args.inventory:
+        raise FleetBusError(2, "--secret-file and --inventory name two key "
+                           "sources: keep exactly one")
+    if args.secret_file:
+        return Keyring(override=read_secret(args.secret_file))
+    if args.inventory:
+        return Keyring(inventory=load_inventory(args.inventory))
+    raise FleetBusError(2, "one of --inventory or --secret-file is required "
+                           "unless --open")
 
 
 def build_parser(env=None):
+    source = os.environ if env is None else env
     ap = argparse.ArgumentParser(
         prog="fleet_bus.py",
         description="Tailnet-only relay listener (D-2024 OCGO-FLEET-BUS, pull mode).")
-    ap.add_argument("--bind", default=bind_default(env),
-                    help="bind address, tailnet-only (default: $%s or %s)"
-                         % (BIND_ENV, DEFAULT_BIND))
+    ap.add_argument("--bind", default=bind_override(source),
+                    help="explicit bind address, the transition override "
+                         "(default: the host part of this host's keeper "
+                         "endpoint; $%s)" % BIND_ENV)
+    ap.add_argument("--host", default=(source.get(HOST_ENV) or "").strip() or None,
+                    help="this host's name in the keeper registry "
+                         "(default: $%s)" % HOST_ENV)
+    ap.add_argument("--keeper-url",
+                    default=(source.get(KEEPER_URL_ENV) or "").strip() or None,
+                    help="keeper base URL whose /v1/hosts registry supplies "
+                         "the bind address (default: $%s)" % KEEPER_URL_ENV)
+    ap.add_argument("--keeper-token-file",
+                    default=(source.get(KEEPER_TOKEN_ENV) or "").strip() or None,
+                    help="0600 file holding the keeper bearer token, never "
+                         "printed (default: $%s)" % KEEPER_TOKEN_ENV)
+    ap.add_argument("--inventory",
+                    default=(source.get(INVENTORY_ENV) or "").strip() or None,
+                    help="per-host key inventory JSON mapping each sending "
+                         "host to its own 0600 key file (default: $%s)"
+                         % INVENTORY_ENV)
+    ap.add_argument("--secret-file", default=None,
+                    help="0600 file holding ONE shared HMAC key: the explicit "
+                         "single-key override of the per-host inventory")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT,
                     help="relay port (default %d)" % DEFAULT_PORT)
-    ap.add_argument("--secret-file", default=None,
-                    help="0600 file holding the shared HMAC secret (required "
-                         "unless --open)")
     ap.add_argument("--log-dir", default="logs/fleet-bus",
                     help="metadata-only jsonl log dir (no text is logged)")
     ap.add_argument("--ttl", type=float, default=0,
@@ -280,24 +788,41 @@ def build_parser(env=None):
     return ap
 
 
-def main(argv=None):
-    args = build_parser().parse_args(argv)
-    secret = None
-    if not args.open:
-        if not args.secret_file:
-            print(json.dumps({"ok": False,
-                              "error": "--secret-file is required unless --open"}))
-            return 2
-        try:
-            secret = read_secret(args.secret_file)
-        except FleetBusError as e:
-            print(json.dumps({"ok": False, "error": e.reason}))
-            return 2
+def main(argv=None, env=None):
+    source = os.environ if env is None else env
+    args = build_parser(env).parse_args(argv)
+    try:
+        keys = None
+        if not args.open:
+            keys = build_keys(args)
+        if args.bind is not None:
+            bind = check_bind(args.bind, "--bind / %s" % BIND_ENV, 2)
+        elif BIND_ENV in source:
+            # a set-but-blank override is the wildcard "", not "no value"
+            raise FleetBusError(2, "refusing wildcard bind (empty) from %s"
+                                % BIND_ENV)
+        else:
+            bind = check_bind(discover_bind(
+                args.host, args.keeper_url, args.keeper_token_file),
+                "the keeper endpoint for %s" % (args.host or HOST_ENV), 3)
+    except FleetBusError as e:
+        print(json.dumps({"ok": False, "error": e.reason}))
+        return e.status
     import time as _time
-    server = FleetBusServer((args.bind, args.port), secret, args.log_dir)
+    try:
+        server = FleetBusServer((bind, args.port), keys, args.log_dir)
+    except (OSError, OverflowError) as e:
+        # unowned/unresolvable address or the wrong family - and a port
+        # past the socket layer's range (bind() raises OverflowError there,
+        # which is not an OSError): one line, like the other fail-closed
+        # startup errors, naming the address and port only
+        print(json.dumps({"ok": False, "error": "cannot bind %s:%s: %s"
+                          % (bind, args.port,
+                             getattr(e, "strerror", None) or e)}))
+        return 3
     port = server.server_address[1]
     sys.stderr.write("fleet-bus: listening on %s:%d%s\n"
-                     % (args.bind, port, " (open, probe-only)" if args.open else ""))
+                     % (bind, port, " (open, probe-only)" if args.open else ""))
     deadline = (_time.monotonic() + args.ttl) if args.ttl > 0 else None
     try:
         server.serve_until(deadline)

@@ -338,14 +338,31 @@ never blank out the gateway `baseURL`.
 
 `tools/fleet_bus.py` is a stdlib-only HTTP relay for tailnet-only cross-host messaging (`POST /inbox` + `GET /outbox?since=<cursor>`):
 
-- **Authentication & bounds:** `POST /inbox` requires `X-Fleet-Sig` = hex `HMAC-SHA256(secret, "ts|nonce|from|to|sha256(text)")`
-  using a 0600 `--secret-file` (value never printed), `|now - ts| <= 60` s skew check, 10 000-entry nonce LRU, and a 4096-byte
+- **Authentication & bounds:** `POST /inbox` requires `X-Fleet-Sig` = hex `HMAC-SHA256(secret, "ts|nonce|from|to|sha256(text)")`,
+  verified with the key of the envelope's `from` host: `--inventory` / `FLEET_BUS_INVENTORY` names a JSON mapping each sending host to
+  its own 0600 key file (`{"hosts": {"<host>": {"key_file": "<path>"}}}`, value never printed; each is read once), an unknown `from`
+  host or an unreadable / non-UTF-8 key file is a 401 like any other, and every 401 body on the wire is the generic
+  `{"error": "unauthorized"}` — the response never enumerates key file paths or host names; the full reason (paths and host names,
+  never the contents) is kept in the metadata-only jsonl log. `--secret-file` remains only as the explicit
+  single-key override of the transition. Also `|now - ts| <= 60` s skew check, 10 000-entry nonce LRU, and a 4096-byte
   body cap. Message text is scrubbed to a single line (`<= 2000` chars).
 - **Pull & logging:** `GET /outbox?since=<cursor>` returns `{"cursor", "records"}` after `cursor` from the 1000-entry in-memory
-  ring; disk logs under `<log-dir>/YYYY-MM-DD.jsonl` record metadata only (`id`, `ts`, `from`, `to`, `len`) and never message text.
-- **Binding:** `--bind` or `FLEET_BUS_BIND` names the tailnet address on the host that runs the relay. The public default is
-  `127.0.0.1`: a site address is never a literal in this public repository (AutoOS Hard Rule 1). A host that needs the relay on
-  the tailnet sets the variable in its own 0600 unit/config, never in a tracked file.
+  ring; disk logs under `<log-dir>/YYYY-MM-DD.jsonl` record metadata only (`id`, `ts`, `from`, `to`, `len`) and never message text,
+  plus one `{"event": "refused", "reason": ...}` row per 401 — that row is where the refusal reason (paths and host names) lives,
+  never key contents and never message text.
+- **Binding:** there is no literal default. The relay binds the host part of its own endpoint as the keeper hosts registry reports it —
+  this host is named by `--host` / `FLEET_BUS_HOST`, the registry is read from `--keeper-url` / `FLEET_KEEPER_URL` (`GET /v1/hosts`)
+  with the token in the 0600 `--keeper-token-file` / `FLEET_KEEPER_TOKEN_FILE` (token never printed; a redirect is never followed,
+  so the token is never re-sent to another host). Discovery that cannot answer
+  (URL/token/host unset, keeper unreachable or non-200, bad JSON, host unknown or unhealthy, endpoint null or malformed) fails closed
+  with one line and exit code 3: it never falls back to an IP or loopback guess. Loopback happens only via an explicit `--bind 127.0.0.1`;
+  `--bind` / `FLEET_BUS_BIND` stays the explicit transition override. A wildcard bind is refused from
+  every source — `--bind` / `FLEET_BUS_BIND` (exit 2) or a discovered endpoint (exit 3) — because the read path is open: the address is
+  resolved first, so every spelling of the all-zeros address is refused (`0.0.0.0`, `0`, `0.0`, `000.000.000.000`, `0x0`, `::`, `::0`,
+  `0:0:0:0:0:0:0:0`, empty), and an address the OS will not hand out is the same one-line exit-3 error naming the address, never a
+  traceback. `--secret-file` together
+  with `--inventory` is refused (exit 2): exactly one key source. A host that names the address itself sets the variable in its
+  own 0600 unit/config, never in a tracked file.
 
 The relay above uses its own `X-Fleet-Sig` format; the separate, versioned fleet-bus v2 wire contract (signing, canonical form, cursors, signed reads, validation, test vectors) is specified in plangraph's [`docs/FLEET-BUS.md`](https://github.com/Ch3fUlrich/plangraph/blob/main/docs/FLEET-BUS.md), implemented by plangraph `src/plangraph/fleet_bus/contract.py`.
 
