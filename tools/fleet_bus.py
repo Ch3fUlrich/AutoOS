@@ -17,8 +17,11 @@ with it ("0", "0.0", "000.000.000.000", "0x0", "0.0.0.0", "::", "::0",
 (unowned, unresolvable, wrong family) is the same one-line status-3 error,
 never a traceback, as are a garbled keeper response (an
 http.client.HTTPException), a keeper that answers with a redirect (never
-followed: the bearer token must not be re-sent to another host) and a
-malformed keeper endpoint. The coding-side poller pulls; apart
+followed: the bearer token must not be re-sent to another host), a
+malformed keeper endpoint and a keeper read that a proxy environment
+variable tries to hijack (the opener carries ProxyHandler({}), so the one
+request carrying the bearer token always travels direct). The coding-side
+poller pulls; apart
 from that one keeper GET at startup this side never dials out, so no
 round-trip is wasted: a single GET carries everything new since the
 poller's cursor.
@@ -26,10 +29,14 @@ poller's cursor.
 Contract (the only two routes):
   POST /inbox   JSON {"from","to","ts","nonce","text"} plus header X-Fleet-Sig
                   = HMAC-SHA256(secret, "ts|nonce|from|to|sha256(text)").
-                  ts is unix epoch seconds (int); |now-ts| <= 60 or 401.
+                  ts is unix epoch seconds (int, finite and int-representable:
+                  "1e400" and friends are the same 400 as a malformed body,
+                  never an OverflowError through the handler);
+                  |now-ts| <= 60 or 401.
                   nonce is single-use (LRU, cap 10000) or 401.
-                  body <= 4096 bytes or 413. text is scrubbed to one line
-                  <= 2000 chars. -> 200 {"id","ts"} | 400 | 401 | 413.
+                  body <= 4096 bytes or 413 (a negative Content-Length is a
+                  400: read(-1) would block to EOF). text is scrubbed to one
+                  line <= 2000 chars. -> 200 {"id","ts"} | 400 | 401 | 413.
   GET /outbox?since=<cursor>
                 -> 200 {"cursor": <last id or the echo>, "records": [...]},
                 records [{id,ts,from,to,text}] in insertion order after the
@@ -66,6 +73,7 @@ import hmac
 import http.client
 import ipaddress
 import json
+import math
 import os
 import socket
 import sys
@@ -234,26 +242,37 @@ class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
 
     Following one would re-send the Authorization header (the keeper
     bearer token) to whatever the Location names, so the redirect is
-    refused and surfaces as the same fail-closed non-200 answer.
+    refused and surfaces as the same fail-closed non-200 answer. The
+    refused response is closed here - nothing will ever read its body, and
+    the opener would otherwise leave that connection dangling - and the
+    raised HTTPError carries no open fp with it.
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if fp is not None:
+            fp.close()
         raise urllib.error.HTTPError(req.full_url, code,
-                                     msg or "redirect refused", headers, fp)
+                                     msg or "redirect refused", headers, None)
 
 
 def fetch_keeper_hosts(keeper_url, token):
     """GET <keeper>/v1/hosts -> the registry list. The token is never printed.
 
-    No redirect is ever followed (see _RefuseRedirects) and no protocol
-    error escapes: http.client.HTTPException (a garbled status line, a
-    truncated response) is the same one-line fail-closed "keeper
+    The read goes DIRECT: the opener carries ProxyHandler({}), so an
+    http(s)_proxy in the environment never routes the bearer token through
+    a third host. No redirect is ever followed (see _RefuseRedirects) and
+    no protocol error escapes: http.client.HTTPException (a garbled status
+    line, a truncated response) is the same one-line fail-closed "keeper
     unreachable" as a refused connection.
     """
     url = keeper_url.rstrip("/") + "/v1/hosts"
     request = urllib.request.Request(
         url, headers={"Authorization": "Bearer " + token.decode("utf-8")})
-    opener = urllib.request.build_opener(_RefuseRedirects())
+    # ProxyHandler({}) REPLACES the default env-reading proxy handler: the
+    # one request that carries the bearer token must never be handed to a
+    # proxy an environment variable named
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _RefuseRedirects())
     try:
         with opener.open(request, timeout=KEEPER_TIMEOUT_S) as response:
             status, raw = response.getcode(), response.read()
@@ -398,14 +417,22 @@ def check_post(keyring, body, sig, now, seen):
     Raises FleetBusError(400) for malformed bodies, (401) for an unknown
     from-host, a bad signature, skew or replay. `keyring` is None only in
     --open mode; `seen` is the server's nonce LRU.
+
+    A ts that is not a finite, int-representable number is a malformed
+    field like any other: `float("1e400")` is inf and `int(inf)` raises
+    OverflowError, and a 400-digit JSON integer overflows the float
+    conversion - none of that may escape as a traceback through do_POST.
     """
     if not isinstance(body, dict):
         raise FleetBusError(400, "body must be a JSON object")
     try:
         frm, to = body["from"], body["to"]
         nonce, text = body["nonce"], body["text"]
-        ts = int(float(body["ts"]))
-    except (KeyError, TypeError, ValueError):
+        ts_value = float(body["ts"])
+        if not math.isfinite(ts_value):
+            raise ValueError("ts is not finite")
+        ts = int(ts_value)
+    except (KeyError, TypeError, ValueError, OverflowError):
         raise FleetBusError(400, "body needs from/to/ts/nonce/text")
     for name, value, cap in (("from", frm, 64), ("to", to, 64),
                              ("nonce", nonce, 128)):
@@ -501,6 +528,10 @@ class FleetBusHandler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length") or "")
         except ValueError:
             raise FleetBusError(400, "Content-Length required")
+        # a negative length passes the cap below and would make read(-1)
+        # block to EOF: refuse it like any malformed header
+        if length < 0:
+            raise FleetBusError(400, "Content-Length must not be negative")
         if length > BODY_MAX:
             raise FleetBusError(413, "body over the 4 KB cap")
         try:

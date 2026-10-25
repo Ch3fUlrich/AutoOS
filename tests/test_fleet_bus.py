@@ -271,6 +271,44 @@ class FleetBusTest(unittest.TestCase):
         status, _ = post_inbox(self.port, {"from": "a"}, "0" * 64)
         self.assertEqual(status, 400)
 
+    # fix round 3 item 1: a non-finite or unrepresentable ts must be the same
+    # clean refusal as any malformed field - `int(float("1e400"))` raises
+    # OverflowError, which used to escape do_POST and drop the connection
+    def test_a_non_finite_timestamp_is_refused_not_a_traceback(self):
+        for ts in ("1e400", "1e309", '"inf"', '"-inf"', '"nan"', '"1e400"',
+                   "1" + "0" * 400):
+            raw = ('{"from": "workst", "to": "coding", "ts": %s, '
+                   '"nonce": "n-nonfinite", "text": "hello"}' % ts)
+            with self.subTest(ts=ts):
+                conn = http.client.HTTPConnection("127.0.0.1", self.port,
+                                                  timeout=10)
+                conn.request("POST", "/inbox", body=raw,
+                             headers={"Content-Type": "application/json",
+                                      "X-Fleet-Sig": "0" * 64})
+                resp = conn.getresponse()
+                status, data = resp.status, resp.read()
+                conn.close()
+                self.assertIn(status, (400, 401), data)
+
+    # fix round 3 item 2: a negative Content-Length passes the size cap and
+    # rfile.read(-n) then blocks to EOF - it is refused with a 400 instead
+    def test_a_negative_content_length_is_refused(self):
+        for value in ("-1", "-4096"):
+            with self.subTest(length=value):
+                conn = http.client.HTTPConnection("127.0.0.1", self.port,
+                                                  timeout=3)
+                try:
+                    conn.request(
+                        "POST", "/inbox", body="",
+                        headers={"Content-Type": "application/json",
+                                 "Content-Length": value,
+                                 "X-Fleet-Sig": "0" * 64})
+                    resp = conn.getresponse()
+                    status, data = resp.status, resp.read()
+                finally:
+                    conn.close()
+                self.assertEqual(status, 400, data)
+
     # (5) privacy: the jsonl log carries records WITHOUT text
     def test_log_records_carry_no_text(self):
         body = good_body(text="secret-words-that-must-not-land-in-logs")
@@ -743,6 +781,42 @@ class BindDiscoveryTest(unittest.TestCase):
             "302")
         self.assertEqual(seen, [],
                          "the redirect target must see no request at all")
+
+    # fix round 3 item 3: the refused redirect's response is closed, not left
+    # dangling with an open fp
+    def test_a_refused_redirect_closes_the_response_it_refused(self):
+        class FakeFP:
+            def __init__(self):
+                self.closed = False
+
+            def close(self):
+                self.closed = True
+
+        fp = FakeFP()
+        request = urllib.request.Request("https://keeper.example.invalid/v1/hosts")
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            fleet_bus._RefuseRedirects().redirect_request(
+                request, fp, 302, "Found", {},
+                "https://elsewhere.example.invalid/v1/hosts")
+        self.assertTrue(fp.closed)
+        # the refused response is gone from the error (a None fp becomes an
+        # inert BytesIO in urllib.error.HTTPError, never the open socket)
+        self.assertIsNot(caught.exception.fp, fp)
+
+    # fix round 3 item 3: the keeper read goes DIRECT - an http(s)_proxy in
+    # the environment must never route the Bearer token through a third host
+    def test_the_keeper_read_ignores_a_proxy_environment(self):
+        dead = closed_loopback_url()
+        url = self.keeper(self.hosts_doc([
+            self.entry("workst", "http://127.0.0.1:58690"),
+        ]))
+        with mock.patch.dict(os.environ, {
+                "http_proxy": dead, "https_proxy": dead, "all_proxy": dead,
+                "HTTP_PROXY": dead, "HTTPS_PROXY": dead, "ALL_PROXY": dead,
+                "no_proxy": "", "NO_PROXY": ""}):
+            self.assertEqual(
+                fleet_bus.discover_bind("workst", url, self.token_file),
+                "127.0.0.1")
 
     def test_the_token_is_never_printed_and_stays_0600(self):
         url = self.keeper(self.hosts_doc([]))
