@@ -3966,8 +3966,9 @@ if it "aistack: compose.zcode.yml names only omniroute, mounts ro by default, an
         [[ "$svc" == "  omniroute:" ]] || { ok=0; echo "services named: [$(tr '\n' '|' <<<"$svc")]" >&2; }
         vols="$(grep -cE '^[[:space:]]*-[[:space:]]' "$f")"
         [[ "$vols" == 1 ]] || { ok=0; echo "$vols volume lines, expected 1" >&2; }
-        grep -qE -- '^[[:space:]]*-[[:space:]]+\$\{AUTOOS_ZCODE_DIR\}:/home/qoder/\.zcode:\$\{AUTOOS_ZCODE_MOUNT_MODE:-ro\}$' "$f" \
-            || { ok=0; echo "the volume line is not \${AUTOOS_ZCODE_DIR}:/home/qoder/.zcode:\${AUTOOS_ZCODE_MOUNT_MODE:-ro}: $(grep -E '^[[:space:]]*-[[:space:]]' "$f" | head -1)" >&2; }
+        grep -qE -- '^[[:space:]]*-[[:space:]]+\$\{AUTOOS_ZCODE_DIR\}:/home/node/\.zcode:\$\{AUTOOS_ZCODE_MOUNT_MODE:-ro\}$' "$f" \
+            || { ok=0; echo "the volume line is not \${AUTOOS_ZCODE_DIR}:/home/node/.zcode:\${AUTOOS_ZCODE_MOUNT_MODE:-ro}: $(grep -E '^[[:space:]]*-[[:space:]]' "$f" | head -1)" >&2; }
+        grep -q '/home/qoder' "$f" && { ok=0; echo "compose.zcode.yml still references /home/qoder" >&2; }
     else
         ok=0; echo "missing $f" >&2
     fi
@@ -5631,6 +5632,19 @@ if it "aistack: verify checks the code dir in opencode and in the OpenHands sand
     grep -qF "exec autoos-opencode test -d $d/fromfile" "$d/docker.log" || { ok=0; echo "stack.env: the exec did not use its AUTOOS_CODE_DIR" >&2; }
     rm -rf "$d"
     if (( ok )); then pass; else fail "the code dir check misbehaves"; fi
+fi
+
+if it "aistack: verify no longer runs a qodercli check (D-2641: qodercli gateway infrastructure withdrawn)"; then
+    ok=1
+    d="$(_aistack_sandbox)"
+    _aistack_verify_sandbox "$d"
+    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    # Neither output nor docker exec log may reference qodercli or qoder
+    grep -qi 'qoder' <<<"$out" && { ok=0; echo "verify output references qoder: $(grep -i 'qoder' <<<"$out")" >&2; }
+    grep -qi 'qoder' "$d/docker.log" && { ok=0; echo "docker log references qoder: $(grep -i 'qoder' "$d/docker.log")" >&2; }
+    rm -rf "$d"
+    if (( ok )); then pass; else fail "verify still probes qodercli"; fi
 fi
 
 if it "aistack: verify prints the public URL as the app normalizes it, skips it when unset or empty, FAILs one the gateway would refuse"; then

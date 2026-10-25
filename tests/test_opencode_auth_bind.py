@@ -376,7 +376,8 @@ class BindParityTests(unittest.TestCase):
         (".".join(map(str, parts)), False) for parts in
         ((0, 0, 0, 0), (0, 1, 2, 3), (224, 0, 0, 1),
          (240, 0, 0, 1), (255, 255, 255, 255))] + [
-        (value, False) for value in ("::", "*", "", "garbage", "127.1", "[::1]")]
+        (value, False) for value in ("::", "*", "", "garbage", "127.1", "[::1]",
+                                     "::ffff:192.0.2.10", "::ffff:c000:20a")]
 
     def test_python_bind_table(self):
         spec = importlib.util.spec_from_file_location('bind', ROOT / 'configuration/opencode-bind.py')

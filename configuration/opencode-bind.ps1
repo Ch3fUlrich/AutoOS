@@ -1,6 +1,7 @@
 ﻿# Numeric unicast only. Naming AUTOOS_OPENCODE_HOST is the operator allowlist.
-# The table is shared with configuration/opencode-bind.py - one table feeds both
-# in tests/test_opencode_auth_bind.py, so a change here is a change there too.
+# Shared contract with configuration/opencode-bind.py; both reject IPv4-mapped
+# IPv6 addresses (dotted or hex) and accept only canonical numeric unicast forms,
+# verified by the shared parity table in tests/test_opencode_auth_bind.py.
 function Get-AutoOSOpencodeHost {
     $value = '127.0.0.1'
     if (Test-Path Env:AUTOOS_OPENCODE_HOST) { $value = $env:AUTOOS_OPENCODE_HOST }
@@ -12,7 +13,9 @@ function Get-AutoOSOpencodeHost {
         # spelling has to match before the address counts as named at all.
         throw 'Invalid opencode bind address'
     }
-    if ($address.IsIPv4MappedToIPv6) { $address = $address.MapToIPv4() }
+    if ($address.IsIPv4MappedToIPv6) {
+        throw 'Refusing IPv4-mapped IPv6 opencode bind'
+    }
     $bytes = $address.GetAddressBytes()
     if ($address.Equals([System.Net.IPAddress]::Any) -or
         $address.Equals([System.Net.IPAddress]::IPv6Any) -or

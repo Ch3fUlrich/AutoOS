@@ -5540,6 +5540,13 @@ class D2641NoGatewayPathTests(unittest.TestCase):
     def test_qoder_has_no_gateway_path(self):
         self.assertEqual(self.clients()["qoder"]["gateway_mode"], "none")
 
+    def test_bogus_gateway_mode_is_refused_by_rule_6(self):
+        reg = copy.deepcopy(load_registry())
+        reg["clients"]["qwen"]["gateway_mode"] = "bogus"
+        problems = registry._check_required_keys(reg)
+        matching = [p for p in problems if "gateway_mode" in p and "bogus" in p]
+        self.assertEqual(len(matching), 1, problems)
+
 
 if __name__ == "__main__":
     unittest.main()

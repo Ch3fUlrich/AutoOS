@@ -450,7 +450,7 @@ effective_opencode_publish() {
 # The ZCode desktop app installs its remote-server bundle (server/node,
 # server/zcode-server.cjs) - and stores the ZCode login in the same directory -
 # on the host, in $HOME/.zcode by default. OmniRoute finds that path by itself,
-# so compose.zcode.yml makes the host directory appear at /home/qoder/.zcode
+# so compose.zcode.yml makes the host directory appear at /home/node/.zcode
 # INSIDE THE GATEWAY CONTAINER ONLY (opencode and openhands never get it) and
 # only while server/zcode-server.cjs is really there: a host without ZCode
 # keeps today's single -f compose call, so `ai-stack.sh up` never changes.

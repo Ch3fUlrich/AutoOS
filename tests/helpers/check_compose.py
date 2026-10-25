@@ -40,7 +40,25 @@ def services(text):
     return {k: "\n".join(v) for k, v in out.items()}
 
 
+def check_zcode_overlay(path):
+    text = open(path, encoding="utf-8").read()
+    svc = services(text)
+    bad = []
+    if set(svc.keys()) != {"omniroute"}:
+        bad.append("compose.zcode.yml must name only services.omniroute, found: %s" % sorted(svc.keys()))
+    om = svc.get("omniroute", "")
+    if "/home/qoder" in om:
+        bad.append("compose.zcode.yml: /home/qoder is withdrawn (target must match gateway HOME /home/node/.zcode)")
+    if not re.search(r"^\s*-\s*\$\{AUTOOS_ZCODE_DIR\}:/home/node/\.zcode:\$\{AUTOOS_ZCODE_MOUNT_MODE:-ro\}\s*$", om, re.M):
+        bad.append("compose.zcode.yml: mount target must equal gateway HOME: ${AUTOOS_ZCODE_DIR}:/home/node/.zcode:${AUTOOS_ZCODE_MOUNT_MODE:-ro}")
+    for line in bad:
+        print(line)
+    return 1 if bad else 0
+
+
 def main(path):
+    if path.endswith("compose.zcode.yml"):
+        return check_zcode_overlay(path)
     text = open(path, encoding="utf-8").read()
     svc = services(text)
     bad = []
