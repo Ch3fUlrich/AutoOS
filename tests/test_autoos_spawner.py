@@ -105,12 +105,41 @@ def allow_in_place(case, agent):
 _WORKERS_TMP = None
 _MEMINFO_TMP = None
 _HOST_PINS = None
+_WRITER_PROBE = None
+_CLIENT_BIN = None
+_CLIENT_PATH_PATCH = None
+
+
+def writer_fixture_state():
+    """D-2148: unrelated tests have one writer, regardless of host installs."""
+    return {name: {"installed": name == "opencode", "signed_in": True,
+                   "reason": "test fixture"} for name in clients.CLIENTS}
 
 
 def setUpModule():
-    global _WORKERS_TMP, _MEMINFO_TMP, _HOST_PINS
+    global _WORKERS_TMP, _MEMINFO_TMP, _HOST_PINS, _WRITER_PROBE, _CLIENT_BIN
+    global _CLIENT_PATH_PATCH
     _WORKERS_TMP = tempfile.mkdtemp(prefix="autoos-workers-test-")
     os.environ["AUTOOS_WORKERS_DIR"] = _WORKERS_TMP
+    # Patch the shared probe (fresh agents and MCP's cached agent both use it).
+    # Policy tests can still replace the probe or pass an explicit snapshot.
+    import autoos_measure
+    _WRITER_PROBE = mock.patch.object(autoos_measure, "client_state",
+                                      side_effect=lambda *a, **k: writer_fixture_state())
+    _WRITER_PROBE.start()
+    # Subprocess CLI tests cannot inherit mocks. Shadow only opencode; it has
+    # no sign-in probe, so an inert executable supplies the same availability.
+    _CLIENT_BIN = os.path.join(_WORKERS_TMP, "bin")
+    os.mkdir(_CLIENT_BIN)
+    if os.name != "nt":
+        stub = Path(_CLIENT_BIN, "opencode")
+        stub.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+    else:
+        Path(_CLIENT_BIN, "opencode.cmd").write_text("@exit /b 0\r\n", encoding="utf-8")
+    _CLIENT_PATH_PATCH = mock.patch.dict(os.environ, {
+        "PATH": _CLIENT_BIN + os.pathsep + os.environ.get("PATH", os.defpath)})
+    _CLIENT_PATH_PATCH.start()
     # HOSTADMISSION reads the host's MemAvailable, and a runner with less free
     # memory than the floor would refuse every real-launch test in this file for
     # a reason none of them is about. Pin the source to a healthy fake; the
@@ -137,6 +166,10 @@ def setUpModule():
 
 
 def tearDownModule():
+    if _WRITER_PROBE is not None:
+        _WRITER_PROBE.stop()
+    if _CLIENT_PATH_PATCH is not None:
+        _CLIENT_PATH_PATCH.stop()
     # `uninstall` first: it puts back what `install` found, which includes the two
     # names this module set before it, so the pops below have to come after it or
     # it would put them back and leave the next test file pointing at this dir.
@@ -159,6 +192,7 @@ def pinned_env(**extra):
     fixtures itself; this is the one place that says what they are (AO-ADMISSION-2).
     """
     env = dict(_host_env_pins())
+    env["PATH"] = _CLIENT_BIN + os.pathsep + os.defpath
     env.update(extra)
     return env
 
@@ -195,6 +229,8 @@ def clean_env(**extra):
     dropped = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_SESSION_TAG")
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k not in dropped}
+    if _CLIENT_BIN is not None:
+        env["PATH"] = _CLIENT_BIN + os.pathsep + env.get("PATH", os.defpath)
     env.update(extra)
     return env
 
@@ -568,6 +604,201 @@ class ClientMatrixTests(unittest.TestCase):
 def plan_of(*args, env=None):
     r = run_agent("run", "--dry-run", *args, env=env)
     return r
+
+
+class WriterPolicyPickTests(unittest.TestCase):
+    def setUp(self):
+        self.agent = load_agent()
+        self.registry = self.agent.load_registry(str(ROOT / "catalog/ai-registry.json"))
+        self.state = {name: {"installed": True, "signed_in": True}
+                      for name in clients.CLIENTS}
+        for target, value in (("load_live_registry", self.registry),):
+            patcher = mock.patch.object(self.agent, target, return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(self.agent.measure_mod, "client_state", return_value=self.state)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_writer_policy_skips_disabled_row(self):
+        self.registry["policy"]["writers"]["order"][0]["available"] = False
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        self.assertEqual(decision["model"], "mimo/mimo-v2.6-flash")
+        self.assertIn("unavailable", decision["writer_skips"][0]["reason"])
+
+    def test_writer_policy_missing_client_is_recorded(self):
+        self.state["opencode"]["installed"] = False
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        self.assertEqual(decision["client"], "qoder")
+        self.assertEqual(len(decision["writer_skips"]), 3)
+        self.assertIn("not installed", decision["writer_skips"][0]["reason"])
+
+    def test_writer_policy_route_leg_bench_is_used(self):
+        leg = "cx/gpt-6.1-sol"
+        self.registry["routes"]["fixture"] = {
+            "legs": [leg], "unavailable_legs": {leg: {"available": False}}}
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        self.assertNotEqual(decision["model"], "omniroute/cx-gpt-6.1-sol")
+
+    def test_writer_policy_sensitive_replacement_is_checked(self):
+        with self.assertRaisesRegex(self.agent.PrivacyRefused, "privacy"):
+            self.agent.policy_writer_route({"privacy": "sensitive"}, eligible=True,
+                                          registry=self.registry, client_state=self.state)
+
+    def test_writer_policy_pricing_without_hand_row(self):
+        self.assertIs(self.agent.spawn_spends_claude(
+            "opencode", "omniroute/cx-gpt-6.1-sol", self.registry,
+            source="policy.writers.order", cfg={}), False)
+
+    def test_writer_policy_deepseek_row_prices_from_its_declared_leg(self):
+        # opencode.jsonc deepseek-direct-flash -> modelID deepseek/deepseek-flash
+        self.assertIs(self.agent.spawn_spends_claude(
+            "opencode", "omniroute/deepseek-direct-flash", self.registry,
+            source="policy.writers.order", cfg={}), False)
+
+    def test_writer_policy_unverified_alias_pricing_refuses_honestly(self):
+        agent = self.agent
+        self.registry["policy"]["claude_budget"]["mode"] = "budget"
+        plan = {"client": "opencode"}
+        with mock.patch.object(agent, "plan_launch_models", return_value=[
+                ("omniroute/no-leg-alias", "policy.writers.order")]), mock.patch.object(
+                agent.resolver, "claude_allowed", return_value=(False, "held")):
+            refusal, _ = agent.claude_plan_refusal(argparse.Namespace(), plan, {}, self.registry, {})
+        self.assertIn("unverified policy alias", refusal)
+        self.assertNotIn("holds for finals", refusal)
+
+    def test_writer_policy_log_records_skips(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        skips = [{"entry": {"model": "fixture"}, "reason": "unavailable"}]
+        plan = {"client": "opencode", "agent": "worker", "model": "fixture",
+                "route": {"combo": "fixture", "reason": "policy.writers.order"},
+                "depth": (1, 2), "sandbox": None, "writer_skips": skips}
+        with mock.patch.object(self.agent, "ROOT", directory):
+            self.agent.log_run(plan, 0, 1, False)
+        log = next(Path(directory, "logs").glob("orch-*.log")).read_text()
+        self.assertIn(json.dumps(skips, sort_keys=True), log)
+
+    def test_writer_policy_mapping(self):
+        agent = load_agent()
+        registry = agent.load_registry(str(ROOT / "catalog/ai-registry.json"))
+        rows = registry["policy"]["writers"]["order"]
+        self.assertEqual([agent.writer_launch_adapter(row, registry) for row in rows], [
+            ("opencode", "omniroute/cx-gpt-6.1-sol"),
+            ("opencode", "mimo/mimo-v2.6-flash"),
+            ("opencode", "omniroute/deepseek-direct-flash"),
+            ("qoder", "qwen3.8-flash")])
+        self.assertIsNone(agent.writer_launch_adapter({"client": "unknown", "model": "x"}, registry))
+
+    def test_writer_policy_default_dry_run(self):
+        with mock.patch.object(_runner_agent(), "load_live_registry", return_value=self.registry):
+            result = plan_of("implement a small fix")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("omniroute/cx-gpt-6.1-sol", result.stdout)
+
+    def test_writer_policy_probe_cached(self):
+        with mock.patch.object(self.agent.measure_mod, "client_state", return_value=self.state) as probe:
+            self.agent.pick_policy_writer(registry=self.registry)
+            self.agent.pick_policy_writer(registry=self.registry)
+        self.assertEqual(probe.call_count, 1)
+
+    def test_writer_policy_cmd_run_qoder_post_plan_client(self):
+        runner = _runner_agent()
+        self.state["opencode"]["installed"] = False
+        with mock.patch.object(runner, "load_live_registry", return_value=self.registry), mock.patch.object(
+                runner, "writer_client_state", return_value=self.state), mock.patch.object(
+                runner.resolver, "_client_reason", wraps=runner.resolver._client_reason) as availability, mock.patch.object(
+                runner, "daily_gate_refusal", side_effect=lambda args, plan=None: "picked-client=" + plan["client"] if plan else None):
+            result = plan_of("implement a fix")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("picked-client=qoder", result.stderr)
+        self.assertEqual(availability.call_args.args[1], "qoder")
+
+    def test_writer_policy_cmd_run_plain_unavailable(self):
+        runner = _runner_agent()
+        with mock.patch.object(runner, "build_plan", side_effect=runner.PolicyWriterUnavailable("no available policy writer: fixture")):
+            result = plan_of("implement a fix")
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("no available policy writer: fixture", result.stderr)
+        self.assertNotIn("see: tools", result.stderr)
+
+    def test_writer_policy_fallthrough_prints_cause(self):
+        agent = self.agent
+        args = argparse.Namespace(free_model="first")
+        output = io.StringIO()
+        with mock.patch.object(agent, "build_plan", side_effect=agent.PolicyWriterUnavailable("no available policy writer: fixture")), contextlib.redirect_stderr(output):
+            result = agent._free_fallthrough_plan(args, {}, {"model": "first", "sandbox": None},
+                                                  ["first", "second"], set())
+        self.assertEqual(result, (None, None, None))
+        self.assertIn("no available policy writer: fixture", output.getvalue())
+
+    def test_writer_policy_worker_record_persists_decision(self):
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        plan = dict(run_id="fixture", client=decision["client"], model=decision["model"],
+                    depth=(1, 2), writer_decision=decision, writer_skips=decision["writer_skips"])
+        with mock.patch.object(self.agent, "_write_worker_record") as write:
+            _, record = self.agent._worker_record_start(plan, argparse.Namespace(title="fixture", task="fix"), ".", kind="worker")
+        self.assertEqual(record["writer_decision"], decision)
+        self.assertEqual(record["writer_skips"], decision["writer_skips"])
+        self.assertEqual(write.call_args.args[1], record)
+
+    def test_writer_policy_row_reason_names_entry_and_until(self):
+        row = self.registry["policy"]["writers"]["order"][0]
+        row["unavailable_until"] = "2999-01-01T00:00:00Z"
+        decision = self.agent.pick_policy_writer(registry=self.registry, client_state=self.state)
+        reason = decision["writer_skips"][0]["reason"]
+        self.assertIn(row["model"], reason)
+        self.assertIn(row["unavailable_until"], reason)
+
+    def test_writer_policy_preflight_kind_pins_and_metadata(self):
+        agent = self.agent
+        old = dict(route="fixture", leg="old/model", effort="high", max_tokens=99,
+                   context_budget=88, expected_cost=77)
+        now = datetime.datetime.now(datetime.timezone.utc)
+        for card, eligible in [({"kind": "review"}, False),
+                               ({"kind": "implement", "override": {"client": "qoder"}}, False),
+                               ({"kind": "implement", "override": {"route": "fixture"}}, False),
+                               ({"kind": "implement"}, True)]:
+            with self.subTest(card=card), mock.patch.object(agent.measure_mod, "measure", return_value={}), mock.patch.object(agent.resolver, "plan", return_value=old):
+                result = agent.route_plan_for(card, "", ".", "fixture", now,
+                                              self.registry, {}, [], self.state,
+                                              apply_writer_policy=True)
+            self.assertEqual("writer_decision" in result, eligible)
+            if eligible:
+                self.assertEqual(result["model"], agent.pick_policy_writer(registry=self.registry, client_state=self.state)["model"])
+                for field in ("effort", "max_tokens", "context_budget", "expected_cost"):
+                    self.assertIsNone(result[field], field)
+                self.assertNotEqual(result["leg"], old["leg"])
+
+    def test_writer_policy_cooldown_records_skip(self):
+        agent = self.agent
+        until = (datetime.datetime.now(datetime.timezone.utc)
+                 + datetime.timedelta(hours=1)).isoformat()
+        args = argparse.Namespace(
+            client=None, tier=None, card=None,
+            task="implement a fix", free=False, model=None, clean=False,
+            allow_training=False, max_depth=None, title=None, isolate=False,
+            auto=True, lean=False, joinable=False)
+        cfg = {"agents": {"l2-worker": {"model": "omniroute/l2-worker"}},
+               "providers": {"omniroute": {"models": {"l2-worker": {}}}}}
+        plan = agent.build_plan(args, cfg, provider_cooldown={
+            "cx": {"unavailable_until": until}})
+        decision = plan["writer_decision"]
+        self.assertEqual((decision["client"], decision["model"]),
+                         ("opencode", "mimo/mimo-v2.6-flash"))
+        self.assertEqual(decision["writer_skips"][0]["entry"]["model"],
+                         "omniroute/cx-gpt-6.1-sol")
+        self.assertIn("unavailable", decision["writer_skips"][0]["reason"])
+        self.assertIn("mimo/mimo-v2.6-flash", plan["cmd"])
+        self.assertEqual(plan["writer_skips"], decision["writer_skips"])
+        self.assertEqual(agent.plan_launch_models(plan, args, cfg),
+                         [("mimo/mimo-v2.6-flash", "policy.writers.order")])
+
+    def test_writer_policy_model_pin_unaffected(self):
+        result = plan_of("--model", "omniroute/l2-worker", "implement a fix")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("omniroute/l2-worker", result.stdout)
+        self.assertNotIn("omniroute/cx-gpt-6.1-sol", result.stdout)
 
 
 class InProcessEquivalenceTests(unittest.TestCase):
@@ -966,14 +1197,23 @@ class ClientCapabilityTests(unittest.TestCase):
         self.assertIn("qodercli", r.stdout)
 
     def test_an_isolated_run_without_a_client_auto_picks_a_capable_one(self):
-        r = plan_of("--isolate", "edit README.md")
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        self.assertIn("would run: opencode", r.stdout)
+        # No installed writer is a refusal, not an implicit opencode default.
+        runner = _runner_agent()
+        absent = {name: {"installed": False, "signed_in": None}
+                  for name in clients.CLIENTS}
+        with mock.patch.object(runner, "writer_client_state", return_value=absent):
+            r = plan_of("--isolate", "edit README.md")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no available policy writer", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertNotIn("would run:", r.stdout)
 
     def test_the_no_client_default_is_still_opencode(self):
         r = plan_of("t")
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("would run: opencode", r.stdout)
+        self.assertIn("omniroute/cx-gpt-6.1-sol", r.stdout)
+        self.assertIn("policy.writers.order", r.stdout)
 
 
 class ReviewFindingTests(unittest.TestCase):
@@ -18913,7 +19153,7 @@ class CreditGuardWiringTests(unittest.TestCase):
 
         def spy(card, brief, repo, orchestrator_model, now, registry, overlay,
                 track_record, client_state, client="opencode", env=None,
-                overlay_missing_at=None, credit_guards=None):
+                overlay_missing_at=None, credit_guards=None, apply_writer_policy=False):
             seen.append(credit_guards)
             return {"route": "l2-worker", "state": "ready", "reason": "stub",
                     "bucket": "S1", "defer_until": None, "explain": [],
@@ -22063,10 +22303,10 @@ class FreeOnlyComboTests(unittest.TestCase):
         self.assertNotIn("route: l3-driver ", out)
 
     def test_a_paid_strong_card_keeps_its_paid_combo(self):
-        out = self._route_line("--card",
+        out = self._route_line("--model", "omniroute/l1-orchestrator", "--card",
                                "complexity=hard,ctx=128k,privacy=public,"
                                "role=implement,spend=free-ok", "t")
-        self.assertRegex(out, r"route: l1-orchestrator reason=")
+        self.assertIn("route: l1-orchestrator", out)
         self.assertNotIn("free-only", out)
 
     def test_the_build_plan_route_combo_is_the_free_only_one_too(self):

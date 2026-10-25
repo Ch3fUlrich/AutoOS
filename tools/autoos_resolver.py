@@ -2510,6 +2510,70 @@ def _reviewer_is_paid(entry, registry):
 
 def reviewer_for(author, registry, client_state, now=None, risk="normal",
                  privacy="public"):
+    """Select one reviewer; retained for callers that need a single seat."""
+    return _reviewer_for(author, registry, client_state, now, risk, privacy)
+
+
+def seats_for(author, registry, client_state, now=None, risk="normal",
+              privacy="public"):
+    """Select two distinct non-author families, or return a non-resolved state.
+
+    Uses the single-seat walk's paid-last, outage, privacy and high-risk gates.
+    HIGH risk reserves seat one for a non-Anthropic reviewer; Claude can only
+    occupy seat two, and first-pass-only entries remain ineligible there too.
+    Partial seats are returned for explanation, never as a resolved pair.
+    """
+    now = _now_or_default(now)
+    first = _reviewer_for(author, registry, client_state, now, risk, privacy,
+                          non_claude=risk == "high")
+    seats = []
+    decisions = [first]
+    if first["reviewer"] is not None:
+        seats.append(first["reviewer"])
+        second = _reviewer_for(
+            author, registry, client_state, now, risk, privacy,
+            excluded_families={family_key(seats[0]["family"])})
+        decisions.append(second)
+        if second["reviewer"] is not None:
+            seats.append(second["reviewer"])
+
+    # A candidate deferred for seat two is selected, not skipped. Preserve the
+    # existing skipped shape and registry order, merging reasons across walks.
+    def key(entry):
+        return (entry.get("client"), entry.get("model"), entry.get("family"))
+
+    selected = {key(entry) for entry in seats}
+    rejected = {}
+    for decision in decisions:
+        for entry in decision["skipped"]:
+            identity = key(entry)
+            if identity in selected:
+                continue
+            if identity not in rejected:
+                rejected[identity] = dict(entry, reasons=list(entry["reasons"]))
+            else:
+                previous = rejected[identity]
+                previous["reasons"].extend(
+                    reason for reason in entry["reasons"]
+                    if reason not in previous["reasons"])
+                previous["waiting"] |= entry["waiting"]
+    skipped = []
+    for entry in (registry.get("policy") or {}).get("reviewers") or []:
+        if isinstance(entry, dict) and key(entry) in rejected:
+            skipped.append(rejected.pop(key(entry)))
+    last = decisions[-1]
+    resolved = len(seats) == 2
+    return {"author": author, "author_family": first["author_family"],
+            "seats": seats, "skipped": skipped,
+            "state": "resolved" if resolved else last["state"],
+            "retry_at": None if resolved else last["retry_at"],
+            "reason": ("two independent reviewer seats: " if resolved else
+                       "two reviewer seats required: ") +
+                      " | ".join(d["reason"] for d in decisions)}
+
+
+def _reviewer_for(author, registry, client_state, now=None, risk="normal",
+                  privacy="public", excluded_families=(), non_claude=False):
     """The reviewer decision for an authored review card (spec 5.7 + D2).
 
     Returns ``{author, author_family, reviewer, skipped, state, retry_at,
@@ -2557,6 +2621,11 @@ def reviewer_for(author, registry, client_state, now=None, risk="normal",
         reasons, _resolved = _reviewer_rejections(entry, family, registry,
                                                  client_state, now, risk,
                                                  privacy)
+        if family_key(entry.get("family")) in excluded_families:
+            reasons.append("same family as selected seat (%s)"
+                           % family_key(entry.get("family")))
+        if non_claude and family_key(entry.get("family")) == "anthropic":
+            reasons.append("high-risk first seat must be non-anthropic")
         examined.append((entry, reasons))
         if reasons:
             temporary = _is_temporary(reasons)

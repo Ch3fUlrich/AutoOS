@@ -467,6 +467,15 @@ class L2SpawnTierGateTest(unittest.TestCase):
     reached through the resolver instead of the flag.
     """
 
+    def setUp(self):
+        # D-2148: an unpinned MCP write spawn runs the policy writer pick, which
+        # probes installed clients; the CI runner has none, so pin the decision.
+        _pick = mock.patch.object(mcp_server.agent, "pick_policy_writer", return_value={
+            "entry": {"client": "opencode", "model": "omniroute/cx-gpt-6.1-sol"},
+            "client": "opencode", "model": "omniroute/cx-gpt-6.1-sol", "writer_skips": []})
+        _pick.start()
+        self.addCleanup(_pick.stop)
+
     def _argv(self, req, **env):
         with mock.patch.dict(os.environ, env):
             return mcp_server.build_argv(dict(req, cwd=str(ROOT)),
