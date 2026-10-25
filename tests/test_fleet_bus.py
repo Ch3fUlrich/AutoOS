@@ -22,7 +22,9 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.request
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
@@ -391,6 +393,38 @@ class InventoryConfigTest(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertIn("--inventory", out.getvalue())
 
+    def test_secret_file_with_inventory_is_refused(self):
+        # one key source: the shared --secret-file must not silently win
+        path = write_inventory(self.td / "both.json",
+                               {"workst": "/keys/workst.key"})
+        secret = write_key(self.td / "fleet.key", FAKE_SECRET.decode("utf-8"))
+        args = fleet_bus.build_parser({}).parse_args(
+            ["--inventory", path, "--secret-file", secret])
+        with self.assertRaises(fleet_bus.FleetBusError) as caught:
+            fleet_bus.build_keys(args)
+        error = caught.exception
+        self.assertEqual(error.status, 2, error.reason)
+        self.assertNotIn("\n", error.reason)
+        self.assertIn("--inventory", error.reason)
+        self.assertIn("--secret-file", error.reason)
+        self.assertNotIn(FAKE_SECRET.decode("utf-8"), error.reason)
+
+    def test_main_refuses_secret_file_with_inventory_on_one_line(self):
+        path = write_inventory(self.td / "both-main.json",
+                               {"workst": "/keys/workst.key"})
+        secret = write_key(self.td / "fleet-main.key",
+                           FAKE_SECRET.decode("utf-8"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = fleet_bus.main(
+                ["--inventory", path, "--secret-file", secret], env={})
+        self.assertEqual(rc, 2)
+        line = out.getvalue().strip()
+        self.assertEqual(len(line.splitlines()), 1, out.getvalue())
+        self.assertNotIn("Traceback", out.getvalue())
+        self.assertIn("--inventory", line)
+        self.assertIn("--secret-file", line)
+
 
 class BindDiscoveryTest(unittest.TestCase):
     """No literal bind default: the keeper registry answers, or we fail closed.
@@ -573,6 +607,101 @@ class BindDiscoveryTest(unittest.TestCase):
                 "--log-dir", str(self.td / "logs")], env={})
         self.assertEqual(rc, 0)
         self.assertIn("listening on 127.0.0.1:", err.getvalue())
+
+
+class BindSafetyTest(unittest.TestCase):
+    """Wildcard binds refused everywhere; a bind that cannot be taken fails closed.
+
+    0.0.0.0, "::" and "" are the wildcard: HTTPServer would put the relay on
+    every interface with its reads open. Every source - --bind, FLEET_BUS_BIND,
+    or a discovered keeper endpoint - must refuse such a value instead of
+    binding it. An address the OS will not hand out (unowned, unresolvable,
+    wrong family) must be the same one-line fail-closed error naming the
+    address, never a traceback. 192.0.2.x is the RFC 5737 documentation
+    placeholder, never a site address.
+    """
+
+    WILDCARDS = ("0.0.0.0", "::", "")
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory(prefix="fleet_bus_safety_")
+        self.td = Path(self._td.name)
+        self.token_file = write_key(self.td / "keeper-token", FAKE_TOKEN)
+        self.addCleanup(self._td.cleanup)
+
+    def run_main(self, argv, env=None):
+        """main() -> (rc, stdout, stderr). No traceback ever escapes."""
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = fleet_bus.main(argv, env=env)
+        self.assertNotIn("Traceback", out.getvalue() + err.getvalue())
+        return rc, out.getvalue(), err.getvalue()
+
+    def one_error_line(self, out_text):
+        """stdout is exactly one line of JSON error output."""
+        lines = out_text.strip().splitlines()
+        self.assertEqual(len(lines), 1, out_text)
+        self.assertIn('"ok": false', lines[0])
+        return lines[0]
+
+    def server_args(self):
+        return ["--port", "0", "--ttl", "0.2",
+                "--log-dir", str(self.td / "logs")]
+
+    # (1) an address the OS refuses: one line, exit 3, never a traceback
+    def test_binding_an_unowned_address_fails_with_one_line_error(self):
+        rc, out, _ = self.run_main(
+            ["--open", "--bind", "192.0.2.1"] + self.server_args(), env={})
+        self.assertEqual(rc, 3)
+        line = self.one_error_line(out)
+        self.assertIn("192.0.2.1", line)  # names the address, not a secret
+
+    # (2) the wildcard is refused from every source it can arrive through
+    def test_an_explicit_wildcard_bind_is_refused(self):
+        for value in self.WILDCARDS:
+            with self.subTest(bind=repr(value)):
+                rc, out, _ = self.run_main(
+                    ["--open", "--bind", value] + self.server_args(), env={})
+                self.assertEqual(rc, 2, out)
+                self.assertIn("wildcard", self.one_error_line(out))
+
+    def test_a_wildcard_bind_env_is_refused(self):
+        # a set-but-blank FLEET_BUS_BIND is the wildcard "", not "no value":
+        # it must never silently fall through to discovery
+        for value in self.WILDCARDS + ("   ",):
+            with self.subTest(env=repr(value)):
+                rc, out, _ = self.run_main(
+                    ["--open"] + self.server_args(),
+                    env={"FLEET_BUS_BIND": value})
+                self.assertEqual(rc, 2, out)
+                self.assertIn("wildcard", self.one_error_line(out))
+
+    def test_a_discovered_wildcard_endpoint_fails_closed(self):
+        for endpoint in ("http://0.0.0.0:58690", "http://[::]:58690", ""):
+            with self.subTest(endpoint=endpoint):
+                keeper, url = start_keeper((200, json.dumps({"hosts": [
+                    {"host": "workst", "endpoint": endpoint, "key_id": "k",
+                     "health": "healthy", "last_seen": 1761000000}]})))
+                try:
+                    rc, out, _ = self.run_main(
+                        ["--open", "--host", "workst", "--keeper-url", url,
+                         "--keeper-token-file", self.token_file]
+                        + self.server_args(), env={})
+                finally:
+                    keeper.shutdown()
+                    keeper.server_close()
+                self.assertEqual(rc, 3, out)
+                self.one_error_line(out)
+
+    # (3) --bind short-circuits discovery: not one keeper request is made
+    def test_bind_short_circuits_discovery(self):
+        with mock.patch.object(
+                urllib.request, "urlopen",
+                side_effect=AssertionError("keeper request attempted")):
+            rc, _, err = self.run_main(
+                ["--open", "--bind", "127.0.0.1"] + self.server_args(), env={})
+        self.assertEqual(rc, 0)
+        self.assertIn("listening on 127.0.0.1:", err)
 
 
 if __name__ == "__main__":

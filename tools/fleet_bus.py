@@ -9,7 +9,11 @@ the 0600 file --keeper-token-file / FLEET_KEEPER_TOKEN_FILE). --bind /
 FLEET_BUS_BIND is the explicit transition override. There is no literal
 default: discovery that cannot answer fails closed (exit code 3, one line,
 no traceback) and never guesses an address, so loopback happens only when
-the operator types --bind 127.0.0.1. The coding-side poller pulls; apart
+the operator types --bind 127.0.0.1. A wildcard bind (0.0.0.0, "::" or
+empty) is refused from every source - it would put the open read path on
+every interface - and an address the OS will not hand out (unowned,
+unresolvable, wrong family) is the same one-line status-3 error, never a
+traceback. The coding-side poller pulls; apart
 from that one keeper GET at startup this side never dials out, so no
 round-trip is wasted: a single GET carries everything new since the
 poller's cursor.
@@ -69,6 +73,8 @@ NONCE_CAP = 10000
 RING_CAP = 1000
 DEFAULT_PORT = 58690
 KEEPER_TIMEOUT_S = 5
+# The wildcard: binding any of these exposes the open read path everywhere.
+WILDCARD_BINDS = ("", "0.0.0.0", "::")
 # There is no literal default bind in this public tree (AutoOS Hard Rule 1):
 # the address comes from the keeper hosts registry entry for --host, or from
 # the explicit --bind / FLEET_BUS_BIND override. Loopback only happens when
@@ -97,11 +103,29 @@ def bind_override(env=None):
     """The explicit transition override: ``--bind`` / ``FLEET_BUS_BIND``.
 
     None means "discover from the keeper registry". A set-but-empty
-    systemd Environment= line is not a value: it must never become "" either,
-    because HTTPServer binds "" to INADDR_ANY, which would expose the relay.
+    systemd Environment= line is not a *value* here either, because
+    HTTPServer binds "" to INADDR_ANY, which would expose the relay: main()
+    refuses it as the wildcard "" rather than silently discovering, so the
+    operator finds out at startup.
     """
     source = os.environ if env is None else env
     return (source.get(BIND_ENV) or "").strip() or None
+
+
+def check_bind(bind, source, status):
+    """Return the stripped bind address, or refuse a wildcard one.
+
+    0.0.0.0 and "::" say the wildcard out loud and "" binds INADDR_ANY in
+    HTTPServer: each would put the relay's open read path on every
+    interface. Every source - the explicit --bind / FLEET_BUS_BIND override
+    or a discovered keeper endpoint - fails closed instead of binding one;
+    `status` is 2 for a configuration error, 3 for a fail-closed discovery.
+    """
+    value = (bind or "").strip()
+    if value in WILDCARD_BINDS:
+        raise FleetBusError(status, "refusing wildcard bind (%s) from %s"
+                            % (value if value else "empty", source))
+    return value
 
 
 def display_url(url):
@@ -422,6 +446,9 @@ def build_keys(args):
     """The HMAC keyring from the CLI: the per-host inventory, or the explicit
     single-key --secret-file override. Errors name paths, never values.
     """
+    if args.secret_file and args.inventory:
+        raise FleetBusError(2, "--secret-file and --inventory name two key "
+                           "sources: keep exactly one")
     if args.secret_file:
         return Keyring(override=read_secret(args.secret_file))
     if args.inventory:
@@ -471,18 +498,34 @@ def build_parser(env=None):
 
 
 def main(argv=None, env=None):
+    source = os.environ if env is None else env
     args = build_parser(env).parse_args(argv)
     try:
         keys = None
         if not args.open:
             keys = build_keys(args)
-        bind = (args.bind or "").strip() or discover_bind(
-            args.host, args.keeper_url, args.keeper_token_file)
+        if args.bind is not None:
+            bind = check_bind(args.bind, "--bind / %s" % BIND_ENV, 2)
+        elif BIND_ENV in source:
+            # a set-but-blank override is the wildcard "", not "no value"
+            raise FleetBusError(2, "refusing wildcard bind (empty) from %s"
+                                % BIND_ENV)
+        else:
+            bind = check_bind(discover_bind(
+                args.host, args.keeper_url, args.keeper_token_file),
+                "the keeper endpoint for %s" % (args.host or HOST_ENV), 3)
     except FleetBusError as e:
         print(json.dumps({"ok": False, "error": e.reason}))
         return e.status
     import time as _time
-    server = FleetBusServer((bind, args.port), keys, args.log_dir)
+    try:
+        server = FleetBusServer((bind, args.port), keys, args.log_dir)
+    except OSError as e:
+        # unowned/unresolvable address or the wrong family: one line, like
+        # the other fail-closed startup errors, naming the address only
+        print(json.dumps({"ok": False, "error": "cannot bind %s:%s: %s"
+                          % (bind, args.port, e.strerror or e)}))
+        return 3
     port = server.server_address[1]
     sys.stderr.write("fleet-bus: listening on %s:%d%s\n"
                      % (bind, port, " (open, probe-only)" if args.open else ""))

@@ -351,7 +351,10 @@ never blank out the gateway `baseURL`.
   with the token in the 0600 `--keeper-token-file` / `FLEET_KEEPER_TOKEN_FILE` (token never printed). Discovery that cannot answer
   (URL/token/host unset, keeper unreachable or non-200, bad JSON, host unknown or unhealthy, endpoint null) fails closed with one line
   and exit code 3: it never falls back to an IP or loopback guess. Loopback happens only via an explicit `--bind 127.0.0.1`;
-  `--bind` / `FLEET_BUS_BIND` stays the explicit transition override. A host that names the address itself sets the variable in its
+  `--bind` / `FLEET_BUS_BIND` stays the explicit transition override. A wildcard bind (`0.0.0.0`, `::` or empty) is refused from
+  every source — `--bind` / `FLEET_BUS_BIND` (exit 2) or a discovered endpoint (exit 3) — because the read path is open, and an
+  address the OS will not hand out is the same one-line exit-3 error naming the address, never a traceback. `--secret-file` together
+  with `--inventory` is refused (exit 2): exactly one key source. A host that names the address itself sets the variable in its
   own 0600 unit/config, never in a tracked file.
 
 The relay above uses its own `X-Fleet-Sig` format; the separate, versioned fleet-bus v2 wire contract (signing, canonical form, cursors, signed reads, validation, test vectors) is specified in plangraph's [`docs/FLEET-BUS.md`](https://github.com/Ch3fUlrich/plangraph/blob/main/docs/FLEET-BUS.md), implemented by plangraph `src/plangraph/fleet_bus/contract.py`.
