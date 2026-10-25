@@ -3,9 +3,14 @@ import hashlib
 import os
 import re
 import stat
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from autoos_tokens import DEFAULT_MAX_TOKENS, clamp_max_tokens
 
 API_MODELS = ('deepseek-v4.1-flash', 'ovh/gpt-oss-120b', 'qoder/glm-5.2')
-MAX_TOKENS_CAP = 8000
+MAX_TOKENS_CAP = DEFAULT_MAX_TOKENS
 MODEL_ID_RE = re.compile(r'[A-Za-z0-9._:/-]{1,100}')
 DEFAULT_MODEL = 'deepseek-v4.1-flash'
 TITLE_RE = re.compile(r'[A-Za-z0-9_-]{1,64}')
@@ -64,11 +69,15 @@ def confine(path, root):
         raise ValueError('path outside root')
     return real_path
 
-def build_argv(model, prompt, out_dir, root, title='api', max_tokens=MAX_TOKENS_CAP, python='python', script=None):
+def build_argv(model, prompt, out_dir, root, title='api', max_tokens=None, python='python', script=None):
     if not _valid_model(model):
         raise ValueError('bad model')
-    if type(max_tokens) is not int or not (1 <= max_tokens <= MAX_TOKENS_CAP):
-        raise ValueError('bad max_tokens')
+    if max_tokens is None:
+        max_tokens = clamp_max_tokens(model, DEFAULT_MAX_TOKENS)
+    else:
+        if type(max_tokens) is not int or not (1 <= max_tokens <= MAX_TOKENS_CAP):
+            raise ValueError('bad max_tokens')
+        max_tokens = clamp_max_tokens(model, max_tokens)
     if not isinstance(title, str) or TITLE_RE.fullmatch(title) is None:
         raise ValueError('bad title')
     if not isinstance(python, str) or not python:

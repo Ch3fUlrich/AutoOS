@@ -59,7 +59,7 @@ class RenderShapeTest(unittest.TestCase):
         # stands (the deepseek fallback catalog claims 128000).
         cfg, _ = render(self.tmp)
         self.assertEqual(cfg["provider"]["omniroute"]["models"]["placeholderprovider/PlaceholderModel"]["limit"],
-                         {"context": 131072, "output": 16000})
+                         {"context": 131072, "output": 128000})
         cfg, _ = render(self.tmp, model={
             "provider": "omniroute", "key": "k", "modelID": "gemini/gemini-3.8-flash",
             "limit": {"context": 1048576, "output": 16000}})
@@ -88,7 +88,19 @@ class RenderShapeTest(unittest.TestCase):
             "provider": "omniroute", "key": "k", "modelID": "gemini/gemini-3.8-flash",
             "fallback_key": "x", "fallback_modelID": "nosuchprovider/NoRow"})
         self.assertEqual(cfg["provider"]["omniroute"]["models"]["nosuchprovider/NoRow"]["limit"],
-                         {"context": 131072, "output": 16000})
+                         {"context": 131072, "output": 128000})
+
+    def test_model_limit_clamps_to_registry_output_max(self):
+        # D-2694: unpinned output limit clamps to the model's registry output_max ceiling
+        cfg, _ = render(self.tmp, model={
+            "provider": "omniroute", "key": "k", "modelID": "anthropic/claude-sonnet-5"})
+        self.assertEqual(cfg["provider"]["omniroute"]["models"]["anthropic/claude-sonnet-5"]["limit"]["output"],
+                         32768)
+        # Model with ceiling > 128000 stays at default 128000 (no clamp below ceiling)
+        cfg2, _ = render(self.tmp, model={
+            "provider": "omniroute", "key": "k", "modelID": "deepseek/deepseek-v4.1-flash"})
+        self.assertEqual(cfg2["provider"]["omniroute"]["models"]["deepseek/deepseek-v4.1-flash"]["limit"]["output"],
+                         128000)
 
     def test_external_directory_renders_when_pinned(self):
         # Lane c (2026-10-05): the outside-folder allowlist moves from a
@@ -129,7 +141,7 @@ class RenderShapeTest(unittest.TestCase):
         self.assertEqual(set(models), {"placeholderprovider/PlaceholderModel", "placeholderprovider/PlaceholderFallback"})
         for entry in models.values():
             self.assertEqual(set(entry), {"name", "limit"})
-            self.assertEqual(entry["limit"], {"context": 131072, "output": 16000})
+            self.assertEqual(entry["limit"], {"context": 131072, "output": 128000})
 
     def test_display_name_from_key_else_last_path_part(self):
         cfg, _ = render(self.tmp)
