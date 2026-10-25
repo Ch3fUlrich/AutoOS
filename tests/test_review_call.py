@@ -14,8 +14,8 @@ shape, every evidence.json field (including finish_reason, verdict and the
 standing-question outcome `test_gaming`, recorded on every run), served_model
 taken from the response, the request carries NO `temperature` by default
 (`--temperature 0.2` is sent verbatim - measured, a temperature-0 request is
-cut at 64 completion tokens on this gateway) and `max_tokens` 16000 UNLESS
-`--max-tokens` is given, the fake key (and the prompt) never in stdout/stderr
+cut at 64 completion tokens on this gateway) and `max_tokens` 128000 (D-2694) UNLESS
+clamped by the model's registry output_max or an explicit `--max-tokens` is given, the fake key (and the prompt) never in stdout/stderr
 nor in any output file, no response header VALUE recorded besides the
 correlation id, missing key -> exit 2, non-200 -> exit 3 + error.json, a
 finish_reason 'length' empty answer -> exit 4 + stderr warning +
@@ -94,11 +94,12 @@ class FakeGateway:
     """A threaded http.server on 127.0.0.1:0 recording every POST it receives."""
 
     def __init__(self, status=200, answer=ANSWER, correlation=CORRELATION,
-                 finish_reason="stop"):
+                 finish_reason="stop", responses=None):
         self.status = status
         self.answer = answer
         self.correlation = correlation
         self.finish_reason = finish_reason
+        self.responses = list(responses) if responses is not None else None
         self.requests = []
         gateway = self
 
@@ -118,14 +119,18 @@ class FakeGateway:
                     record["body"] = None
                 gateway.requests.append(record)
                 if gateway.status == 200:
+                    if gateway.responses:
+                        cur_answer, cur_finish = gateway.responses.pop(0)
+                    else:
+                        cur_answer, cur_finish = gateway.answer, gateway.finish_reason
                     payload = {
                         "id": "cmpl-fake-1",
                         "object": "chat.completion",
                         "model": SERVED_MODEL,
                         "choices": [{"index": 0,
                                      "message": {"role": "assistant",
-                                                 "content": gateway.answer},
-                                     "finish_reason": gateway.finish_reason}],
+                                                 "content": cur_answer},
+                                     "finish_reason": cur_finish}],
                         "usage": dict(EXPECTED_TOKENS),
                     }
                 else:
@@ -316,10 +321,9 @@ class ReviewCallTests(unittest.TestCase):
         # temperature-0 request is cut at 64 completion tokens (finish_reason
         # 'length', empty content) - hence the opt-in --temperature flag.
         self.assertNotIn("temperature", body)
-        # The default max-tokens is 16000: a reasoning model used 6.2k
-        # completion tokens on an 11k prompt, so the old 4096 cut it. The
-        # dedicated test below pins the default AND the explicit flag.
-        self.assertEqual(body["max_tokens"], 16000)
+        # Default max-tokens is 128000 (D-2694), clamped to ovh/gpt-oss-120b's
+        # ceiling 32768 in catalog/ai-registry.json.
+        self.assertEqual(body["max_tokens"], 32768)
         self.assertNotIn("tools", body)
         self.assert_no_leak(result)
 
@@ -356,17 +360,32 @@ class ReviewCallTests(unittest.TestCase):
         self.assertEqual(self.read_evidence()["finish_reason"], "stop")
         self.assert_no_leak(result)
 
-    def test_max_tokens_is_16000_unless_the_flag_is_given(self):
+    def test_max_tokens_is_128000_or_clamped_unless_the_flag_is_given(self):
         gateway = self.start_gateway()
+        # Default clamps to ovh/gpt-oss-120b's ceiling 32768
         result = self.run_tool(gateway, "--title", "tok-default")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(gateway.requests), 1)
-        self.assertEqual(gateway.requests[0]["body"]["max_tokens"], 16000)
+        self.assertEqual(gateway.requests[0]["body"]["max_tokens"], 32768)
+        # Explicit flag below ceiling is not clamped
         result = self.run_tool(gateway, "--title", "tok-flag",
                                "--max-tokens", "4096")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(gateway.requests), 2)
         self.assertEqual(gateway.requests[1]["body"]["max_tokens"], 4096)
+        # Model with ceiling > 128000 (deepseek-v4.1-flash, 393216) sends 128000
+        result = self.run_tool(gateway, "--title", "tok-ds",
+                               "--model", "deepseek-v4.1-flash")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(gateway.requests), 3)
+        self.assertEqual(gateway.requests[2]["body"]["max_tokens"], 128000)
+        # Unknown model sends 128000 default (does not invent lower cap) and logs
+        result = self.run_tool(gateway, "--title", "tok-unknown",
+                               "--model", "nosuchprovider/nosuchmodel")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(gateway.requests), 4)
+        self.assertEqual(gateway.requests[3]["body"]["max_tokens"], 128000)
+        self.assertIn("unknown output_max for nosuchprovider/nosuchmodel", result.stderr)
         self.assert_no_leak(result)
 
     def test_colon_bold_verdict_is_normalised_in_stdout_and_evidence(self):
@@ -435,12 +454,13 @@ class ReviewCallTests(unittest.TestCase):
             self):
         # Measured on the central OmniRoute: a `"temperature": 0` request is
         # cut at 64 completion tokens - finish_reason 'length', no content.
+        # Retried once at ceiling (32768) and when still empty fails loud.
         gateway = self.start_gateway(answer="", finish_reason="length")
         result = self.run_tool(gateway, "--title", "truncated")
         self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
         self.assertEqual(result.stdout, "")  # no success lines, no VERDICT
-        self.assertIn("review-call: answer truncated/empty "
-                      "(finish_reason=length)", result.stderr)
+        self.assertIn("review-call: empty answer at the output ceiling (finish_reason=length, max_tokens=32768)",
+                      result.stderr)
         names = [p.name for p in self.output_files()]
         self.assertEqual(names, ["evidence.json", "review.txt"])
         ev = self.read_evidence()
@@ -448,6 +468,37 @@ class ReviewCallTests(unittest.TestCase):
         self.assertEqual(ev["status"], 200)
         self.assertEqual(ev["served_model"], SERVED_MODEL)
         self.assertRegex(ev["finished"], UTC_RE)
+        self.assert_no_leak(result)
+
+    def test_finish_length_empty_retries_at_ceiling_and_succeeds(self):
+        # D-2694: fake gateway answering finish=length+empty then a real answer ->
+        # one retry at the ceiling and success
+        gateway = self.start_gateway(responses=[("", "length"), (ANSWER, "stop")])
+        result = self.run_tool(gateway, "--title", "retry-success", "--max-tokens", "1000")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(len(gateway.requests), 2)
+        # First request was at requested max-tokens (1000)
+        self.assertEqual(gateway.requests[0]["body"]["max_tokens"], 1000)
+        # Second request retried at the model's ceiling (32768)
+        self.assertEqual(gateway.requests[1]["body"]["max_tokens"], 32768)
+        # Success lines on stdout
+        self.assertIn("review.txt: " + str(self.out_dir / "review.txt"), result.stdout)
+        ev = self.read_evidence()
+        self.assertEqual(ev["finish_reason"], "stop")
+        self.assert_no_leak(result)
+
+    def test_finish_length_empty_twice_fails_loud_at_ceiling(self):
+        # D-2694: empty twice -> loud non-zero exit with stderr message
+        gateway = self.start_gateway(responses=[("", "length"), ("", "length")])
+        result = self.run_tool(gateway, "--title", "retry-fail", "--max-tokens", "1000")
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertEqual(len(gateway.requests), 2)
+        self.assertEqual(gateway.requests[0]["body"]["max_tokens"], 1000)
+        self.assertEqual(gateway.requests[1]["body"]["max_tokens"], 32768)
+        self.assertIn("review-call: empty answer at the output ceiling (finish_reason=length, max_tokens=32768)",
+                      result.stderr)
+        ev = self.read_evidence()
+        self.assertEqual(ev["finish_reason"], "length")
         self.assert_no_leak(result)
 
     def test_no_verdict_line_prints_the_missing_sentinel(self):

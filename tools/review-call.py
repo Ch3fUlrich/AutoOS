@@ -6,7 +6,7 @@ this process's environment (D-370) and nowhere else:
 
     python3 tools/autoos_gateway_key.py exec -- python3 tools/review-call.py \
         --model mimo/mimo-v2.6-flash --prompt-file prompt.md --out-dir out \
-        [--title my-review] [--max-tokens 16000] [--gateway-url URL] \
+        [--title my-review] [--max-tokens 128000] [--gateway-url URL] \
         [--temperature 0.2]
 
 This tool never reads configuration/api-keys.yml, never resolves a key, and
@@ -24,8 +24,9 @@ header keys and `<tag>/<run-id>` value are replicated EXACTLY instead.
 
 The call: POST <base>/chat/completions with `stream: false`, NO `tools`,
 NO `temperature` (unless `--temperature FLOAT` is given), `max_tokens`
-(default 16000 - RC-2: reasoning models burned 6.2k completion tokens on an
-11k prompt, so 4096 cut the answer) and the prompt as one user message.
+(default 128000 - D-2694; was 16000 RC-2: reasoning models burned 6.2k completion tokens on an
+11k prompt, and mimo-v2.6-pro burned 32k reasoning tokens on W6b, so a low cap silently ate answers)
+and the prompt as one user message.
 temperature is OFF by
 default because of a MEASURED defect on the central OmniRoute 2026-10-02
 (ovh/gpt-oss-120b, provider removed 2026-10): a request carrying `"temperature": 0` is cut at 64
@@ -96,13 +97,14 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from autoos_tokens import (DEFAULT_MAX_TOKENS, resolve_output_ceiling,
+                           clamp_max_tokens)
 from autoos_verdict import (TRANSCRIPT_VERDICTS, VERDICTS, LEGACY_CALL_VERDICTS,
                             transcript_value, transcript_verdict)  # noqa: E402
 
 GATEWAY_ENV_VAR = "AUTOOS_OMNIROUTE_URL"
 KEY_ENV_VAR = "AUTOOS_OMNIROUTE_KEY"
 DEFAULT_GATEWAY = "http://127.0.0.1:20128/v1"
-DEFAULT_MAX_TOKENS = 16000
 REQUEST_TIMEOUT_SECONDS = 300
 MAX_ERROR_BODY = 4000
 
@@ -583,70 +585,86 @@ def main(argv=None) -> int:
                             or DEFAULT_GATEWAY)
     url = base.rstrip("/") + "/chat/completions"
 
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(request_body(args.model, message, args.max_tokens,
-                                     args.temperature))
-             .encode("utf-8"),
-        headers=request_headers(key, tag, run_id),
-        method="POST",
-    )
+    ceiling = resolve_output_ceiling(args.model) or DEFAULT_MAX_TOKENS
+    clamped_tokens = clamp_max_tokens(args.model, args.max_tokens)
+    current_max_tokens = clamped_tokens
+    retried = False
 
-    started = utc_now()
-    try:
-        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
-            status = response.status
-            names = [name for name, _ in response.headers.items()]
-            raw_body = response.read()
-    except urllib.error.HTTPError as exc:
-        # Non-200 is a recorded outcome, not a crash: the error file carries the
-        # status and a (key-masked, truncated) body, and we exit 3 (D-440).
+    while True:
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(request_body(args.model, message, current_max_tokens,
+                                         args.temperature))
+                 .encode("utf-8"),
+            headers=request_headers(key, tag, run_id),
+            method="POST",
+        )
+
+        started = utc_now()
         try:
-            raw_error = exc.read()
-        except OSError:
-            raw_error = b""
-        header_names = [name for name, _ in exc.headers.items()] \
-            if exc.headers is not None else []
-        error_doc = {
-            "status": int(exc.code),
-            "reason": str(exc.reason),
-            "body": mask_key(raw_error.decode("utf-8", "replace"),
-                             key)[:MAX_ERROR_BODY],
-            "requested_model": args.model,
-            "response_header_names": header_names,
-            "session_tag": tag,
-            "run_id": run_id,
-            "prompt_sha256": prompt_sha256,
-            "started": started,
-            "finished": utc_now(),
-        }
-        error_path = os.path.join(args.out_dir, "error.json")
-        try:
-            with open(error_path, "w", encoding="utf-8") as handle:
-                json.dump(error_doc, handle, indent=2)
-                handle.write("\n")
+            with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
+                status = response.status
+                names = [name for name, _ in response.headers.items()]
+                raw_body = response.read()
+        except urllib.error.HTTPError as exc:
+            # Non-200 is a recorded outcome, not a crash: the error file carries the
+            # status and a (key-masked, truncated) body, and we exit 3 (D-440).
+            try:
+                raw_error = exc.read()
+            except OSError:
+                raw_error = b""
+            header_names = [name for name, _ in exc.headers.items()] \
+                if exc.headers is not None else []
+            error_doc = {
+                "status": int(exc.code),
+                "reason": str(exc.reason),
+                "body": mask_key(raw_error.decode("utf-8", "replace"),
+                                 key)[:MAX_ERROR_BODY],
+                "requested_model": args.model,
+                "response_header_names": header_names,
+                "session_tag": tag,
+                "run_id": run_id,
+                "prompt_sha256": prompt_sha256,
+                "started": started,
+                "finished": utc_now(),
+            }
+            error_path = os.path.join(args.out_dir, "error.json")
+            try:
+                with open(error_path, "w", encoding="utf-8") as handle:
+                    json.dump(error_doc, handle, indent=2)
+                    handle.write("\n")
+            except OSError as exc:
+                print("review-call: cannot write error.json: %s"
+                      % (exc.strerror or exc), file=sys.stderr)
+            return 3
+        except urllib.error.URLError as exc:
+            print("review-call: gateway unreachable: %s"
+                  % mask_key(str(getattr(exc, "reason", exc)), key), file=sys.stderr)
+            return 4
         except OSError as exc:
-            print("review-call: cannot write error.json: %s"
-                  % (exc.strerror or exc), file=sys.stderr)
-        return 3
-    except urllib.error.URLError as exc:
-        print("review-call: gateway unreachable: %s"
-              % mask_key(str(getattr(exc, "reason", exc)), key), file=sys.stderr)
-        return 4
-    except OSError as exc:
-        print("review-call: gateway call failed: %s"
-              % mask_key(str(exc), key), file=sys.stderr)
-        return 4
+            print("review-call: gateway call failed: %s"
+                  % mask_key(str(exc), key), file=sys.stderr)
+            return 4
 
-    finished = utc_now()
-    try:
-        payload = json.loads(raw_body.decode("utf-8"))
-        if not isinstance(payload, dict):
-            raise ValueError("response is not a JSON object")
-    except (UnicodeDecodeError, ValueError) as exc:
-        print("review-call: unparseable gateway response: %s"
-              % mask_key(str(exc), key), file=sys.stderr)
-        return 4
+        finished = utc_now()
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("response is not a JSON object")
+        except (UnicodeDecodeError, ValueError) as exc:
+            print("review-call: unparseable gateway response: %s"
+                  % mask_key(str(exc), key), file=sys.stderr)
+            return 4
+
+        answer = answer_text(payload)
+        finish = finish_reason_of(payload)
+
+        # D-2694: finish_reason == "length" with EMPTY answer content -> retry ONCE at the leg's ceiling
+        if finish == "length" and not answer and not retried:
+            retried = True
+            current_max_tokens = ceiling
+            continue
+        break
 
     served_model = payload.get("model")
     if served_model is not None and not isinstance(served_model, str):
@@ -715,8 +733,12 @@ def main(argv=None) -> int:
     # always did, and a truncated answer necessarily has test_gaming=missing
     # in the evidence already written.
     if finish == "length" or not answer:
-        print("review-call: answer truncated/empty (finish_reason=%s)"
-              % (finish or "unknown"), file=sys.stderr)
+        if finish == "length" and not answer:
+            print("review-call: empty answer at the output ceiling (finish_reason=length, max_tokens=%d)"
+                  % current_max_tokens, file=sys.stderr)
+        else:
+            print("review-call: answer truncated/empty (finish_reason=%s)"
+                  % (finish or "unknown"), file=sys.stderr)
         return 4
 
     # INCOMPLETE seat (exit 5, distinct from truncation's 4): no qualifying
