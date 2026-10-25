@@ -8956,7 +8956,7 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     # the client.
     _free_model = getattr(args, "free_model", None)
     requested_model = args.model or (_free_model if args.free and _free_model else None) or ""
-    return {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
+    plan = {"agent": agent, "client": client.name, "model": model, "cmd": cmd, "env": env,
             "writer_decision": writer_decision,
             "writer_skips": writer_decision["writer_skips"] if writer_decision else [],
             # FAMILYFENCE-b: the ask and its witness, kept beside the ask so a
@@ -8982,6 +8982,14 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
             # SEAT-PYTEST (P4): worker_env applies it only if it recomputes to this.
             "user_site_path": user_site,
             "session_tag": tag}
+    item_key = getattr(args, "item_key", None)
+    if item_key is None:
+        c = route.get("card")
+        if isinstance(c, dict):
+            item_key = c.get("item_key")
+    if item_key is not None:
+        plan["item_key"] = item_key
+    return plan
 
 
 # --- RUNMODEL (D-103, SB-B item 4): who ACTUALLY served this run -------------
@@ -12255,7 +12263,7 @@ def write_kill_record(run_id: str, record: dict) -> bool:
                     "toolhome_bytes_before", "toolhome_bytes_after"):
             if record.get(key) is not None:
                 merged[key] = record[key]
-        for key in ("mode", "scope", "dry_run", "allow_mode_only", "lane"):
+        for key in ("mode", "scope", "dry_run", "allow_mode_only", "lane", "item_key"):
             if record.get(key) is not None:
                 merged.setdefault(key, record[key])
         tmp = "%s.tmp-%d" % (path, os.getpid())
@@ -13589,6 +13597,9 @@ def _worker_record_start(plan: dict, args, directory: str, attempt=None, *, kind
     mismatch = model_mismatch_refusal(plan)
     if mismatch is not None:
         record["reason"] = mismatch
+    item_key = plan.get("item_key") or getattr(args, "item_key", None)
+    if item_key:
+        record["item_key"] = item_key
     _write_worker_record(os.path.join(directory, wid + ".json"), record)
     return wid, record
 
@@ -14222,6 +14233,13 @@ def cmd_run(args, cfg: dict) -> int:
                       "(YYYYMMDD-HHMMSS-<slug up to %d chars>-<6 hex>, as minted by "
                       "the spawner or the MCP server's spawn)"
                       % (args.run_id, RUN_ID_SLUG_CAP), 2)
+    # SPAWNER-ITEM-KEY (D-2345/D-2664): validate explicit --item-key
+    if getattr(args, "item_key", None) is not None:
+        try:
+            routing.check_item_key(args.item_key)
+        except routing.CardError as exc:
+            return refuse("invalid item_key %r: expected <project>:<ID> "
+                          "(project [a-z0-9-]+, ID [A-Z0-9][A-Z0-9-]*)" % (args.item_key,), 2)
     # T2-RECORD-PIN item 5 (D-284): the pins this lane may not launch, refused
     # on the way IN - before the budget prices a model, before a route is burned
     # and before anything is cloned. Both pins are read: --free-model only when
@@ -14922,6 +14940,8 @@ def cmd_run(args, cfg: dict) -> int:
             worker_id, worker_rec = _worker_record_start(plan, args, workers,
                                                          attempt=fallthroughs + cooldown_retries + 1,
                                                          kind=kind)
+            if plan.get("run_id") and plan.get("item_key"):
+                write_kill_record(plan.get("run_id"), {"item_key": plan["item_key"]})
         except Exception as exc:  # noqa: BLE001
             print("autoos-agent: could not write worker record: %s" % exc, file=sys.stderr)
         scope_rec = (worker_rec or {}).get("scope") or scope_rec
@@ -15750,6 +15770,9 @@ def _parser_run(sub):
                           "(100644 <-> 100755): the MODEFLIP refusal is what an "
                           "artifact of the checkout looks like, and this says the "
                           "diff is the task")
+    run.add_argument("--item-key", dest="item_key",
+                     help="task item key (<project>:<ID>) for this run; validated as "
+                          "project [a-z0-9-]+, ID [A-Z0-9][A-Z0-9-]*")
     run.add_argument("--title")
     run.add_argument("--run-id", dest="run_id", metavar="ID",
                      help="use this id (a canonical one, as minted by the MCP server's spawn) "
