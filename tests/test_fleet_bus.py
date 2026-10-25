@@ -40,7 +40,8 @@ def write_key(path, value):
     """Write a 0600 key file the way the fleet ships them; return its path."""
     path = Path(path)
     path.write_text(value + "\n", encoding="utf-8")
-    os.chmod(path, 0o600)
+    if os.name != "nt":
+        os.chmod(path, 0o600)
     return str(path)
 
 
@@ -472,6 +473,7 @@ class PerHostKeyTest(unittest.TestCase):
                          {"error": "unauthorized"})
         self.assertIn("signature", self.refusal_reasons())
 
+    @unittest.skipIf(os.name == "nt", "file modes are not enforced on Windows")
     def test_a_non_utf8_key_file_is_a_401_not_a_dropped_connection(self):
         # fix round 2 item 2: UnicodeDecodeError from the key file must not
         # escape as a traceback and kill the connection mid-request
@@ -487,6 +489,7 @@ class PerHostKeyTest(unittest.TestCase):
                          {"error": "unauthorized"})
         self.assertIn(str(binary), self.refusal_reasons())
 
+    @unittest.skipIf(os.name == "nt", "file modes are not enforced on Windows")
     def test_key_for_turns_a_decode_error_into_a_refusal(self):
         binary = self.td / "binary-unit.key"
         binary.write_bytes(b"\xff\xfe not utf-8\n")
@@ -755,6 +758,7 @@ class BindDiscoveryTest(unittest.TestCase):
                     lambda: fleet_bus.discover_bind("workst", url, self.token_file),
                     "malformed")
 
+    @unittest.skipIf(os.name == "nt", "file modes are not enforced on Windows")
     def test_a_non_utf8_keeper_token_fails_closed(self):
         binary = self.td / "binary-token"
         binary.write_bytes(b"\xff\xfe not utf-8\n")
