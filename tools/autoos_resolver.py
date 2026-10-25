@@ -2420,6 +2420,14 @@ def author_family(author, registry):
                   "knows, and not a family it declares" % name)
 
 
+def _reviewer_outage(entry, name):
+    """Keep the provider's diagnosis alongside the time-aware outage reason."""
+    reason = _unavailable_reason(entry, name)
+    details = [entry.get(key) for key in ("note", "reason")
+               if isinstance(entry, dict) and entry.get(key)]
+    return "; ".join([reason] + [str(text) for text in details])
+
+
 def _reviewer_rejections(entry, family, registry, client_state, now, risk,
                          privacy):
     """``(reasons, resolved_leg)`` for one reviewer entry; empty reasons = usable.
@@ -2431,6 +2439,8 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
     """
     reasons = []
     reviewer_family = entry.get("family")
+    if family_key(reviewer_family) == "qwen" and entry.get("client") != "qoder":
+        reasons.append("D-2641: qwen only via qodercli")
     if not reviewer_family:
         reasons.append("no family: cannot check the different-family rule")
     elif family_key(reviewer_family) == family:
@@ -2449,6 +2459,16 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
     if client_reason:
         reasons.append(client_reason)
 
+    # Measured overlay entries supplement registry outages; never lose the
+    # upstream diagnosis when a quota makes a reviewer unavailable.
+    client = entry.get("client")
+    for data in (((registry.get("clients") or {}).get(client) or {}),
+                 ((client_state or {}).get(client) or {}), entry):
+        if unavailable_now(data, now):
+            outage = _reviewer_outage(data, client)
+            if outage not in reasons:
+                reasons.append(outage)
+
     leg = entry.get("leg")
     resolved = None
     if leg:
@@ -2464,7 +2484,12 @@ def _reviewer_rejections(entry, family, registry, client_state, now, risk,
         resolved = (provider_id, model_id)
         provider = registry["providers"].get(provider_id) or {}
         if unavailable_now(provider, now):
-            reasons.append(_unavailable_reason(provider, provider_id))
+            reasons.append(_reviewer_outage(provider, provider_id))
+        for section in ("providers", "legs"):
+            name = provider_id if section == "providers" else leg
+            data = ((client_state or {}).get(section) or {}).get(name) or {}
+            if unavailable_now(data, now):
+                reasons.append(_reviewer_outage(data, name))
         bound = (registry["models"].get(model_id) or {}).get("client_bound")
         if bound and bound != entry.get("client"):
             reasons.append("client_bound: %s needs %s, not %s"
@@ -2510,6 +2535,70 @@ def _reviewer_is_paid(entry, registry):
 
 def reviewer_for(author, registry, client_state, now=None, risk="normal",
                  privacy="public"):
+    """Select one reviewer; retained for callers that need a single seat."""
+    return _reviewer_for(author, registry, client_state, now, risk, privacy)
+
+
+def seats_for(author, registry, client_state, now=None, risk="normal",
+              privacy="public"):
+    """Select two distinct non-author families, or return a non-resolved state.
+
+    Uses the single-seat walk's paid-last, outage, privacy and high-risk gates.
+    HIGH risk reserves seat one for a non-Anthropic reviewer; Claude can only
+    occupy seat two, and first-pass-only entries remain ineligible there too.
+    Partial seats are returned for explanation, never as a resolved pair.
+    """
+    now = _now_or_default(now)
+    first = _reviewer_for(author, registry, client_state, now, risk, privacy,
+                          non_claude=risk == "high")
+    seats = []
+    decisions = [first]
+    if first["reviewer"] is not None:
+        seats.append(first["reviewer"])
+        second = _reviewer_for(
+            author, registry, client_state, now, risk, privacy,
+            excluded_families={family_key(seats[0]["family"])})
+        decisions.append(second)
+        if second["reviewer"] is not None:
+            seats.append(second["reviewer"])
+
+    # A candidate deferred for seat two is selected, not skipped. Preserve the
+    # existing skipped shape and registry order, merging reasons across walks.
+    def key(entry):
+        return (entry.get("client"), entry.get("model"), entry.get("family"))
+
+    selected = {key(entry) for entry in seats}
+    rejected = {}
+    for decision in decisions:
+        for entry in decision["skipped"]:
+            identity = key(entry)
+            if identity in selected:
+                continue
+            if identity not in rejected:
+                rejected[identity] = dict(entry, reasons=list(entry["reasons"]))
+            else:
+                previous = rejected[identity]
+                previous["reasons"].extend(
+                    reason for reason in entry["reasons"]
+                    if reason not in previous["reasons"])
+                previous["waiting"] |= entry["waiting"]
+    skipped = []
+    for entry in (registry.get("policy") or {}).get("reviewers") or []:
+        if isinstance(entry, dict) and key(entry) in rejected:
+            skipped.append(rejected.pop(key(entry)))
+    last = decisions[-1]
+    resolved = len(seats) == 2
+    return {"author": author, "author_family": first["author_family"],
+            "seats": seats, "skipped": skipped,
+            "state": "resolved" if resolved else last["state"],
+            "retry_at": None if resolved else last["retry_at"],
+            "reason": ("two independent reviewer seats: " if resolved else
+                       "two reviewer seats required: ") +
+                      " | ".join(d["reason"] for d in decisions)}
+
+
+def _reviewer_for(author, registry, client_state, now=None, risk="normal",
+                  privacy="public", excluded_families=(), non_claude=False):
     """The reviewer decision for an authored review card (spec 5.7 + D2).
 
     Returns ``{author, author_family, reviewer, skipped, state, retry_at,
@@ -2557,6 +2646,11 @@ def reviewer_for(author, registry, client_state, now=None, risk="normal",
         reasons, _resolved = _reviewer_rejections(entry, family, registry,
                                                  client_state, now, risk,
                                                  privacy)
+        if family_key(entry.get("family")) in excluded_families:
+            reasons.append("same family as selected seat (%s)"
+                           % family_key(entry.get("family")))
+        if non_claude and family_key(entry.get("family")) == "anthropic":
+            reasons.append("high-risk first seat must be non-anthropic")
         examined.append((entry, reasons))
         if reasons:
             temporary = _is_temporary(reasons)
@@ -2566,7 +2660,7 @@ def reviewer_for(author, registry, client_state, now=None, risk="normal",
                             "reasons": reasons,
                             "waiting": temporary})
             if temporary:
-                waits.extend(_entry_unavailable_until(entry, registry, now))
+                waits.extend(_entry_unavailable_until(entry, registry, now, client_state))
     for entry, reasons in examined:
         if not reasons and not _reviewer_is_paid(entry, registry):
             model = entry.get("model")
@@ -2605,7 +2699,7 @@ def reviewer_for(author, registry, client_state, now=None, risk="normal",
                       "(%d candidate(s) rejected)" % (family, len(skipped))}
 
 
-def _entry_unavailable_until(entry, registry, now):
+def _entry_unavailable_until(entry, registry, now, client_state=None):
     """The ISO dates a reviewer entry is down until, parsed to datetimes.
 
     Reads the same ``unavailable_until`` values the rejection reasons named
@@ -2615,19 +2709,28 @@ def _entry_unavailable_until(entry, registry, now):
     operator flips it, not when the clock reaches something.
     """
     moments = []
+    client_state = client_state or {}
+    client = entry.get("client")
+    sources = [entry, (registry.get("clients") or {}).get(client) or {},
+               client_state.get(client) or {}]
     leg = entry.get("leg")
     if leg:
         try:
             provider_id, _model_id = resolve_leg(leg, registry)
-        except ValueError:
+        except (ValueError, KeyError):
             return moments
-        entry_data = registry["providers"].get(provider_id) or {}
+        entry_data = (registry.get("providers") or {}).get(provider_id) or {}
+        sources.extend((client_state.get(section) or {}).get(name) or {}
+                       for section, name in (("providers", provider_id), ("legs", leg)))
     else:
         entry_data = (registry.get("clients") or {}).get(entry.get("client")) or {}
-    moment = _parse_until(entry_data.get("unavailable_until"))
-    if moment is not None and moment > now:
-        moments.append(moment)
-    return moments
+    sources.append(entry_data)
+    for data in sources:
+        moment = _parse_until(data.get("unavailable_until"))
+        if moment is not None and moment > now:
+            moments.append(moment)
+    # All outages on this candidate must clear before it can serve.
+    return [max(moments)] if moments else []
 
 
 def _format_retry(moment):

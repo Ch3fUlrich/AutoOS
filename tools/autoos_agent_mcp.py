@@ -694,7 +694,8 @@ def route_plan(card, brief: str = "", explain: bool = False) -> dict:
                                       agent.DEFAULT_ORCHESTRATOR_MODEL, now,
                                       registry, overlay, track_record, client_state,
                                       overlay_missing_at=overlay_missing_at,
-                                      credit_guards=agent.plan_credit_guards(registry))
+                                      credit_guards=agent.plan_credit_guards(registry),
+                                      apply_writer_policy=True)
     except Exception as exc:  # noqa: BLE001 - an MCP tool returns errors, never raises
         return {"error": "%s: %s" % (type(exc).__name__, exc)}
     if explain:
@@ -850,8 +851,32 @@ def review_base_refusal(value) -> str | None:
     return None
 
 
+def implicit_policy_writer(req: dict) -> bool:
+    """Leave only unpinned write cards to the CLI's default-client policy."""
+    return (not req.get("client") and not req.get("model")
+            and not req.get("free_model") and not req.get("free")
+            and req.get("tier") is None and not req.get("read_only")
+            and is_write_role(req) and _policy_writers_declared())
+
+
+def _policy_writers_declared() -> bool:
+    """No policy.writers.order (an old or test registry) keeps the opencode default."""
+    try:
+        registry = agent.load_registry(agent.REGISTRY_PATH)
+    except (OSError, ValueError):
+        return False
+    return bool(((registry.get("policy") or {}).get("writers") or {}).get("order"))
+
+
+def spawn_client(req: dict, policy: dict | None = None) -> str:
+    """Resolve the implicit policy client for gates, never pin it in argv."""
+    if implicit_policy_writer(req):
+        return (policy if policy is not None else agent.pick_policy_writer())["client"]
+    return req.get("client") or "opencode"
+
+
 def build_argv(req: dict, run_id: str | None = None,
-               cwd: str | None = None) -> tuple:
+               cwd: str | None = None, policy: dict | None = None) -> tuple:
     """(autoos-agent.py run argv, route) for a spawn request; ValueError on a bad one.
 
     `run_id` is the canonical id this server minted for the run (FLEETP0b): it
@@ -865,7 +890,7 @@ def build_argv(req: dict, run_id: str | None = None,
     leaf = agent.leaf_spawn_refusal()
     if leaf is not None:
         raise ValueError(leaf)
-    client = req.get("client") or "opencode"
+    client = spawn_client(req, policy)
     if client not in clients.CLIENTS:
         raise ValueError("unknown client %r; one of %s" % (client, ", ".join(clients.CLIENTS)))
     task = (req.get("task") or "").strip()
@@ -878,7 +903,10 @@ def build_argv(req: dict, run_id: str | None = None,
         d284 = agent.d284_model_refusal(pin)
         if d284 is not None:
             raise ValueError(d284)
-    argv = ["run", "--client", client]
+    # Naming even the default client disables cmd_run's policy writer pick.
+    argv = ["run"]
+    if not implicit_policy_writer(req):
+        argv += ["--client", client]
     tier = req.get("tier")
     card = req.get("card")
     if isinstance(card, str):
@@ -898,6 +926,18 @@ def build_argv(req: dict, run_id: str | None = None,
         if client in ("opencode", "claude") and req.get("lean") is None and card["role"] == "review":
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
+    # SPAWNER-ITEM-KEY (D-2345/D-2664): explicit item_key wins; otherwise take it
+    # from the card. Validated as <project>:<ID>; refused if invalid.
+    item_key = req.get("item_key")
+    if item_key is not None:
+        try:
+            item_key = routing.check_item_key(item_key)
+        except routing.CardError as exc:
+            raise ValueError(str(exc))
+    elif card and isinstance(card, dict) and card.get("item_key") is not None:
+        item_key = card["item_key"]
+    if item_key is not None:
+        route["item_key"] = item_key
     # D-665 (AO-L2-LAUNCH criteria 3 and b): the L2 gate. A spawn that resolves
     # below tier 2 is not a worker an L2 may start, and a Claude client or a
     # Claude model pin is a spend an L2 may not make. Checked here, at the one
@@ -1045,6 +1085,8 @@ def build_argv(req: dict, run_id: str | None = None,
         argv += ["--review-base", str(req["review_base"]).strip()]
     if run_id:
         argv += ["--run-id", run_id]
+    if item_key is not None:
+        argv += ["--item-key", item_key]
     if req.get("dry_run") or os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN") == "1":
         argv.append("--dry-run")
     argv.append(task)
@@ -1141,7 +1183,7 @@ def recorded_family_fields(run_id: str, job: dict | None) -> dict:
             "family_source": agent.FAMILY_SOURCE_PLANNED}
 
 
-def planned_model_args(req: dict) -> dict:
+def planned_model_args(req: dict, policy: dict | None = None) -> dict:
     """The one reading of the spawn flags that decide WHICH model this run answers
     with, as the kwargs both callers take.
 
@@ -1151,8 +1193,11 @@ def planned_model_args(req: dict) -> dict:
     value the plan will carry. AO-RUN-FAMILY-RECORD (D-807) adds the second
     reader: the family written into job.json is resolved from that same model, so
     the price and the record cannot drift onto two different runs."""
+    # Price and record the policy model, not the old opencode route default.
+    if policy is None and implicit_policy_writer(req):
+        policy = agent.pick_policy_writer()
     return dict(
-        model=req.get("model"),
+        model=policy["model"] if policy else req.get("model"),
         card=req.get("card"),
         tier=req.get("tier"),
         free=bool(req.get("free")),
@@ -1161,7 +1206,7 @@ def planned_model_args(req: dict) -> dict:
         clean=bool(req.get("clean")))
 
 
-def planned_family_fields(req: dict, client: str) -> dict:
+def planned_family_fields(req: dict, client: str, policy: dict | None = None) -> dict:
     """``family`` / ``family_source`` (or ``family`` null plus ``family_reason``)
     for the model this spawn resolves to — AO-RUN-FAMILY-RECORD (D-807).
 
@@ -1179,7 +1224,7 @@ def planned_family_fields(req: dict, client: str) -> dict:
     labels the result `planned-model` rather than the layer that placed it: this half
     is a plan by construction, and the layer's strength claim only means something
     about a model a witness named."""
-    model, _source = agent.effective_spawn_model(client, **planned_model_args(req))
+    model, _source = agent.effective_spawn_model(client, **planned_model_args(req, policy))
     family, family_source, reason = agent.run_model_family(model, client=client)
     return agent.witnessed_family(family, family_source, reason, False)
 
@@ -1204,25 +1249,33 @@ def spawn(req: dict) -> dict:
     # client's default, or the tier/card combo), and `claude_reason` is this
     # spawn's own declaration -- so the exception is one call wide instead of an
     # AUTOOS_CLAUDE_CRITICAL the server holds for every caller that follows.
+    # Resolve once for all parent gates and planning. The child cmd_run re-picks
+    # and re-runs its own gates on that pick, so a changed pick cannot bypass them.
+    try:
+        policy = agent.pick_policy_writer() if implicit_policy_writer(req) else None
+        client = spawn_client(req, policy)
+    except agent.PolicyWriterUnavailable as exc:
+        return _refused(str(exc))
     try:
         budget_refusal, budget_note = agent.claude_spawn_refusal(
-            req.get("client") or "opencode", os.environ,
+            client, os.environ,
             # CLAUDEBUDGET-f item 3: the same one resolution the CLI's build_plan
             # runs -- the flags go in as flags, and `free` is priced at the promo
             # model the argv carries. `planned_model_args` is the same reading the
             # run record's family is resolved from (AO-RUN-FAMILY-RECORD).
-            **planned_model_args(req),
+            **planned_model_args(req, policy),
             # CLAUDEBUDGET-d item 2/3: the gate reads the model the request names (or the
             # client's default, or the tier/card combo), and `claude_reason` is this
             # spawn's own declaration -- so the exception is one call wide instead of an
             # AUTOOS_CLAUDE_CRITICAL the server holds for every caller that follows.
             reason=req.get("claude_reason"))
+    except agent.PolicyWriterUnavailable as exc:
+        return _refused(str(exc))
     except (OSError, ValueError) as exc:
         return _refused("cannot read the Claude budget: %s" % exc)
     if budget_refusal is not None:
         return _refused(budget_refusal)
     budget_env = spawn_budget_env(req)
-    client = req.get("client") or "opencode"
     cwd = req.get("cwd") or os.getcwd()
     if not os.path.isdir(cwd):
         return _refused("cwd %s is not a directory" % cwd)
@@ -1262,7 +1315,7 @@ def spawn(req: dict) -> dict:
         # with, and nothing is created before that says yes.
         run_id = agent.mint_run_id(req.get("title"), req.get("task") or "")
         try:
-            argv, route = build_argv(req, run_id, cwd=cwd)
+            argv, route = build_argv(req, run_id, cwd=cwd, policy=policy)
         except (ValueError, clients.DepthError) as exc:
             return _refused(str(exc))
         if budget_note is not None:
@@ -1294,9 +1347,15 @@ def spawn(req: dict) -> dict:
                 return {"error": "Failed to create run directory after %d attempts" % max_attempts,
                         "state": "failed"}
             continue
+    job_req = dict({k: v for k, v in req.items() if k != "task"},
+                   **planned_family_fields(req, client, policy))
+    if route.get("item_key") is not None:
+        job_req["item_key"] = route["item_key"]
+    else:
+        # The registered tool always passes item_key (default None): no key -> no field.
+        job_req.pop("item_key", None)
     job = {"id": run_id, "run_id": run_id,
-           "request": dict({k: v for k, v in req.items() if k != "task"},
-                          **planned_family_fields(req, client)),
+           "request": job_req,
            "task": req.get("task"), "argv": argv, "cwd": cwd, "route": route,
            # F1 (AO-L2-RESUME): whose child this is. The L2 lane names itself in
            # its own environment (the render sets AUTOOS_L2_LANE), so the lane
@@ -1323,7 +1382,7 @@ def spawn(req: dict) -> dict:
         scope_unit = agent.worker_scope_unit(run_id)
     except ValueError:
         scope_unit = None
-    write_kill_record(run_id, {
+    kill_rec = {
         "mode": "review" if _review_requested(req, argv) else "write",
         "scope": scope_unit,
         "dry_run": "--dry-run" in argv,
@@ -1336,7 +1395,11 @@ def spawn(req: dict) -> dict:
         # because that is the only copy `autoos_recovery` may believe (R-orch-17).
         # None is not written at all: `write_kill_record` skips it, so a run
         # outside a lane keeps a record that names no lane.
-        "lane": lane})
+        "lane": lane,
+    }
+    if route.get("item_key") is not None:
+        kill_rec["item_key"] = route["item_key"]
+    write_kill_record(run_id, kill_rec)
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-job", path],
                             # FF1b item 6: the detached runner is a child of
                             # ours, so it gets the fence — and the runner repeats
@@ -1887,7 +1950,7 @@ def build_server(profile: str | None = None):
         return list_clients()
 
     @_register("spawn")
-    def _spawn(task: str, client: str = "opencode", card: dict | None = None,
+    def _spawn(task: str, client: str | None = None, card: dict | None = None,
                tier: int | None = None, model: str | None = None,
                isolate: bool | None = None,
                lean: bool | None = None, free: bool = False, allow_training: bool = False,
@@ -1899,9 +1962,11 @@ def build_server(profile: str | None = None):
                review_of: str | None = None,
                no_fallthrough: bool = False,
                review_base: str | None = None,
-               claude_reason: str | None = None) -> dict:
+               claude_reason: str | None = None,
+               item_key: str | None = None) -> dict:
         """Start one agent on `task` and return its run id at once (poll status/result).
 
+        client: omit for the D-2148 writer order on write cards; review cards default to opencode.
         card: {role: orchestrate|implement|review, complexity: trivial|standard|hard,
         ctx: 128k|1m, privacy: public|sensitive, spend: free-ok}; omitted fields
         take their defaults, an empty card is l2-worker. Or pass tier 1-3 instead of a card.
@@ -1982,7 +2047,9 @@ def build_server(profile: str | None = None):
         (gateway-log/client-reported/pinned/assumed-default); a CROSS-FAMILY verdict
         prints `yes` only on a witnessed model, never on an assumed default, while a
         collision prints `NO`, marked `(assumed)` when nothing witnessed the model
-        that hit it (FAMILYFENCE-3 N5) — the same collision the run exits 12 on."""
+        that hit it (FAMILYFENCE-3 N5) — the same collision the run exits 12 on.
+        item_key: task item key (<project>:<ID>, e.g. autoos:SPAWNER-ITEM-KEY); validated
+        as project [a-z0-9-]+, ID [A-Z0-9][A-Z0-9-]*; refused if invalid."""
         return spawn({"task": task, "client": client, "card": card, "tier": tier, "model": model,
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,
@@ -1992,7 +2059,8 @@ def build_server(profile: str | None = None):
                       "not_family": not_family, "review_of": review_of,
                       "no_fallthrough": no_fallthrough,
                       "review_base": review_base,
-                      "claude_reason": claude_reason})
+                      "claude_reason": claude_reason,
+                      "item_key": item_key})
 
     @_register("status")
     def _status(run_id: str | None = None) -> dict:

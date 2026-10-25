@@ -3272,6 +3272,186 @@ class FreeAiResolverTests(unittest.TestCase):
         self.assertIn("privacy:", " ".join(removed["l3-driver-free-only"]))
 
 
+class RealCatalogSeatTests(unittest.TestCase):
+    NOW = datetime(2026, 10, 24, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.registry = json.loads((Path(__file__).resolve().parents[1] /
+                                    "catalog/ai-registry.json").read_text(encoding="utf-8"))
+        self.entries = self.registry["policy"]["reviewers"]
+        self.state = {e["client"]: {"installed": True, "signed_in": True}
+                      for e in self.entries}
+        # Availability is injected, not inherited from today's provider outages.
+        for section in ("clients", "providers"):
+            for entry in self.registry[section].values():
+                entry.pop("unavailable_until", None)
+                entry["available"] = True
+
+    def pick(self, author="cx/gpt-6.1-sol", **kwargs):
+        return r.seats_for(author, self.registry, self.state, self.NOW, **kwargs)
+
+    def test_real_catalog_independence_and_google_first(self):
+        result = self.pick()
+        self.assertEqual(result["state"], "resolved")
+        self.assertEqual(len(result["seats"]), 2)
+        families = {e["family"] for e in result["seats"]}
+        self.assertEqual(len(families), 2)
+        self.assertNotIn("openai", families)
+        self.assertEqual(result["seats"][0], self.entries[0])
+        self.assertEqual(result["seats"][0]["family"], "google")
+        self.assertNotIn("qwen", {e["family"] for e in self.pick("qwen3.8-flash")["seats"]})
+        self.assertNotEqual(self.pick(risk="high")["seats"][0]["family"], "anthropic")
+
+    def test_real_catalog_qwen_only_via_qoder(self):
+        result = self.pick()
+        for entry in self.entries:
+            if entry["family"] != "qwen":
+                continue
+            reasons, _ = r._reviewer_rejections(
+                entry, "openai", self.registry, self.state, self.NOW, "normal", "public")
+            if entry["client"] == "qoder":
+                self.assertEqual(reasons, [])
+            else:
+                self.assertIn("D-2641: qwen only via qodercli", reasons)
+                skipped = next(e for e in result["skipped"] if e["model"] == entry["model"])
+                self.assertIn("D-2641: qwen only via qodercli", skipped["reasons"])
+
+    def test_provider_bench_preserves_own_text(self):
+        provider, _ = r.resolve_leg(self.entries[0]["leg"], self.registry)
+        self.registry["providers"][provider].update(
+            available=False, unavailable_until="2026-10-25T00:00:00Z",
+            note="Provider quota exhausted; wait for daily reset")
+        skipped = next(e for e in self.pick()["skipped"] if e["client"] == "gemini")
+        self.assertIn("Provider quota exhausted; wait for daily reset", " ".join(skipped["reasons"]))
+
+    def test_go_and_free_available_then_rate_limited(self):
+        candidates = [e for e in self.entries if e.get("leg", "").startswith("opencode-go/")
+                      or (e.get("leg", "").startswith("opencode-zen/") and e["leg"].endswith("-free"))]
+        for entry in candidates:
+            if entry["family"] == "qwen":
+                continue  # D-2641 is independent of availability.
+            with self.subTest(leg=entry["leg"]):
+                registry = json.loads(json.dumps(self.registry))
+                registry["policy"]["reviewers"] = [entry, self.entries[0]]
+                self.assertIn(entry, r.seats_for("cx/gpt-6.1-sol", registry, self.state, self.NOW)["seats"])
+                provider, _ = r.resolve_leg(entry["leg"], registry)
+                registry["providers"][provider].update(available=False, reason="HTTP 429: quota reset pending")
+                result = r.seats_for("cx/gpt-6.1-sol", registry, self.state, self.NOW)
+                skipped = next(e for e in result["skipped"] if e["model"] == entry["model"])
+                self.assertIn("HTTP 429: quota reset pending", " ".join(skipped["reasons"]))
+
+    def test_client_and_leg_overlay_preserve_outage_text(self):
+        for location in ("client", "leg", "provider", "registry-client", "reviewer"):
+            with self.subTest(location=location):
+                state = json.loads(json.dumps(self.state))
+                registry = json.loads(json.dumps(self.registry))
+                outage = {"available": False, "unavailable_until": "2026-10-25T00:00:00Z",
+                          "reason": "HTTP 429: measured review quota exhausted"}
+                if location == "client":
+                    state["gemini"].update(outage)
+                elif location == "leg":
+                    state["legs"] = {self.entries[0]["leg"]: outage}
+                elif location == "provider":
+                    provider, _ = r.resolve_leg(self.entries[0]["leg"], registry)
+                    state["providers"] = {provider: outage}
+                elif location == "registry-client":
+                    registry["clients"]["gemini"].update(outage)
+                else:
+                    registry["policy"]["reviewers"][0].update(outage)
+                result = r.seats_for("cx/gpt-6.1-sol", registry, state, self.NOW)
+                skipped = next(e for e in result["skipped"] if e["client"] == "gemini")
+                self.assertIn(outage["reason"], " ".join(skipped["reasons"]))
+
+    def test_client_and_leg_timed_overlay_yields_retry_at(self):
+        outage = {"available": False, "unavailable_until": "2026-10-25T00:00:00Z",
+                  "reason": "HTTP 429: measured review quota exhausted"}
+        for location in ("client", "leg"):
+            with self.subTest(location=location):
+                state = json.loads(json.dumps(self.state))
+                registry = json.loads(json.dumps(self.registry))
+                if location == "client":
+                    for e in self.entries:
+                        state.setdefault(e["client"], {}).update(outage)
+                else:
+                    state["legs"] = {e["leg"]: outage for e in self.entries if e.get("leg")}
+                    for e in self.entries:
+                        if not e.get("leg"):
+                            state.setdefault(e["client"], {}).update(outage)
+                result = r.seats_for("cx/gpt-6.1-sol", registry, state, self.NOW)
+                self.assertEqual(result["state"], "queued")
+                self.assertEqual(result["retry_at"], "2026-10-25T00:00:00Z")
+
+
+class TwoSeatSelectionTests(unittest.TestCase):
+    NOW = datetime(2026, 10, 24, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self.entries = [
+            {"client": "claude", "model": "sonnet", "family": "anthropic"},
+            {"client": "mimo", "model": "mimo-v2.6-flash", "family": "xiaomi"},
+            {"client": "opencode", "model": "cx/gpt-6.1-sol", "family": "openai"},
+            {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen"},
+            {"client": "qoder", "model": "qwen-other", "family": "qwen"},
+        ]
+        self.registry = {"policy": {"reviewers": self.entries}, "clients": {}}
+        self.state = {e["client"]: {"installed": True, "signed_in": True}
+                      for e in self.entries}
+
+    def pick(self, author, **kwargs):
+        return r.seats_for(author, self.registry, self.state, self.NOW, **kwargs)
+
+    def assert_independent(self, result, author_family):
+        self.assertEqual(result["state"], "resolved")
+        self.assertEqual(len(result["seats"]), 2)
+        families = {e["family"] for e in result["seats"]}
+        self.assertEqual(len(families), 2)
+        self.assertNotIn(author_family, families)
+
+    def test_cx_writer_gets_two_non_openai_families(self):
+        self.assert_independent(self.pick("cx/gpt-6.1-sol"), "openai")
+
+    def test_mimo_writer_gets_two_non_xiaomi_families(self):
+        self.assert_independent(self.pick("mimo-v2.6-flash"), "xiaomi")
+
+    def test_high_risk_anthropic_is_only_the_second_seat(self):
+        result = self.pick("cx/gpt-6.1-sol", risk="high")
+        self.assert_independent(result, "openai")
+        self.assertNotEqual(result["seats"][0]["family"], "anthropic")
+        self.assertEqual(result["seats"][1]["family"], "anthropic")
+
+    def test_rate_limited_seat_is_skipped_with_reason(self):
+        self.registry["clients"]["mimo"] = {
+            "available": False, "unavailable_until": "2026-10-25T00:00:00Z"}
+        result = self.pick("cx/gpt-6.1-sol", risk="high")
+        self.assert_independent(result, "openai")
+        skipped = next(e for e in result["skipped"] if e["client"] == "mimo")
+        self.assertIn("client: mimo unavailable until 2026-10-25T00:00:00Z",
+                      skipped["reasons"])
+        self.assertTrue(skipped["waiting"])
+
+    def test_high_risk_keeps_first_pass_only_rejection(self):
+        self.entries[0]["first_pass_only"] = True
+        result = self.pick("cx/gpt-6.1-sol", risk="high")
+        self.assertNotIn("anthropic", [e["family"] for e in result["seats"]])
+        self.assertTrue(any("first-pass only" in reason
+                            for e in result["skipped"] for reason in e["reasons"]))
+
+    def test_insufficient_distinct_families_is_not_resolved(self):
+        # Keep the writer registered, with two candidates from just one other
+        # family: the second qwen model must not count as an independent seat.
+        self.registry["policy"]["reviewers"] = self.entries[2:]
+        result = self.pick("cx/gpt-6.1-sol")
+        self.assertEqual(result["author_family"], "openai")
+        self.assertEqual(result["state"], "unresolved")
+        self.assertNotEqual(result["state"], "resolved")
+        self.assertEqual(result["seats"], [self.entries[3]])
+        self.assertIn("two reviewer seats required", result["reason"])
+        duplicate = next(e for e in result["skipped"]
+                         if e["model"] == "qwen-other")
+        self.assertIn("same family as selected seat (qwen)",
+                      duplicate["reasons"])
+
+
 class ReviewerSelectionTests(unittest.TestCase):
     """Brief REVROUTE (S2) item 2: a review card carrying ``author`` resolves to
     the first entry of ``policy.reviewers`` whose family differs from the
@@ -3291,6 +3471,24 @@ class ReviewerSelectionTests(unittest.TestCase):
     NOW = datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc)
     FUTURE = "2026-09-30T09:00:00Z"
     FUTURE_LATER = "2026-09-30T12:00:00Z"
+
+    def test_measured_reviewer_outages_queue_with_retry_at(self):
+        for source in ("client", "providers", "legs", "entry"):
+            with self.subTest(source=source):
+                reg = self.registry()
+                row = reg["policy"]["reviewers"][1]
+                reg["policy"]["reviewers"] = [row]
+                outage = {"unavailable_until": self.FUTURE}
+                state = {"gemini": {"installed": True, "signed_in": True}}
+                if source == "client":
+                    state["gemini"].update(outage)
+                elif source == "entry":
+                    row.update(outage)
+                else:
+                    state[source] = {"gemini" if source == "providers" else row["leg"]: outage}
+                result = r.reviewer_for("meta", reg, state, self.NOW)
+                self.assertEqual(result["state"], "queued")
+                self.assertEqual(result["retry_at"], self.FUTURE)
 
     def registry(self):
         return {

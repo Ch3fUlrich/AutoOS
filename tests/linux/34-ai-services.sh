@@ -4904,6 +4904,12 @@ if it "opencode exposure: guarded publish address, guarded healthcheck, loopback
     out="$(python3 tests/test_opencode_auth_bind.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+if it "MCP spawn keeps the D-2148 policy writer pick: no client pin on an unpinned write, one pick per spawn (unit tests)"; then
+    # tests/test_mcp_writer_policy.py (MO-2) is pytest-style and hermetic:
+    # pick_policy_writer is mocked, every spawn is a dry run.
+    out="$(python3 tests/test_mcp_writer_policy.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "aistack: every FROM in opencode.Dockerfile and omniroute.Dockerfile is digest-pinned, or the rebuild hash is blind"; then
     # The rebuild label hashes the Dockerfile text: a tag-only FROM could move
     # underneath an unchanged text and the stale layer would never rebuild.
