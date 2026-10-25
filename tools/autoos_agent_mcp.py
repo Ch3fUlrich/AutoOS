@@ -1349,6 +1349,9 @@ def spawn(req: dict) -> dict:
                    **planned_family_fields(req, client, policy))
     if route.get("item_key") is not None:
         job_req["item_key"] = route["item_key"]
+    else:
+        # The registered tool always passes item_key (default None): no key -> no field.
+        job_req.pop("item_key", None)
     job = {"id": run_id, "run_id": run_id,
            "request": job_req,
            "task": req.get("task"), "argv": argv, "cwd": cwd, "route": route,

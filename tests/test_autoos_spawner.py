@@ -21372,6 +21372,13 @@ class McpItemKeyPlumbingTests(unittest.TestCase):
             rec = mcp_server.read_kill_record(out["id"])
             self.assertNotIn("item_key", rec or {})
 
+    def test_spawn_with_explicit_none_item_key_has_no_field(self):
+        # The registered MCP tool always sends item_key (default None).
+        out = self._spawn(item_key=None)
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertNotIn("item_key", job["request"])
+
     def test_spawn_invalid_item_key_refused(self):
         for bad in ("bad-key", "autoos:", ":ITEM", "autoos:lower"):
             with self.subTest(bad=bad):
