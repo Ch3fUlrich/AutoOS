@@ -198,12 +198,17 @@ python3 tools/autoos_gateway_key.py exec -- python3 tools/review-call.py --model
 ```
 
 Optional: `--title <slug>` (the session tag becomes `review/<title>`, else
-`review/<prompt-sha12>`), `--max-tokens N` (default 16000), `--temperature F`
+`review/<prompt-sha12>`), `--max-tokens N` (default 128000, clamped only to the
+model's catalog output ceiling), `--temperature F`
 (off by default — measured 2026-10-02 on the central gateway, a
 `temperature: 0` request is cut at 64 completion tokens with an empty answer)
 and `--gateway-url
 URL` (otherwise `AUTOOS_OMNIROUTE_URL`, otherwise `http://127.0.0.1:20128/v1`;
-a URL with no path gains `/v1`). The call is stamped with the spawner's own
+a URL with no path gains `/v1`). Per operator decision D-2694, the default
+output cap is 128000 to prevent reasoning models from exhausting low fixed caps.
+Calls clamp only to the model's catalog `output_max` ceiling; if an answer
+returns `finish_reason=length` with empty content, it retries once at the ceiling
+before failing loud with exit 4. The call is stamped with the spawner's own
 `x-omniroute-session-id` / `X-AutoOS-Run-Id` headers, so the gateway call log
 attributes it like a run. It writes `review.txt` and `evidence.json`
 (requested/served model, status, `finish_reason`, `verdict`, correlation id,

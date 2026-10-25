@@ -118,7 +118,7 @@ class RenderGoldenTest(unittest.TestCase):
                 {"placeholderprovider/PlaceholderModel", "placeholderprovider/PlaceholderFallback"},
             )
             self.assertEqual(models["placeholderprovider/PlaceholderModel"]["name"], "placeholder-direct-model")
-            self.assertEqual(models["placeholderprovider/PlaceholderModel"]["limit"], {"context": 131072, "output": 16000})
+            self.assertEqual(models["placeholderprovider/PlaceholderModel"]["limit"], {"context": 131072, "output": 128000})
 
             # 3) mcp: a FLAT map name -> entry, enabled only for the lane's list (lean rule)
             servers = rendered["mcp"]
