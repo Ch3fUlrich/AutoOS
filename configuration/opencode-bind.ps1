@@ -1,9 +1,15 @@
 ﻿# Numeric unicast only. Naming AUTOOS_OPENCODE_HOST is the operator allowlist.
+# The table is shared with configuration/opencode-bind.py - one table feeds both
+# in tests/test_opencode_auth_bind.py, so a change here is a change there too.
 function Get-AutoOSOpencodeHost {
     $value = '127.0.0.1'
     if (Test-Path Env:AUTOOS_OPENCODE_HOST) { $value = $env:AUTOOS_OPENCODE_HOST }
     $address = $null
-    if (-not [System.Net.IPAddress]::TryParse($value, [ref]$address)) {
+    if ((-not [System.Net.IPAddress]::TryParse($value, [ref]$address)) -or
+        (-not [string]::Equals($address.ToString(), $value, [System.StringComparison]::OrdinalIgnoreCase))) {
+        # TryParse alone is wider than the python twin: it accepts short forms
+        # ("127.1" -> 127.0.0.1) and bracketed text ("[::1]"), so the canonical
+        # spelling has to match before the address counts as named at all.
         throw 'Invalid opencode bind address'
     }
     if ($address.IsIPv4MappedToIPv6) { $address = $address.MapToIPv4() }

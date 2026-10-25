@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """D-2549 offline bind/auth contracts. Env password auth is bypassed in v2; anomalyco/opencode#45856. Network bind is the binding control. Fake credentials only."""
 import base64
+import http.server
+import importlib.util
+import json
 import os
+import pathlib
 import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -360,20 +365,8 @@ def _probe(port, path, user=None, pw=None):
         return None
 
 
-"""Offline regression checks for D-2549 review findings."""
-import importlib.util
-import pathlib
-import subprocess
-import unittest
-import json
-import os
-import tempfile
-import http.server
-import threading
-import urllib.request
-import urllib.error
-
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+# Offline regression checks for D-2549 review findings. (The imports and ROOT
+# above are the file's own: one home per fact, no second module namespace.)
 
 
 class BindParityTests(unittest.TestCase):
@@ -523,14 +516,16 @@ class RoundTwoTests(unittest.TestCase):
 
     def test_positive_address_validation(self):
         helper = ROOT / 'configuration/opencode-bind.py'
+        # sys.executable, not a PATH lookup: the suite may run as `python` while
+        # only `python3` is on PATH (or the reverse) on a CI box.
         for address in ('0.0.0.0', '::', '[::]', '0:0:0:0:0:0:0:0',
                         '::ffff:0.0.0.0', '*', '', 'garbage', '224.0.0.1'):
             with self.subTest(address=address):
                 self.assertNotEqual(subprocess.run(
-                    ['python3', str(helper), address], capture_output=True).returncode, 0)
+                    [sys.executable, str(helper), address], capture_output=True).returncode, 0)
         for address in ('127.0.0.1', '::1', '192.0.2.10'):
             self.assertEqual(subprocess.run(
-                ['python3', str(helper), address], capture_output=True).returncode, 0)
+                [sys.executable, str(helper), address], capture_output=True).returncode, 0)
 
     def test_each_windows_spawner_exports_and_validates(self):
         for name in ('start-stack.ps1', 'autostart/Start-AutoOSStack.ps1'):
