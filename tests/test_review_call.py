@@ -75,7 +75,7 @@ PROMPT = "REVIEW-PROMPT-SENTINEL: paste of the diff to review.\nExplain it.\n"
 STANDING = review_call.STANDING_QUESTION
 STANDING_ANSWER = "TEST-GAMING: no - searched src/ for __eq__: 0 hits"
 # Two VERDICT lines: the LAST qualifying one wins (neither value outside
-# pass / fail-with-findings counts - see VerdictParseTests). Every existing
+# ACCEPT/REJECT/HOLD and legacy pass/fail-with-findings count - see VerdictParseTests). Every existing
 # answer also carries the mandatory standing-question line.
 ANSWER = ("first pass\nVERDICT: pass\nthen a finding\n"
           "VERDICT: fail-with-findings\n" + STANDING_ANSWER + "\n")
@@ -668,8 +668,12 @@ class ReviewCallTests(unittest.TestCase):
 
 
 class VerdictParseTests(unittest.TestCase):
+    """In-process parser and mocked MCP record integration, without client binaries.
+
+    Seat words are ACCEPT/REJECT/HOLD; call legacy words are pass/fail-with-findings.
+    """
+
     def test_seat_words_survive_harness_and_prompt_echo_in_both_readers(self):
-        sys.path.insert(0, str(TOOLS))
         import autoos_agent_mcp as agent_mcp
         harness = "\n".join(("route: review", "run-id: sample", "sandbox: isolated",
                               "model: seat", "notice: starting", "client: ready",
@@ -677,15 +681,37 @@ class VerdictParseTests(unittest.TestCase):
         for reader in (review_call.review_verdict, agent_mcp.review_verdict):
             for word in ("ACCEPT", "REJECT", "HOLD"):
                 with self.subTest(reader=reader.__module__, word=word):
-                    text = (harness + "\nVERDICT: ACCEPT|REJECT|HOLD\nVERDICT: "
+                    text = (harness + chr(10) + "VERDICT: " + "|".join(review_call.VERDICTS) + chr(10) + "VERDICT: "
                             + word + "\nFindings: reviewed the change.\nstatus: ended\n")
                     self.assertEqual(word, reader(text))
-                    text_lower = (harness + "\nVERDICT: ACCEPT|REJECT|HOLD\nVERDICT: "
+                    text_lower = (harness + chr(10) + "VERDICT: " + "|".join(review_call.VERDICTS) + chr(10) + "VERDICT: "
                                   + word.lower() + "\nFindings: reviewed the change.\nstatus: ended\n")
                     self.assertEqual(word, reader(text_lower))
 
+    def test_exact_echo_shapes_in_both_readers(self):
+        import autoos_agent_mcp as agent_mcp
+        from autoos_verdict import VERDICTS, seat_prompt
+        grammar = "|".join(VERDICTS)
+        prompt = next(line for line in seat_prompt("seat", "criteria", "base").splitlines()
+                      if line.strip().startswith("VERDICT:"))
+        echoes = ("VERDICT: " + grammar, prompt, "VERDICT: <" + grammar + ">",
+                  "VERDICT: " + " / ".join(VERDICTS),
+                  "VERDICT: " + ", ".join(VERDICTS[:-1]) + " or " + VERDICTS[-1],
+                  "VERDICT: [" + VERDICTS[0] + "]")
+        for reader in (review_call.review_verdict, agent_mcp.review_verdict):
+            for echo in echoes:
+                with self.subTest(reader=reader.__module__, echo=echo):
+                    self.assertEqual("ACCEPT", reader(echo + chr(10) + "VERDICT: ACCEPT"))
+
+    def test_pipe_finding_never_preserves_accept(self):
+        import autoos_agent_mcp as agent_mcp
+        for reader in (review_call.review_verdict, agent_mcp.review_verdict):
+            self.assertIsNone(reader("VERDICT: ACCEPT" + chr(10)
+                                     + "VERDICT: REJECT | see findings"))
+        self.assertIsNone(agent_mcp.review_verdict("VERDICT: pass"))
+        self.assertIsNone(review_call.review_verdict("VERDICT: ready"))
+
     def test_review_run_record_keeps_accept_and_reject_instead_of_no_verdict(self):
-        sys.path.insert(0, str(TOOLS))
         import autoos_agent_mcp as agent_mcp
         for word in ("ACCEPT", "REJECT"):
             with self.subTest(word=word), mock.patch.object(
@@ -693,19 +719,12 @@ class VerdictParseTests(unittest.TestCase):
                     {"rc": 0} if path.endswith("exit.json") else {}), mock.patch.object(
                     agent_mcp, "read_kill_record", return_value={"mode": "review"}), mock.patch.object(
                     agent_mcp, "_stdout_channel", return_value={}), mock.patch.object(
-                    agent_mcp, "_read_tail", return_value="route: review\nVERDICT: " + word + "\nFindings.\n"):
-                result = agent_mcp._state("sample-review")
+                    agent_mcp, "_read_tail", return_value=chr(10).join(("route: review", "run-id: sample", "sandbox: isolated", "model: seat", "notice: starting", "client: ready", "mode: review", "status: running", "answer:", "VERDICT: " + "|".join(review_call.VERDICTS), "VERDICT: " + word, "Findings: reviewed the change."))):
+                with tempfile.TemporaryDirectory() as run_dir:
+                    result = agent_mcp._state(run_dir)
                 self.assertEqual("completed", result["state"])
-                self.assertNotEqual("no-verdict", result["detail"])
+                self.assertEqual("done", result["detail"])
                 self.assertEqual(word, result.get("verdict"))
-
-    """verdict_line() called DIRECTLY on the loaded module: the tolerant
-    D-337 parse (copied from tools/autoos_agent_mcp.py's review_verdict /
-    _verdict_value), no gateway, no subprocess.
-
-    Every case returns the NORMALISED line: `VERDICT: pass` /
-    `VERDICT: fail-with-findings` / `VERDICT: missing`.
-    """
 
     def verdict(self, text):
         return review_call.verdict_line(text)

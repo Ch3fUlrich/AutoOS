@@ -51,7 +51,8 @@ Written into --out-dir:
     evidence.json  requested_model, served_model, status, correlation_id (the
                    ONLY response header VALUE recorded), response_header_names
                    (names only), finish_reason, verdict (the D-337 parse: pass
-                   / fail-with-findings / null), test_gaming (the standing
+                   / fail-with-findings / null; ACCEPT maps to pass, REJECT to
+                   fail-with-findings, HOLD to null), test_gaming (the standing
                    question parse: no / yes / unsure / missing /
                    yes_unverified_quote, plus test_gaming_quote for yes and
                    yes_unverified_quote), session_tag, run_id,
@@ -59,7 +60,7 @@ Written into --out-dir:
     error.json     only when the gateway answers non-200 -> exit 3
 
 Printed, and nothing else: the two paths, the served model, the answer's
-verdict normalised as `VERDICT: pass` / `VERDICT: fail-with-findings` (or
+verdict as ACCEPT/REJECT/HOLD or legacy pass/fail-with-findings (or
 `VERDICT: missing`), and the standing-question outcome as `TEST-GAMING: no` /
 `TEST-GAMING: yes` (an answer gives its own stdout line "beside the VERDICT
 line"; `TEST-GAMING: unsure` and `TEST-GAMING: yes_unverified_quote` are
@@ -95,7 +96,8 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from autoos_verdict import TRANSCRIPT_VERDICTS, VERDICTS  # noqa: E402
+from autoos_verdict import (TRANSCRIPT_VERDICTS, VERDICTS, LEGACY_CALL_VERDICTS,
+                            transcript_value, transcript_verdict)  # noqa: E402
 
 GATEWAY_ENV_VAR = "AUTOOS_OMNIROUTE_URL"
 KEY_ENV_VAR = "AUTOOS_OMNIROUTE_KEY"
@@ -180,14 +182,9 @@ CORRELATION_HEADER_NAMES = (
     "request-id",
 )
 
-# --- the verdict parse, COPIED from tools/autoos_agent_mcp.py ---------------
-# Its D-337 rules (`_VERDICT_LINE_RE` ~line 910, `_verdict_value` ~line 940,
-# `review_verdict` ~line 962). That module is NOT imported here - it pulls the
-# whole MCP stack into this one-shot tool (the same reason autoos-agent.py is
-# replicated instead of imported, see the header) - so the needed logic is
-# copied verbatim, changing only the value set: a review call answers `pass` /
-# `fail-with-findings`, never the runner's `ready` / `fix-first` / `not-ready`.
-# tools/autoos_agent_mcp.py has the same indented-line gap (follow-up)
+# Verdict scanning is owned by autoos_verdict, not by the MCP transport.
+# Both readers accept ACCEPT/REJECT/HOLD. This call additionally accepts only
+# pass/fail-with-findings; the agent alone accepts ready/fix-first/not-ready.
 
 # The verdict line a review answer states, anchored at the line start so a
 # sentence that merely mentions a verdict does not read as one. The
@@ -356,40 +353,8 @@ def finish_reason_of(payload: dict) -> str | None:
 
 
 def _verdict_value(stripped: str) -> str | None:
-    """The normalised verdict word a single line states, or None.
-
-    Copied from tools/autoos_agent_mcp.py `_verdict_value` (D-337 SB-A2 item
-    D), revalued for this tool: a `>`-quoted line is someone else's text, a
-    line carrying `<` or `|` is template syntax (the brief echoed back / a
-    table row), and the value has to be the bare word - `pass, but ...` is a
-    reviewer *talking* and reads as NO verdict. Bold/italic decoration and one
-    trailing `. ! ?` (`VERDICT: pass.`) are stripped before the test, so
-    `**Verdict:** pass` and `**VERDICT**: pass` both land on `pass`. RC-2
-    seat B: single `*`/`_` emphasis counts too, but only when it BALANCES -
-    `*VERDICT*: pass` and `*Verdict:* pass` are a wrapped label, while an
-    opening or closing mark on its own (`*VERDICT: pass`, `VERDICT*: pass`)
-    is punctuation in prose and stays missing.
-    """
-    if stripped.startswith(">") or "<" in stripped or "|" in stripped:
-        return None
-    m = _VERDICT_LINE_RE.match(stripped)
-    if not m:
-        return None
-    dec, dec2, value = m.group("dec"), m.group("dec2"), m.group("value")
-    if dec != dec2 and not (dec and dec2 is None and value.startswith(dec)):
-        return None  # unbalanced emphasis: a label nobody wrapped
-    # Twice: `pass.` needs the punctuation then the decorators, while
-    # `**pass**.` needs a decorator round after the punctuation falls off.
-    for _ in range(2):
-        value = value.strip().strip("*_` ").strip()
-        if value[-1:] in (".", "!", "?"):
-            value = value[:-1]
-    norm = value.strip().lower()
-    if norm in _VERDICT_VALUES:
-        if norm.upper() in VERDICTS:
-            return norm.upper()
-        return norm
-    return None
+    """Shared line grammar, with this reader's own legacy words only."""
+    return transcript_value(stripped, LEGACY_CALL_VERDICTS)
 
 
 def _indent_columns(line: str) -> int:
@@ -407,85 +372,12 @@ def _indent_columns(line: str) -> int:
 
 
 def review_verdict(text: str) -> str | None:
-    """The answer's verdict (`pass` / `fail-with-findings`), or None.
-
-    Copied from tools/autoos_agent_mcp.py `review_verdict` (D-337): the LAST
-    qualifying line wins - a reviewer that changed its mind said so - a
-    verdict line inside a fenced code block or a unified-diff hunk body is not
-    the reviewer's own word, a fence still open at the END of the text fails
-    CLOSED (ignore everything from the first fence marker on: the answer was
-    cut mid-block, so nothing in it is trusted), and fences follow CommonMark.
-
-    RC-2 seat A: a line indented by >= 4 columns (a tab counts as 4) is a
-    CommonMark indented code block - a pasted sample, not the reviewer's own
-    word - so it is never a verdict, whatever it says and whatever last-wins
-    would otherwise do with it.
-    """
-    raws = [_ANSI_RE.sub("", line) for line in (text or "").splitlines()]
-    found = None               # last verdict outside fences and hunks
-    found_before_fence = None  # ...and before the text's first fence marker
-    fence = None               # (char, length) while a block is open
-    first_marker = None
-    hunk = None                # (old, new) lines left in the active hunk body
-    for i, raw in enumerate(raws):
-        if hunk is not None:
-            old, new = hunk
-            if old <= 0 and new <= 0:
-                hunk = None
-            elif raw.startswith(" "):
-                hunk = (old - 1, new - 1)
-                continue
-            elif raw.startswith("-"):
-                hunk = (old - 1, new)
-                continue
-            elif raw.startswith("+"):
-                hunk = (old, new - 1)
-                continue
-            elif raw.startswith("\\"):
-                continue  # "\ No newline at end of file" counts toward neither
-            elif raw == "":
-                # a blank context line that lost its single leading space to a
-                # trailing-whitespace strip is still hunk content
-                hunk = (old - 1, new - 1)
-                continue
-            else:
-                hunk = None
-        if fence is not None:
-            m = _FENCE_CLOSE_RE.match(raw)
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
-                fence = None
-            continue
-        if raw.startswith(("diff --git", "index ", "---", "+++")):
-            continue
-        m = _HUNK_RE.match(raw)
-        if m:
-            hunk = (int(m.group(1) or 1), int(m.group(2) or 1))
-            continue
-        m = _FENCE_OPEN_RE.match(raw)
-        if m:
-            fence = (m.group(1)[0], len(m.group(1)))
-            if first_marker is None:
-                first_marker = i
-            continue
-        # RC-2 seat A: >= 4 columns of leading whitespace is an indented code
-        # block in CommonMark - a paste, not the reviewer's verdict - so it
-        # never counts, not even as the "last wins" line.
-        if _indent_columns(raw) >= 4:
-            continue
-        stripped = raw.strip()
-        if not stripped:
-            continue
-        value = _verdict_value(stripped)
-        if value:
-            found = value
-            if first_marker is None:
-                found_before_fence = value
-    return found_before_fence if fence is not None else found
+    """ACCEPT/REJECT/HOLD or this reader's legacy words; ambiguous seats return None."""
+    return transcript_verdict(text, LEGACY_CALL_VERDICTS)
 
 
 def verdict_line(text: str) -> str:
-    """The one stdout verdict line: `VERDICT: pass` / `VERDICT:
-    fail-with-findings` / `VERDICT: missing` (the parse is review_verdict's)."""
+    """Stdout: ACCEPT/REJECT/HOLD, legacy pass/fail-with-findings, or missing."""
     return "VERDICT: " + (review_verdict(text) or "missing")
 
 
@@ -767,9 +659,13 @@ def main(argv=None) -> int:
     text = mask_key(answer, key)
     finish = finish_reason_of(payload)
     tokens = dict(usage)
-    # The same parse the stdout line prints, captured as a machine-readable
+    # Preserve the evidence contract while stdout retains the seat vocabulary.
+    # The parsed decision is captured as a machine-readable
     # field: pass / fail-with-findings / null (null, never a sentinel word).
-    verdict = review_verdict(text)
+    verdict = {"ACCEPT": "pass", "REJECT": "fail-with-findings"}.get(
+        review_verdict(text), review_verdict(text))
+    if verdict not in LEGACY_CALL_VERDICTS:
+        verdict = None
 
     # The same parse discipline as the verdict, captured as the machine-
     # readable evidence.json `test_gaming` field: no / yes / unsure /

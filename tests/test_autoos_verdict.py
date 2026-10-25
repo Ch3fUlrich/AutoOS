@@ -36,15 +36,25 @@ class VerdictGrammarTests(unittest.TestCase):
                               "model: seat", "notice: starting", "client: ready",
                               "mode: review", "status: running", "answer:"))
         for word in v.VERDICTS:
-            for echo in ("", "VERDICT: ACCEPT|REJECT|HOLD\n",
-                         "  VERDICT: ACCEPT|REJECT|HOLD — that word alone, findings underneath.\n",
-                         "VERDICT: <ACCEPT|REJECT|HOLD>\n",
-                         "VERDICT: ACCEPT | REJECT | HOLD\n"):
+            grammar = "|".join(v.VERDICTS)
+            prompt = next(line for line in v.seat_prompt("seat", CRITERIA, BASE).splitlines()
+                          if line.strip().startswith("VERDICT:"))
+            echoes = ("", "VERDICT: " + grammar, prompt,
+                      "VERDICT: <" + grammar + ">",
+                      "VERDICT: " + " / ".join(v.VERDICTS),
+                      "VERDICT: " + ", ".join(v.VERDICTS[:-1]) + " or " + v.VERDICTS[-1],
+                      "VERDICT: [" + v.VERDICTS[0] + "]")
+            for echo in (line + chr(10) if line else "" for line in echoes):
                 with self.subTest(word=word, echo=echo):
                     got = v.parse_verdict(harness + "\n" + echo + "VERDICT: " + word
                                           + "\nFindings: reviewed the change.\nstatus: ended\n")
                     self.assertTrue(got["valid"], got)
                     self.assertEqual(word, got["verdict"])
+
+    def test_pipe_finding_is_a_second_real_verdict(self):
+        got = v.parse_verdict("VERDICT: ACCEPT\nVERDICT: REJECT | see findings")
+        self.assertFalse(got["valid"], got)
+        self.assertEqual("two verdicts in one answer", got["reason"])
 
     @classmethod
     def setUpClass(cls):

@@ -116,9 +116,8 @@ def parse_verdict(text):
            if not fences.feed(ln) and not _fold_invisible(ln).lstrip().startswith(">")]
     # The harness can echo the prompt's grammar. It is a template, not a second
     # decision; still reject two actual decisions and malformed non-template lines.
-    template = "VERDICT: " + "|".join(VERDICTS)
     found = [ln for ln in map(_normalise, own) if _VERDICT_RE.match(ln)
-             and not ("|" in ln or "<" in ln or ln.upper() == template or ln.upper().startswith(template + " "))]
+             and not is_verdict_echo(ln)]
     if not found:
         return invalid("no verdict line in the answer: %s" % _normalise(lines[0])[:60])
     if len(found) > 1:
@@ -169,3 +168,149 @@ def seat_prompt(angle, criteria, base_line):
              "Quote this line verbatim in your report, as proof of what you reviewed: %s"
              % base_line.strip()]
     return "\n".join(lines) + "\n"
+
+
+def is_verdict_echo(line):
+    """Only exact alternatives/placeholders are echoes, never findings with pipes.
+
+    The full prompt line is also an exact echo, derived from its sole owner.
+    """
+    text = _normalise(line)
+    prompt_line = next(ln for ln in seat_prompt("seat", "criteria", "base").splitlines()
+                       if ln.strip().startswith("VERDICT:"))
+    if text == _normalise(prompt_line):
+        return True
+    match = _VERDICT_RE.match(text)
+    if not match:
+        return False
+    rest = match.group("rest").upper().strip()
+    # A bracketed single choice is a placeholder, not a bare decision.
+    if rest in tuple("[" + word + "]" for word in VERDICTS):
+        return True
+    words = re.findall(r"[A-Z]+", rest)
+    remainder = re.sub(r"\b(?:" + "|".join(VERDICTS) + r"|OR)\b", "", rest)
+    return (tuple(w for w in words if w != "OR") == VERDICTS
+            and not re.sub(r"[\s|/,<>\[\]()]", "", remainder))
+
+
+def is_seat_line(line):
+    match = _VERDICT_RE.match(_normalise(line))
+    return bool(match and re.match(r"(?i)^\s*(?:" + "|".join(VERDICTS)
+                                  + r")\b", match.group("rest")))
+
+_VERDICT_LINE_RE = re.compile(
+    r"(?i)^\s*(?:#{1,6}\s*|[-*+]\s+)*(?P<dec>[*_]{1,2})?VERDICT"
+    r"(?:\s*(?P<dec2>[*_]{1,2})\s*:|\s*:)\s*(?P<value>\S.*)$")
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ 	]*$")
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def transcript_value(line, legacy):
+    """Bare seat word or this reader's own legacy vocabulary; no cross-legacy words."""
+    if line.startswith(">") or is_verdict_echo(line):
+        return None
+    m = _VERDICT_LINE_RE.match(line)
+    if not m:
+        return None
+    dec, dec2, value = m.group("dec"), m.group("dec2"), m.group("value")
+    if dec != dec2 and not (dec and dec2 is None and value.startswith(dec)):
+        return None
+    for _ in range(2):
+        value = value.strip().strip("*_` ").strip()
+        if value[-1:] in (".", "!", "?"):
+            value = value[:-1]
+    original = m.group("value").strip().strip("*_` ").strip()
+    norm = value.strip().lower()
+    if norm.upper() in VERDICTS:
+        return norm.upper()
+    if legacy == LEGACY_AGENT_VERDICTS:
+        return original if norm.replace(" ", "-") in legacy else None
+    return norm if norm in legacy else None
+
+
+def _indent_columns(line: str) -> int:
+    """The line's leading indent in CommonMark columns: a tab advances to the
+    next multiple of 4, so a line starting with a tab indents 4 columns."""
+    col = 0
+    for ch in line:
+        if ch == " ":
+            col += 1
+        elif ch == "\t":
+            col += 4 - (col % 4)
+        else:
+            break
+    return col
+
+
+def transcript_verdict(text: str, legacy=LEGACY_CALL_VERDICTS) -> str | None:
+    """Shared fence/hunk scan; legacy decisions retain last-wins compatibility.
+
+    Seat decisions fail closed on duplicates or malformed verdict-prefixed lines.
+    """
+    raws = [_ANSI_RE.sub("", line) for line in (text or "").splitlines()]
+    seat_lines = []
+    found = None               # last verdict outside fences and hunks
+    fence = None               # (char, length) while a block is open
+    first_marker = None
+    hunk = None                # (old, new) lines left in the active hunk body
+    for i, raw in enumerate(raws):
+        if hunk is not None:
+            old, new = hunk
+            if old <= 0 and new <= 0:
+                hunk = None
+            elif raw.startswith(" "):
+                hunk = (old - 1, new - 1)
+                continue
+            elif raw.startswith("-"):
+                hunk = (old - 1, new)
+                continue
+            elif raw.startswith("+"):
+                hunk = (old, new - 1)
+                continue
+            elif raw.startswith("\\"):
+                continue  # "\ No newline at end of file" counts toward neither
+            elif raw == "":
+                # a blank context line that lost its single leading space to a
+                # trailing-whitespace strip is still hunk content
+                hunk = (old - 1, new - 1)
+                continue
+            else:
+                hunk = None
+        if fence is not None:
+            m = _FENCE_CLOSE_RE.match(raw)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+                fence = None
+            continue
+        if raw.startswith(("diff --git", "index ", "---", "+++")):
+            continue
+        m = _HUNK_RE.match(raw)
+        if m:
+            hunk = (int(m.group(1) or 1), int(m.group(2) or 1))
+            continue
+        m = _FENCE_OPEN_RE.match(raw)
+        if m:
+            fence = (m.group(1)[0], len(m.group(1)))
+            if first_marker is None:
+                first_marker = i
+            continue
+        # RC-2 seat A: >= 4 columns of leading whitespace is an indented code
+        # block in CommonMark - a paste, not the reviewer's verdict - so it
+        # never counts, not even as the "last wins" line.
+        if _indent_columns(raw) >= 4:
+            continue
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if is_seat_line(stripped) and not is_verdict_echo(stripped):
+            seat_lines.append(stripped)
+        value = transcript_value(stripped, legacy)
+        if value:
+            found = value
+    if fence is not None and first_marker is not None:
+        return transcript_verdict("\n".join(raws[:first_marker]), legacy)
+    if seat_lines:
+        parsed = parse_verdict("\n".join(seat_lines))
+        return parsed["verdict"] if parsed["valid"] else None
+    return found
