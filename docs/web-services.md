@@ -497,7 +497,7 @@ D-2641 withdrew the gateway-side Qoder PAT login and removed the container-side
 ACP client (`clients.qoder`, `gateway_mode: none`). The OmniRoute gateway
 container no longer carries a `qodercli` layer, does not mount a writable
 home directory, and runs with the standard read-only root filesystem and
-image default `HOME=/home/node`.
+the image default `HOME` of its `node` user.
 
 ### OmniRoute with ZCode (GLM)
 
