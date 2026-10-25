@@ -1753,6 +1753,8 @@ def _state(path: str) -> dict:
             # nothing ran, nothing was lost, and a caller that retries must retry
             # against the host's room, not against a bug.
             state, detail = "rejected", "host-admission"
+        elif ex.get("rc") == agent.EXIT_RELAUNCH_QUOTA:
+            state, detail = "rejected", "relaunch-quota"
         else:
             state, detail = "failed", "failed"
     elif not job.get("pid"):

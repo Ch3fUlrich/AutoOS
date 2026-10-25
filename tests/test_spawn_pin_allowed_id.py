@@ -28,7 +28,7 @@ def load(name, file):
 
 class SpawnPinAllowedIdTests(unittest.TestCase):
     def setUp(self):
-        tmp = tempfile.TemporaryDirectory(dir=ROOT / "logs")
+        tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith("AUTOOS_")}
@@ -37,7 +37,9 @@ class SpawnPinAllowedIdTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.agent = load("pin_agent", "autoos-agent.py")
-        cls.cfg = cls.agent.load_jsonc(str(ROOT / "opencode.jsonc"))
+        cls.cfg = {"providers": {
+            "opencode": {"models": {"deepseek-v4.1-flash-free": {}, "glm-5.3-flash-free": {}}},
+            "omniroute": {"models": {"l3-implementer": {}}}}}
 
     def test_undeclared_pin_names_the_declared_id_for_its_mid(self):
         # The mid exists under exactly one provider - the one NOT typed.
@@ -86,31 +88,37 @@ class SpawnPinAllowedIdTests(unittest.TestCase):
                          ["p1/m-a", "p2/m-a"])
 
     def test_declared_pins_still_resolve_and_d2459_is_unchanged(self):
+        cfg = {"providers": {**self.cfg["providers"], "mimo": {"models": {"mimo-v2.6-flash": {}}}}}
         for pin in ("mimo/mimo-v2.6-flash", "opencode/glm-5.3-flash-free"):
             with self.subTest(pin=pin):
                 self.assertEqual(
-                    self.agent.resolve_model(self.cfg, 3, False, pin), pin)
+                    self.agent.resolve_model(cfg, 3, False, pin), pin)
         # D-2459 keeps its own wording - it already names both allowed ids.
         with self.assertRaisesRegex(
             ValueError, "D-2459.*mimo/mimo-v2.6-flash.*mimo/mimo-v2.6-pro"
         ):
-            self.agent.resolve_model(self.cfg, 3, False, "omniroute/mimo-v2.6-flash")
+            self.agent.resolve_model(self.agent.load_jsonc(str(ROOT / "opencode.jsonc")),
+                                     3, False, "omniroute/mimo-v2.6-flash")
 
     def test_cli_refusal_names_the_allowed_id(self):
         plan = subprocess.run(
             [sys.executable, str(ROOT / "tools/autoos-agent.py"), "run",
-             "--model", "omniroute/deepseek-v4.1-flash-free", "--dry-run",
+             "--model", "omniroute/mimo-v2.6-flash", "--dry-run",
              "--isolate", "x"],
             cwd=ROOT, capture_output=True, text=True, env=self.env)
-        self.assertNotEqual(plan.returncode, 0, plan.stdout)
-        self.assertIn("opencode/deepseek-v4.1-flash-free", plan.stderr)
+        self.assertEqual(plan.returncode, 2, plan.stdout)
+        self.assertIn("mimo/mimo-v2.6-flash", plan.stderr)
 
     def test_free_pool_refusal_appends_the_allowed_ids(self):
-        plan = subprocess.run(
-            [sys.executable, str(ROOT / "tools/autoos-agent.py"), "run", "--free",
-             "--model", "opencode/glm-5.3-flash-fre", "--dry-run",
-             "--isolate", "x"],
-            cwd=ROOT, capture_output=True, text=True, env=self.env)
+        from unittest.mock import patch
+        with patch.object(self.agent, "load_jsonc", return_value=self.cfg), patch.dict(os.environ, self.env, clear=True):
+            import io
+            from contextlib import redirect_stderr, redirect_stdout
+            err = io.StringIO()
+            with redirect_stderr(err), redirect_stdout(io.StringIO()):
+                rc = self.agent.main(["run", "--free", "--model", "opencode/glm-5.3-flash-fre", "--dry-run", "--isolate", "x"])
+        from types import SimpleNamespace
+        plan = SimpleNamespace(returncode=rc, stdout="", stderr=err.getvalue())
         self.assertEqual(plan.returncode, 2, plan.stdout + plan.stderr)
         self.assertIn("is not in the free pool for", plan.stderr)
         self.assertIn("opencode/glm-5.3-flash-free", plan.stderr)
@@ -122,6 +130,11 @@ class SpawnPinAllowedIdTests(unittest.TestCase):
             cwd=ROOT, capture_output=True, text=True, env=self.env)
         self.assertEqual(plan.returncode, 2, plan.stdout + plan.stderr)
         self.assertIn("see tools/autoos-agent.py list", plan.stderr)
+
+    def test_clean_twins_only_when_requested(self):
+        cfg = {"providers": {"p": {"models": {"model-a": {}, "model-a-clean": {}}}}}
+        self.assertEqual(self.agent.allowed_ids_for_pin(cfg, "wrong/model-a"), ["p/model-a"])
+        self.assertEqual(self.agent.allowed_ids_for_pin(cfg, "wrong/model-a", clean=True), ["p/model-a-clean"])
 
 
 if __name__ == "__main__":

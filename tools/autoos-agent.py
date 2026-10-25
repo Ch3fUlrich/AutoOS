@@ -3516,7 +3516,7 @@ def qualify_pinned_model(cfg: dict, model) -> str | None:
     return "%s/%s%s%s" % (owners[0], base, sep, variant)
 
 
-def allowed_ids_for_pin(cfg: dict, pin) -> list[str]:
+def allowed_ids_for_pin(cfg: dict, pin, clean=False) -> list[str]:
     """The declared `provider/mid` ids a pin could plausibly have meant (L3).
 
     A refusal that only says "not declared" teaches the caller nothing: the
@@ -3546,6 +3546,9 @@ def allowed_ids_for_pin(cfg: dict, pin) -> list[str]:
     if not pin_mid:
         return []
     declared = sorted(declared_models(cfg))
+    declared = [d for d in declared if not d.endswith("-clean") or clean]
+    if clean:
+        declared = [d for d in declared if d.endswith("-clean") or d + "-clean" not in declared]
     exact = [d for d in declared if mid_of(d) == pin_mid]
     if exact:
         return exact
@@ -3577,7 +3580,7 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
         # pin the old `e.g. omniroute/<pin>` hint printed a double-qualified
         # nonsense id (omniroute/bogus/none), so it survives only for a bare
         # pin the helper found nothing better than.
-        allowed = allowed_ids_for_pin(cfg, base)
+        allowed = allowed_ids_for_pin(cfg, base, clean=clean)
         if allowed:
             clean_note = "drop --clean; " if clean else ""
             raise ValueError("%s is not declared in opencode.jsonc providers; "
@@ -13625,6 +13628,7 @@ EXIT_RELAUNCH_QUOTA = 15  # 14 belongs to EXIT_LAYER_FENCE.
 
 
 def quota_group(model):
+    """Unknown models are their own provider-prefix group, matching only that state prefix."""
     pin = (model or "").lower().partition("#")[0]
     if pin in QUOTA_GROUPS:
         return QUOTA_GROUPS[pin]
@@ -13643,28 +13647,37 @@ def relaunch_quota_ok(group):
                                     or PROVIDER_STATE_PATH)
     except (OSError, ValueError):
         return True, "no cooldown recorded"
-    providers = state.get("providers") or {}
+    providers = state.get("providers") if isinstance(state, dict) else {}
     now = datetime.datetime.now(datetime.timezone.utc)
     if isinstance(providers, dict):
         for provider, entry in providers.items():
             if quota_group(provider) != group or not isinstance(entry, dict):
                 continue
-            until = _iso_utc(entry.get("unavailable_until"))
+            value = entry.get("unavailable_until")
+            try:
+                until = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if until.tzinfo is None:
+                    until = until.replace(tzinfo=datetime.timezone.utc)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                continue
             if until is not None and until > now:
-                return False, "unavailable_until %s" % entry["unavailable_until"]
+                minutes = max(1, int((until - now).total_seconds() / 60 + 0.999999))
+                return False, "until %s (%d min left)" % (until.isoformat(), minutes)
     return True, "no cooldown recorded"
 
 
-def relaunch_quota_refusal(model, title_or_lane, workers, now, quota_ok):
+def relaunch_quota_refusal(model, title, workers, now, quota_ok):
     # A stalled writer must check quota first: switching sol to luna shares it.
-    if not title_or_lane:
+    if not title or os.environ.get("AUTOOS_RELAUNCH_QUOTA_OFF") == "1":
         return None
     group = quota_group(model)
     earlier = []
     for row in workers:
-        identity = row.get("title") or row.get("lane")
+        if not isinstance(row, dict):
+            continue
+        identity = row.get("title")
         started = _iso_utc(row.get("started"))
-        if (identity and identity == title_or_lane and quota_group(row.get("model")) == group
+        if (identity and identity == title and quota_group(row.get("model")) == group
                 and started is not None and started < now):
             earlier.append((started, row))
     if not earlier:
@@ -13675,10 +13688,14 @@ def relaunch_quota_refusal(model, title_or_lane, workers, now, quota_ok):
         rc = int(row.get("rc"))
     except (TypeError, ValueError):
         rc = None
+    # Refusals and killed runs imply no work; leaks (7) and generic failures (1) do not.
     if (row.get("state") != "died"
-            and not (rc is not None and (rc < 0 or rc in (5, 10, 137, 143, 124)))):
+            and not (rc is not None and (rc < 0 or rc in (5, 6, 10, 137, 143, 124)))):
         return None
-    minutes = (now - started).total_seconds() / 60
+    activity = _iso_utc(row.get("ended")) if row.get("ended") else started
+    if activity is None:
+        return None
+    minutes = (now - activity).total_seconds() / 60
     if minutes <= RELAUNCH_QUIET_MINUTES:
         return None
     ok, detail = quota_ok(group)
@@ -13686,7 +13703,7 @@ def relaunch_quota_refusal(model, title_or_lane, workers, now, quota_ok):
         return None
     return ("relaunch quota: previous run %s (%s) made no workspace change for "
             "%d min and the %s quota check failed (%s); wait for the window or "
-            "pick a model from another quota group"
+            "pick a model from another quota group; AUTOOS_RELAUNCH_QUOTA_OFF=1 overrides"
             % (row.get("id"), row.get("model"), minutes, group, detail))
 
 
@@ -14309,7 +14326,7 @@ def cmd_run(args, cfg: dict) -> int:
                 pin_str = str(pin)
                 # L3: this refusal names the declared ids the pin could have
                 # meant, the same candidates resolve_model's refusal gives.
-                allowed = allowed_ids_for_pin(cfg, pin_str)
+                allowed = allowed_ids_for_pin(cfg, pin_str, clean=args.clean)
                 allow_txt = (("; drop --clean" if args.clean else "")
                              + "; allowed: %s" % ", ".join(allowed)) if allowed else (
                                  "; see tools/autoos-agent.py list")
