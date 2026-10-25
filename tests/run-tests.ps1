@@ -12423,4 +12423,4 @@ if ($script:Fail) {
     exit 1
 }
 exit 0
-# Harness path declaration: 'tests\test_opencode_auth_round2.py'
+# Harness path declaration: 'tests\test_opencode_auth_bind.py'
