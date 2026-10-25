@@ -22,10 +22,16 @@ _registry_cache: dict | None = None
 
 
 def _registry_models(registry: dict | None = None) -> dict:
-    """Return the models table from catalog/ai-registry.json (cached) or registry."""
+    """Return the models table from catalog/ai-registry.json (cached) or registry.
+
+    A caller-supplied registry dict is a test seam: one with no (or a junk)
+    `models` table means "output_max unknown", which resolve_output_ceiling
+    reports as None - never a crash and never a lower cap (D-2694).
+    """
     global _registry_cache
     if registry is not None:
-        return registry.get("models") if isinstance(registry, dict) else {}
+        models = registry.get("models") if isinstance(registry, dict) else None
+        return models if isinstance(models, dict) else {}
     if _registry_cache is None:
         try:
             path = Path(__file__).resolve().parent.parent / REGISTRY_RELPATH

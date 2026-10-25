@@ -1,4 +1,6 @@
+import contextlib
 import hashlib
+import io
 import os
 import re
 import stat
@@ -13,6 +15,7 @@ if str(TOOLS) not in sys.path:
     sys.path.insert(0, str(TOOLS))
 
 import api_client as api
+import autoos_tokens as tokens
 
 VALID_MODEL = 'deepseek-v4.1-flash'
 DEFAULT_MODEL = 'deepseek-v4.1-flash'
@@ -286,6 +289,32 @@ class TestApiClient(unittest.TestCase):
         self.assertTrue(prompt.exists())
         self.assertEqual(os.path.realpath(argv[5]), os.path.realpath(str(prompt)))
         self.assertFalse((home / '.local' / 'state' / 'autoos' / 'pool' / 'api-prompts' / (ident + '.md')).exists())
+
+class TestAutoosTokensRegistrySeam(unittest.TestCase):
+    """autoos_tokens' registry seam: a registry dict the caller supplied is a
+    TEST seam for clamp_max_tokens/resolve_output_ceiling. A dict with no (or a
+    junk) models table means "output_max unknown" - never a crash and never a
+    lower cap (D-2694: unknown output_max -> send the 128000 default and log)."""
+
+    def test_registry_dict_without_a_models_table_is_unknown_not_a_crash(self):
+        self.assertIsNone(tokens.resolve_output_ceiling('m/x', registry={}))
+        self.assertIsNone(tokens.resolve_output_ceiling('m/x',
+                                                        registry={'models': None}))
+        self.assertIsNone(tokens.resolve_output_ceiling('m/x',
+                                                        registry={'models': 'junk'}))
+
+    def test_registry_models_table_still_resolves_rows(self):
+        registry = {'models': {'x': {'output_max': 5}}}
+        self.assertEqual(tokens.resolve_output_ceiling('m/x', registry=registry), 5)
+        self.assertEqual(tokens.clamp_max_tokens('m/x', None, registry=registry), 5)
+
+    def test_clamp_with_registry_missing_models_sends_the_default_and_logs(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = tokens.clamp_max_tokens('m/x', None, registry={})
+        self.assertEqual(got, tokens.DEFAULT_MAX_TOKENS)
+        self.assertEqual(got, 128000)  # D-2694: never invent a lower cap
+        self.assertIn('unknown output_max for m/x', err.getvalue())
 
 if __name__ == '__main__':
     unittest.main()
