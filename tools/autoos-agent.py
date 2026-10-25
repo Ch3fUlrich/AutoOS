@@ -194,6 +194,7 @@ docs/api-keys.md) and is handed to the
 child through its environment only. One line per run is appended to
 logs/orch-<date>.log (git-ignored), which the watchdog protocol reads.
 
+15 = a stalled writer's relaunch quota is cooling down (dry-run previews only).
 Exit codes: 5 = an --isolate implement run changed nothing (NO-OP); 6 = a headless client auto-denied a tool and
 exited 0 (HEADLESS-REFUSAL); 7 = an --isolate run wrote to the parent checkout (LEAK: a commit authored or
 committed by autoos-worker@users.noreply.github.com on a parent branch that existed at the start - HEAD range,
@@ -3515,6 +3516,52 @@ def qualify_pinned_model(cfg: dict, model) -> str | None:
     return "%s/%s%s%s" % (owners[0], base, sep, variant)
 
 
+def allowed_ids_for_pin(cfg: dict, pin, clean=False) -> list[str]:
+    """The declared `provider/mid` ids a pin could plausibly have meant (L3).
+
+    A refusal that only says "not declared" teaches the caller nothing: the
+    run this lesson came from launched `omniroute/mimo-v2.6-flash` where only
+    `mimo/mimo-v2.6-flash` was declared and failed five times before anyone
+    could read an allowed id off the error. So the refusal names its
+    candidates, computed here as a pure function over the cfg dict.
+
+    Two passes, both on the pin's MID (last path segment, ignoring a leading
+    provider, a trailing `-clean` and a `#variant` tail):
+
+    1. exact mid - every declared id whose mid equals the pin's mid: the id
+       the caller almost certainly meant, spelled under whichever providers
+       declare it.
+    2. closest mids - up to three declared mids ranked by similarity (0.6
+       cutoff), preserving every provider spelling of each candidate.
+
+    [] means nothing is even suggestable; the caller then points at
+    `tools/autoos-agent.py list` instead of guessing a prefix.
+    """
+    def mid_of(value) -> str:
+        base = str(value or "").partition("#")[0]
+        segment = base.rsplit("/", 1)[-1]
+        return segment[:-len("-clean")] if segment.endswith("-clean") else segment
+
+    pin_mid = mid_of(pin)
+    if not pin_mid:
+        return []
+    declared = sorted(declared_models(cfg))
+    exact = [d for d in declared if mid_of(d) == pin_mid]
+    if exact:
+        if clean:
+            filtered = [d for d in exact if d.endswith("-clean") or d + "-clean" not in exact]
+        else:
+            filtered = [d for d in exact if not d.endswith("-clean") or d[:-len("-clean")] not in exact]
+        return filtered or exact
+    candidates = [d for d in declared if not d.endswith("-clean") or clean]
+    if clean:
+        candidates = [d for d in candidates if d.endswith("-clean") or d + "-clean" not in candidates]
+    import difflib
+    closest = difflib.get_close_matches(
+        pin_mid, sorted({mid_of(d) for d in candidates}), n=3, cutoff=0.6)
+    return [d for mid in closest for d in candidates if mid_of(d) == mid]
+
+
 def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> str:
     agent = TIERS[tier]
     model = override or cfg["agents"][agent]["model"]
@@ -3533,9 +3580,21 @@ def resolve_model(cfg: dict, tier: int, clean: bool, override: str | None) -> st
     if clean and not base.endswith("-clean"):
         base += "-clean"
     if base not in declared_models(cfg):
-        raise ValueError("%s is not declared in opencode.jsonc providers "
-                         "(a bare pin needs the provider prefix that declares "
-                         "it, e.g. omniroute/%s)" % (base, base))
+        # L3: the refusal NAMES the ids allowed for this pin. For a qualified
+        # pin the old `e.g. omniroute/<pin>` hint printed a double-qualified
+        # nonsense id (omniroute/bogus/none), so it survives only for a bare
+        # pin the helper found nothing better than.
+        allowed = allowed_ids_for_pin(cfg, base, clean=clean)
+        if allowed:
+            clean_note = "drop --clean; " if clean else ""
+            raise ValueError("%s is not declared in opencode.jsonc providers; "
+                             "%sallowed: %s" % (base, clean_note, ", ".join(allowed)))
+        tail = "see tools/autoos-agent.py list"
+        if "/" not in base:
+            tail = ("a bare pin needs the provider prefix that declares it, "
+                    "e.g. omniroute/%s; %s" % (base, tail))
+        raise ValueError("%s is not declared in opencode.jsonc providers (%s)"
+                         % (base, tail))
     return base + ("#" + variant if variant else "")
 
 
@@ -13946,6 +14005,108 @@ def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
     return rows
 
 
+# Registry provider ids used by record_reset_stop (ai-registry models->provider):
+# cx/cxa serve cx-gpt-*; xiaomi_mimo serves mimo-*. Gateway ids are not providers.
+QUOTA_GROUPS = {"cx": "codex", "cxa": "codex", "xiaomi_mimo": "mimo"}
+RELAUNCH_QUIET_MINUTES = 30
+EXIT_RELAUNCH_QUOTA = 15  # 14 belongs to EXIT_LAYER_FENCE.
+
+
+def quota_group(model):
+    """Unknown models are their own provider-prefix group, matching only that state prefix."""
+    pin = (model or "").lower().partition("#")[0]
+    if pin in QUOTA_GROUPS:
+        return QUOTA_GROUPS[pin]
+    mid = pin.rsplit("/", 1)[-1]
+    if mid.startswith("cx-gpt-"):
+        return "codex"
+    if mid.startswith("mimo-"):
+        return "mimo"
+    return pin.split("/", 1)[0]
+
+
+def relaunch_quota_ok(group):
+    """Read recorded cooldowns only; absent state does not block a launch."""
+    if os.environ.get("AUTOOS_RELAUNCH_QUOTA_OFF", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True, "override"
+    try:
+        state = load_provider_state(os.environ.get("AUTOOS_PROVIDER_STATE_PATH")
+                                    or PROVIDER_STATE_PATH)
+    except (OSError, ValueError):
+        return True, "no cooldown recorded"
+    providers = state.get("providers") if isinstance(state, dict) else {}
+    now = datetime.datetime.now(datetime.timezone.utc)
+    if isinstance(providers, dict):
+        for provider, entry in providers.items():
+            if quota_group(provider) != group or not isinstance(entry, dict):
+                continue
+            value = entry.get("unavailable_until")
+            try:
+                until = datetime.datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if until.tzinfo is None:
+                    until = until.replace(tzinfo=datetime.timezone.utc)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                continue
+            if until is not None and until > now:
+                minutes = max(1, int((until - now).total_seconds() / 60 + 0.999999))
+                return False, "until %s (%d min left)" % (until.isoformat(), minutes)
+    return True, "no cooldown recorded"
+
+
+def relaunch_quota_refusal(model, title, workers, now, quota_ok):
+    # A stalled writer must check quota first: switching sol to luna shares it.
+    if not title or os.environ.get("AUTOOS_RELAUNCH_QUOTA_OFF", "").strip().lower() in ("1", "true", "yes", "on"):
+        return None
+    group = quota_group(model)
+    earlier = []
+    for row in workers:
+        if not isinstance(row, dict):
+            continue
+        try:
+            row_rc = int(row.get("rc"))
+        except (TypeError, ValueError):
+            row_rc = None
+        # A refusal is not a run; skip so next attempt is still refused while window holds.
+        if row_rc in (13, 15) or row.get("state") == "rejected":
+            continue
+        # Title-only identity stands: two lanes sharing a title share a chain; rows with only a lane never match.
+        identity = row.get("title")
+        started = _iso_utc(row.get("started"))
+        if (identity and identity == title and quota_group(row.get("model")) == group
+                and started is not None and started < now):
+            earlier.append((started, row))
+    if not earlier:
+        return None
+    started, row = max(earlier, key=lambda item: item[0])
+    # A newer successful run supersedes an old failure; it is progress.
+    try:
+        rc = int(row.get("rc"))
+    except (TypeError, ValueError):
+        rc = None
+    # Refusals and killed runs imply no work; leaks (7) and generic failures (1) do not.
+    if (row.get("state") != "died"
+            and not (rc is not None and (rc < 0 or rc in (5, 6, 10, 137, 143, 124)))):
+        return None
+    ended = row.get("ended")
+    if isinstance(ended, str) and ended.strip() in ("", "0"):
+        ended = None
+    elif ended == 0:
+        ended = None
+    activity = _iso_utc(ended) or started
+    if activity is None:
+        return None
+    minutes = (now - activity).total_seconds() / 60
+    if minutes <= RELAUNCH_QUIET_MINUTES:
+        return None
+    ok, detail = quota_ok(group)
+    if ok:
+        return None
+    return ("relaunch quota: previous run %s (%s) made no workspace change for "
+            "%d min and the %s quota check failed (%s); wait for the window or "
+            "pick a model from another quota group; AUTOOS_RELAUNCH_QUOTA_OFF=1 overrides"
+            % (row.get("id"), row.get("model"), minutes, group, detail))
+
+
 ENDED_VISIBLE_WINDOW = datetime.timedelta(hours=24)
 
 
@@ -14578,17 +14739,25 @@ def cmd_run(args, cfg: dict) -> int:
             pin = getattr(args, attr, None)
             if pin and "/" in str(pin):
                 pin_str = str(pin)
+                # L3: this refusal names the declared ids the pin could have
+                # meant, the same candidates resolve_model's refusal gives.
+                allowed = allowed_ids_for_pin(cfg, pin_str, clean=args.clean)
+                allow_txt = (("; drop --clean" if args.clean else "")
+                             + "; allowed: %s" % ", ".join(allowed)) if allowed else (
+                                 "; see tools/autoos-agent.py list")
                 # Skip F3 free pool check for opencode/ models when the pool is
                 # empty/absent: opencode/* free models are served by opencode itself
                 # and keep their old behaviour (they don't need a declared pool).
                 if client_free and pin_str not in client_free and pin_str not in declared:
-                    return refuse("%s is not in the free pool for %s (declared: %s)"
-                                  % (pin_str, client.name, ", ".join(client_free) or "none"), 2)
+                    return refuse("%s is not in the free pool for %s (declared: %s)%s"
+                                  % (pin_str, client.name,
+                                     ", ".join(client_free) or "none", allow_txt), 2)
                 # When pool is empty/absent, still refuse non-opencode pins
                 # (e.g. foo/bar) that are not declared.
                 if not client_free and pin_str not in declared and not pin_str.startswith("opencode/"):
-                    return refuse("%s is not in the free pool for %s (declared: %s)"
-                                  % (pin_str, client.name, ", ".join(client_free) or "none"), 2)
+                    return refuse("%s is not in the free pool for %s (declared: %s)%s"
+                                  % (pin_str, client.name,
+                                     ", ".join(client_free) or "none", allow_txt), 2)
         # Then qualify bare pins (no '/' in original)
         for attr in ("model", "free_model"):
             pin = getattr(args, attr, None)
@@ -14855,7 +15024,17 @@ def cmd_run(args, cfg: dict) -> int:
               "post-run leak check (exit 7). What is and is not isolated: "
               "\"ISOLATION STATEMENT\" in isolate_clone (tools/autoos-agent.py)."
               % client.name)
+    quota_refusal = relaunch_quota_refusal(
+        # A generated titleless session tag is shared by unrelated tasks.
+        plan["model"], args.title or "",
+        list_workers(workers_dir(), include_ended=True),
+        datetime.datetime.now(datetime.timezone.utc), relaunch_quota_ok)
+    if quota_refusal is not None and not args.dry_run:
+        print(quota_refusal, file=sys.stderr)
+        return EXIT_RELAUNCH_QUOTA
     if args.dry_run:
+        if quota_refusal is not None:
+            print("note: " + quota_refusal)
         # CLAUDEBUDGET-g item A: the last-mile gate, on the plan this process would
         # hand the client. The early gate proved the *flags*; a reviewer override,
         # the resolver's v2 route and --free have rewritten the model since, so the

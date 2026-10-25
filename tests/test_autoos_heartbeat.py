@@ -1198,6 +1198,7 @@ class McpHeartbeatTests(unittest.TestCase):
         self._old_env = {k: os.environ.get(k) for k in
                         ("AUTOOS_STATE_DIR", "AUTOOS_AGENT_MCP_DRY_RUN",
                          "AUTOOS_AGENT_DEPTH", "AUTOOS_AGENT_MAX_DEPTH", "AUTOOS_AGENT_INBOX")}
+        self.addCleanup(self._restore_env)
         os.environ.update(AUTOOS_STATE_DIR=state_dir, AUTOOS_AGENT_MCP_DRY_RUN="1")
         os.environ.pop("AUTOOS_AGENT_DEPTH", None)
         os.environ.pop("AUTOOS_AGENT_MAX_DEPTH", None)
@@ -1225,7 +1226,6 @@ class McpHeartbeatTests(unittest.TestCase):
         _path.start()
         self.addCleanup(_path.stop)
         os.environ.pop("AUTOOS_AGENT_INBOX", None)
-        self.addCleanup(self._restore_env)
 
     def _restore_env(self):
         for k, v in self._old_env.items():
