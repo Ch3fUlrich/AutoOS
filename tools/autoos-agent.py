@@ -9221,24 +9221,32 @@ def registry_family_names(registry):
 def _seat_item_text(text):
     """Keep item prose only: reviewed code is evidence, not seat instructions."""
     lines = []
-    fenced = False
+    fenced = None
+    patch = False
     for line in (text or "").splitlines():
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
+        fence = line.lstrip()[:3]
+        if fence in ("```", "~~~") and (fenced is None or fence == fenced):
+            fenced = fence if fenced is None else None
             lines.append("")
         else:
             if not fenced and line.startswith(("diff --git", "--- a/", "+++ b/")):
-                break
-            lines.append("" if fenced else line)
+                patch = True
+                lines.append("")
+                continue
+            if not line.strip():
+                patch = False
+            hunk = patch and line.startswith(("+", "-", " ", "@@"))
+            lines.append("" if fenced or hunk else line)
     return "\n".join(lines)
 
 
 def _seat_clause_matches(text):
     """Yield family and original clause text without reading host or registry state."""
     text = _seat_item_text(text)
+    # Known limits: qwen L1/L2/L5/L6/L7/L8 (fence conflicts, task-only, dry-run delivery, Python prerequisite, explicit seat triggers, model/task/log coupling) and agy colon-prefix LOW.
     count = r"(?:[0-9]*[1-9][0-9]*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|both|all|a|an|the)"
     noun = r"(?:seats?|famil(?:y|ies)|reviewers?|verdicts?)"
-    negative = r"(?:non-|not-|not\s+)([a-z]+)\b"
+    negative = r"(?:non[-\s]+|not-|not\s+)([a-z]+)\b"
     # Match requirements, not nearby mentions of reviewers or vendor compatibility.
     patterns = (
         rf"\b(?:{count}\s+)?{negative}\s+(?:[a-z]+\s+)?{noun}\b(?:\s+only\b)?",
@@ -9250,6 +9258,10 @@ def _seat_clause_matches(text):
         matches = sorted((match for pattern in patterns
                           for match in re.finditer(pattern, sentence, re.IGNORECASE)),
                          key=lambda match: match.start())
+        if re.search(rf"\b{noun}\b", sentence, re.IGNORECASE):
+            matches += list(re.finditer(
+                r"\bnot\s+(?:use|choose|select|pick|include|assign)\s+([a-z]+)\b",
+                sentence, re.IGNORECASE))
         for match in matches:
             name = resolver.family_key(match.group(1))
             family = vendor_family_name_unique(name) or name
@@ -14117,7 +14129,8 @@ def cmd_run(args, cfg: dict) -> int:
     # a worker chatted twice before the route planner caught it).
     if not args.task or not args.task.strip():
         return refuse("task is empty or whitespace-only", 2)
-    args.task, changed = seat_prompt(args.task, is_seat_run(args))
+    seat = is_seat_run(args)
+    args.task, changed = seat_prompt(args.task, seat)
     if changed:
         print("seat-prompt: prepended the no-tools first line", file=sys.stderr)
     # FLEETP0b: `--run-id` names a directory, a branch and a header, so a shape
@@ -14315,7 +14328,7 @@ def cmd_run(args, cfg: dict) -> int:
     if any(not str(v).strip() for v in not_family_values(args)):
         return refuse(fence_blank_refusal(), 2)
     fence = family_fence(args)
-    if is_seat_run(args):
+    if seat:
         excluded = seat_clause_exclusions(args.task)
         if excluded:
             seat_model, _ = effective_spawn_model(

@@ -40,10 +40,7 @@ class SeatPromptTests(unittest.TestCase):
                 self.assertTrue(agent.is_seat_run(argparse.Namespace(**values)))
 
     def test_review_card(self):
-        with mock.patch.object(agent.routing, "parse_card", return_value={"role": "review"}) as parse:
-            with mock.patch.object(agent, "_card_asks_review", return_value=True):
-                self.assertTrue(agent.is_seat_run(argparse.Namespace(card="review card")))
-            parse.assert_called_once_with("review card")
+        self.assertTrue(agent.is_seat_run(argparse.Namespace(card="role=review")))
 
     def test_plain_run(self):
         self.assertFalse(agent.is_seat_run(argparse.Namespace()))
