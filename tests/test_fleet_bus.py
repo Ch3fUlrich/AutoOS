@@ -1125,6 +1125,82 @@ class BindSafetyTest(unittest.TestCase):
         self.assertEqual(rc, 3, out)  # fail-closed discovery, like a wildcard
         self.assertIn("wildcard", self.one_error_line(out))
 
+    # a lone surrogate in the bind ("\ud800") cannot be encoded: the later
+    # encoding - the OS's own in getaddrinfo - raises UnicodeEncodeError
+    # straight through main(). It is refused as a bad bind instead: one
+    # line, the same exit code as every other bad-bind error (2 for the
+    # explicit override, 3 for a discovered endpoint), never a traceback
+    # and never a bind. It is NOT the wildcard and must not be
+    # misdiagnosed as one.
+    def test_a_lone_surrogate_in_an_explicit_bind_is_a_bad_bind_refusal(self):
+        for value in ("\ud800", "a\ud800b", "x\udc00"):
+            with self.subTest(bind=repr(value)):
+                rc, out, _ = self.run_main(
+                    ["--open", "--bind", value] + self.server_args(), env={})
+                self.assertEqual(rc, 2, out)  # config error, like a wildcard
+                line = self.one_error_line(out)
+                self.assertIn("bad bind", line)
+                self.assertNotIn("wildcard", line)
+
+    def test_a_lone_surrogate_in_the_bind_env_is_a_bad_bind_refusal(self):
+        rc, out, _ = self.run_main(
+            ["--open"] + self.server_args(), env={"FLEET_BUS_BIND": "\ud800"})
+        self.assertEqual(rc, 2, out)
+        line = self.one_error_line(out)
+        self.assertIn("bad bind", line)
+        self.assertNotIn("wildcard", line)
+
+    def test_check_bind_refuses_a_lone_surrogate_as_a_bad_bind(self):
+        for value in ("\ud800", "a\ud800b", "x\udc00"):
+            with self.subTest(bind=repr(value)):
+                with self.assertRaises(fleet_bus.FleetBusError) as caught:
+                    fleet_bus.check_bind(value, "--bind / FLEET_BUS_BIND", 2)
+                error = caught.exception
+                self.assertEqual(error.status, 2, error.reason)
+                self.assertNotIn("\n", error.reason)
+                self.assertIn("bad bind", error.reason)
+                self.assertNotIn("wildcard", error.reason)
+
+    def test_endpoint_host_refuses_a_lone_surrogate_as_a_bad_bind(self):
+        for endpoint in ("\ud800", "\ud800:58690", "http://\ud800:58690",
+                         "https://\ud800"):
+            with self.subTest(endpoint=repr(endpoint)):
+                with self.assertRaises(fleet_bus.FleetBusError) as caught:
+                    fleet_bus.endpoint_host(endpoint)
+                error = caught.exception
+                self.assertEqual(error.status, 3, error.reason)
+                self.assertNotIn("\n", error.reason)
+                self.assertIn("bad bind", error.reason)
+
+    def test_a_lone_surrogate_in_a_keeper_endpoint_host_fails_closed(self):
+        keeper, url = start_keeper((200, json.dumps({"hosts": [
+            {"host": "workst", "endpoint": "\ud800", "key_id": "k",
+             "health": "healthy", "last_seen": 1761000000}]})))
+        try:
+            rc, out, _ = self.run_main(
+                ["--open", "--host", "workst", "--keeper-url", url,
+                 "--keeper-token-file", self.token_file]
+                + self.server_args(), env={})
+        finally:
+            keeper.shutdown()
+            keeper.server_close()
+        self.assertEqual(rc, 3, out)  # fail-closed discovery, like a wildcard
+        line = self.one_error_line(out)
+        self.assertIn("bad bind", line)
+        self.assertNotIn("wildcard", line)
+
+    # a port past the socket layer's range (--port 70000) makes bind()
+    # raise OverflowError, which is not an OSError and used to escape
+    # main() as a traceback. It is the same one-line fail-closed bind
+    # error (exit 3) as every other address the OS will not take.
+    def test_a_port_out_of_range_fails_with_one_line_error(self):
+        rc, out, _ = self.run_main(
+            ["--open", "--bind", "127.0.0.1", "--port", "70000",
+             "--ttl", "0.2", "--log-dir", str(self.td / "logs")], env={})
+        self.assertEqual(rc, 3)
+        line = self.one_error_line(out)
+        self.assertIn("70000", line)  # names the port, not a secret
+
 
 class RefusalLogCapTest(unittest.TestCase):
     """fix round 4 item 2: the refusal metadata log is capped per process.
@@ -1192,6 +1268,63 @@ class RefusalLogCapTest(unittest.TestCase):
         self.assertEqual(len(refusals), 3)
         self.assertEqual(len(capped), 1)
         self.assertEqual(len(rows), 4)
+
+
+class RefusalLogBestEffortTest(unittest.TestCase):
+    """The refusal metadata log is best-effort: the 401 answer always goes out.
+
+    log_refusal runs on the 401 path, and its jsonl append (os.makedirs +
+    open) raises OSError when the log dir is unwritable - here it sits
+    under a regular file - or when the disk is full. That OSError used to
+    escape do_POST and drop the response: the caller saw a dead connection
+    instead of a refusal. The write is best-effort now: the drop is
+    counted silently and the 401 is sent either way.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory(prefix="fleet_bus_logdrop_")
+        self.td = Path(self._td.name)
+        self.addCleanup(self._td.cleanup)
+        # a regular file where the log's parent must be: every write under
+        # it fails with OSError on POSIX and Windows alike (no chmod and no
+        # root-sensitive permission bits involved)
+        self.blocker = self.td / "blocker"
+        self.blocker.write_text("not a directory\n", encoding="utf-8")
+        self.logdir = str(self.blocker / "logs")
+        self.server = fleet_bus.FleetBusServer(
+            ("127.0.0.1", 0),
+            keys=fleet_bus.Keyring(override=FAKE_SECRET),
+            logdir=self.logdir)
+        self.port = self.server.server_address[1]
+        self._thread = threading.Thread(target=self.server.serve_until,
+                                        kwargs={"deadline": None}, daemon=True)
+        self._thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self._thread.join(timeout=10)
+
+    def test_a_bad_signature_gets_a_clean_401_when_the_log_is_unwritable(self):
+        for nonce in ("log-drop", "log-drop-again"):
+            with self.subTest(nonce=nonce):
+                status, data = post_inbox(self.port, good_body(nonce=nonce),
+                                          "0" * 64)
+                self.assertEqual(status, 401, data)
+                self.assertEqual(json.loads(data.decode("utf-8")),
+                                 {"error": "unauthorized"})
+        # the dropped writes are counted - and silently: nothing printed,
+        # nothing raised
+        self.assertGreaterEqual(self.server.store._log_drops, 2)
+
+    def test_log_refusal_swallows_the_oserror_and_counts_the_drop(self):
+        store = fleet_bus.FleetBusStore(self.logdir)
+        store.log_refusal("unwritable log")
+        store.log_refusal("unwritable log again")
+        self.assertEqual(store._log_drops, 2)
+        # and the cap accounting still runs, so the write stays bounded
+        # even while every one of them fails
+        self.assertEqual(store._refusals, 2)
 
 
 if __name__ == "__main__":

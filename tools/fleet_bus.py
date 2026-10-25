@@ -15,7 +15,11 @@ address is RESOLVED first, so every spelling of the all-zeros address goes
 with it ("0", "0.0", "000.000.000.000", "0x0", "0.0.0.0", "::", "::0",
 "0:0:0:0:0:0:0:0" and the empty value). An address the OS will not hand out
 (unowned, unresolvable, wrong family) is the same one-line status-3 error,
-never a traceback, as are a garbled keeper response (an
+never a traceback, as are a port past the socket layer's range (bind()'s
+OverflowError joins the same one-line arm), a bind value that cannot be
+encoded (a lone surrogate is refused as a bad bind in check_bind /
+endpoint_host, before the OS's own encoding in getaddrinfo can raise
+UnicodeEncodeError), a garbled keeper response (an
 http.client.HTTPException), a keeper that answers with a redirect (never
 followed: the bearer token must not be re-sent to another host), a
 malformed keeper endpoint, a keeper URL that is not http(s) (a scheme-less
@@ -55,7 +59,9 @@ hold message text) and refusals as {"id","ts","event":"refused","reason"}
 and never message text) lives there and nowhere else. The refusal rows are
 capped (REFUSAL_LOG_CAP per process, then one "refusal log capped" row and
 silence): any unauthenticated caller can trigger one, and the log write
-must stay bounded. A restart drops
+must stay bounded. The refusal-log write is best-effort: an unwritable
+log dir or a full disk drops the row (counted silently), never the 401
+answer. A restart drops
 undelivered bodies by design (best-effort relay: 10 s client timeout, no
 auto-retry).
 
@@ -189,8 +195,19 @@ def check_bind(bind, source, status):
     source - the explicit --bind / FLEET_BUS_BIND override or a discovered
     keeper endpoint - fails closed instead of binding one; `status` is 2
     for a configuration error, 3 for a fail-closed discovery.
+
+    A value that cannot be encoded (a lone surrogate) is refused here as
+    a bad bind, before it can reach the OS's own encoding in getaddrinfo -
+    that UnicodeEncodeError would escape main() as a traceback - and with
+    the same one-line error and exit code as every other bad bind. It is
+    not the wildcard and must never be misdiagnosed as one.
     """
     value = (bind or "").strip()
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        raise FleetBusError(status, "refusing bad bind (%s) from %s"
+                            % (value, source))
     if is_wildcard_bind(value):
         raise FleetBusError(status, "refusing wildcard bind (%s) from %s"
                             % (value if value else "empty", source))
@@ -216,12 +233,24 @@ def endpoint_host(endpoint):
 
     A malformed endpoint - say, unbalanced brackets - is not a traceback:
     urlparse's ValueError becomes a one-line fail-closed status-3 error.
+    A host that cannot be encoded (a lone surrogate) is refused the same
+    way, as a bad bind: the OS's own later encoding in getaddrinfo would
+    raise UnicodeEncodeError straight through main() otherwise.
     """
     try:
         parsed = urlparse(endpoint if "://" in endpoint else "//" + endpoint)
+        host = (parsed.hostname or "").strip()
     except ValueError:
         raise FleetBusError(3, "keeper endpoint is malformed")
-    return (parsed.hostname or "").strip()
+    try:
+        host.encode("utf-8")
+    except UnicodeError:
+        # never a traceback: refuse the unencodable host here - the wire
+        # names the host only, never the endpoint (its userinfo could
+        # carry credentials)
+        raise FleetBusError(3, "refusing bad bind (%s) from the keeper endpoint"
+                            % host)
+    return host
 
 
 def read_secret(path, what="secret file"):
@@ -534,6 +563,7 @@ class FleetBusStore:
         self._seen = OrderedDict()
         self._seq = 0
         self._refusals = 0
+        self._log_drops = 0
         self._logdir = logdir
 
     def _log(self, row):
@@ -543,6 +573,20 @@ class FleetBusStore:
         with open(os.path.join(self._logdir, day + ".jsonl"), "a",
                   encoding="utf-8") as f:
             f.write(json.dumps(row) + "\n")
+
+    def _try_log(self, row):
+        """Best-effort append for the refusal path (caller holds the lock).
+
+        The refusal-log write can fail - an unwritable log dir (a path
+        under a regular file), a full disk - and an OSError escaping
+        log_refusal would drop the 401 answer the caller is waiting for.
+        The log is best-effort: a failed write is counted as one drop in
+        self._log_drops and swallowed silently.
+        """
+        try:
+            self._log(row)
+        except OSError:
+            self._log_drops += 1
 
     def append(self, fields):
         """Store a checked record; returns it with its id. Logs metadata only."""
@@ -570,22 +614,27 @@ class FleetBusStore:
         trigger, so an unbounded append would be a disk-fill lever. Past the
         cap exactly one "refusal log capped" row is written and every later
         refusal drops silently - the 401 answers themselves never stop.
+
+        The write is best-effort too: an OSError from an unwritable log dir
+        or a full disk is counted as one silent drop (see _try_log) and
+        never stops the 401 answer from going out.
         """
         with self._lock:
             if self._refusals >= REFUSAL_LOG_CAP:
                 if self._refusals == REFUSAL_LOG_CAP:
                     self._refusals += 1
                     self._seq += 1
-                    self._log({"id": "%d-%06d"
-                               % (int(time.time() * 1000), self._seq),
-                               "ts": int(time.time()),
-                               "event": "refusal log capped"})
+                    self._try_log({"id": "%d-%06d"
+                                   % (int(time.time() * 1000), self._seq),
+                                   "ts": int(time.time()),
+                                   "event": "refusal log capped"})
                 return
             self._refusals += 1
             self._seq += 1
-            self._log({"id": "%d-%06d" % (int(time.time() * 1000), self._seq),
-                       "ts": int(time.time()), "event": "refused",
-                       "reason": reason})
+            self._try_log({"id": "%d-%06d" % (int(time.time() * 1000),
+                                              self._seq),
+                           "ts": int(time.time()), "event": "refused",
+                           "reason": reason})
 
     def since(self, cursor):
         """Records after `cursor` (insertion order); unknown cursor -> all."""
@@ -762,11 +811,14 @@ def main(argv=None, env=None):
     import time as _time
     try:
         server = FleetBusServer((bind, args.port), keys, args.log_dir)
-    except OSError as e:
-        # unowned/unresolvable address or the wrong family: one line, like
-        # the other fail-closed startup errors, naming the address only
+    except (OSError, OverflowError) as e:
+        # unowned/unresolvable address or the wrong family - and a port
+        # past the socket layer's range (bind() raises OverflowError there,
+        # which is not an OSError): one line, like the other fail-closed
+        # startup errors, naming the address and port only
         print(json.dumps({"ok": False, "error": "cannot bind %s:%s: %s"
-                          % (bind, args.port, e.strerror or e)}))
+                          % (bind, args.port,
+                             getattr(e, "strerror", None) or e)}))
         return 3
     port = server.server_address[1]
     sys.stderr.write("fleet-bus: listening on %s:%d%s\n"
