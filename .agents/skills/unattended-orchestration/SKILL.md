@@ -71,7 +71,7 @@ Binding on every level below; each line links its source — read the source, ne
 6. Quiet fleet: messages only for BLOCKED/decision, DONE or MERGE-READY with sha, GO requests, incidents, launch/recycle; no acks, no ALIVE; no recurring crons, wait with one background command that exits [D-1364, D-1377; build-L1 beat exception D-1436].
 7. L1 and L2 Claude sessions run at effort medium [D-1390].
 8. CI runs only on the workstation or ci.vm; no GitHub billing [D-1436].
-9. Judge (server-L1-routing) reviews only HIGH risk: secrets/auth/access, keeper and plan-graph engine or live keeper changes, live deploys/migrations (D-825 GO steps), data-mutating live steps. Standard lanes merge on the L1's own approval with 1-2 non-Claude seats; the router samples [D-1442].
+9. Judge (server-L1-routing) reviews only HIGH risk: secrets/auth/access, keeper and plan-graph engine or live keeper changes, live deploys/migrations (D-825 GO steps), data-mutating live steps. Seat selection follows D-2488/D-2654 via `seats_for`; see `docs/routing.md` "Seat selection". The router samples [D-1442]. Writer order follows D-2148 (`policy.writers.order`).
 10. A harness or classifier refusal is never worked around or relayed to another agent: stop and send the router the verbatim refusal; the router turns it into an OS-NN line the operator types in that session [routing DECISIONS 2.7].
 11. Model access paths: a named model runs ONLY over its own path, never a substitute model or route [D-1504]. qwen3.8-flash = qodercli ACP only; gemini-3.8-flash = antigravity (agy) ACP or Google AI Studio (both rate-limited: back off or send BLOCKED, never swap); muse-spark-1.3 = opencode ACP; mimo/mimo-v2.6-flash | mimo/mimo-v2.6-pro (mimo provider only). Path down = BLOCKED, not another model. Detail: `docs/agent-protocol.md` "Model access paths".
 
@@ -175,7 +175,8 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-orch-11: A lane that changes a route id or return code greps every consumer (lanes.md list), catalog postInstall too. (why: stale ids and bare postInstall abort CI; source: CI 36320592493, 765f189)
 - R-orch-12: Approve each fresh worktree with `trust_worktree.py` before its first session. (why: background sessions cannot answer a trust dialog; source: three lanes blocked in 3s)
 - R-orch-13: Plan, spec, decision, or bucket-table-big diff (lines incl. tests): pinned cross-family review before execute/merge, then Sonnet. (why: same family shares blind spots; source: inbox 00:31Z)
-- R-orch-14: Never skip a slow free reviewer; Haiku stays an extra pass; record writer, reviewer, verdict. (why: a small reviewer's no-issues is no proof; source: HAIKU-EVAL.md, review-spawnredact.md)
+- R-orch-14: Select available review seats per D-2488/D-2654; record writer, reviewer, verdict and provider skip text. (why: unavailable seats cannot supply independent evidence;
+  source: docs/routing.md Seat selection)
 - R-orch-15: Send the skill owner one `lesson: … evidence=…` line per bug or surprise; only a tested lesson becomes a rule. (why: unmeasured lessons corrupt the skill; source: briefs/common.md)
 - R-orch-16: Code that acts on a report (merge, ready, push) is re-audited cross-family before it gates; names match exactly. (why: a substring let notsonnet sign off; source: REVGATE2.brief, 4ff89c8)
 - R-orch-17: Kill targets, run id and mode come only from a runner-private record, never job.json. (why: each fix that read job.json re-opened the hole it closed; source: SB-A2..A3 Muse/Sonnet)
@@ -242,5 +243,3 @@ The opencode server has no cron: the router runs this loop every operator turn a
 - R-heartbeat-05: The interactive router session cannot self-wake, so the loop pings it (`Router fleet analysis and next steps`, by title): on alert findings (`BLOCKED`, `OOM_KILL`, `MISSING`) and
   for the scheduled 08:00/13:00/19:00 operator-clock digests (one per hour-slot per day, tracked in the watch file; skipped if the operator spoke in the last 20 min). The pinged router investigates
   and reports in chat unprompted. (why: the router only ever reacted; operator-worthy findings waited for questions; source: operator 2026-09-30)
-
-

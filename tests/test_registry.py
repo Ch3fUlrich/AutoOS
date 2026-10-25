@@ -43,6 +43,38 @@ def _load_tool():
 registry = _load_tool()
 
 
+class ReviewerExclusionTests(unittest.TestCase):
+    def fixture(self):
+        return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+
+    def test_stale_codex_spellings_rejected(self):
+        for model in ("cx/gpt-5.6-sol", "provider/GPT-5.6-SOL-high",
+                      "GPT_5_6_SOL", "gpt 5 6 sol", "gpt.5.6.sol"):
+            for field in ("model", "leg", "provider", "family"):
+                with self.subTest(model=model, field=field):
+                    data = self.fixture()
+                    data["policy"]["reviewers"][0][field] = model
+                    self.assertTrue(any("forbids stale gpt-5.6-sol" in p
+                                        for p in registry._check_reviewers(data)))
+
+    def test_ovh_provider_and_leg_rejected(self):
+        for field in ("provider", "leg"):
+            with self.subTest(field=field):
+                data = self.fixture()
+                data["policy"]["reviewers"][0][field] = "OVH/example-model"
+                self.assertTrue(any("forbids ovh" in p
+                                    for p in registry._check_reviewers(data)))
+
+    def test_claude_haiku_reviewer_allowed(self):
+        data = self.fixture()
+        data["policy"]["reviewers"] = [dict(client="claude", model="haiku",
+                                              family="anthropic")]
+        self.assertEqual(registry._check_reviewers(data), [])
+
+    def test_committed_catalog_passes(self):
+        self.assertEqual(registry._check_reviewers(self.fixture()), [])
+
+
 class WriterOrderTests(unittest.TestCase):
     def fixture(self):
         return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))

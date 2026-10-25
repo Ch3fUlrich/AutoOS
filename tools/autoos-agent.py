@@ -4531,7 +4531,7 @@ def claude_spawn_refusal(client_name: str, env: dict, registry: dict | None = No
     spends the allowance is the model that answers, and three other ways reach a
     Claude model than naming the client: `--model sonnet` on any client, a combo
     route whose legs are all Claude, and a client whose own configured default IS
-    Claude (`clients.AGY_DEFAULT_MODEL` is `claude-opus-4-6-thinking` today). So
+    Claude (`clients.AGY_DEFAULT_MODEL` is `claude-opus-5-5-medium` today). So
     the gate reads the effective model through `effective_spawn_model` and
     `spawn_spends_claude`, and refuses when it cannot tell what will answer --
     guessing free is the side that spends.
@@ -5559,6 +5559,11 @@ class RouteDeferred(ValueError):
     """A v2 card's resolver plan is deferred and --no-defer was not given."""
 
 
+def review_seat(card):
+    """Validate even hand-built cards before indexing a resolved seat pair."""
+    return routing.normalize({"seat": card.get("seat", 1)})["seat"]
+
+
 def resolve_review_plan(card: dict, now=None) -> dict | None:
     """The ``policy.reviewers`` decision for an authored review card.
 
@@ -5572,11 +5577,16 @@ def resolve_review_plan(card: dict, now=None) -> dict | None:
     """
     if not _card_asks_review(card) or not card.get("author"):
         return None
+    seat = review_seat(card)
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    return resolver.reviewer_for(
+    result = resolver.seats_for(
         card["author"], load_live_registry(),
         measure_mod.client_state(clients), now,
         risk=card.get("risk", "normal"), privacy=card.get("privacy", "public"))
+    result = dict(result)
+    result["reviewer"] = (result["seats"][seat - 1]
+                          if result["state"] == "resolved" else None)
+    return result
 
 
 def _card_asks_review(card: dict) -> bool:
@@ -8130,13 +8140,12 @@ def reviewer_run_override(review, client, cfg, tier, model, override, free,
         return model, None, "note: --free keeps its promo model, not policy.reviewers (%s)" % asked
     if entry.get("client") != client.name:
         return (model, None,
-                "note: policy.reviewers wants --client %s --model %s; this run stays on %s, "
-                "so it is NOT the review that list picked"
+                "note: policy.reviewers switches this run to --client %s --model %s "
+                "from %s"
                 % (entry.get("client"), entry.get("model"), client.name))
     if not client.gateway:
-        return (model, None,
-                "note: %s is not a gateway client, so --model stays the caller's; "
-                "policy.reviewers picked %s" % (client.name, asked))
+        _fence_check_reviewer(asked, entry["model"], fence)
+        return entry["model"], None, "reviewer-model: %s" % asked
     # FAMILYFENCE-5 item 1: both returns below put the reviewer's own spelling on
     # the run, so the fence is asked HERE — the resolver's route was fenced
     # upstream, the reviewer that replaces it never was.
@@ -8623,6 +8632,15 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         args.client = choose_client(required_capabilities(args))
     client = clients.CLIENTS[args.client]
     route = resolve_route(args, cfg, client, exclude_routes, provider_cooldown, fence)
+    review = route.get("review_plan")
+    if (review and review.get("state") == "resolved" and review.get("reviewer")
+            and not args.model and not args.free):
+        entry = review["reviewer"]
+        client = clients.CLIENTS[entry["client"]]
+        _fence_check_reviewer(entry["model"], entry["model"], fence)
+        route["model"] = entry["model"]
+        if client.gateway and client.name != "opencode":
+            route["combo"] = entry.get("combo") or entry.get("leg") or entry["model"]
     route, writer_decision = policy_writer_route(
         route, eligible=(getattr(args, "default_client", False) and not args.model
                          and not args.free and args.tier is None),
@@ -8726,7 +8744,9 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         level = clients.seat_level(client, level, isolate=bool(args.isolate),
                                    read_only=bool(route.get("read_only")))
         model = (writer_decision["model"] if writer_decision else
-                 args.model if not client.gateway else None)
+                 route["model"] if review and review.get("state") == "resolved"
+                 and review.get("reviewer") and not args.model and not args.free
+                 and not client.gateway else args.model if not client.gateway else None)
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         # KEYDENY3g item 3: a leaf that runs on a CLI with its own spawn gate has
         # that gate denied in argv; opencode's gate is the overlay below.
@@ -9210,6 +9230,9 @@ def resolved_writer(plan, uses_gateway, registry=None, key=None, fetch=None,
     result = {"provider": provider or WRITER_UNRESOLVED,
               "model": model or WRITER_UNRESOLVED,
               "source": source or WRITER_UNRESOLVED}
+    if client == "agy":
+        result["served_model_source"] = (source if source == WRITER_SOURCE_REPORT else
+                                          "unverified (agy keeps no model witness)")
     # REJECT 3: the family is read off the id above, so its witness is that id's.
     # A run that died before answering has no witness for its model, and the family
     # under it is the plan's claim — `planned-model`, which opens no gate — whatever
@@ -10423,11 +10446,21 @@ def route_plan_for(card, brief: str, repo: str, orchestrator_model: str, now,
     closed on it.
     """
     parsed = routing.parse_card(card) if isinstance(card, str) else dict(card or {})
+    seat = review_seat(parsed)
     normalized = routing.normalize_v2(parsed)
     features = measure_mod.measure(normalized, repo, brief or "")
     result = resolver.plan(normalized, features, client_state, registry,
                            overlay, track_record, orchestrator_model, now,
                            client, env, credit_guards)
+    if _card_asks_review(normalized) and normalized.get("author"):
+        review = resolver.seats_for(normalized["author"], registry, client_state, now,
+                                    risk=normalized.get("risk", "normal"),
+                                    privacy=normalized.get("privacy", "public"))
+        review = dict(review)
+        review["reviewer"] = (review["seats"][seat - 1]
+                              if review["state"] == "resolved" else None)
+        result["review"] = review
+        result["explain"] = list(result.get("explain") or []) + resolver.reviewer_explain_lines(review)
     if (apply_writer_policy and registry.get("policy", {}).get("writers", {}).get("order")
             and client == "opencode" and normalized.get("kind") in
             ("implement", "debug", "bulk")

@@ -3060,6 +3060,11 @@ def _check_provider_limits(registry) -> list:
 _REVIEWER_STR_FIELDS = ("client", "model", "family")
 
 
+def _is_stale_sol(blob: str) -> bool:
+    """Share the MO-1 spelling guard between writer and reviewer policy."""
+    return bool(re.search(r"gpt[-_. ]*5[-_. ]*6[-_. ]*sol", blob, re.I))
+
+
 def _check_reviewers(registry) -> list:
     """rule 11 - policy.reviewers is a non-empty ordered list of reviewers the
     resolver can actually walk (brief REVROUTE (S2) item 1, 2026-09-27).
@@ -3095,6 +3100,13 @@ def _check_reviewers(registry) -> list:
         if not isinstance(entry, dict):
             problems.append("reviewers: %s is not an object" % label)
             continue
+        blob = " ".join(str(entry.get(key, ""))
+                        for key in ("client", "model", "leg", "provider", "family"))
+        # D-2654 excludes stale/removed routes, not Claude reviewer seats.
+        if _is_stale_sol(blob):
+            problems.append("reviewers: " + label + " forbids stale gpt-5.6-sol")
+        if "ovh" in blob.lower():
+            problems.append("reviewers: " + label + " forbids ovh reviewers")
         for field in _REVIEWER_STR_FIELDS:
             if field not in entry:
                 continue
@@ -3171,7 +3183,7 @@ def _check_writers(registry) -> list:
             if row["family"].lower() == "anthropic" or re.search(
                     r"claude|sonnet|opus|haiku|anthropic", blob, re.I):
                 problems.append(label + " forbids Claude-family writers")
-            if re.search(r"gpt[-_. ]*5[-_. ]*6[-_. ]*sol", blob, re.I):
+            if _is_stale_sol(blob):
                 problems.append(label + " forbids stale gpt-5.6-sol")
             if "ovh" in blob.lower():
                 problems.append(label + " forbids ovh writers")

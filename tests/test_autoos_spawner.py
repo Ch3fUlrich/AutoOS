@@ -4734,9 +4734,9 @@ class CardV2Tests(unittest.TestCase):
         })
         # REVROUTE (S2) item 2: author is shared by both dialects and is not a
         # combo input -- it decides who reviews, never what runs.
-        # SPAWNER-ITEM-KEY: item_key is shared by both dialects.
-        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author", "item_key"}))
-        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author", "item_key"}))
+        # SPAWNER-ITEM-KEY: item_key is shared by both dialects; MODEL-ORDER: so is seat.
+        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author", "item_key", "seat"}))
+        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author", "item_key", "seat"}))
 
     def test_kind_final_and_critical_are_the_claude_budget_card_fields(self):
         """D-102 CLAUDEBUDGET: `kind=final` names the reserved final review and
@@ -9141,6 +9141,60 @@ def _reviewer_registry():
     return reg
 
 
+class ModelOrderSeatTests(unittest.TestCase):
+    def seat_plan(self, seat):
+        harness = ReviewerGateTests()
+        harness.setUp()
+        self.addCleanup(harness.doCleanups)
+        harness.registry["policy"]["reviewers"] = [
+            {"client": "agy", "model": "gemini-3.8-flash", "family": "gemini"},
+            {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen"}]
+        harness.client_state["agy"] = {"installed": True, "signed_in": True}
+        return harness.agent.build_plan(harness.args(
+            card="kind=review,author=meta,seat=%d,paths=tools/registry.py" % seat),
+            harness.cfg())
+
+    def test_model_order_agy_explicit_model(self):
+        argv = self.seat_plan(1)["cmd"]
+        self.assertEqual(argv[argv.index("--model") + 1], "gemini-3.8-flash")
+        self.assertNotIn(clients.AGY_DEFAULT_MODEL, argv)
+
+    def test_model_order_seat_card_validation(self):
+        agent = load_agent()
+        self.assertEqual(agent.routing.normalize({"seat": 2})["seat"], 2)
+        with self.assertRaises(agent.routing.CardError):
+            agent.routing.normalize({"seat": 3})
+
+    def test_model_order_selects_second_seat(self):
+        argv = self.seat_plan(2)["cmd"]
+        self.assertEqual(argv[argv.index("--model") + 1], "qwen3.8-flash")
+
+    def test_model_order_gateway_seat_leg(self):
+        harness = ReviewerGateTests()
+        harness.setUp()
+        self.addCleanup(harness.doCleanups)
+        harness.registry["policy"]["reviewers"] = [
+            {"client": "gemini", "model": "gem-flash", "family": "gemini",
+             "leg": "gem_api/gem-flash"},
+            {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen"}]
+        harness.client_state["gemini"] = {"installed": True, "signed_in": True}
+        plan = harness.agent.build_plan(harness.args(
+            card="kind=review,author=meta,seat=2,paths=tools/registry.py"),
+            harness.cfg())
+        argv = plan["cmd"]
+        self.assertEqual(argv[argv.index("--model") + 1], "gem_api/gem-flash")
+
+    def test_hand_built_card_rejects_out_of_range_seat(self):
+        agent = load_agent()
+        with self.assertRaisesRegex(routing.CardError, "seat"):
+            agent.resolve_review_plan({"kind": "review", "author": "gpt", "seat": 3})
+        with self.assertRaisesRegex(routing.CardError, "seat"):
+            agent.route_plan_for({"kind": "review", "author": "gpt", "seat": 3},
+                                 "review this", str(ROOT), "orch", None,
+                                 agent.load_registry(agent.REGISTRY_PATH),
+                                 {}, [], {})
+
+
 class ReviewerGateTests(unittest.TestCase):
     """REVROUTE (S2) item 2: the spawner resolves WHO reviews an authored review
     card from ``policy.reviewers``, and refuses to start a run that has no
@@ -9276,7 +9330,7 @@ class ReviewerGateTests(unittest.TestCase):
         # whose gem_api leg does not train.
         route = self.route(card="kind=review,author=qwen,privacy=sensitive,"
                                 "paths=tools/registry.py")
-        self.assertEqual(route["review_plan"]["reviewer"]["family"], "google")
+        self.assertEqual(route["review_plan"]["state"], "unresolved")
         skipped = route["review_plan"]["skipped"]
         self.assertEqual([s["model"] for s in skipped],
                          ["omniroute/muse", "qwen3.8-flash", "haiku"])
@@ -9348,9 +9402,9 @@ class ReviewerGateTests(unittest.TestCase):
             "available": False, "unavailable_until": self.DOWN_LATER})
         route = self.route()
         self.assertEqual(route["review_plan"]["reviewer"]["client"], "gemini")
-        self.assertTrue(str(route["model"]).startswith("omniroute/r-"), route["model"])
-        self.assertIn("policy.reviewers wants --client gemini", route["reviewer_note"])
-        self.assertIn("it is NOT the review that list picked", self.run_cmd_run()[1])
+        self.assertEqual(route["model"], "gem-flash")
+        self.assertIn("policy.reviewers switches this run to --client gemini", route["reviewer_note"])
+        self.assertIn("switches this run to --client", self.run_cmd_run()[1])
 
     def test_a_review_plan_is_carried_through_the_route_cli_explain_output(self):
         # route --explain must show the skipped reviewers, not only the run's own
@@ -9395,7 +9449,7 @@ class ReviewerGateTests(unittest.TestCase):
         rc, out, err = self.run_cmd_run()
         self.assertEqual(rc, self.agent.EXIT_FREE_QUEUE_TIMEOUT, out + err)
         self.assertEqual(self.agent.EXIT_FREE_QUEUE_TIMEOUT, 9)
-        self.assertIn("reviewer queued until %s" % self.DOWN, err)
+        self.assertIn("queued until %s" % self.DOWN, err)
         self.assertEqual(out, "", "a queued run prints nothing it did not decide")
 
     def test_a_queue_waits_for_the_first_reviewer_back_not_the_last(self):
@@ -20155,6 +20209,7 @@ class ResolvedWriterTests(unittest.TestCase):
                                        False, registry=registry)
         self.assertEqual(native, {"provider": "agy", "model": "gemini-3.8-flash",
                                   "family": "gemini", "source": "assumed-default",
+                                  "served_model_source": "unverified (agy keeps no model witness)",
                                   "family_source": agent.FAMILY_SOURCE_PLANNED})
         self.assertFalse(agent.writer_is_proven(native))
         free = agent.resolved_writer({"client": "qoder", "model": "jetski/jetski-9"},
