@@ -31,6 +31,40 @@ NOT_BLIND_LINES = ("the fixture cannot see the row",
 
 
 class VerdictGrammarTests(unittest.TestCase):
+    def test_harness_and_echoed_grammar_are_not_a_second_verdict(self):
+        harness = "\n".join(("route: review", "run-id: sample", "sandbox: isolated",
+                              "model: seat", "notice: starting", "client: ready",
+                              "mode: review", "status: running", "answer:"))
+        for word in v.VERDICTS:
+            grammar = "|".join(v.VERDICTS)
+            prompt = next(line for line in v.seat_prompt("seat", CRITERIA, BASE).splitlines()
+                          if line.strip().startswith("VERDICT:"))
+            echoes = ("", "VERDICT: " + grammar, prompt,
+                      "VERDICT: <" + grammar + ">",
+                      "VERDICT: " + " / ".join(v.VERDICTS),
+                       "VERDICT: " + ", ".join(v.VERDICTS[:-1]) + " or " + v.VERDICTS[-1])
+            for echo in (line + chr(10) if line else "" for line in echoes):
+                with self.subTest(word=word, echo=echo):
+                    got = v.parse_verdict(harness + "\n" + echo + "VERDICT: " + word
+                                          + "\nFindings: reviewed the change.\nstatus: ended\n")
+                    self.assertTrue(got["valid"], got)
+                    self.assertEqual(word, got["verdict"])
+
+    def test_pipe_finding_is_a_second_real_verdict(self):
+        got = v.parse_verdict("VERDICT: ACCEPT\nVERDICT: REJECT | see findings")
+        self.assertFalse(got["valid"], got)
+        self.assertEqual("two verdicts in one answer", got["reason"])
+
+    def test_an_indented_decision_never_answers_but_a_different_one_fails_closed(self):
+        # round-3 seat MED: a 4-space REJECT after ACCEPT read as ACCEPT.
+        contradiction = "VERDICT: ACCEPT\n\n    VERDICT: REJECT\n"
+        self.assertFalse(v.parse_verdict(contradiction)["valid"])
+        self.assertIsNone(v.transcript_verdict(contradiction))
+        # an indented sample that agrees, or stands alone, is still only a paste
+        self.assertEqual(v.parse_verdict("    VERDICT: ACCEPT\nVERDICT: ACCEPT\n")["verdict"],
+                         "ACCEPT")
+        self.assertFalse(v.parse_verdict("    VERDICT: ACCEPT\n")["valid"])
+
     @classmethod
     def setUpClass(cls):
         spec = importlib.util.spec_from_file_location(
@@ -67,8 +101,7 @@ class VerdictGrammarTests(unittest.TestCase):
             got = v.parse_verdict(text)
             self.assertTrue(got["valid"], (text, got["reason"]))
             self.assertEqual(want, got["verdict"], text)
-        for text, why in (("prose\nVERDICT: ACCEPT\nmore\nVERDICT: ACCEPT\n", "two"),
-                          ("prose only, the word verdict: accept inside a sentence\n",
+        for text, why in (("prose only, the word verdict: accept inside a sentence\n",
                            "no verdict line"),
                           ("I reviewed it.\nVERDICT: SHIP\n", "SHIP"),
                           # mimo seat d15v: a lone fenced verdict with no conclusion of the

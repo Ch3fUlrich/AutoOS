@@ -5,9 +5,13 @@ counted anyway, and the seat's text and the record's `verdict=` field disagreed 
 yes. One owner: `parse_verdict`, `verdict_word`, `seat_prompt`. Hermetic (D-852)."""
 import re
 
-from autoos_ready_guards import _Fences  # the one markdown-fence rule (P4a fix 1)
 
 VERDICTS = ("ACCEPT", "REJECT", "HOLD")
+# Transcript readers retain their historical words, but never own a second seat grammar.
+LEGACY_AGENT_VERDICTS = ("ready", "fix-first", "not-ready")
+LEGACY_CALL_VERDICTS = ("pass", "fail-with-findings")
+TRANSCRIPT_VERDICTS = (tuple(word.lower() for word in VERDICTS)
+                      + LEGACY_AGENT_VERDICTS + LEGACY_CALL_VERDICTS)
 READY_TOKEN = "accept"        # the record gate's yes, lower-cased like its word list
 UNCOUNTABLE_TOKEN = "HOLD"    # a stated HOLD is honest, and reviews nothing
 
@@ -27,7 +31,7 @@ BLIND_PHRASES = (
 )
 _BLIND_RES = tuple(re.compile(p, re.IGNORECASE) for p in BLIND_PHRASES)
 
-_MARKDOWN = ("**", "__", "`", "*", "_")
+_MARKDOWN = ("**", "__", "`", "*", "_", "~")
 _PUNCT = ".,;:!?'\" "
 # Decoration is stackable (`> # VERDICT: ACCEPT`) and numbered prose is a bullet too
 # (`1. VERDICT: ACCEPT`, `a) VERDICT: ACCEPT`), so it is stripped in a loop, once layer
@@ -50,7 +54,7 @@ def _strip_decoration(text):
         text = stripped.strip()
 
 
-_VERDICT_RE = re.compile(r"(?i)^verdict:(?P<rest>.*)$")
+_VERDICT_RE = re.compile(r"(?i)^verdict\s*:(?P<rest>.*)$")
 
 
 def _normalise(line):
@@ -82,16 +86,12 @@ def _blind_statement(text):
 
 
 def parse_verdict(text):
-    """`{"verdict", "valid", "reason", "countable"}` for one seat's whole answer.
+    """Read the shared decision scan, then apply seat-only blindness/countability rules.
 
-    Exactly ONE line, decoration normalised, must be `VERDICT: ACCEPT|REJECT|HOLD` — one
-    colon, the bare word, trailing punctuation tolerated — wherever it stands (D-1515: a
-    seat that reviews first and concludes last was logged as no verdict); a line inside a
-    markdown fence or a `>` blockquote is quoted material and never counts. No verdict line,
-    a second verdict, an unknown word (`SHIP`, `LGTM`), or the reviewer talking after the
-    word on that line is invalid and says which. A seat that says IT could not see the change has voided its
-    ACCEPT (P2/G2); a REJECT stands — losing a blocking finding is the worse failure — and
-    a HOLD stays valid but never countable."""
+    Fences, diff hunks, blockquotes and >=4-column indentation are quoted material.
+    Identical decisions are allowed; any different words fail closed. Positive trailing
+    prose is invalid (and still participates in conflicts); negative prose is retained.
+    """
     out = {"verdict": None, "valid": False, "reason": "", "countable": False}
 
     def invalid(reason):
@@ -101,46 +101,19 @@ def parse_verdict(text):
     lines = [ln for ln in (text or "").splitlines() if _fold_invisible(ln).strip()]
     if not lines:
         return invalid("no non-empty line to read a verdict from")
-    # D-1515: the verdict line may stand anywhere (seats review first and conclude last);
-    # exactly one is read, zero or two fail closed. A fenced line is quoted material
-    # (a sample from the diff), never the seat's own: the one fence rule every reader
-    # shares (_Fences), so an unclosed fence swallows the rest.
-    fences = _Fences()
-    # A `>` blockquote is quoted material the same way (seat qwen d15v r3).
-    own = [ln for ln in lines
-           if not fences.feed(ln) and not _fold_invisible(ln).lstrip().startswith(">")]
-    found = [ln for ln in map(_normalise, own) if _VERDICT_RE.match(ln)]
-    if not found:
-        return invalid("no verdict line in the answer: %s" % _normalise(lines[0])[:60])
-    if len(found) > 1:
-        return invalid("two verdicts in one answer")
-    first = found[0]
-    match = _VERDICT_RE.match(first)
-    rest, word = match.group("rest"), match.group("rest").strip(_PUNCT)
-    for bad, why in ((":" in rest, "the verdict line wants exactly one colon: %s" % rest[:60]),
-                     (not word, "no verdict word after the colon: %s" % first[:60]),
-                     (" " in word, "words after the verdict word: %s" % word[:60]),
-                     (word.upper() not in VERDICTS, "unknown verdict word: %s" % word)):
-        if bad:
-            return invalid(why)
-    verdict = word.upper()
+    verdict, reason = _decision_scan(text, ())
+    if reason:
+        return invalid(reason)
     out["verdict"] = verdict
     blind = _blind_statement(text)
     if verdict == "REJECT":
         out.update(valid=True, countable=True)
-        if blind:
-            out["reason"] = ("says it %s, and a REJECT from a seat that could not see is "
-                             "still a finding" % blind)
-    elif blind and verdict == UNCOUNTABLE_TOKEN:
-        out.update(valid=True, reason="says it %s: HOLD is right, no seat counted" % blind)
     elif blind:
-        out["reason"] = "says it %s, so its %s is not a verdict" % (blind, verdict)
+        out.update(valid=verdict == UNCOUNTABLE_TOKEN,
+                   reason="says it %s, so its %s is not a countable verdict" % (blind, verdict))
     else:
         out.update(valid=True, countable=verdict != UNCOUNTABLE_TOKEN)
     return out
-
-
-_VERDICT_RE = re.compile(r"(?i)^verdict:(?P<rest>.*)$")
 
 
 def seat_prompt(angle, criteria, base_line):
@@ -154,7 +127,8 @@ def seat_prompt(angle, criteria, base_line):
     lines = ["You are an independent review seat. Your angle: %s." % angle,
              "Review criteria, verbatim:", criteria, "",
              "Answer with your verdict on the FIRST line of your reply, exactly:",
-             "  VERDICT: ACCEPT|REJECT|HOLD — that word alone, findings underneath.",
+             "  VERDICT: " + "|".join(VERDICTS),
+             "Use that word alone, findings underneath.",
              "REJECT only for a finding of this severity: a secret or a path outside the"
              " sandbox in the change; a stamp mismatch, the sandbox base not what this"
              " prompt quoted; the change not visible to you; a crash where a clean refusal"
@@ -163,3 +137,173 @@ def seat_prompt(angle, criteria, base_line):
              "Quote this line verbatim in your report, as proof of what you reviewed: %s"
              % base_line.strip()]
     return "\n".join(lines) + "\n"
+
+
+def _candidate(line):
+    """Normalise markup before splitting the label, independent of colon placement."""
+    text = _normalise(line).strip("[]()<>'\" ")
+    match = _VERDICT_RE.match(text)
+    return re.sub(r"(?i)\bnot\s+ready\b", "not-ready", match.group("rest").strip()) if match else None
+
+
+def is_verdict_echo(line):
+    """Only two distinct vocabulary words joined solely by separators are an echo."""
+    rest = _candidate(line)
+    if rest is None:
+        return False
+    words = re.findall(r"[a-z]+(?:-[a-z]+)*", rest.lower())
+    choices = {word for word in words if word in TRANSCRIPT_VERDICTS}
+    remainder = re.sub(r"[a-z]+(?:-[a-z]+)*", "", rest.lower())
+    return (len(choices) >= 2 and all(w in TRANSCRIPT_VERDICTS or w == "or" for w in words)
+            and not re.sub(r"[\s|/,<>\[\]()'\"]", "", remainder))
+
+
+def is_seat_line(line):
+    value, _ = _decision(line)
+    return value in VERDICTS
+
+
+def _decision(line):
+    rest = _candidate(line)
+    if rest is None or is_verdict_echo(line):
+        return None, None
+    rest = rest.lstrip("[]()<>'\" ")
+    match = re.match(r"(?i)^([a-z]+(?:-[a-z]+)*)(?![a-z-])(.*)$", rest)
+    if not match or match.group(1).lower() not in TRANSCRIPT_VERDICTS:
+        return None, "unknown verdict word: " + rest[:60]
+    word, tail = match.group(1).lower(), match.group(2)
+    # Positive prose is not a clean approval. Retain its word for conflict detection,
+    # but invalidate it even alone. Negative findings must never be discarded.
+    tail = tail.strip("[]()<>'\" .,!?:; ")
+    reason = "words after the verdict word (or colon)" if tail and word in ("accept", "ready", "pass") else None
+    return word.upper() if word.upper() in VERDICTS else word, reason
+
+
+def transcript_value(line, legacy):
+    """Read one candidate with the shared grammar and the caller's vocabulary."""
+    if line.lstrip().startswith(">"):
+        return None
+    value, reason = _decision(line)
+    return value if not reason and (value in VERDICTS or value in legacy) else None
+
+
+_FENCE_OPEN_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_FENCE_CLOSE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})[ 	]*$")
+_HUNK_RE = re.compile(r"^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _indent_columns(line: str) -> int:
+    """The line's leading indent in CommonMark columns: a tab advances to the
+    next multiple of 4, so a line starting with a tab indents 4 columns."""
+    col = 0
+    for ch in line:
+        if ch == " ":
+            col += 1
+        elif ch == "\t":
+            col += 4 - (col % 4)
+        else:
+            break
+    return col
+
+
+def _decision_scan(text, legacy):
+    """One quoted-material and decision policy for seats and transcript readers."""
+    raws = [_ANSI_RE.sub("", line) for line in (text or "").splitlines()]
+    decisions = set()
+    indented = set()  # decisions inside >= 4-column indented code (never the answer)
+    originals = {}
+    errors = []
+    fence = None               # (char, length) while a block is open
+    first_marker = None
+    hunk = None                # (old, new) lines left in the active hunk body
+    for i, raw in enumerate(raws):
+        if hunk is not None:
+            old, new = hunk
+            if old <= 0 and new <= 0:
+                hunk = None
+            elif raw.startswith(" "):
+                hunk = (old - 1, new - 1)
+                continue
+            elif raw.startswith("-"):
+                hunk = (old - 1, new)
+                continue
+            elif raw.startswith("+"):
+                hunk = (old, new - 1)
+                continue
+            elif raw.startswith("\\"):
+                continue  # "\ No newline at end of file" counts toward neither
+            elif raw == "":
+                # a blank context line that lost its single leading space to a
+                # trailing-whitespace strip is still hunk content
+                hunk = (old - 1, new - 1)
+                continue
+            else:
+                hunk = None
+        if fence is not None:
+            m = _FENCE_CLOSE_RE.match(raw)
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1]:
+                fence = None
+            continue
+        if raw.startswith(("diff --git", "index ", "---", "+++")):
+            continue
+        m = _HUNK_RE.match(raw)
+        if m:
+            hunk = (int(m.group(1) or 1), int(m.group(2) or 1))
+            continue
+        m = _FENCE_OPEN_RE.match(raw)
+        if m:
+            fence = (m.group(1)[0], len(m.group(1)))
+            if first_marker is None:
+                first_marker = i
+            continue
+        # RC-2 seat A: >= 4 columns of leading whitespace is an indented code
+        # block in CommonMark - a paste, not the reviewer's verdict - so it
+        # never counts, in any of the three public readers.
+        if _indent_columns(raw) >= 4:
+            # ...but it may still CONTRADICT the real verdict: an indented
+            # decision never becomes the answer, yet a different one fails
+            # closed (a 4-space REJECT after ACCEPT must not read as ACCEPT).
+            value, _ = _decision(raw.strip())
+            if value:
+                indented.add(value)
+            continue
+        stripped = raw.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(">"):
+            continue
+        value, reason = _decision(stripped)
+        if value:
+            decisions.add(value)
+            originals[value] = stripped
+        if reason:
+            errors.append(reason)
+    if fence is not None and first_marker is not None:
+        return _decision_scan("\n".join(raws[:first_marker]), legacy)
+    if len(decisions) > 1:
+        return None, "two verdicts in one answer"
+    # Only a POSITIVE answer can be undercut by an indented contradiction; a real
+    # negative stays the answer whatever a pasted sample says (RC-2 seat A).
+    if (decisions and indented - decisions
+            and next(iter(decisions)).lower().rstrip(".!") in ("accept", "pass", "ready")):
+        return None, "an indented verdict line contradicts the answer"
+    if errors:
+        return None, errors[0]
+    if not decisions:
+        return None, "no verdict line in the answer"
+    value = decisions.pop()
+    if value not in VERDICTS and value not in legacy:
+        return None, "unknown verdict word: " + value
+    if legacy == LEGACY_AGENT_VERDICTS and value in legacy:
+        # Preserve historical presentation for record consumers, not decision identity.
+        original = _fold_invisible(originals[value]).split(":", 1)[1].strip().strip("*_` ").strip()
+        if re.fullmatch(r"(?i)(?:ready|fix-first|not[- ]ready)[.!?]?", original):
+            return original, None
+    return value, None
+
+
+def transcript_verdict(text: str, legacy=LEGACY_CALL_VERDICTS) -> str | None:
+    """Same decision scan as seats; unsupported or conflicting words yield missing/null."""
+    value, reason = _decision_scan(text, legacy)
+    return None if reason else value
