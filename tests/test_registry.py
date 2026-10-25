@@ -5520,5 +5520,26 @@ class ProviderSpellingTests(unittest.TestCase):
                                                                             spelling))
 
 
+class D2641NoGatewayPathTests(unittest.TestCase):
+    """D-2641: the gateway-side Qoder PAT login is withdrawn, so no gateway
+    leg serves qwen or qoder any more. Both client rows stay (both CLIs exist
+    on the host), but neither may declare a gateway path through OmniRoute:
+    `gateway_mode` is the registry's own record of how a client reaches its
+    models, and `omniroute-run` would promise a leg that no longer exists.
+    tools/autoos_clients.py keeps its own `gateway` flag for the
+    `omniroute run <client>` wrapper; that is the adapter's table, pinned by
+    its own suite, not this one."""
+
+    @staticmethod
+    def clients():
+        return load_registry()["clients"]
+
+    def test_qwen_has_no_gateway_path(self):
+        self.assertEqual(self.clients()["qwen"]["gateway_mode"], "none")
+
+    def test_qoder_has_no_gateway_path(self):
+        self.assertEqual(self.clients()["qoder"]["gateway_mode"], "none")
+
+
 if __name__ == "__main__":
     unittest.main()

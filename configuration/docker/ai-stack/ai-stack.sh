@@ -29,7 +29,7 @@
 #   ~/.config/autoos/ai-stack/stack.active   ownership marker: written only when a
 #                                            migrate completed (or a fresh host's
 #                                            first `up`), removed by rollback
-#   ~/.local/share/autoos/ai-stack/          omniroute/ data, opencode-home/, qoder-home/
+#   ~/.local/share/autoos/ai-stack/          omniroute/ data, opencode-home/
 # init only ADDS missing keys (backup first); a value you edit stays yours.
 # up/migrate refuse a LAN publish address unless coding-agents-fw.service
 # runs or stack.env says AUTOOS_STACK_ALLOW_LAN=1, and an AUTOOS_OMNIROUTE_PUBLIC_URL
@@ -719,10 +719,11 @@ stack_data_dir() {
 # when present, the gateway's own data included. A mount source that is missing
 # when compose starts is created by the docker daemon as root, and the
 # containers (host uid) could not write it. init calls this, and so does `up`:
-# an already initialised host gets a newly added mount (qoder-home) that way.
+# an already initialised host gets a newly added mount that way (D-2641 kept
+# this generic; the withdrawn qoder-home mount is no longer one of them).
 ensure_data_dirs() {
     local base="$1" d
-    for d in "$base" "$base/omniroute" "$base/opencode-home" "$base/qoder-home"; do
+    for d in "$base" "$base/omniroute" "$base/opencode-home"; do
         if [[ -d "$d" ]]; then continue; fi
         if [[ $DRY -eq 1 ]]; then echo "  - would create $d"; continue; fi
         mkdir -p "$d"
@@ -743,9 +744,8 @@ cmd_init() {
         if [[ -d "$d" ]]; then continue; fi
         if [[ $DRY -eq 1 ]]; then echo "  - would create $d"; else mkdir -p "$d"; echo "  + created $d"; fi
     done
-    # The gateway DB, opencode sessions, the MCP caches and qodercli's home:
-    # the operator's only.
-    [[ $DRY -eq 1 ]] || chmod 700 "$DATA_DIR" "$DATA_DIR/omniroute" "$DATA_DIR/opencode-home" "$DATA_DIR/qoder-home"
+    # The gateway DB, opencode sessions and the MCP caches: the operator's only.
+    [[ $DRY -eq 1 ]] || chmod 700 "$DATA_DIR" "$DATA_DIR/omniroute" "$DATA_DIR/opencode-home"
 
     # OPENCODE_MEM_LIMIT is deliberately absent (2026-09-29): a 1536m cap
     # OOM-killed opencode serve and cut every in-flight run across the fleet.
@@ -961,8 +961,8 @@ cmd_up() {
     # Before the images: compose up below may create these containers or
     # recreate running ones (a changed bind, a rebuilt image).
     preflight || return 1
-    # A mount source added since init ran (qoder-home) must not be left to
-    # docker, which would create it as root.
+    # A mount source added since init ran must not be left to docker, which
+    # would create it as root.
     ensure_data_dirs "$(stack_data_dir)"
     ensure_images "${start[@]}" || return 1
     if [[ $DRY -eq 1 ]]; then
@@ -1836,9 +1836,8 @@ cmd_failover() {
 
 # ─── verify ─────────────────────────────────────────────────────────────────
 # The by-hand checklist after `migrate --yes`, as one command. READ-ONLY: docker
-# is only asked `inspect`, `exec <opencode> test -d` and `exec <omniroute>
-# qodercli --version` (which leaves qodercli's usual log files in its HOME, the
-# qoder-home mount - nothing else), curl only makes GETs and the combo probes
+# is only asked `inspect` and `exec <opencode> test -d`, curl only makes GETs
+# and the combo probes
 # (POST /v1/chat/completions, max_tokens 256; a 502/503 is retried twice,
 # 10 s then 20 s, while a freshly started gateway warms up); nothing is started, stopped,
 # written or printed that could be a key. One line per
@@ -2052,21 +2051,7 @@ verify_code_dir_visible() {
     return 0
 }
 
-# 5. The gateway container carries qodercli: the Qoder PAT login spawns it
-# there (omniroute.Dockerfile). Run the way the gateway runs it - same user,
-# same HOME - so a missing binary and an unwritable HOME both show up here.
-verify_omniroute_qodercli() {
-    local c out name="omniroute has qodercli"
-    c="$(verify_container omniroute)"
-    if [[ -z "$c" ]]; then v_skip "$name" "the omniroute service is not enabled"; return 0; fi
-    if ! container_running "$c"; then v_skip "$name" "$c is not running"; return 0; fi
-    out="$("$DOCKER" exec "$c" qodercli --version 2>/dev/null || true)"
-    out="${out%%$'\n'*}"
-    if [[ "$out" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then v_ok "$name"; return 0; fi
-    v_fail "$name" "qodercli --version printed no version in $c - the container runs an image without the qodercli layer, or its HOME is not writable (ai-stack.sh up omniroute rebuilds and recreates it)"
-}
-
-# 6. What the public sees: the auth proxy redirects, it never serves. No
+# 5. What the public sees: the auth proxy redirects, it never serves. No
 # credentials are sent, and none that sit in a URL are echoed.
 verify_public_urls() {
     local urls u code shown
@@ -2084,7 +2069,7 @@ verify_public_urls() {
     return 0
 }
 
-# 7. The public origin the gateway was told (AUTOOS_OMNIROUTE_PUBLIC_URL):
+# 6. The public origin the gateway was told (AUTOOS_OMNIROUTE_PUBLIC_URL):
 # printed the way the app normalizes it - trailing slashes dropped - or skipped
 # when unset or empty. Checked, not requested: it may be a plain LAN address,
 # and reachability through the proxy is what AUTOOS_VERIFY_PUBLIC_URLS is for.
@@ -2100,7 +2085,7 @@ verify_omniroute_public_url() {
     v_ok "$name $(public_url_shown "$u")"
 }
 
-# 8. configuration/healthcheck.sh is the repo's stack probe, and it is not a
+# 7. configuration/healthcheck.sh is the repo's stack probe, and it is not a
 # check verify can run: it appends to logs/healthcheck-<date>.log on every run
 # (mkdir + tee), answers with exit 0 whatever it finds, and its --fix mode
 # resumes services. Everything of it that concerns this stack (the three ports,
@@ -2109,7 +2094,7 @@ verify_healthcheck() {
     v_skip "healthcheck" "configuration/healthcheck.sh writes a log file and always exits 0 - not read-only, no verdict"
 }
 
-# 9. The effective admission gate and heap the running gateway process sees:
+# 8. The effective admission gate and heap the running gateway process sees:
 # read PID 1's environment (the entrypoint appends OMNIROUTE_MEMORY_MB to
 # NODE_OPTIONS; docker exec shells only see the Dockerfile's default, so
 # /proc/1 is the truth). Informational - not a pass/fail check; the image
@@ -2131,7 +2116,7 @@ verify_omniroute_admission() {
     echo "  = $name: max_heavy=$heavy, queue_ms=$queue, heap MB=$heap"
 }
 
-# 10. The cgroup memory split behind the gateway's pressure guard: the guard
+# 9. The cgroup memory split behind the gateway's pressure guard: the guard
 # (upstream thresholds, not configurable in 3.8.50) answers 503 to every chat
 # call at >= 92% current/max and only recovers below 75%, and page cache counts
 # toward it - while anon (real use) can sit far lower (measured 2026-09-27:
@@ -2188,7 +2173,6 @@ cmd_verify() {
     verify_keyless_one opencode /api/session
     verify_combos
     verify_code_dir_visible
-    verify_omniroute_qodercli
     verify_public_urls
     verify_omniroute_public_url
     verify_healthcheck

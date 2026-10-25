@@ -116,20 +116,22 @@ def main(path):
             bad.append(name + ": needs no capability back")
     if not re.search(r'REQUIRE_API_KEY: "true"', om):
         bad.append("omniroute: REQUIRE_API_KEY must be pinned to true")
-    # The gateway runs qodercli for the Qoder PAT login: a derived image (the
-    # upstream one has none) and a writable HOME - qodercli crashes at start
-    # without one, and the rootfs is read-only.
+    # D-2641: the gateway-side Qoder PAT login is withdrawn, so with it the
+    # qodercli layer, the CLI_QODER_BIN it was named by, and the writable HOME
+    # (qodercli crashed at start without one, and the rootfs is read-only).
+    # The derived image itself stays: bcryptjs and the build-time vertex patch.
     if not re.search(r"^    build:\n      context: \.\n      dockerfile: omniroute\.Dockerfile$", om, re.M):
-        bad.append("omniroute: must build omniroute.Dockerfile (the qodercli layer)")
+        bad.append("omniroute: must build omniroute.Dockerfile (the bcryptjs and vertex-patch layers)")
     if not re.search(r"^    image: autoos/omniroute:\d+\.\d+\.\d+-autoos\d+$", om, re.M):
         bad.append("omniroute: the local image must be autoos/omniroute:<upstream version>-autoos<n>")
-    if not re.search(r"^      CLI_QODER_BIN: /usr/local/bin/qodercli$", om, re.M):
-        bad.append("omniroute: CLI_QODER_BIN must be the absolute path /usr/local/bin/qodercli")
-    home = re.search(r"^      HOME: (/\S+)$", om, re.M)
-    if not home:
-        bad.append("omniroute: HOME must be set to the writable qoder home")
-    elif not re.search(r"^      - \$\{AUTOOS_STACK_DATA:\?[^}]*\}/qoder-home:%s$" % re.escape(home.group(1)), om, re.M):
-        bad.append("omniroute: HOME %s must be the mount of ${AUTOOS_STACK_DATA}/qoder-home" % home.group(1))
+    if "qodercli" in om:
+        bad.append("omniroute: qodercli is withdrawn (D-2641) - no env line, comment or mount may name it")
+    if "CLI_QODER_BIN" in om:
+        bad.append("omniroute: CLI_QODER_BIN is withdrawn (D-2641) - the gateway never runs qodercli")
+    if re.search(r"^      HOME:", om, re.M):
+        bad.append("omniroute: the writable qoder HOME override is withdrawn (D-2641)")
+    if "qoder-home" in om:
+        bad.append("omniroute: the qoder-home mount is withdrawn (D-2641)")
     if not re.search(r"^      - \$\{AUTOOS_STACK_DATA:\?[^}]*\}/omniroute:/app/data$", om, re.M):
         bad.append("omniroute: the gateway data dir must stay mounted at /app/data")
     # The public URL (stack.env, never this file): passed through, empty when
