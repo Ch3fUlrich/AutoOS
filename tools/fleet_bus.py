@@ -156,6 +156,14 @@ def is_wildcard_bind(value):
             return True
     except OSError:
         pass
+    except ValueError:
+        # inet_aton raises ValueError (not OSError) on an embedded NUL.
+        # Fail closed and treat it as the wildcard so check_bind refuses it
+        # with the same one-line error and exit code as every other bad bind
+        # instead of a traceback - and so the value never reaches a C
+        # resolver, which would truncate it at the NUL and could bind the
+        # wildcard after all.
+        return True
     try:
         return ipaddress.ip_address(value).is_unspecified
     except ValueError:

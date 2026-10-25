@@ -992,6 +992,35 @@ class BindSafetyTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("listening on 127.0.0.1:", err)
 
+    # (4) a bind value with an embedded NUL fails closed like any other bad
+    # bind. inet_aton raises ValueError - not OSError - on one, and that must
+    # become the same one-line refusal and exit code as the other bad-bind
+    # errors, never a traceback and never a bind. A NUL is never legitimate
+    # here, and a C resolver would truncate the value at it ("0\0evil" could
+    # reach the OS as the wildcard "0").
+    def test_a_nul_in_an_explicit_bind_is_refused(self):
+        for value in ("0\x00", "0.0.0.0\x00", "127.0.0.1\x00evil"):
+            with self.subTest(bind=repr(value)):
+                rc, out, _ = self.run_main(
+                    ["--open", "--bind", value] + self.server_args(), env={})
+                self.assertEqual(rc, 2, out)  # config error, like a wildcard
+                self.assertIn("wildcard", self.one_error_line(out))
+
+    def test_a_nul_in_a_discovered_endpoint_fails_closed(self):
+        keeper, url = start_keeper((200, json.dumps({"hosts": [
+            {"host": "workst", "endpoint": "http://0\x00:58690", "key_id": "k",
+             "health": "healthy", "last_seen": 1761000000}]})))
+        try:
+            rc, out, _ = self.run_main(
+                ["--open", "--host", "workst", "--keeper-url", url,
+                 "--keeper-token-file", self.token_file]
+                + self.server_args(), env={})
+        finally:
+            keeper.shutdown()
+            keeper.server_close()
+        self.assertEqual(rc, 3, out)  # fail-closed discovery, like a wildcard
+        self.assertIn("wildcard", self.one_error_line(out))
+
 
 if __name__ == "__main__":
     unittest.main()
