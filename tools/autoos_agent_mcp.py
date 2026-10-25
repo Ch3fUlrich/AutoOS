@@ -99,7 +99,7 @@ sys.path.insert(0, TOOLS_DIR)
 import autoos_clients as clients  # noqa: E402
 import autoos_recovery as recovery  # noqa: E402
 import autoos_report as report_parser  # noqa: E402
-from autoos_verdict import TRANSCRIPT_VERDICTS  # noqa: E402
+from autoos_verdict import TRANSCRIPT_VERDICTS, VERDICTS  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 from registry import resolve_leg, unavailable_now  # noqa: E402
 
@@ -1598,7 +1598,10 @@ def _verdict_value(stripped: str) -> str | None:
     value = m.group(1).strip().strip("*_` ").strip()
     if not value:
         return None
-    if value.lower().replace(" ", "-").rstrip(".!?:;,*_") in _VERDICT_WORDS:
+    norm = value.lower().replace(" ", "-").rstrip(".!?:;,*_")
+    if norm in _VERDICT_WORDS:
+        if norm.upper() in VERDICTS:
+            return norm.upper()
         return value
     return None
 

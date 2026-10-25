@@ -37,7 +37,9 @@ class VerdictGrammarTests(unittest.TestCase):
                               "mode: review", "status: running", "answer:"))
         for word in v.VERDICTS:
             for echo in ("", "VERDICT: ACCEPT|REJECT|HOLD\n",
-                         "  VERDICT: ACCEPT|REJECT|HOLD — that word alone, findings underneath.\n"):
+                         "  VERDICT: ACCEPT|REJECT|HOLD — that word alone, findings underneath.\n",
+                         "VERDICT: <ACCEPT|REJECT|HOLD>\n",
+                         "VERDICT: ACCEPT | REJECT | HOLD\n"):
                 with self.subTest(word=word, echo=echo):
                     got = v.parse_verdict(harness + "\n" + echo + "VERDICT: " + word
                                           + "\nFindings: reviewed the change.\nstatus: ended\n")

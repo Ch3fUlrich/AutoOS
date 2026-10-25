@@ -95,7 +95,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from autoos_verdict import TRANSCRIPT_VERDICTS  # noqa: E402
+from autoos_verdict import TRANSCRIPT_VERDICTS, VERDICTS  # noqa: E402
 
 GATEWAY_ENV_VAR = "AUTOOS_OMNIROUTE_URL"
 KEY_ENV_VAR = "AUTOOS_OMNIROUTE_KEY"
@@ -384,8 +384,12 @@ def _verdict_value(stripped: str) -> str | None:
         value = value.strip().strip("*_` ").strip()
         if value[-1:] in (".", "!", "?"):
             value = value[:-1]
-    value = value.strip().lower()
-    return value if value in _VERDICT_VALUES else None
+    norm = value.strip().lower()
+    if norm in _VERDICT_VALUES:
+        if norm.upper() in VERDICTS:
+            return norm.upper()
+        return norm
+    return None
 
 
 def _indent_columns(line: str) -> int:

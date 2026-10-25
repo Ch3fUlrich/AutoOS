@@ -118,7 +118,7 @@ def parse_verdict(text):
     # decision; still reject two actual decisions and malformed non-template lines.
     template = "VERDICT: " + "|".join(VERDICTS)
     found = [ln for ln in map(_normalise, own) if _VERDICT_RE.match(ln)
-             and not (ln.upper() == template or ln.upper().startswith(template + " "))]
+             and not ("|" in ln or "<" in ln or ln.upper() == template or ln.upper().startswith(template + " "))]
     if not found:
         return invalid("no verdict line in the answer: %s" % _normalise(lines[0])[:60])
     if len(found) > 1:

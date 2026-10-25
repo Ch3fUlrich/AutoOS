@@ -679,8 +679,10 @@ class VerdictParseTests(unittest.TestCase):
                 with self.subTest(reader=reader.__module__, word=word):
                     text = (harness + "\nVERDICT: ACCEPT|REJECT|HOLD\nVERDICT: "
                             + word + "\nFindings: reviewed the change.\nstatus: ended\n")
-                    expected = word if reader is agent_mcp.review_verdict else word.lower()
-                    self.assertEqual(expected, reader(text))
+                    self.assertEqual(word, reader(text))
+                    text_lower = (harness + "\nVERDICT: ACCEPT|REJECT|HOLD\nVERDICT: "
+                                  + word.lower() + "\nFindings: reviewed the change.\nstatus: ended\n")
+                    self.assertEqual(word, reader(text_lower))
 
     def test_review_run_record_keeps_accept_and_reject_instead_of_no_verdict(self):
         sys.path.insert(0, str(TOOLS))
@@ -695,6 +697,7 @@ class VerdictParseTests(unittest.TestCase):
                 result = agent_mcp._state("sample-review")
                 self.assertEqual("completed", result["state"])
                 self.assertNotEqual("no-verdict", result["detail"])
+                self.assertEqual(word, result.get("verdict"))
 
     """verdict_line() called DIRECTLY on the loaded module: the tolerant
     D-337 parse (copied from tools/autoos_agent_mcp.py's review_verdict /
