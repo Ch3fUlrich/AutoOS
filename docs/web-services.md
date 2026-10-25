@@ -665,7 +665,7 @@ The variables `verify` reads besides the ones above:
   (default `l2-worker-free-only l2-worker-clean`).
 - `AUTOOS_VERIFY_RETRY_SLEEP` - seconds before check 3's first retry (default
   10, doubled for the second; decimal, anything else means 10).
-- `AUTOOS_VERIFY_PUBLIC_URLS` - space separated public URLs for check 6. Keep
+- `AUTOOS_VERIFY_PUBLIC_URLS` - space separated public URLs for check 5. Keep
   them in your shell environment, not in a file that is committed. A URL with
   credentials in it is refused, and a query string is never echoed.
 
