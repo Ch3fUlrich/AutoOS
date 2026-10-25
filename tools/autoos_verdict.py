@@ -211,6 +211,7 @@ def _decision_scan(text, legacy):
     """One quoted-material and decision policy for seats and transcript readers."""
     raws = [_ANSI_RE.sub("", line) for line in (text or "").splitlines()]
     decisions = set()
+    indented = set()  # decisions inside >= 4-column indented code (never the answer)
     originals = {}
     errors = []
     fence = None               # (char, length) while a block is open
@@ -260,6 +261,12 @@ def _decision_scan(text, legacy):
         # block in CommonMark - a paste, not the reviewer's verdict - so it
         # never counts, in any of the three public readers.
         if _indent_columns(raw) >= 4:
+            # ...but it may still CONTRADICT the real verdict: an indented
+            # decision never becomes the answer, yet a different one fails
+            # closed (a 4-space REJECT after ACCEPT must not read as ACCEPT).
+            value, _ = _decision(raw.strip())
+            if value:
+                indented.add(value)
             continue
         stripped = raw.strip()
         if not stripped:
@@ -276,6 +283,11 @@ def _decision_scan(text, legacy):
         return _decision_scan("\n".join(raws[:first_marker]), legacy)
     if len(decisions) > 1:
         return None, "two verdicts in one answer"
+    # Only a POSITIVE answer can be undercut by an indented contradiction; a real
+    # negative stays the answer whatever a pasted sample says (RC-2 seat A).
+    if (decisions and indented - decisions
+            and next(iter(decisions)).lower().rstrip(".!") in ("accept", "pass", "ready")):
+        return None, "an indented verdict line contradicts the answer"
     if errors:
         return None, errors[0]
     if not decisions:

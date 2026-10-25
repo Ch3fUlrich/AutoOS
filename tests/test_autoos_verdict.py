@@ -55,6 +55,16 @@ class VerdictGrammarTests(unittest.TestCase):
         self.assertFalse(got["valid"], got)
         self.assertEqual("two verdicts in one answer", got["reason"])
 
+    def test_an_indented_decision_never_answers_but_a_different_one_fails_closed(self):
+        # round-3 seat MED: a 4-space REJECT after ACCEPT read as ACCEPT.
+        contradiction = "VERDICT: ACCEPT\n\n    VERDICT: REJECT\n"
+        self.assertFalse(v.parse_verdict(contradiction)["valid"])
+        self.assertIsNone(v.transcript_verdict(contradiction))
+        # an indented sample that agrees, or stands alone, is still only a paste
+        self.assertEqual(v.parse_verdict("    VERDICT: ACCEPT\nVERDICT: ACCEPT\n")["verdict"],
+                         "ACCEPT")
+        self.assertFalse(v.parse_verdict("    VERDICT: ACCEPT\n")["valid"])
+
     @classmethod
     def setUpClass(cls):
         spec = importlib.util.spec_from_file_location(

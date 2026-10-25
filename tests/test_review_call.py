@@ -690,7 +690,10 @@ class VerdictParseTests(unittest.TestCase):
             cases.append((line, "REJECT"))
         cases += [("VERDICT: ACCEPT\nVERDICT: ACCEPT", "ACCEPT"),
                   ("```\nVERDICT: REJECT\n```\nVERDICT: ACCEPT", "ACCEPT"),
-                  ("VERDICT: ACCEPT\n    VERDICT: REJECT", "ACCEPT")]
+                  # round-3 seat MED: an indented REJECT undercuts a real ACCEPT
+                  # (fail closed); a real negative stays the answer.
+                  ("VERDICT: ACCEPT\n    VERDICT: REJECT", None),
+                  ("VERDICT: REJECT\n    VERDICT: ACCEPT", "REJECT")]
         for echo in ("VERDICT: ACCEPT|REJECT|HOLD", "VERDICT: [ACCEPT / REJECT]",
                      "VERDICT: <ready|fix-first>", "VERDICT: (pass or fail-with-findings)"):
             cases += [(echo, None), (echo + "\nVERDICT: ACCEPT", "ACCEPT")]
