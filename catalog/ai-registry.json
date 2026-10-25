@@ -81,13 +81,13 @@
       "supports_effort": false
     },
     "qwen": {
-      "$comment": "skills_dir unmeasured: plan.md Phase C5 spikes each client's native skills directory; not done as of this migration.",
+      "$comment": "skills_dir unmeasured: plan.md Phase C5 spikes each client's native skills directory; not done as of this migration. D-2641: gateway_mode none - the gateway-side Qoder PAT/infrastructure was withdrawn, and qwen (like qoder) now reaches the gateway only as a plain client; the adapter's own gateway flag is a separate table in tools/autoos_clients.py.",
       "binary": "qwen",
       "capabilities": {
         "shell": true,
         "write": true
       },
-      "gateway_mode": "omniroute-run",
+      "gateway_mode": "none",
       "id": "qwen",
       "signin_check": "env:AUTOOS_OMNIROUTE_KEY",
       "skills_dir": null,
