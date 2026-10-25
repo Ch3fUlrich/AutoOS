@@ -9168,10 +9168,30 @@ class ModelOrderSeatTests(unittest.TestCase):
         argv = self.seat_plan(2)["cmd"]
         self.assertEqual(argv[argv.index("--model") + 1], "qwen3.8-flash")
 
+    def test_model_order_gateway_seat_leg(self):
+        harness = ReviewerGateTests()
+        harness.setUp()
+        self.addCleanup(harness.doCleanups)
+        harness.registry["policy"]["reviewers"] = [
+            {"client": "gemini", "model": "gem-flash", "family": "gemini",
+             "leg": "gem_api/gem-flash"},
+            {"client": "qoder", "model": "qwen3.8-flash", "family": "qwen"}]
+        harness.client_state["gemini"] = {"installed": True, "signed_in": True}
+        plan = harness.agent.build_plan(harness.args(
+            card="kind=review,author=meta,seat=2,paths=tools/registry.py"),
+            harness.cfg())
+        argv = plan["cmd"]
+        self.assertEqual(argv[argv.index("--model") + 1], "gem_api/gem-flash")
+
     def test_hand_built_card_rejects_out_of_range_seat(self):
         agent = load_agent()
         with self.assertRaisesRegex(routing.CardError, "seat"):
             agent.resolve_review_plan({"kind": "review", "author": "gpt", "seat": 3})
+        with self.assertRaisesRegex(routing.CardError, "seat"):
+            agent.route_plan_for({"kind": "review", "author": "gpt", "seat": 3},
+                                 "review this", str(ROOT), "orch", None,
+                                 agent.load_registry(agent.REGISTRY_PATH),
+                                 {}, [], {})
 
 
 class ReviewerGateTests(unittest.TestCase):

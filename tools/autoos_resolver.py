@@ -2717,9 +2717,9 @@ def _entry_unavailable_until(entry, registry, now, client_state=None):
     if leg:
         try:
             provider_id, _model_id = resolve_leg(leg, registry)
-        except ValueError:
+        except (ValueError, KeyError):
             return moments
-        entry_data = registry["providers"].get(provider_id) or {}
+        entry_data = (registry.get("providers") or {}).get(provider_id) or {}
         sources.extend((client_state.get(section) or {}).get(name) or {}
                        for section, name in (("providers", provider_id), ("legs", leg)))
     else:

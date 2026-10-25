@@ -3362,6 +3362,25 @@ class RealCatalogSeatTests(unittest.TestCase):
                 skipped = next(e for e in result["skipped"] if e["client"] == "gemini")
                 self.assertIn(outage["reason"], " ".join(skipped["reasons"]))
 
+    def test_client_and_leg_timed_overlay_yields_retry_at(self):
+        outage = {"available": False, "unavailable_until": "2026-10-25T00:00:00Z",
+                  "reason": "HTTP 429: measured review quota exhausted"}
+        for location in ("client", "leg"):
+            with self.subTest(location=location):
+                state = json.loads(json.dumps(self.state))
+                registry = json.loads(json.dumps(self.registry))
+                if location == "client":
+                    for e in self.entries:
+                        state.setdefault(e["client"], {}).update(outage)
+                else:
+                    state["legs"] = {e["leg"]: outage for e in self.entries if e.get("leg")}
+                    for e in self.entries:
+                        if not e.get("leg"):
+                            state.setdefault(e["client"], {}).update(outage)
+                result = r.seats_for("cx/gpt-6.1-sol", registry, state, self.NOW)
+                self.assertEqual(result["state"], "queued")
+                self.assertEqual(result["retry_at"], "2026-10-25T00:00:00Z")
+
 
 class TwoSeatSelectionTests(unittest.TestCase):
     NOW = datetime(2026, 10, 24, tzinfo=timezone.utc)

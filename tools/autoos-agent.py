@@ -8633,12 +8633,14 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
     client = clients.CLIENTS[args.client]
     route = resolve_route(args, cfg, client, exclude_routes, provider_cooldown, fence)
     review = route.get("review_plan")
-    if (review and review.get("state") == "resolved" and review.get("seats")
+    if (review and review.get("state") == "resolved" and review.get("reviewer")
             and not args.model and not args.free):
         entry = review["reviewer"]
         client = clients.CLIENTS[entry["client"]]
         _fence_check_reviewer(entry["model"], entry["model"], fence)
         route["model"] = entry["model"]
+        if client.gateway and client.name != "opencode":
+            route["combo"] = entry.get("combo") or entry.get("leg") or entry["model"]
     route, writer_decision = policy_writer_route(
         route, eligible=(getattr(args, "default_client", False) and not args.model
                          and not args.free and args.tier is None),
@@ -8742,8 +8744,8 @@ def build_plan(args, cfg: dict, exclude_routes: set | None = None,
         level = clients.seat_level(client, level, isolate=bool(args.isolate),
                                    read_only=bool(route.get("read_only")))
         model = (writer_decision["model"] if writer_decision else
-                 route["model"] if review and review.get("seats")
-                 and review.get("state") == "resolved" and not args.model and not args.free
+                 route["model"] if review and review.get("state") == "resolved"
+                 and review.get("reviewer") and not args.model and not args.free
                  and not client.gateway else args.model if not client.gateway else None)
         joinable = re.sub(r"[^A-Za-z0-9._-]+", "-", title).strip("-") if args.joinable else None
         # KEYDENY3g item 3: a leaf that runs on a CLI with its own spawn gate has
