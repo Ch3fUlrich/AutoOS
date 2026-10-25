@@ -24261,9 +24261,11 @@ class VerdictLineTests(unittest.TestCase):
 
     def test_template_echoes_are_ignored(self):
         for line in ("VERDICT: <ready|fix-first|NOT READY>\n",
-                     "VERDICT: [ready]\n",
                      "> VERDICT: ready\n"):
             self.assertIsNone(self.verdict(line), line)
+        # REVIEW-VERDICT-PARSE r3: a bracketed SINGLE choice is a decision, not an
+        # echo (only two or more verdict words make a template echo).
+        self.assertEqual(self.verdict("VERDICT: [ready]\n"), "ready")
 
     def test_a_verdict_inside_a_code_fence_is_ignored(self):
         text = ("```text\n"
@@ -24380,8 +24382,12 @@ class VerdictLineTests(unittest.TestCase):
         self.assertEqual(self.verdict(text), "ready")
 
     def test_the_last_valid_line_wins(self):
+        # REVIEW-VERDICT-PARSE r3: two DIFFERENT decisions fail closed (the seat
+        # re-runs) instead of last-wins; identical repeats still read as one.
         text = "VERDICT: ready\n...more work...\n**VERDICT**: fix-first\n"
-        self.assertEqual(self.verdict(text), "fix-first")
+        self.assertIsNone(self.verdict(text))
+        self.assertEqual(self.verdict("VERDICT: fix-first\n...\n**VERDICT**: fix-first\n"),
+                         "fix-first")
 
     def test_a_verdict_far_from_the_tail_is_still_read(self):
         # A long reviewer session: the verdict is the deliverable, and it can sit
