@@ -924,6 +924,18 @@ def build_argv(req: dict, run_id: str | None = None,
         if client in ("opencode", "claude") and req.get("lean") is None and card["role"] == "review":
             req = dict(req, lean=True)  # reviewers do not need serena or a browser
     route["routing_version"] = routing.ROUTING_VERSION
+    # SPAWNER-ITEM-KEY (D-2345/D-2664): explicit item_key wins; otherwise take it
+    # from the card. Validated as <project>:<ID>; refused if invalid.
+    item_key = req.get("item_key")
+    if item_key is not None:
+        try:
+            item_key = routing.check_item_key(item_key)
+        except routing.CardError as exc:
+            raise ValueError(str(exc))
+    elif card and isinstance(card, dict) and card.get("item_key") is not None:
+        item_key = card["item_key"]
+    if item_key is not None:
+        route["item_key"] = item_key
     # D-665 (AO-L2-LAUNCH criteria 3 and b): the L2 gate. A spawn that resolves
     # below tier 2 is not a worker an L2 may start, and a Claude client or a
     # Claude model pin is a spend an L2 may not make. Checked here, at the one
@@ -1071,6 +1083,8 @@ def build_argv(req: dict, run_id: str | None = None,
         argv += ["--review-base", str(req["review_base"]).strip()]
     if run_id:
         argv += ["--run-id", run_id]
+    if item_key is not None:
+        argv += ["--item-key", item_key]
     if req.get("dry_run") or os.environ.get("AUTOOS_AGENT_MCP_DRY_RUN") == "1":
         argv.append("--dry-run")
     argv.append(task)
@@ -1331,9 +1345,12 @@ def spawn(req: dict) -> dict:
                 return {"error": "Failed to create run directory after %d attempts" % max_attempts,
                         "state": "failed"}
             continue
+    job_req = dict({k: v for k, v in req.items() if k != "task"},
+                   **planned_family_fields(req, client, policy))
+    if route.get("item_key") is not None:
+        job_req["item_key"] = route["item_key"]
     job = {"id": run_id, "run_id": run_id,
-           "request": dict({k: v for k, v in req.items() if k != "task"},
-                          **planned_family_fields(req, client, policy)),
+           "request": job_req,
            "task": req.get("task"), "argv": argv, "cwd": cwd, "route": route,
            # F1 (AO-L2-RESUME): whose child this is. The L2 lane names itself in
            # its own environment (the render sets AUTOOS_L2_LANE), so the lane
@@ -1360,7 +1377,7 @@ def spawn(req: dict) -> dict:
         scope_unit = agent.worker_scope_unit(run_id)
     except ValueError:
         scope_unit = None
-    write_kill_record(run_id, {
+    kill_rec = {
         "mode": "review" if _review_requested(req, argv) else "write",
         "scope": scope_unit,
         "dry_run": "--dry-run" in argv,
@@ -1373,7 +1390,11 @@ def spawn(req: dict) -> dict:
         # because that is the only copy `autoos_recovery` may believe (R-orch-17).
         # None is not written at all: `write_kill_record` skips it, so a run
         # outside a lane keeps a record that names no lane.
-        "lane": lane})
+        "lane": lane,
+    }
+    if route.get("item_key") is not None:
+        kill_rec["item_key"] = route["item_key"]
+    write_kill_record(run_id, kill_rec)
     proc = subprocess.Popen([sys.executable, os.path.abspath(__file__), "--run-job", path],
                             # FF1b item 6: the detached runner is a child of
                             # ours, so it gets the fence — and the runner repeats
@@ -2030,7 +2051,8 @@ def build_server(profile: str | None = None):
                review_of: str | None = None,
                no_fallthrough: bool = False,
                review_base: str | None = None,
-               claude_reason: str | None = None) -> dict:
+               claude_reason: str | None = None,
+               item_key: str | None = None) -> dict:
         """Start one agent on `task` and return its run id at once (poll status/result).
 
         client: omit for the D-2148 writer order on write cards; review cards default to opencode.
@@ -2114,7 +2136,9 @@ def build_server(profile: str | None = None):
         (gateway-log/client-reported/pinned/assumed-default); a CROSS-FAMILY verdict
         prints `yes` only on a witnessed model, never on an assumed default, while a
         collision prints `NO`, marked `(assumed)` when nothing witnessed the model
-        that hit it (FAMILYFENCE-3 N5) — the same collision the run exits 12 on."""
+        that hit it (FAMILYFENCE-3 N5) — the same collision the run exits 12 on.
+        item_key: task item key (<project>:<ID>, e.g. autoos:SPAWNER-ITEM-KEY); validated
+        as project [a-z0-9-]+, ID [A-Z0-9][A-Z0-9-]*; refused if invalid."""
         return spawn({"task": task, "client": client, "card": card, "tier": tier, "model": model,
                       "isolate": isolate, "lean": lean, "free": free,
                       "allow_training": allow_training, "joinable": joinable,
@@ -2124,7 +2148,8 @@ def build_server(profile: str | None = None):
                       "not_family": not_family, "review_of": review_of,
                       "no_fallthrough": no_fallthrough,
                       "review_base": review_base,
-                      "claude_reason": claude_reason})
+                      "claude_reason": claude_reason,
+                      "item_key": item_key})
 
     @_register("status")
     def _status(run_id: str | None = None) -> dict:

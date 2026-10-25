@@ -4734,8 +4734,9 @@ class CardV2Tests(unittest.TestCase):
         })
         # REVROUTE (S2) item 2: author is shared by both dialects and is not a
         # combo input -- it decides who reviews, never what runs.
-        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author"}))
-        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author"}))
+        # SPAWNER-ITEM-KEY: item_key is shared by both dialects.
+        self.assertEqual(routing.CARD_SHARED, frozenset({"privacy", "author", "item_key"}))
+        self.assertEqual(routing._CARD_NON_COMBO_SHARED, frozenset({"author", "item_key"}))
 
     def test_kind_final_and_critical_are_the_claude_budget_card_fields(self):
         """D-102 CLAUDEBUDGET: `kind=final` names the reserved final review and
@@ -16384,6 +16385,93 @@ class RunIdRecordTests(_WorkerRecordBase):
         self.assertIsNone(row["parent_run_id"])
 
 
+class CliItemKeyTests(RunIdRecordTests):
+    """SPAWNER-ITEM-KEY (D-2345/D-2664): CLI run accepts --item-key and card item_key;
+    records on worker record and runner-private record; invalid key refused with rc 2."""
+
+    def setUp(self):
+        super().setUp()
+        self.old_state = os.environ.get("AUTOOS_STATE_DIR")
+        os.environ["AUTOOS_STATE_DIR"] = self.tmp
+        self.addCleanup(self._restore_state)
+
+    def _restore_state(self):
+        if self.old_state is None:
+            os.environ.pop("AUTOOS_STATE_DIR", None)
+        else:
+            os.environ["AUTOOS_STATE_DIR"] = self.old_state
+
+    def cfg(self):
+        names = list(routing.ALL_COMBOS) + ["r-free", "r-cheap"]
+        return {"providers": {"omniroute": {"models": {n: {} for n in names}}}}
+
+    def test_cli_run_with_explicit_item_key(self):
+        plan = self._plan(item_key="autoos:CLI-EXPLICIT")
+        rc, rec, _ = self._cmd_run(plan, run_id=self.GIVEN_ID)
+        self.assertEqual(rec.get("item_key"), "autoos:CLI-EXPLICIT")
+        if os.name != "nt":
+            kill_rec = self.agent.read_kill_record(self.GIVEN_ID)
+            self.assertEqual(kill_rec.get("item_key"), "autoos:CLI-EXPLICIT")
+
+    def test_cli_run_with_card_item_key(self):
+        plan = self._plan(item_key="autoos:CLI-CARD")
+        rc, rec, _ = self._cmd_run(plan, run_id=self.GIVEN_ID)
+        self.assertEqual(rec.get("item_key"), "autoos:CLI-CARD")
+        if os.name != "nt":
+            kill_rec = self.agent.read_kill_record(self.GIVEN_ID)
+            self.assertEqual(kill_rec.get("item_key"), "autoos:CLI-CARD")
+
+    def test_cli_build_plan_resolves_card_item_key_and_explicit_wins(self):
+        # 1. card item_key is placed on plan
+        args = self._args()
+        args.card = "role=implement,item_key=autoos:CARD-KEY"
+        args.tier = None
+        p = self.agent.build_plan(args, self.cfg())
+        self.assertEqual(p.get("item_key"), "autoos:CARD-KEY")
+
+        # 2. explicit item_key wins over card item_key
+        args = self._args()
+        args.card = "role=implement,item_key=autoos:CARD-KEY"
+        args.item_key = "autoos:EXPLICIT-KEY"
+        args.tier = None
+        p = self.agent.build_plan(args, self.cfg())
+        self.assertEqual(p.get("item_key"), "autoos:EXPLICIT-KEY")
+
+        # 3. no item_key -> no field
+        args = self._args()
+        args.card = "role=implement"
+        args.tier = None
+        p = self.agent.build_plan(args, self.cfg())
+        self.assertNotIn("item_key", p)
+
+    def test_cli_run_without_item_key_has_no_field(self):
+        plan = self._plan()
+        rc, rec, _ = self._cmd_run(plan, run_id=self.GIVEN_ID)
+        self.assertNotIn("item_key", rec)
+        if os.name != "nt":
+            kill_rec = self.agent.read_kill_record(self.GIVEN_ID)
+            self.assertNotIn("item_key", kill_rec or {})
+
+    def test_cli_run_invalid_item_key_refused(self):
+        args = self._args()
+        args.item_key = "invalid-key"
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            rc = self.agent.cmd_run(args, self.cfg())
+        self.assertEqual(rc, 2)
+        self.assertIn("item_key", err.getvalue())
+
+    def test_cli_run_card_invalid_item_key_refused(self):
+        args = self._args()
+        args.card = "role=implement,item_key=invalid-key"
+        args.tier = None
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err):
+            rc = self.agent.cmd_run(args, self.cfg())
+        self.assertEqual(rc, 2)
+        self.assertIn("item_key", err.getvalue())
+
+
 class PsTreeTests(_WorkerRecordBase):
     """FLEETSPEC P0 item 2: `ps --tree` shows the spawn tree, not a flat list."""
 
@@ -21176,6 +21264,136 @@ class McpReviewBasePlumbingTests(unittest.TestCase):
                 if t.name == "spawn"][0]
         self.assertIn("review_base", tool.inputSchema["properties"])
         self.assertIn("review_base", tool.description)
+
+
+class ItemKeyRoutingTests(unittest.TestCase):
+    """SPAWNER-ITEM-KEY (D-2345/D-2664): routing card supports shared item_key field,
+    validated as <project>:<ID> (project [a-z0-9-]+, ID [A-Z0-9][A-Z0-9-]*)."""
+
+    def test_item_key_is_shared_card_field(self):
+        self.assertIn("item_key", routing.CARD_SHARED)
+        self.assertIn("item_key", routing._CARD_NON_COMBO_SHARED)
+        self.assertIn("item_key", routing.CARD_V2_KNOWN)
+
+    def test_item_key_validation_valid(self):
+        for valid in ("autoos:SPAWNER-ITEM-KEY", "proj-1:ITEM-1", "a:1", "p:A", "foo-bar:A-B-1"):
+            self.assertEqual(routing.check_item_key(valid), valid)
+
+    def test_item_key_validation_invalid_refused(self):
+        for bad in ("", "   ", "autoos", "autoos:", ":ITEM", "autoos:item",
+                    "AUTOOS:ITEM", "autoos:-ITEM", "autoos:ITEM_1", "auto_os:ITEM", 123, None):
+            with self.assertRaises((routing.CardError, ValueError), msg=repr(bad)):
+                routing.check_item_key(bad)
+
+    def test_v1_card_with_item_key(self):
+        out = routing.normalize(routing.parse_card("role=implement,item_key=autoos:TEST-1"))
+        self.assertEqual(out["item_key"], "autoos:TEST-1")
+
+    def test_v1_card_without_item_key_has_no_field(self):
+        out = routing.normalize(routing.parse_card("role=implement"))
+        self.assertNotIn("item_key", out)
+
+    def test_v2_card_with_item_key(self):
+        out = routing.normalize_v2(routing.parse_card("kind=implement,item_key=autoos:TEST-2"))
+        self.assertEqual(out["item_key"], "autoos:TEST-2")
+
+    def test_v2_card_without_item_key_has_no_field(self):
+        out = routing.normalize_v2(routing.parse_card("kind=implement"))
+        self.assertNotIn("item_key", out)
+
+    def test_card_with_invalid_item_key_refused(self):
+        with self.assertRaises(routing.CardError):
+            routing.normalize(routing.parse_card("role=implement,item_key=invalid-key"))
+        with self.assertRaises(routing.CardError):
+            routing.normalize_v2(routing.parse_card("kind=implement,item_key=invalid-key"))
+
+
+class McpItemKeyPlumbingTests(unittest.TestCase):
+    """SPAWNER-ITEM-KEY (D-2345/D-2664): MCP spawn and build_argv accept item_key,
+    validated as <project>:<ID>; an invalid key is refused (_refused);
+    explicit item_key wins over card; job.json request.item_key equals it;
+    passed down to child argv as --item-key; no key -> no field."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.old = {k: os.environ.get(k) for k in ("AUTOOS_STATE_DIR",
+                                                   "AUTOOS_AGENT_MCP_DRY_RUN")}
+        os.environ.update(AUTOOS_STATE_DIR=self.tmp, AUTOOS_AGENT_MCP_DRY_RUN="1")
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def tearDown(self):
+        for k, v in self.old.items():
+            os.environ.pop(k, None) if v is None else os.environ.update({k: v})
+
+    def _spawn(self, **over):
+        return mcp_server.spawn(dict({"task": "t", "cwd": str(ROOT), "dry_run": True,
+                                      "card": {"role": "implement"}}, **over))
+
+    def test_spawn_with_explicit_item_key_records_in_job_json_and_argv(self):
+        out = self._spawn(item_key="autoos:EXPLICIT-1")
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertEqual(job["request"]["item_key"], "autoos:EXPLICIT-1")
+        self.assertIn("--item-key", job["argv"])
+        self.assertEqual(job["argv"][job["argv"].index("--item-key") + 1], "autoos:EXPLICIT-1")
+        if os.name != "nt":
+            rec = mcp_server.read_kill_record(out["id"])
+            self.assertEqual(rec["item_key"], "autoos:EXPLICIT-1")
+
+    def test_spawn_with_card_item_key_records_in_job_json_and_argv(self):
+        out = self._spawn(card={"role": "implement", "item_key": "autoos:CARD-1"})
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertEqual(job["request"]["item_key"], "autoos:CARD-1")
+        self.assertIn("--item-key", job["argv"])
+        self.assertEqual(job["argv"][job["argv"].index("--item-key") + 1], "autoos:CARD-1")
+        if os.name != "nt":
+            rec = mcp_server.read_kill_record(out["id"])
+            self.assertEqual(rec["item_key"], "autoos:CARD-1")
+
+    def test_spawn_explicit_item_key_wins_over_card_item_key(self):
+        out = self._spawn(item_key="autoos:EXPLICIT-WIN",
+                          card={"role": "implement", "item_key": "autoos:CARD-LOSE"})
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertEqual(job["request"]["item_key"], "autoos:EXPLICIT-WIN")
+        self.assertEqual(job["argv"][job["argv"].index("--item-key") + 1], "autoos:EXPLICIT-WIN")
+        if os.name != "nt":
+            rec = mcp_server.read_kill_record(out["id"])
+            self.assertEqual(rec["item_key"], "autoos:EXPLICIT-WIN")
+
+    def test_spawn_without_item_key_has_no_field(self):
+        out = self._spawn()
+        self.assertNotIn("error", out, out)
+        job = mcp_server._read_json(os.path.join(out["dir"], "job.json"))
+        self.assertNotIn("item_key", job["request"])
+        self.assertNotIn("--item-key", job["argv"])
+        if os.name != "nt":
+            rec = mcp_server.read_kill_record(out["id"])
+            self.assertNotIn("item_key", rec or {})
+
+    def test_spawn_invalid_item_key_refused(self):
+        for bad in ("bad-key", "autoos:", ":ITEM", "autoos:lower"):
+            with self.subTest(bad=bad):
+                out = self._spawn(item_key=bad)
+                self.assertEqual(out.get("state"), "rejected", out)
+                self.assertIn("error", out)
+                self.assertIn("item_key", out["error"])
+
+    def test_spawn_card_with_invalid_item_key_refused(self):
+        out = self._spawn(card={"role": "implement", "item_key": "bad-key"})
+        self.assertEqual(out.get("state"), "rejected", out)
+        self.assertIn("error", out)
+        self.assertIn("item_key", out["error"])
+
+    def test_spawn_tool_schema_and_docstring_advertise_item_key(self):
+        import asyncio
+        if not importlib.util.find_spec("mcp"):
+            self.skipTest("the mcp package is not installed")
+        tool = [t for t in asyncio.run(mcp_server.build_server().list_tools())
+                if t.name == "spawn"][0]
+        self.assertIn("item_key", tool.inputSchema["properties"])
+        self.assertIn("item_key", tool.description)
 
 
 class FamilyFenceRecordTests(unittest.TestCase):
