@@ -25,9 +25,6 @@
 #                        (one NAME=value per line; nothing when the file is absent)
 #   nocode-<container>   `docker exec <container> test -d <dir>` fails: the code
 #                        tree is not mounted in that container
-#   noqoder-<container>  `docker exec <container> qodercli --version` fails: the
-#                        image has no qodercli layer
-#   qoder-version-<container>  what that command prints instead of 1.1.63
 #   proc1-environ-<container>  what `docker exec <container> sh -c 'tr ... </proc/1/environ'`
 #                              prints: one NAME=value per line (the admission
 #                              gate verify reads OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT,
@@ -146,16 +143,6 @@ fake_docker() {
             if [[ "${3:-}" == sh && "${4:-}" == -c && "${5:-}" == *"memory.current"* ]]; then
                 [[ -e "$S/run-$2" ]] || return 1
                 if [[ -s "$S/cgroup-$2" ]]; then cat "$S/cgroup-$2"; fi
-                return 0
-            fi
-            # exec <container> qodercli --version: the gateway's CLI check.
-            if [[ "${3:-}" == qodercli ]]; then
-                [[ -e "$S/run-$2" ]] || return 1
-                if [[ -e "$S/noqoder-$2" ]]; then
-                    echo 'OCI runtime exec failed: exec: "qodercli": executable file not found in $PATH: unknown' >&2
-                    return 126
-                fi
-                if [[ -s "$S/qoder-version-$2" ]]; then cat "$S/qoder-version-$2"; else echo 1.1.63; fi
                 return 0
             fi
             # exec <container> test -d <dir>: the code tree check. True while

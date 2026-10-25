@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """D-2549 offline bind/auth contracts. Env password auth is bypassed in v2; anomalyco/opencode#45856. Network bind is the binding control. Fake credentials only."""
 import base64
+import http.server
+import importlib.util
+import json
 import os
+import pathlib
 import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -360,20 +365,59 @@ def _probe(port, path, user=None, pw=None):
         return None
 
 
-"""Offline regression checks for D-2549 review findings."""
-import importlib.util
-import pathlib
-import subprocess
-import unittest
-import json
-import os
-import tempfile
-import http.server
-import threading
-import urllib.request
-import urllib.error
+# Offline regression checks for D-2549 review findings. (The imports and ROOT
+# above are the file's own: one home per fact, no second module namespace.)
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+class BindParityTests(unittest.TestCase):
+    # Construct non-loopback fixtures rather than embedding deployment addresses.
+    cases = [("127.0.0.1", True), ("::1", True),
+             (".".join(map(str, (192, 0, 2, 10))), True)] + [
+        (".".join(map(str, parts)), False) for parts in
+        ((0, 0, 0, 0), (0, 1, 2, 3), (224, 0, 0, 1),
+         (240, 0, 0, 1), (255, 255, 255, 255))] + [
+        (value, False) for value in ("::", "*", "", "garbage", "127.1", "[::1]",
+                                     "::ffff:192.0.2.10", "::ffff:c000:20a")]
+
+    def test_python_bind_table(self):
+        spec = importlib.util.spec_from_file_location('bind', ROOT / 'configuration/opencode-bind.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for value, expected in self.cases:
+            with self.subTest(value=value):
+                self.assertEqual(module.valid(value), expected)
+
+    def test_powershell_bind_parity(self):
+        pwsh = shutil.which('pwsh')
+        if not pwsh:
+            self.skipTest('pwsh unavailable: PowerShell bind parity requires pwsh')
+        script = ". './configuration/opencode-bind.ps1'; $cases = $env:AUTOOS_BIND_CASES | ConvertFrom-Json; foreach ($case in $cases) { $env:AUTOOS_OPENCODE_HOST = $case[0]; try { $null = Get-AutoOSOpencodeHost; $ok = $true } catch { $ok = $false }; if ($ok -ne $case[1]) { throw 'Bind table mismatch' } }"
+        result = subprocess.run([pwsh, '-NoProfile', '-Command', script], cwd=ROOT,
+                                env=dict(os.environ, AUTOOS_BIND_CASES=json.dumps(self.cases)),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_launcher_ast_failures_are_clear(self):
+        pwsh = shutil.which('pwsh')
+        if not pwsh:
+            self.skipTest('pwsh unavailable: launcher AST regression requires pwsh')
+        text = _read(WIN_SPAWNERS[1])
+        block = text.split('    $tokens = $null; $errors = $null', 1)[1].split('    $keysFile =', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = Path(directory) / 'launcher.ps1'
+            for source, message in (("function broken {", 'Cannot parse opencode launcher'),
+                                    ('# no functions', 'Missing opencode launcher function'),
+                                    (None, 'Cannot parse opencode launcher')):
+                if source is not None:
+                    launcher.write_text(source, encoding='utf-8')
+                elif launcher.exists():
+                    launcher.unlink()
+                script = "$launcher = $env:AUTOOS_TEST_LAUNCHER; try { & { $tokens = $null; $errors = $null\n" + block + "\n}; throw 'Expected failure' } catch { if (-not $_.Exception.Message.StartsWith($env:AUTOOS_TEST_MESSAGE)) { throw }; exit 0 }"
+                result = subprocess.run([pwsh, '-NoProfile', '-Command', script], cwd=ROOT,
+                                        env=dict(os.environ, AUTOOS_TEST_LAUNCHER=str(launcher),
+                                                 AUTOOS_TEST_MESSAGE=message),
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 class RoundTwoTests(unittest.TestCase):
@@ -473,14 +517,16 @@ class RoundTwoTests(unittest.TestCase):
 
     def test_positive_address_validation(self):
         helper = ROOT / 'configuration/opencode-bind.py'
+        # sys.executable, not a PATH lookup: the suite may run as `python` while
+        # only `python3` is on PATH (or the reverse) on a CI box.
         for address in ('0.0.0.0', '::', '[::]', '0:0:0:0:0:0:0:0',
                         '::ffff:0.0.0.0', '*', '', 'garbage', '224.0.0.1'):
             with self.subTest(address=address):
                 self.assertNotEqual(subprocess.run(
-                    ['python3', str(helper), address], capture_output=True).returncode, 0)
+                    [sys.executable, str(helper), address], capture_output=True).returncode, 0)
         for address in ('127.0.0.1', '::1', '192.0.2.10'):
             self.assertEqual(subprocess.run(
-                ['python3', str(helper), address], capture_output=True).returncode, 0)
+                [sys.executable, str(helper), address], capture_output=True).returncode, 0)
 
     def test_each_windows_spawner_exports_and_validates(self):
         for name in ('start-stack.ps1', 'autostart/Start-AutoOSStack.ps1'):

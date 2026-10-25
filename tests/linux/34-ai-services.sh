@@ -3966,8 +3966,9 @@ if it "aistack: compose.zcode.yml names only omniroute, mounts ro by default, an
         [[ "$svc" == "  omniroute:" ]] || { ok=0; echo "services named: [$(tr '\n' '|' <<<"$svc")]" >&2; }
         vols="$(grep -cE '^[[:space:]]*-[[:space:]]' "$f")"
         [[ "$vols" == 1 ]] || { ok=0; echo "$vols volume lines, expected 1" >&2; }
-        grep -qE -- '^[[:space:]]*-[[:space:]]+\$\{AUTOOS_ZCODE_DIR\}:/home/qoder/\.zcode:\$\{AUTOOS_ZCODE_MOUNT_MODE:-ro\}$' "$f" \
-            || { ok=0; echo "the volume line is not \${AUTOOS_ZCODE_DIR}:/home/qoder/.zcode:\${AUTOOS_ZCODE_MOUNT_MODE:-ro}: $(grep -E '^[[:space:]]*-[[:space:]]' "$f" | head -1)" >&2; }
+        grep -qE -- '^[[:space:]]*-[[:space:]]+\$\{AUTOOS_ZCODE_DIR\}:/home/node/\.zcode:\$\{AUTOOS_ZCODE_MOUNT_MODE:-ro\}$' "$f" \
+            || { ok=0; echo "the volume line is not \${AUTOOS_ZCODE_DIR}:/home/node/.zcode:\${AUTOOS_ZCODE_MOUNT_MODE:-ro}: $(grep -E '^[[:space:]]*-[[:space:]]' "$f" | head -1)" >&2; }
+        grep -q '/home/qoder' "$f" && { ok=0; echo "compose.zcode.yml still references /home/qoder" >&2; }
     else
         ok=0; echo "missing $f" >&2
     fi
@@ -4928,12 +4929,13 @@ if it "aistack: every FROM in opencode.Dockerfile and omniroute.Dockerfile is di
     if (( ok )); then pass; else fail "a FROM is not digest-pinned"; fi
 fi
 
-# ─── The gateway image: OmniRoute + qodercli (omniroute.Dockerfile) ─────────
-# The Qoder PAT login runs `qodercli` inside the gateway container. The
-# upstream image has none (`spawn qodercli ENOENT`), so a derived layer adds
-# it - built like the opencode one, from a digest-pinned base.
+# ─── The gateway image: OmniRoute + the AutoOS layers (omniroute.Dockerfile) ─
+# D-2641 withdrew the gateway-side Qoder PAT login and with it the qodercli
+# layer that login needed: no package is installed globally any more. What is
+# left must still hold the base guards - a digest-pinned FROM, an image tag
+# that names the FROM version, and no vendor binary out of the build context.
 
-if it "aistack: the omniroute layer adds qodercli at an exact version on a digest-pinned base, no vendor binary"; then
+if it "aistack: the omniroute layer keeps a digest-pinned base, adds no qodercli and no vendor binary"; then
     ok=1
     f="$AISTACK/omniroute.Dockerfile"
     [[ -f "$f" ]] || { ok=0; echo "omniroute.Dockerfile is missing" >&2; }
@@ -4942,9 +4944,11 @@ if it "aistack: the omniroute layer adds qodercli at an exact version on a diges
     # The local tag names the upstream version it is built on: bumped together.
     grep -qxE "    image: autoos/omniroute:${base//./\\.}-autoos[0-9]+" "$AISTACK/compose.yml" \
         || { ok=0; echo "compose.yml's image tag does not carry the FROM version [$base]" >&2; }
-    grep -qxE 'RUN npm install -g @qoder-ai/qodercli@[0-9]+\.[0-9]+\.[0-9]+ && npm cache clean --force' "$f" 2>/dev/null \
-        || { ok=0; echo "qodercli is not installed at an exact version, cache cleaned in the same layer" >&2; }
-    grep -qx 'USER root' "$f" 2>/dev/null || { ok=0; echo "no USER root for the install" >&2; }
+    # D-2641: the withdrawn layer must not come back - no global install, no
+    # package spec, neither in a RUN nor hiding in a comment.
+    grep -qE '^RUN npm install -g ' "$f" 2>/dev/null && { ok=0; echo "a global npm install is back in the image" >&2; }
+    grep -q '@qoder-ai/qodercli' "$f" 2>/dev/null && { ok=0; echo "the withdrawn qodercli package is back in the image" >&2; }
+    grep -qx 'USER root' "$f" 2>/dev/null || { ok=0; echo "no USER root for the bcryptjs layer" >&2; }
     [[ "$(grep -E '^USER ' "$f" 2>/dev/null | tail -n1)" == "USER node" ]] || { ok=0; echo "the image must end as USER node" >&2; }
     # No file from the build context: the only COPYs allowed are between build stages
     # (`--from=<stage declared earlier>`) and the reviewed patcher script from the `tools`
@@ -4960,7 +4964,7 @@ if it "aistack: the omniroute layer adds qodercli at an exact version on a diges
             }
             print }' "$f" 2>/dev/null)"
     [[ -z "$bad_copy" ]] || { ok=0; echo "COPY/ADD from the build context (vendor binary risk): $bad_copy" >&2; }
-    if (( ok )); then pass; else fail "omniroute.Dockerfile does not add a pinned qodercli"; fi
+    if (( ok )); then pass; else fail "omniroute.Dockerfile carries the withdrawn qodercli layer or lost a guard"; fi
 fi
 
 if it "aistack: vertex the omniroute U2 stage patches at build time and hands the tree to vertex-patch-gate.py, which counts every chunk"; then
@@ -5062,55 +5066,51 @@ if it "aistack: keys_add_opencode_password backs up a 644 keys file at mode 600"
     if (( ok )); then pass; else fail "keys_add_opencode_password backup inherits source mode instead of 600"; fi
 fi
 
-if it "aistack: init creates the qoder home, private and the operator's, and leaves the gateway data alone"; then
+if it "aistack: init keeps the withdrawn qoder home out of the data dirs and leaves the gateway data alone"; then
     d="$(_aistack_sandbox)"
     ok=1
     mkdir -p "$d/data/omniroute"
     printf 'db\n' >"$d/data/omniroute/storage.sqlite"; printf 'k=v\n' >"$d/data/omniroute/.env"
     before="$(cd "$d/data/omniroute" && cksum storage.sqlite .env)"
     out="$(_aistack "$d" --dry-run init)"
-    [[ "$out" == *"would create $d/data/qoder-home"* ]] || { ok=0; echo "the dry run does not announce the qoder home" >&2; }
-    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "the dry run created it" >&2; }
+    [[ "$out" == *"would create $d/data/opencode-home"* ]] || { ok=0; echo "the dry run no longer announces the real data dirs: $out" >&2; }
+    [[ "$out" == *qoder-home* ]] && { ok=0; echo "the dry run still announces the withdrawn qoder home: $out" >&2; }
     _aistack "$d" init >/dev/null
-    got="$(stat -c '%a %U' "$d/data/qoder-home" 2>&1)"
-    [[ "$got" == "700 $(id -un)" ]] || { ok=0; echo "qoder home is not 700 and the operator's: $got" >&2; }
+    [[ -d "$d/data/omniroute" && -d "$d/data/opencode-home" ]] || { ok=0; echo "the real data dirs are missing" >&2; }
+    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "init created the withdrawn qoder home" >&2; }
     out="$(_aistack "$d" init)"
-    [[ "$out" == *qoder-home* ]] && { ok=0; echo "a second init touched it again: $out" >&2; }
+    [[ "$out" == *qoder-home* ]] && { ok=0; echo "a second init mentioned the withdrawn qoder home: $out" >&2; }
     [[ "$(cd "$d/data/omniroute" && cksum storage.sqlite .env)" == "$before" ]] || { ok=0; echo "the gateway data changed" >&2; }
     [[ "$(LC_ALL=C ls -A "$d/data/omniroute" | tr '\n' ' ')" == ".env storage.sqlite " ]] || { ok=0; echo "files appeared in the gateway data dir" >&2; }
-    # One that already exists with looser rights (made by hand) is tightened.
-    chmod 755 "$d/data/qoder-home"
-    _aistack "$d" init >/dev/null
-    got="$(stat -c '%a' "$d/data/qoder-home" 2>&1)"
-    [[ "$got" == 700 ]] || { ok=0; echo "an existing qoder home stays $got" >&2; }
     rm -rf "$d"
-    if (( ok )); then pass; else fail "the qoder home is not created private, or init touched the gateway data"; fi
+    if (( ok )); then pass; else fail "init touches the withdrawn qoder home or the gateway data"; fi
 fi
 
-if it "aistack: up creates the qoder home before compose starts the gateway, on a host init ran on long ago"; then
+if it "aistack: up does not create the withdrawn qoder home on a host init ran on long ago"; then
     ok=1
-    # init ran long ago (stack.env exists), so up does not run it again: docker
-    # would create the missing mount source as root and the gateway (host uid)
-    # could not write its HOME.
+    # init ran long ago (stack.env exists), so up does not run it again. The
+    # qoder-home mount is gone (D-2641): neither init nor compose may conjure
+    # the directory back - least of all as root, which is what a missing mount
+    # source would get from the docker daemon.
     d="$(_aistack_sandbox)"
     mkdir -p "$d/cfg" "$d/data/omniroute" "$d/data/opencode-home"
     printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
     : >"$d/image-exists"
     _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed" >&2; }
-    [[ "$(cat "$d/qoder-home-at-up.log" 2>/dev/null)" == present ]] || { ok=0; echo "compose up saw: [$(cat "$d/qoder-home-at-up.log" 2>&1)]" >&2; }
-    got="$(stat -c '%a %U' "$d/data/qoder-home" 2>&1)"
-    [[ "$got" == "700 $(id -un)" ]] || { ok=0; echo "qoder home: $got" >&2; }
+    [[ "$(cat "$d/qoder-home-at-up.log" 2>/dev/null)" == absent ]] || { ok=0; echo "compose up saw: [$(cat "$d/qoder-home-at-up.log" 2>&1)]" >&2; }
+    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "up created the withdrawn qoder home" >&2; }
     rm -rf "$d"
-    # compose mounts AUTOOS_STACK_DATA from stack.env: that is where it is made.
+    # compose mounts AUTOOS_STACK_DATA from stack.env: the check follows it there.
     d="$(_aistack_sandbox)"
     mkdir -p "$d/cfg" "$d/elsewhere/omniroute"
     printf "AUTOOS_STACK_BIND='127.0.0.1'\nAUTOOS_STACK_DATA='%s'\n" "$d/elsewhere" >"$d/cfg/stack.env"
     : >"$d/image-exists"
     _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up (stack.env data dir) failed" >&2; }
-    [[ -d "$d/elsewhere/qoder-home" ]] || { ok=0; echo "not created under the AUTOOS_STACK_DATA of stack.env" >&2; }
-    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "created under the default data dir, which compose does not mount" >&2; }
+    [[ -d "$d/elsewhere/omniroute" ]] || { ok=0; echo "the gateway data dir is not under the AUTOOS_STACK_DATA of stack.env" >&2; }
+    [[ -e "$d/elsewhere/qoder-home" ]] && { ok=0; echo "created under the AUTOOS_STACK_DATA of stack.env" >&2; }
+    [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "created under the default data dir" >&2; }
     rm -rf "$d"
-    if (( ok )); then pass; else fail "compose can be the one to create the qoder home"; fi
+    if (( ok )); then pass; else fail "up still conjures the withdrawn qoder home"; fi
 fi
 
 if it "aistack: the omniroute image is rebuilt when its label, base digest or Dockerfile changes, and only then"; then
@@ -5428,11 +5428,11 @@ if it "aistack: verify all green exits 0 and the summary says 0 failed"; then
         AUTOOS_VERIFY_PUBLIC_URLS="http://127.0.0.1:18081/ http://127.0.0.1:18082/" verify)" && rc=0 || rc=$?
     ok=1
     (( rc == 0 )) || { ok=0; echo "exit $rc, not 0" >&2; }
-    grep -qx 'verify: 12 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
+    grep -qx 'verify: 11 ok, 0 failed, 2 skipped' <<<"$out" || { ok=0; echo "summary: $(tail -n1 <<<"$out")" >&2; }
     grep -q '^  FAIL' <<<"$out" && { ok=0; echo "a FAIL line on a healthy stack" >&2; }
     for name in 'container autoos-omniroute' 'container autoos-opencode' 'container openhands-app' \
                 'keyless /v1/models refused on :20128' 'keyless /api/session refused on :4096' \
-                'combo l2-worker-free-only' 'combo l2-worker-clean' 'omniroute has qodercli' \
+                'combo l2-worker-free-only' 'combo l2-worker-clean' \
                 'public URL http://127.0.0.1:18081/' 'public URL http://127.0.0.1:18082/'; do
         grep -qx "  ok    $name" <<<"$out" || { ok=0; echo "no ok line for: $name" >&2; }
     done
@@ -5634,45 +5634,17 @@ if it "aistack: verify checks the code dir in opencode and in the OpenHands sand
     if (( ok )); then pass; else fail "the code dir check misbehaves"; fi
 fi
 
-if it "aistack: verify checks the gateway container has qodercli: ok, FAIL, or skip with a reason"; then
+if it "aistack: verify no longer runs a qodercli check (D-2641: qodercli gateway infrastructure withdrawn)"; then
     ok=1
     d="$(_aistack_sandbox)"
     _aistack_verify_sandbox "$d"
     out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
-    (( rc == 0 )) || { ok=0; echo "healthy: exit $rc, not 0" >&2; }
-    grep -qx '  ok    omniroute has qodercli' <<<"$out" || { ok=0; echo "healthy: no ok line" >&2; }
-    grep -qx 'exec autoos-omniroute qodercli --version' "$d/docker.log" || { ok=0; echo "the check did not run qodercli --version in the gateway container" >&2; }
-    # The image without the layer: the exec cannot find the binary.
-    : >"$d/noqoder-autoos-omniroute"
-    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
-    (( rc == 1 )) || { ok=0; echo "no qodercli: exit $rc, not 1" >&2; }
-    grep -qE '^  FAIL  omniroute has qodercli - ' <<<"$out" || { ok=0; echo "no qodercli: no FAIL line: $out" >&2; }
-    [[ "$(grep -c '^  FAIL' <<<"$out")" == 1 ]] || { ok=0; echo "no qodercli: not exactly one FAIL" >&2; }
-    # A command that answers, but not with a version.
-    rm -f "$d/noqoder-autoos-omniroute"; printf 'not a version\n' >"$d/qoder-version-autoos-omniroute"
-    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
-    (( rc == 1 )) || { ok=0; echo "no version: exit $rc, not 1" >&2; }
-    grep -qE '^  FAIL  omniroute has qodercli - ' <<<"$out" || { ok=0; echo "no version: no FAIL line" >&2; }
-    rm -f "$d/qoder-version-autoos-omniroute"
-    # A stopped gateway is the container check's FAIL; this one skips, and does not exec.
-    rm -f "$d/run-autoos-omniroute" "$d/docker.log"
-    out="$(_aistack_verify "$d" verify)" && rc=0 || rc=$?
-    grep -qx '  skip  omniroute has qodercli - autoos-omniroute is not running' <<<"$out" || { ok=0; echo "stopped: no skip line: $(grep qodercli <<<"$out")" >&2; }
-    grep -q 'qodercli' "$d/docker.log" 2>/dev/null && { ok=0; echo "stopped: docker was asked to exec qodercli" >&2; }
+    (( rc == 0 )) || { ok=0; echo "exit $rc, not 0: $out" >&2; }
+    # Neither output nor docker exec log may reference qodercli or qoder
+    grep -qi 'qoder' <<<"$out" && { ok=0; echo "verify output references qoder: $(grep -i 'qoder' <<<"$out")" >&2; }
+    grep -qi 'qoder' "$d/docker.log" && { ok=0; echo "docker log references qoder: $(grep -i 'qoder' "$d/docker.log")" >&2; }
     rm -rf "$d"
-    # The gateway service is not enabled: skipped, and docker is not asked.
-    d="$(_aistack_sandbox)"
-    _aistack_verify_sandbox "$d"
-    t="$d/tree/configuration"
-    mkdir -p "$t/docker/ai-stack"
-    cp "$AISTACK/ai-stack.sh" "$AISTACK/opencode.Dockerfile" "$AISTACK/omniroute.Dockerfile" "$t/docker/ai-stack/"
-    cp "$ROOT/configuration/env-file.sh" "$ROOT/configuration/opencode-bind.py" "$t/"
-    sed 's/^    container_name: autoos-omniroute$/&\n    profiles: ["gateway"]/' "$AISTACK/compose.yml" >"$t/docker/ai-stack/compose.yml"
-    out="$(_AISTACK_SH="$t/docker/ai-stack/ai-stack.sh" _aistack_verify "$d" verify)" && rc=0 || rc=$?
-    grep -qx '  skip  omniroute has qodercli - the omniroute service is not enabled' <<<"$out" || { ok=0; echo "profile off: no skip line: $(grep qodercli <<<"$out")" >&2; }
-    grep -q 'qodercli' "$d/docker.log" 2>/dev/null && { ok=0; echo "profile off: docker was asked about qodercli" >&2; }
-    rm -rf "$d"
-    if (( ok )); then pass; else fail "the qodercli check is not ok/FAIL/skip as specified"; fi
+    if (( ok )); then pass; else fail "verify still probes qodercli"; fi
 fi
 
 if it "aistack: verify prints the public URL as the app normalizes it, skips it when unset or empty, FAILs one the gateway would refuse"; then
@@ -5752,7 +5724,7 @@ if it "aistack: verify prints the admission gate values and heap MB from the run
     _aistack_verify_sandbox "$d"
     # Stub /proc/1/environ: two --max-old-space-size flags; the last one wins
     # (the image ENTRYPOINT appends OMNIROUTE_MEMORY_MB to NODE_OPTIONS).
-    printf 'OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=6\nOMNIROUTE_CHAT_ADMISSION_QUEUE_MS=60000\nNODE_OPTIONS=--max-old-space-size=1024 --max-old-space-size=1536\nHOME=/home/qoder\n' \
+    printf 'OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=6\nOMNIROUTE_CHAT_ADMISSION_QUEUE_MS=60000\nNODE_OPTIONS=--max-old-space-size=1024 --max-old-space-size=1536\nHOME=/home/node\n' \
         >"$d/proc1-environ-autoos-omniroute"
     out="$(_aistack_verify "$d" verify)"
     ok=1
@@ -5769,7 +5741,7 @@ if it "aistack: verify prints unset wording when admission gate vars are absent 
     d="$(_aistack_sandbox)"
     _aistack_verify_sandbox "$d"
     # Stub /proc/1/environ without the admission vars or NODE_OPTIONS.
-    printf 'HOME=/home/qoder\nPATH=/usr/bin\n' >"$d/proc1-environ-autoos-omniroute"
+    printf 'HOME=/home/node\nPATH=/usr/bin\n' >"$d/proc1-environ-autoos-omniroute"
     out="$(_aistack_verify "$d" verify)"
     ok=1
     grep -q 'unset (image default 1 / 2000)' <<<"$out" \
@@ -5897,7 +5869,7 @@ if it "aistack: verify is read-only: only inspect and exec reach docker, nothing
     [[ "$(grep -cE '^(start|stop|restart|rm|up|down|run|create|compose|build|pull|network|kill|pause|unpause|cp|update)( |$)' "$d/docker.log" || true)" == 0 ]] \
         || { ok=0; echo "a mutating docker verb: $(grep -E '^(start|stop|restart|rm|up|down|run|create|compose)' "$d/docker.log" | head -3)" >&2; }
     grep -vE '^(inspect|exec) ' "$d/docker.log" | grep -q . && { ok=0; echo "docker verbs beyond inspect/exec: $(grep -vE '^(inspect|exec) ' "$d/docker.log" | head -3)" >&2; }
-    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |qodercli --version$|sh -c cat /sys/fs/cgroup/memory\.current /sys/fs/cgroup/memory\.max; sed -n "s/\^\\\(anon\\\|file\\\) /&/p" /sys/fs/cgroup/memory\.stat$|sh -c tr "\\0" "\\n" </proc/1/environ$)' | grep -q . && { ok=0; echo "an exec that is neither test -d, qodercli --version nor a cgroup//proc/1/environ read" >&2; }
+    grep '^exec ' "$d/docker.log" | grep -vE '^exec [^ ]+ (test -d |sh -c cat /sys/fs/cgroup/memory\.current /sys/fs/cgroup/memory\.max; sed -n "s/\^\\\(anon\\\|file\\\) /&/p" /sys/fs/cgroup/memory\.stat$|sh -c tr "\\0" "\\n" </proc/1/environ$)' | grep -q . && { ok=0; echo "an exec that is neither test -d nor a cgroup//proc/1/environ read" >&2; }
     # Nothing but docker inspect/exec: not systemctl, not ss, not the plain curl on PATH.
     grep -vE '^docker: (inspect|exec) ' "$d/events.log" | grep -q . && { ok=0; echo "another tool was called: $(grep -vE '^docker: (inspect|exec) ' "$d/events.log" | head -3)" >&2; }
     rm -rf "$d"
