@@ -376,6 +376,56 @@ import urllib.error
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
+class BindParityTests(unittest.TestCase):
+    # Construct non-loopback fixtures rather than embedding deployment addresses.
+    cases = [("127.0.0.1", True), ("::1", True),
+             (".".join(map(str, (192, 0, 2, 10))), True)] + [
+        (".".join(map(str, parts)), False) for parts in
+        ((0, 0, 0, 0), (0, 1, 2, 3), (224, 0, 0, 1),
+         (240, 0, 0, 1), (255, 255, 255, 255))] + [
+        (value, False) for value in ("::", "*", "", "garbage", "127.1", "[::1]")]
+
+    def test_python_bind_table(self):
+        spec = importlib.util.spec_from_file_location('bind', ROOT / 'configuration/opencode-bind.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        for value, expected in self.cases:
+            with self.subTest(value=value):
+                self.assertEqual(module.valid(value), expected)
+
+    def test_powershell_bind_parity(self):
+        pwsh = shutil.which('pwsh')
+        if not pwsh:
+            self.skipTest('pwsh unavailable: PowerShell bind parity requires pwsh')
+        script = ". './configuration/opencode-bind.ps1'; $cases = $env:AUTOOS_BIND_CASES | ConvertFrom-Json; foreach ($case in $cases) { $env:AUTOOS_OPENCODE_HOST = $case[0]; try { $null = Get-AutoOSOpencodeHost; $ok = $true } catch { $ok = $false }; if ($ok -ne $case[1]) { throw 'Bind table mismatch' } }"
+        result = subprocess.run([pwsh, '-NoProfile', '-Command', script], cwd=ROOT,
+                                env=dict(os.environ, AUTOOS_BIND_CASES=json.dumps(self.cases)),
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_launcher_ast_failures_are_clear(self):
+        pwsh = shutil.which('pwsh')
+        if not pwsh:
+            self.skipTest('pwsh unavailable: launcher AST regression requires pwsh')
+        text = _read(WIN_SPAWNERS[1])
+        block = text.split('    $tokens = $null; $errors = $null', 1)[1].split('    $keysFile =', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            launcher = Path(directory) / 'launcher.ps1'
+            for source, message in (("function broken {", 'Cannot parse opencode launcher'),
+                                    ('# no functions', 'Missing opencode launcher function'),
+                                    (None, 'Cannot parse opencode launcher')):
+                if source is not None:
+                    launcher.write_text(source, encoding='utf-8')
+                elif launcher.exists():
+                    launcher.unlink()
+                script = "$launcher = $env:AUTOOS_TEST_LAUNCHER; try { & { $tokens = $null; $errors = $null\n" + block + "\n}; throw 'Expected failure' } catch { if (-not $_.Exception.Message.StartsWith($env:AUTOOS_TEST_MESSAGE)) { throw }; exit 0 }"
+                result = subprocess.run([pwsh, '-NoProfile', '-Command', script], cwd=ROOT,
+                                        env=dict(os.environ, AUTOOS_TEST_LAUNCHER=str(launcher),
+                                                 AUTOOS_TEST_MESSAGE=message),
+                                        capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
 class RoundTwoTests(unittest.TestCase):
     def test_auth_401_nonstrict_xfail_v2(self):
         # Offline v2 fake: env password does NOT enforce auth. Always exercised
