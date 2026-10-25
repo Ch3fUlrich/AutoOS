@@ -5710,7 +5710,7 @@ if it "aistack: verify prints the admission gate values and heap MB from the run
     _aistack_verify_sandbox "$d"
     # Stub /proc/1/environ: two --max-old-space-size flags; the last one wins
     # (the image ENTRYPOINT appends OMNIROUTE_MEMORY_MB to NODE_OPTIONS).
-    printf 'OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=6\nOMNIROUTE_CHAT_ADMISSION_QUEUE_MS=60000\nNODE_OPTIONS=--max-old-space-size=1024 --max-old-space-size=1536\nHOME=/home/qoder\n' \
+    printf 'OMNIROUTE_CHAT_MAX_HEAVY_IN_FLIGHT=6\nOMNIROUTE_CHAT_ADMISSION_QUEUE_MS=60000\nNODE_OPTIONS=--max-old-space-size=1024 --max-old-space-size=1536\nHOME=/home/node\n' \
         >"$d/proc1-environ-autoos-omniroute"
     out="$(_aistack_verify "$d" verify)"
     ok=1
@@ -5727,7 +5727,7 @@ if it "aistack: verify prints unset wording when admission gate vars are absent 
     d="$(_aistack_sandbox)"
     _aistack_verify_sandbox "$d"
     # Stub /proc/1/environ without the admission vars or NODE_OPTIONS.
-    printf 'HOME=/home/qoder\nPATH=/usr/bin\n' >"$d/proc1-environ-autoos-omniroute"
+    printf 'HOME=/home/node\nPATH=/usr/bin\n' >"$d/proc1-environ-autoos-omniroute"
     out="$(_aistack_verify "$d" verify)"
     ok=1
     grep -q 'unset (image default 1 / 2000)' <<<"$out" \
