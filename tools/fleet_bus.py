@@ -18,7 +18,9 @@ with it ("0", "0.0", "000.000.000.000", "0x0", "0.0.0.0", "::", "::0",
 never a traceback, as are a garbled keeper response (an
 http.client.HTTPException), a keeper that answers with a redirect (never
 followed: the bearer token must not be re-sent to another host), a
-malformed keeper endpoint and a keeper read that a proxy environment
+malformed keeper endpoint, a keeper URL that is not http(s) (a scheme-less
+value would make Request(...) itself raise, and file:/ftp:/data: are not
+keeper reads) and a keeper read that a proxy environment
 variable tries to hijack (the opener carries ProxyHandler({}), so the one
 request carrying the bearer token always travels direct). The coding-side
 poller pulls; apart
@@ -50,7 +52,10 @@ scrubbed text; the append-only log <logdir>/YYYY-MM-DD.jsonl carries records
 WITHOUT text ({"id","ts","from","to","len"}) per D-2024 (privacy: logs never
 hold message text) and refusals as {"id","ts","event":"refused","reason"}
 - the reason a 401 names (key file paths, host names, never key contents
-and never message text) lives there and nowhere else. A restart drops
+and never message text) lives there and nowhere else. The refusal rows are
+capped (REFUSAL_LOG_CAP per process, then one "refusal log capped" row and
+silence): any unauthenticated caller can trigger one, and the log write
+must stay bounded. A restart drops
 undelivered bodies by design (best-effort relay: 10 s client timeout, no
 auto-retry).
 
@@ -92,6 +97,11 @@ TEXT_MAX = 2000
 SKEW_S = 60
 NONCE_CAP = 10000
 RING_CAP = 1000
+# The refusal log is capped: log_refusal runs on every 401, which any
+# unauthenticated caller can trigger, and an unbounded append to the jsonl
+# log is a disk-fill lever. At most this many refusal rows per process,
+# then one "refusal log capped" row and silence.
+REFUSAL_LOG_CAP = 1000
 DEFAULT_PORT = 58690
 KEEPER_TIMEOUT_S = 5
 # The wildcard: binding it exposes the open read path on every interface.
@@ -271,17 +281,19 @@ def fetch_keeper_hosts(keeper_url, token):
     a third host. No redirect is ever followed (see _RefuseRedirects) and
     no protocol error escapes: http.client.HTTPException (a garbled status
     line, a truncated response) is the same one-line fail-closed "keeper
-    unreachable" as a refused connection.
+    unreachable" as a refused connection - and so is a ValueError from
+    Request(...) itself ('unknown url type' on a URL that slipped past
+    check_keeper_url), which must never escape as a traceback either.
     """
     url = keeper_url.rstrip("/") + "/v1/hosts"
-    request = urllib.request.Request(
-        url, headers={"Authorization": "Bearer " + token.decode("utf-8")})
     # ProxyHandler({}) REPLACES the default env-reading proxy handler: the
     # one request that carries the bearer token must never be handed to a
-    # proxy an environment variable named
+    # proxy an environment variable names
     opener = urllib.request.build_opener(
         urllib.request.ProxyHandler({}), _RefuseRedirects())
     try:
+        request = urllib.request.Request(
+            url, headers={"Authorization": "Bearer " + token.decode("utf-8")})
         with opener.open(request, timeout=KEEPER_TIMEOUT_S) as response:
             status, raw = response.getcode(), response.read()
     except urllib.error.HTTPError as e:
@@ -303,13 +315,33 @@ def fetch_keeper_hosts(keeper_url, token):
     return hosts
 
 
+def check_keeper_url(url):
+    """The keeper base URL must be http or https - checked at config time.
+
+    A scheme-less value ("keeper.example.invalid:8765", or no colon at all)
+    makes Request(...) itself raise ValueError('unknown url type'), and an
+    ftp:/file:/data: URL is not a keeper read at all (urllib's own handlers
+    would answer it, file: with no network and no auth). The scheme is
+    refused here - at startup, before any request carries the bearer token -
+    as the same one-line fail-closed status-3 error as every other discovery
+    failure, never a traceback.
+    """
+    try:
+        scheme = urlparse(url).scheme
+    except ValueError:
+        raise FleetBusError(3, "keeper URL is malformed: %s" % display_url(url))
+    if scheme.lower() not in ("http", "https"):
+        raise FleetBusError(3, "keeper URL must be http or https: %s"
+                           % display_url(url))
+
+
 def discover_bind(host, keeper_url, token_file):
     """This host's bind address: the host part of its keeper endpoint.
 
     Fail closed (status 3, one line) whenever the keeper cannot answer -
-    unset URL/token/host, an unreachable or non-200 keeper, bad JSON, an
-    unknown or unhealthy host, a missing endpoint - and never fall back to
-    an IP or loopback guess.
+    unset URL/token/host, a keeper URL that is not http(s), an unreachable
+    or non-200 keeper, bad JSON, an unknown or unhealthy host, a missing
+    endpoint - and never fall back to an IP or loopback guess.
     """
     host = (host or "").strip()
     keeper_url = (keeper_url or "").strip()
@@ -322,6 +354,7 @@ def discover_bind(host, keeper_url, token_file):
                                "or %s)" % KEEPER_TOKEN_ENV)
     if not host:
         raise FleetBusError(3, "host name not set (--host or %s)" % HOST_ENV)
+    check_keeper_url(keeper_url)
     entries = fetch_keeper_hosts(keeper_url, read_keeper_token(token_file))
     match = [e for e in entries if isinstance(e, dict) and e.get("host") == host]
     if not match:
@@ -430,6 +463,9 @@ def check_post(keyring, body, sig, now, seen):
     field like any other: `float("1e400")` is inf and `int(inf)` raises
     OverflowError, and a 400-digit JSON integer overflows the float
     conversion - none of that may escape as a traceback through do_POST.
+    The same holds for a string field that cannot be UTF-8-encoded (a lone
+    surrogate): the canonical form's own encode would raise
+    UnicodeEncodeError through do_POST, so it is refused as a 400 first.
     """
     if not isinstance(body, dict):
         raise FleetBusError(400, "body must be a JSON object")
@@ -446,14 +482,40 @@ def check_post(keyring, body, sig, now, seen):
                              ("nonce", nonce, 128)):
         if not isinstance(value, str) or not value or len(value) > cap:
             raise FleetBusError(400, "bad %s" % name)
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            # a lone surrogate ("\ud800") is not UTF-8: refuse the field now,
+            # before the canonical form's own encode can raise it through
+            # do_POST as a traceback
+            raise FleetBusError(400, "bad %s" % name)
     if not isinstance(body["text"], str):
+        raise FleetBusError(400, "bad text")
+    try:
+        body["text"].encode("utf-8")
+    except UnicodeEncodeError:
+        # same lone-surrogate refusal for the text (fix round 4 item 3):
+        # treat it as a 400 like any malformed field, never a traceback and
+        # never a dropped connection
         raise FleetBusError(400, "bad text")
     if abs(int(now) - ts) > SKEW_S:
         raise FleetBusError(401, "timestamp outside the skew window")
     if keyring is not None:
         secret = keyring.key_for(frm)
-        if not isinstance(sig, str) or not hmac.compare_digest(
-                sign(secret, ts, nonce, frm, to, body["text"]), sig):
+        try:
+            expected = sign(secret, ts, nonce, frm, to, body["text"])
+        except UnicodeEncodeError:
+            # unreachable past the field checks above - but nothing escapes
+            # do_POST as a traceback
+            raise FleetBusError(400, "bad text")
+        try:
+            matched = (isinstance(sig, str)
+                       and hmac.compare_digest(expected, sig))
+        except TypeError:
+            # compare_digest refuses non-ASCII strings: a garbage
+            # X-Fleet-Sig is a bad signature (401), never a traceback
+            matched = False
+        if not matched:
             raise FleetBusError(401, "bad signature")
     if nonce in seen:
         raise FleetBusError(401, "replayed nonce")
@@ -471,6 +533,7 @@ class FleetBusStore:
         self._records = deque(maxlen=RING_CAP)
         self._seen = OrderedDict()
         self._seq = 0
+        self._refusals = 0
         self._logdir = logdir
 
     def _log(self, row):
@@ -501,8 +564,24 @@ class FleetBusStore:
         This is where the reason a 401 names lives - key file paths and host
         names are fine here, key contents and message text never are - since
         the wire body of a 401 is generic (D-2024: logs never hold text).
+
+        The write is capped at REFUSAL_LOG_CAP refusal rows per process:
+        this runs on every 401, which any unauthenticated caller can
+        trigger, so an unbounded append would be a disk-fill lever. Past the
+        cap exactly one "refusal log capped" row is written and every later
+        refusal drops silently - the 401 answers themselves never stop.
         """
         with self._lock:
+            if self._refusals >= REFUSAL_LOG_CAP:
+                if self._refusals == REFUSAL_LOG_CAP:
+                    self._refusals += 1
+                    self._seq += 1
+                    self._log({"id": "%d-%06d"
+                               % (int(time.time() * 1000), self._seq),
+                               "ts": int(time.time()),
+                               "event": "refusal log capped"})
+                return
+            self._refusals += 1
             self._seq += 1
             self._log({"id": "%d-%06d" % (int(time.time() * 1000), self._seq),
                        "ts": int(time.time()), "event": "refused",

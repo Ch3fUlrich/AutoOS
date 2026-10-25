@@ -23,6 +23,7 @@ import threading
 import time
 import unittest
 import urllib.request
+from collections import OrderedDict
 from pathlib import Path
 from unittest import mock
 
@@ -291,6 +292,50 @@ class FleetBusTest(unittest.TestCase):
                 conn.close()
                 self.assertIn(status, (400, 401), data)
 
+    # fix round 4 item 3: a lone surrogate in the text ("\ud800") cannot be
+    # UTF-8-encoded, and the encode inside the canonical form used to raise
+    # UnicodeEncodeError straight through do_POST - a traceback on stderr and
+    # a dropped connection. It is a 400 refusal like any malformed body.
+    def test_a_lone_surrogate_in_the_text_is_a_400_not_a_traceback(self):
+        for i, text in enumerate(("\ud800", "a\ud800b", "x\udc00")):
+            body = good_body(text=text, nonce="surrogate-%d" % i)
+            with self.subTest(text=repr(text)):
+                status, data = post_inbox(self.port, body, "f" * 64)
+                self.assertEqual(status, 400, data)
+                self.assertEqual(json.loads(data.decode("utf-8")),
+                                 {"error": "bad text"})
+        # the server still serves the next request
+        body = good_body(text="after-surrogate", nonce="after-surrogate")
+        status, _ = post_inbox(self.port, body, self._sig(body))
+        self.assertEqual(status, 200)
+
+    def test_check_post_refuses_unencodable_fields_before_signing(self):
+        # every request-controlled string must be UTF-8-encodable before the
+        # signature is computed over it - that encode is what used to escape
+        # as a traceback through do_POST
+        keys = fleet_bus.Keyring(override=FAKE_SECRET)
+        for field, value in (("text", "\ud800"), ("text", "a\udc00b"),
+                             ("from", "\ud800"), ("to", "\ud800"),
+                             ("nonce", "\ud800")):
+            body = good_body(nonce="unit-surrogate")
+            body[field] = value
+            with self.subTest(field=field, value=repr(value)):
+                with self.assertRaises(fleet_bus.FleetBusError) as caught:
+                    fleet_bus.check_post(keys, body, "0" * 64,
+                                         time.time(), OrderedDict())
+                self.assertEqual(caught.exception.status, 400,
+                                 caught.exception.reason)
+
+    def test_a_non_ascii_signature_is_a_401_not_a_traceback(self):
+        # hmac.compare_digest refuses non-ASCII strings with a TypeError,
+        # which used to escape do_POST as a traceback: garbage X-Fleet-Sig
+        # values are bad signatures, and a bad signature is a 401
+        body = good_body(nonce="garbage-sig")
+        status, data = post_inbox(self.port, body, "\u00ff" * 64)
+        self.assertEqual(status, 401, data)
+        self.assertEqual(json.loads(data.decode("utf-8")),
+                         {"error": "unauthorized"})
+
     # fix round 3 item 2: a negative Content-Length passes the size cap and
     # rfile.read(-n) then blocks to EOF - it is refused with a 400 instead
     def test_a_negative_content_length_is_refused(self):
@@ -479,7 +524,8 @@ class PerHostKeyTest(unittest.TestCase):
         # escape as a traceback and kill the connection mid-request
         binary = self.td / "binary.key"
         binary.write_bytes(b"\xff\xfe not utf-8\n")
-        os.chmod(binary, 0o600)
+        if os.name != "nt":
+            os.chmod(binary, 0o600)
         _, port = self.start_server(
             fleet_bus.Keyring(inventory={"workst": str(binary)}))
         body = good_body(frm="workst", nonce="binary-key")
@@ -493,7 +539,8 @@ class PerHostKeyTest(unittest.TestCase):
     def test_key_for_turns_a_decode_error_into_a_refusal(self):
         binary = self.td / "binary-unit.key"
         binary.write_bytes(b"\xff\xfe not utf-8\n")
-        os.chmod(binary, 0o600)
+        if os.name != "nt":
+            os.chmod(binary, 0o600)
         keyring = fleet_bus.Keyring(inventory={"workst": str(binary)})
         with self.assertRaises(fleet_bus.FleetBusError) as caught:
             keyring.key_for("workst")
@@ -697,6 +744,58 @@ class BindDiscoveryTest(unittest.TestCase):
                                             self.token_file),
             "FLEET_BUS_HOST")
 
+    # fix round 4 item 1: a keeper URL that is not http(s) is refused at
+    # config time. A scheme-less value makes Request(...) itself raise
+    # ValueError('unknown url type') outside the request try, and ftp:/file:/
+    # data: URLs are not keeper reads at all (urllib's own handlers would
+    # answer them) - all of it must be the one-line fail-closed status-3
+    # error, never a traceback and never a request.
+    def test_a_keeper_url_without_a_scheme_fails_closed(self):
+        for url in ("keeper.example.invalid:8765", "keeper.example.invalid",
+                    "keeper.example.invalid:8765/base"):
+            with self.subTest(url=url):
+                self.assert_fails_closed(
+                    lambda: fleet_bus.discover_bind("workst", url,
+                                                    self.token_file),
+                    "keeper", "http")
+
+    def test_a_keeper_url_scheme_other_than_http_fails_closed(self):
+        for url in ("ftp://keeper.example.invalid",
+                    "file:///etc/hosts",
+                    "data:text/plain,NOT-A-REAL-KEEPER"):
+            with self.subTest(url=url):
+                self.assert_fails_closed(
+                    lambda: fleet_bus.discover_bind("workst", url,
+                                                    self.token_file),
+                    "keeper", "http")
+
+    def test_main_refuses_a_keeper_url_that_is_not_http_on_one_line(self):
+        for url in ("keeper.example.invalid:8765", "keeper.example.invalid",
+                    "ftp://keeper.example.invalid", "file:///etc/hosts",
+                    "data:text/plain,NOT-A-REAL-KEEPER"):
+            out = io.StringIO()
+            with self.subTest(url=url), contextlib.redirect_stdout(out):
+                rc = fleet_bus.main(["--open", "--host", "workst",
+                                     "--keeper-url", url,
+                                     "--keeper-token-file", self.token_file],
+                                    env={})
+            self.assertEqual(rc, 3, out.getvalue())
+            line = out.getvalue().strip()
+            self.assertEqual(len(line.splitlines()), 1, out.getvalue())
+            self.assertNotIn("Traceback", line)
+            self.assertIn("http", line)
+
+    def test_a_request_value_error_fails_closed(self):
+        # defense in depth: whatever makes Request(...) itself raise
+        # ValueError ('unknown url type') must be the same one-line
+        # fail-closed error as every other keeper failure
+        url = self.keeper(self.hosts_doc([]))
+        with mock.patch.object(urllib.request, "Request",
+                               side_effect=ValueError("unknown url type")):
+            self.assert_fails_closed(
+                lambda: fleet_bus.discover_bind("workst", url, self.token_file),
+                "keeper")
+
     def test_an_unhealthy_host_fails_closed(self):
         url = self.keeper(self.hosts_doc([
             self.entry("workst", None, health="degraded"),
@@ -762,7 +861,8 @@ class BindDiscoveryTest(unittest.TestCase):
     def test_a_non_utf8_keeper_token_fails_closed(self):
         binary = self.td / "binary-token"
         binary.write_bytes(b"\xff\xfe not utf-8\n")
-        os.chmod(binary, 0o600)
+        if os.name != "nt":
+            os.chmod(binary, 0o600)
         url = self.keeper(self.hosts_doc([]))
         error = self.assert_fails_closed(
             lambda: fleet_bus.discover_bind("workst", url, str(binary)),
@@ -1024,6 +1124,74 @@ class BindSafetyTest(unittest.TestCase):
             keeper.server_close()
         self.assertEqual(rc, 3, out)  # fail-closed discovery, like a wildcard
         self.assertIn("wildcard", self.one_error_line(out))
+
+
+class RefusalLogCapTest(unittest.TestCase):
+    """fix round 4 item 2: the refusal metadata log is capped per process.
+
+    log_refusal runs on every 401 and every unauthenticated caller can
+    trigger one, so the append-only jsonl write is a disk-fill lever. At
+    most REFUSAL_LOG_CAP refusal rows per process, then exactly one
+    "refusal log capped" row and silence - the 401 answers themselves never
+    stop.
+    """
+
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory(prefix="fleet_bus_cap_")
+        self.td = Path(self._td.name)
+        self.addCleanup(self._td.cleanup)
+
+    def rows(self, logdir):
+        rows = []
+        for path in sorted(Path(logdir).rglob("*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                rows.append(json.loads(line))
+        return rows
+
+    def test_the_refusal_log_is_capped(self):
+        self.assertEqual(fleet_bus.REFUSAL_LOG_CAP, 1000)  # the shipped cap
+        logdir = self.td / "logs"
+        store = fleet_bus.FleetBusStore(str(logdir))
+        for i in range(fleet_bus.REFUSAL_LOG_CAP + 25):
+            store.log_refusal("refusal %d" % i)
+        rows = self.rows(logdir)
+        refusals = [r for r in rows if r.get("event") == "refused"]
+        capped = [r for r in rows if r.get("event") == "refusal log capped"]
+        self.assertEqual(len(refusals), fleet_bus.REFUSAL_LOG_CAP, "the cap")
+        self.assertEqual(len(capped), 1, "exactly one capped marker row")
+        self.assertEqual(len(rows), fleet_bus.REFUSAL_LOG_CAP + 1)
+        # further refusals after the cap drop silently: not one more row
+        for i in range(10):
+            store.log_refusal("refusal past the cap %d" % i)
+        self.assertEqual(len(self.rows(logdir)), fleet_bus.REFUSAL_LOG_CAP + 1)
+
+    def test_the_cap_bounds_the_unauthenticated_401_write(self):
+        # the same cap through the real request path: every unauthorized POST
+        # writes a refusal row, and that write must stay bounded
+        logdir = self.td / "http-logs"
+        server = fleet_bus.FleetBusServer(
+            ("127.0.0.1", 0), keys=fleet_bus.Keyring(override=FAKE_SECRET),
+            logdir=str(logdir))
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_until,
+                                  kwargs={"deadline": None}, daemon=True)
+        thread.start()
+        try:
+            with mock.patch.object(fleet_bus, "REFUSAL_LOG_CAP", 3):
+                for i in range(6):
+                    status, _ = post_inbox(port, good_body(nonce="cap-%d" % i),
+                                           "0" * 64)
+                    self.assertEqual(status, 401)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=10)
+        rows = self.rows(logdir)
+        refusals = [r for r in rows if r.get("event") == "refused"]
+        capped = [r for r in rows if r.get("event") == "refusal log capped"]
+        self.assertEqual(len(refusals), 3)
+        self.assertEqual(len(capped), 1)
+        self.assertEqual(len(rows), 4)
 
 
 if __name__ == "__main__":
