@@ -160,8 +160,19 @@ if (Test-OpencodeServe) {
     $launcher = Join-Path (Split-Path -Parent $PSScriptRoot) 'start-stack.ps1'
     $tokens = $null; $errors = $null
     $ast = [System.Management.Automation.Language.Parser]::ParseFile($launcher, [ref]$tokens, [ref]$errors)
+    if ($null -eq $ast -or $errors.Count -gt 0) {
+        # A missing or unparseable start-stack.ps1 lands here too (ParseFile
+        # reports an unreadable file as a parse error), so the failure is a
+        # message naming the file instead of a null $fn below.
+        $detail = 'no syntax tree'
+        if ($errors.Count -gt 0) { $detail = $errors[0].Message }
+        throw "Cannot parse opencode launcher '$launcher': $detail"
+    }
     foreach ($name in @('ConvertFrom-AutoOSKeyValue', 'Read-AutoOSKeyMap', 'Get-AutoOSKeyValue')) {
         $fn = $ast.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name }, $true)
+        if ($null -eq $fn) {
+            throw "Missing opencode launcher function '$name' in '$launcher'"
+        }
         . ([scriptblock]::Create($fn.Extent.Text))
     }
     $keysFile = Join-Path (Split-Path -Parent $PSScriptRoot) 'api-keys.yml'

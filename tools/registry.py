@@ -1208,6 +1208,9 @@ def _walk_required(node, schema, root, label, problems) -> None:
     if "anyOf" in schema or "oneOf" in schema:
         return
 
+    if label.endswith(".gateway_mode") and "enum" in schema and node not in schema["enum"]:
+        problems.append("invalid: %s (value %r not in enum %s)" % (label.lstrip("."), node, schema["enum"]))
+
     if isinstance(node, dict):
         for key in schema.get("required", []):
             if key not in node:
