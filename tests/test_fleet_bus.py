@@ -79,12 +79,46 @@ def good_body(frm="workst", to="coding", text="hello", ts=None, nonce="n1"):
 
 
 class KeeperHandler(http.server.BaseHTTPRequestHandler):
-    """Mock keeper: answers every GET with the fixture's (status, body)."""
+    """Mock keeper: answers every GET with the fixture's (status, body).
+
+    A fixture that sets `location` answers a redirect, the way a compromised
+    or misconfigured keeper would try to move the reader (and its bearer
+    token) somewhere else.
+    """
 
     def do_GET(self):  # noqa: N802 (http.server names the method)
         status, payload = self.server.answer
         body = payload.encode("utf-8")
         self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        if getattr(self.server, "location", None):
+            self.send_header("Location", self.server.location)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):  # keep the test output clean
+        pass
+
+
+def start_keeper(answer, location=None):
+    """A local mock of GET <keeper>/v1/hosts on loopback, ephemeral port."""
+    server = http.server.HTTPServer(("127.0.0.1", 0), KeeperHandler)
+    server.answer = answer
+    server.location = location
+    thread = threading.Thread(target=server.serve_forever,
+                              kwargs={"poll_interval": 0.02}, daemon=True)
+    thread.start()
+    return server, "http://127.0.0.1:%d" % server.server_address[1]
+
+
+class RecordingHandler(http.server.BaseHTTPRequestHandler):
+    """Answers GET with the fixture's JSON and records every request seen."""
+
+    def do_GET(self):  # noqa: N802 (http.server names the method)
+        self.server.seen.append(self.path)
+        body = self.server.answer.encode("utf-8")
+        self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -94,14 +128,44 @@ class KeeperHandler(http.server.BaseHTTPRequestHandler):
         pass
 
 
-def start_keeper(answer):
-    """A local mock of GET <keeper>/v1/hosts on loopback, ephemeral port."""
-    server = http.server.HTTPServer(("127.0.0.1", 0), KeeperHandler)
+def start_recorder(answer):
+    """A second loopback server that counts the requests it receives."""
+    server = http.server.HTTPServer(("127.0.0.1", 0), RecordingHandler)
     server.answer = answer
+    server.seen = []
     thread = threading.Thread(target=server.serve_forever,
                               kwargs={"poll_interval": 0.02}, daemon=True)
     thread.start()
-    return server, "http://127.0.0.1:%d" % server.server_address[1]
+    return (server, "http://127.0.0.1:%d" % server.server_address[1],
+            server.seen)
+
+
+def start_broken_keeper():
+    """A loopback port that answers with a non-HTTP status line.
+
+    http.client raises BadStatusLine (an http.client.HTTPException) on it,
+    which is exactly the class of keeper failure that used to escape as a
+    traceback instead of a one-line fail-closed error.
+    """
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(5)
+
+    def serve():
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.recv(65536)
+                    conn.sendall(b"NOT-HTTP-AT-ALL\r\n\r\n")
+                except OSError:
+                    pass
+
+    threading.Thread(target=serve, daemon=True).start()
+    return listener, "http://127.0.0.1:%d" % listener.getsockname()[1]
 
 
 def closed_loopback_url():
@@ -278,6 +342,18 @@ class PerHostKeyTest(unittest.TestCase):
         return fleet_bus.sign(secret, body["ts"], body["nonce"],
                               body["from"], body["to"], body["text"])
 
+    def logged(self):
+        """Every metadata jsonl row the server wrote, refusals included."""
+        rows = []
+        for path in sorted((self.td / "logs").rglob("*.jsonl")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                rows.append(json.loads(line))
+        return rows
+
+    def refusal_reasons(self):
+        return " ".join(row.get("reason", "") for row in self.logged()
+                        if row.get("event") == "refused")
+
     def test_each_sender_is_verified_with_its_own_key(self):
         _, port = self.start_server(fleet_bus.Keyring(inventory=self.inventory))
         body = good_body(frm="workst", nonce="own-key")
@@ -291,12 +367,17 @@ class PerHostKeyTest(unittest.TestCase):
         status, _ = post_inbox(port, body, self.sig(body, FAKE_SECRET_OTHER))
         self.assertEqual(status, 200)
 
-    def test_an_unknown_from_host_is_refused(self):
+    def test_an_unknown_from_host_gets_a_generic_401_body(self):
+        # fix round 2 item 4: the wire body must not enumerate host names;
+        # the full reason goes to the metadata-only jsonl log
         _, port = self.start_server(fleet_bus.Keyring(inventory=self.inventory))
         body = good_body(frm="stranger", nonce="stranger")
         status, data = post_inbox(port, body, self.sig(body, FAKE_SECRET))
         self.assertEqual(status, 401)
-        self.assertIn("stranger", data.decode("utf-8"))
+        wire = data.decode("utf-8")
+        self.assertEqual(json.loads(wire), {"error": "unauthorized"})
+        self.assertNotIn("stranger", wire)
+        self.assertIn("stranger", self.refusal_reasons())
 
     def test_key_files_are_read_once(self):
         _, port = self.start_server(fleet_bus.Keyring(inventory=self.inventory))
@@ -320,9 +401,14 @@ class PerHostKeyTest(unittest.TestCase):
         body = good_body(frm="workst", nonce="loose-mode")
         status, data = post_inbox(port, body, self.sig(body, FAKE_SECRET))
         self.assertEqual(status, 401)
-        reason = data.decode("utf-8")
-        self.assertIn("workst", reason)      # names the host
-        self.assertIn(self.key_a, reason)    # names the path
+        wire = data.decode("utf-8")
+        self.assertEqual(json.loads(wire), {"error": "unauthorized"})
+        self.assertNotIn(self.key_a, wire)                       # no path
+        self.assertNotIn("workst", wire)                         # no host
+        self.assertNotIn(FAKE_SECRET.decode("utf-8"), wire)      # never contents
+        reason = self.refusal_reasons()
+        self.assertIn("workst", reason)      # the log names the host
+        self.assertIn(self.key_a, reason)    # and the path
         self.assertNotIn(FAKE_SECRET.decode("utf-8"), reason)  # never contents
 
     def test_a_missing_key_file_names_the_path_and_host(self):
@@ -331,9 +417,47 @@ class PerHostKeyTest(unittest.TestCase):
         body = good_body(frm="workst", nonce="missing-file")
         status, data = post_inbox(port, body, self.sig(body, FAKE_SECRET))
         self.assertEqual(status, 401)
-        reason = data.decode("utf-8")
-        self.assertIn("workst", reason)
+        wire = data.decode("utf-8")
+        self.assertEqual(json.loads(wire), {"error": "unauthorized"})
+        self.assertNotIn("gone.key", wire)   # the wire names nothing
+        self.assertNotIn("workst", wire)
+        reason = self.refusal_reasons()
+        self.assertIn("workst", reason)      # the log does name both
         self.assertIn("gone.key", reason)
+
+    def test_a_bad_signature_gets_the_same_generic_401_body(self):
+        _, port = self.start_server(fleet_bus.Keyring(inventory=self.inventory))
+        body = good_body(frm="workst", nonce="bad-sig")
+        status, data = post_inbox(port, body, "0" * 64)
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(data.decode("utf-8")),
+                         {"error": "unauthorized"})
+        self.assertIn("signature", self.refusal_reasons())
+
+    def test_a_non_utf8_key_file_is_a_401_not_a_dropped_connection(self):
+        # fix round 2 item 2: UnicodeDecodeError from the key file must not
+        # escape as a traceback and kill the connection mid-request
+        binary = self.td / "binary.key"
+        binary.write_bytes(b"\xff\xfe not utf-8\n")
+        os.chmod(binary, 0o600)
+        _, port = self.start_server(
+            fleet_bus.Keyring(inventory={"workst": str(binary)}))
+        body = good_body(frm="workst", nonce="binary-key")
+        status, data = post_inbox(port, body, self.sig(body, FAKE_SECRET))
+        self.assertEqual(status, 401)
+        self.assertEqual(json.loads(data.decode("utf-8")),
+                         {"error": "unauthorized"})
+        self.assertIn(str(binary), self.refusal_reasons())
+
+    def test_key_for_turns_a_decode_error_into_a_refusal(self):
+        binary = self.td / "binary-unit.key"
+        binary.write_bytes(b"\xff\xfe not utf-8\n")
+        os.chmod(binary, 0o600)
+        keyring = fleet_bus.Keyring(inventory={"workst": str(binary)})
+        with self.assertRaises(fleet_bus.FleetBusError) as caught:
+            keyring.key_for("workst")
+        self.assertEqual(caught.exception.status, 401)
+        self.assertIn(str(binary), caught.exception.reason)
 
     def test_the_secret_file_override_stays_one_shared_key(self):
         # an explicit single key: any sender, one key, no inventory lookup
@@ -454,6 +578,11 @@ class BindDiscoveryTest(unittest.TestCase):
         self._keepers.append(server)
         return url
 
+    def keeper_with_location(self, answer, location):
+        server, url = start_keeper(answer, location=location)
+        self._keepers.append(server)
+        return server, url
+
     @staticmethod
     def hosts_doc(hosts):
         return (200, json.dumps({"hosts": hosts}))
@@ -570,6 +699,51 @@ class BindDiscoveryTest(unittest.TestCase):
                 lambda: fleet_bus.discover_bind("workst", url, self.token_file),
                 "keeper")
 
+    # fix round 2 item 2: no traceback paths out of the keeper read
+    def test_a_keeper_answering_garbage_fails_closed(self):
+        # http.client raises BadStatusLine (an HTTPException) on this one
+        listener, url = start_broken_keeper()
+        self.addCleanup(listener.close)
+        self.assert_fails_closed(
+            lambda: fleet_bus.discover_bind("workst", url, self.token_file),
+            "keeper")
+
+    def test_a_malformed_keeper_endpoint_fails_closed(self):
+        # urlparse's ValueError (unbalanced brackets) is one line, status 3
+        for endpoint in ("http://[::1", "[::1", "http://relay-a.example.invalid:[7"):
+            with self.subTest(endpoint=endpoint):
+                url = self.keeper(self.hosts_doc([self.entry("workst", endpoint)]))
+                self.assert_fails_closed(
+                    lambda: fleet_bus.discover_bind("workst", url, self.token_file),
+                    "malformed")
+
+    def test_a_non_utf8_keeper_token_fails_closed(self):
+        binary = self.td / "binary-token"
+        binary.write_bytes(b"\xff\xfe not utf-8\n")
+        os.chmod(binary, 0o600)
+        url = self.keeper(self.hosts_doc([]))
+        error = self.assert_fails_closed(
+            lambda: fleet_bus.discover_bind("workst", url, str(binary)),
+            "binary-token")
+        self.assertNotIn("Traceback", error.reason)
+
+    # fix round 2 item 3: a 3xx is an answer, not an invitation - the
+    # Bearer token must never be re-sent to whatever Location names
+    def test_a_keeper_redirect_is_refused_and_never_followed(self):
+        target, target_url, seen = start_recorder(self.hosts_doc([
+            self.entry("workst", "http://127.0.0.1:58690")])[1])
+        self.addCleanup(target.server_close)
+        self.addCleanup(target.shutdown)
+        keeper, url = self.keeper_with_location(
+            (302, ""), target_url + "/v1/hosts")
+        self.addCleanup(keeper.server_close)
+        self.addCleanup(keeper.shutdown)
+        self.assert_fails_closed(
+            lambda: fleet_bus.discover_bind("workst", url, self.token_file),
+            "302")
+        self.assertEqual(seen, [],
+                         "the redirect target must see no request at all")
+
     def test_the_token_is_never_printed_and_stays_0600(self):
         url = self.keeper(self.hosts_doc([]))
         error = self.assert_fails_closed(
@@ -621,7 +795,12 @@ class BindSafetyTest(unittest.TestCase):
     placeholder, never a site address.
     """
 
-    WILDCARDS = ("0.0.0.0", "::", "")
+    # Every spelling the OS resolves to the all-zeros (wildcard) address.
+    # The check must resolve the address, not compare strings: "0", "0.0",
+    # "000.000.000.000" and "0x0" are 0.0.0.0 in inet_aton, and "::0" and
+    # "0:0:0:0:0:0:0:0" are the IPv6 wildcard.
+    WILDCARDS = ("0.0.0.0", "0", "0.0", "000.000.000.000", "0x0",
+                 "::", "::0", "0:0:0:0:0:0:0:0", "")
 
     def setUp(self):
         self._td = tempfile.TemporaryDirectory(prefix="fleet_bus_safety_")
@@ -693,11 +872,47 @@ class BindSafetyTest(unittest.TestCase):
                 self.assertEqual(rc, 3, out)
                 self.one_error_line(out)
 
+    def test_every_wildcard_spelling_is_refused_from_a_discovered_endpoint(self):
+        for value in self.WILDCARDS:
+            if not value:
+                continue  # the null endpoint is its own fail-closed case above
+            endpoint = ("http://[%s]:58690" % value if ":" in value
+                        else "http://%s:58690" % value)
+            with self.subTest(endpoint=endpoint):
+                keeper, url = start_keeper((200, json.dumps({"hosts": [
+                    {"host": "workst", "endpoint": endpoint, "key_id": "k",
+                     "health": "healthy", "last_seen": 1761000000}]})))
+                try:
+                    rc, out, _ = self.run_main(
+                        ["--open", "--host", "workst", "--keeper-url", url,
+                         "--keeper-token-file", self.token_file]
+                        + self.server_args(), env={})
+                finally:
+                    keeper.shutdown()
+                    keeper.server_close()
+                self.assertEqual(rc, 3, out)
+                self.assertIn("wildcard", self.one_error_line(out))
+
+    def test_wildcard_detection_resolves_the_address_not_the_string(self):
+        for value in self.WILDCARDS:
+            with self.subTest(value=value):
+                self.assertTrue(fleet_bus.is_wildcard_bind(value))
+        # 0x1 is the legacy spelling of the address one step past the
+        # wildcard (0x0): near it and still not it (spelled in hex so this
+        # public tree types no dotted-quad literal for it - Hard Rule 1)
+        for value in ("127.0.0.1", "192.0.2.10", "::1", "0x1",
+                      "relay-a.example.invalid"):
+            with self.subTest(value=value):
+                self.assertFalse(fleet_bus.is_wildcard_bind(value))
+
     # (3) --bind short-circuits discovery: not one keeper request is made
     def test_bind_short_circuits_discovery(self):
         with mock.patch.object(
                 urllib.request, "urlopen",
-                side_effect=AssertionError("keeper request attempted")):
+                side_effect=AssertionError("keeper request attempted")), \
+                mock.patch.object(
+                    urllib.request.OpenerDirector, "open",
+                    side_effect=AssertionError("keeper request attempted")):
             rc, _, err = self.run_main(
                 ["--open", "--bind", "127.0.0.1"] + self.server_args(), env={})
         self.assertEqual(rc, 0)

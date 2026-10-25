@@ -9,11 +9,16 @@ the 0600 file --keeper-token-file / FLEET_KEEPER_TOKEN_FILE). --bind /
 FLEET_BUS_BIND is the explicit transition override. There is no literal
 default: discovery that cannot answer fails closed (exit code 3, one line,
 no traceback) and never guesses an address, so loopback happens only when
-the operator types --bind 127.0.0.1. A wildcard bind (0.0.0.0, "::" or
-empty) is refused from every source - it would put the open read path on
-every interface - and an address the OS will not hand out (unowned,
-unresolvable, wrong family) is the same one-line status-3 error, never a
-traceback. The coding-side poller pulls; apart
+the operator types --bind 127.0.0.1. A wildcard bind is refused from every
+source - it would put the open read path on every interface - and the
+address is RESOLVED first, so every spelling of the all-zeros address goes
+with it ("0", "0.0", "000.000.000.000", "0x0", "0.0.0.0", "::", "::0",
+"0:0:0:0:0:0:0:0" and the empty value). An address the OS will not hand out
+(unowned, unresolvable, wrong family) is the same one-line status-3 error,
+never a traceback, as are a garbled keeper response (an
+http.client.HTTPException), a keeper that answers with a redirect (never
+followed: the bearer token must not be re-sent to another host) and a
+malformed keeper endpoint. The coding-side poller pulls; apart
 from that one keeper GET at startup this side never dials out, so no
 round-trip is wasted: a single GET carries everything new since the
 poller's cursor.
@@ -36,16 +41,21 @@ Contract (the only two routes):
 Storage: an in-memory ring (cap 1000, oldest evicted) carries the full
 scrubbed text; the append-only log <logdir>/YYYY-MM-DD.jsonl carries records
 WITHOUT text ({"id","ts","from","to","len"}) per D-2024 (privacy: logs never
-hold message text). A restart drops undelivered bodies by design
-(best-effort relay: 10 s client timeout, no auto-retry).
+hold message text) and refusals as {"id","ts","event":"refused","reason"}
+- the reason a 401 names (key file paths, host names, never key contents
+and never message text) lives there and nowhere else. A restart drops
+undelivered bodies by design (best-effort relay: 10 s client timeout, no
+auto-retry).
 
 Secrets travel by NAME and FILE only, never in output: every sending host
 has its own HMAC key in a 0600 file, named by the inventory JSON
 (--inventory / FLEET_BUS_INVENTORY:
 {"hosts": {"<host>": {"key_file": "<path>"}}}). A POST is verified with the
 key of the envelope's "from" host - an unknown from-host or an unreadable
-key file is a 401 naming the path and host, never the value - and each key
-file is read once into memory. --secret-file stays as the explicit
+or non-UTF-8 key file is a 401 like any other, and its wire body is always
+the generic {"error": "unauthorized"} so the response never enumerates key
+file paths or host names (the full reason is in the metadata log) - and
+each key file is read once into memory. --secret-file stays as the explicit
 single-key override of the transition. --open skips HMAC for probe-only dry
 runs (15 min TTL throwaway); it must never carry live traffic.
 """
@@ -53,8 +63,11 @@ runs (15 min TTL throwaway); it must never carry live traffic.
 import argparse
 import hashlib
 import hmac
+import http.client
+import ipaddress
 import json
 import os
+import socket
 import sys
 import threading
 import time
@@ -73,8 +86,15 @@ NONCE_CAP = 10000
 RING_CAP = 1000
 DEFAULT_PORT = 58690
 KEEPER_TIMEOUT_S = 5
-# The wildcard: binding any of these exposes the open read path everywhere.
-WILDCARD_BINDS = ("", "0.0.0.0", "::")
+# The wildcard: binding it exposes the open read path on every interface.
+# Its spelling is never compared as a string - "0", "0.0", "000.000.000.000"
+# and "0x0" are 0.0.0.0 to inet_aton, and "::0" / "0:0:0:0:0:0:0:0" are the
+# IPv6 wildcard - so every check RESOLVES the address first (see
+# is_wildcard_bind).
+WILDCARD_ZERO4 = b"\0\0\0\0"
+# The one 401 body that goes on the wire: it never enumerates key file
+# paths or host names. The full reason is kept in the metadata-only log.
+UNAUTHORIZED = "unauthorized"
 # There is no literal default bind in this public tree (AutoOS Hard Rule 1):
 # the address comes from the keeper hosts registry entry for --host, or from
 # the explicit --bind / FLEET_BUS_BIND override. Loopback only happens when
@@ -112,37 +132,79 @@ def bind_override(env=None):
     return (source.get(BIND_ENV) or "").strip() or None
 
 
+def is_wildcard_bind(value):
+    """True when `value` names the all-zeros (wildcard) address.
+
+    The address is RESOLVED, not string-compared: to the OS "0", "0.0",
+    "000.000.000.000", "0x0" and "0.0.0.0" are all 0.0.0.0, and "::",
+    "::0" and "0:0:0:0:0:0:0:0" are the IPv6 wildcard. "" is refused too:
+    HTTPServer binds it to INADDR_ANY. Anything that resolves elsewhere
+    (including a name that resolves nowhere) is not the wildcard here.
+    """
+    if not value:
+        return True
+    try:
+        if socket.inet_aton(value) == WILDCARD_ZERO4:
+            return True
+    except OSError:
+        pass
+    try:
+        return ipaddress.ip_address(value).is_unspecified
+    except ValueError:
+        return False
+
+
 def check_bind(bind, source, status):
     """Return the stripped bind address, or refuse a wildcard one.
 
-    0.0.0.0 and "::" say the wildcard out loud and "" binds INADDR_ANY in
-    HTTPServer: each would put the relay's open read path on every
-    interface. Every source - the explicit --bind / FLEET_BUS_BIND override
-    or a discovered keeper endpoint - fails closed instead of binding one;
-    `status` is 2 for a configuration error, 3 for a fail-closed discovery.
+    Every spelling of the all-zeros address (see is_wildcard_bind) would
+    put the relay's open read path on every interface - "" binds
+    INADDR_ANY in HTTPServer just like "0.0.0.0" and "0x0" do. Every
+    source - the explicit --bind / FLEET_BUS_BIND override or a discovered
+    keeper endpoint - fails closed instead of binding one; `status` is 2
+    for a configuration error, 3 for a fail-closed discovery.
     """
     value = (bind or "").strip()
-    if value in WILDCARD_BINDS:
+    if is_wildcard_bind(value):
         raise FleetBusError(status, "refusing wildcard bind (%s) from %s"
                             % (value if value else "empty", source))
     return value
 
 
 def display_url(url):
-    """The URL without userinfo, so a message never carries credentials."""
-    parts = urlparse(url)
+    """The URL without userinfo, so a message never carries credentials.
+
+    Never raises: a malformed URL (urlparse's ValueError) degrades to the
+    part after the last "@", which is the same no-credentials promise.
+    """
+    try:
+        parts = urlparse(url)
+    except ValueError:
+        return str(url).rsplit("@", 1)[-1]
     return urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1],
                        parts.path, parts.query, parts.fragment))
 
 
 def endpoint_host(endpoint):
-    """The host part of a keeper endpoint (a URL or bare host[:port])."""
-    parsed = urlparse(endpoint if "://" in endpoint else "//" + endpoint)
+    """The host part of a keeper endpoint (a URL or bare host[:port]).
+
+    A malformed endpoint - say, unbalanced brackets - is not a traceback:
+    urlparse's ValueError becomes a one-line fail-closed status-3 error.
+    """
+    try:
+        parsed = urlparse(endpoint if "://" in endpoint else "//" + endpoint)
+    except ValueError:
+        raise FleetBusError(3, "keeper endpoint is malformed")
     return (parsed.hostname or "").strip()
 
 
 def read_secret(path, what="secret file"):
-    """First line of a 0600 file. Names the failure, never the value."""
+    """First line of a 0600 file. Names the failure, never the value.
+
+    A file that is not valid UTF-8 is the same one-line refusal (and never
+    a traceback), because the caller may be a request handler that must
+    answer 401 rather than drop the connection.
+    """
     try:
         if os.name != "nt" and os.stat(path).st_mode & 0o077:
             raise FleetBusError(2, "%s must be owner-only (0600): %s" % (what, path))
@@ -150,6 +212,8 @@ def read_secret(path, what="secret file"):
             value = f.readline().strip()
     except OSError:
         raise FleetBusError(2, "%s unreadable: %s" % (what, path))
+    except UnicodeDecodeError:
+        raise FleetBusError(2, "%s is not valid UTF-8: %s" % (what, path))
     if not value:
         raise FleetBusError(2, "%s empty: %s" % (what, path))
     return value.encode("utf-8")
@@ -161,20 +225,42 @@ def read_keeper_token(path):
         return read_secret(path, "keeper token file")
     except FleetBusError as e:
         raise FleetBusError(3, e.reason)
+    except UnicodeDecodeError:
+        raise FleetBusError(3, "keeper token file is not valid UTF-8: %s" % path)
+
+
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """A 3xx is an answer, not an invitation.
+
+    Following one would re-send the Authorization header (the keeper
+    bearer token) to whatever the Location names, so the redirect is
+    refused and surfaces as the same fail-closed non-200 answer.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code,
+                                     msg or "redirect refused", headers, fp)
 
 
 def fetch_keeper_hosts(keeper_url, token):
-    """GET <keeper>/v1/hosts -> the registry list. The token is never printed."""
+    """GET <keeper>/v1/hosts -> the registry list. The token is never printed.
+
+    No redirect is ever followed (see _RefuseRedirects) and no protocol
+    error escapes: http.client.HTTPException (a garbled status line, a
+    truncated response) is the same one-line fail-closed "keeper
+    unreachable" as a refused connection.
+    """
     url = keeper_url.rstrip("/") + "/v1/hosts"
     request = urllib.request.Request(
         url, headers={"Authorization": "Bearer " + token.decode("utf-8")})
+    opener = urllib.request.build_opener(_RefuseRedirects())
     try:
-        with urllib.request.urlopen(request, timeout=KEEPER_TIMEOUT_S) as response:
+        with opener.open(request, timeout=KEEPER_TIMEOUT_S) as response:
             status, raw = response.getcode(), response.read()
     except urllib.error.HTTPError as e:
         raise FleetBusError(3, "keeper answered HTTP %d: %s"
                            % (e.code, display_url(keeper_url)))
-    except (urllib.error.URLError, OSError, ValueError):
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException):
         raise FleetBusError(3, "keeper unreachable: %s" % display_url(keeper_url))
     if status != 200:
         raise FleetBusError(3, "keeper answered HTTP %d: %s"
@@ -220,7 +306,11 @@ def discover_bind(host, keeper_url, token_file):
     endpoint = entry.get("endpoint")
     if not isinstance(endpoint, str) or not endpoint.strip():
         raise FleetBusError(3, "keeper entry for %s has no endpoint" % host)
-    bind = endpoint_host(endpoint.strip())
+    try:
+        bind = endpoint_host(endpoint.strip())
+    except ValueError:
+        # urlparse's own ValueError (malformed endpoint): one line, status 3
+        raise FleetBusError(3, "keeper endpoint for %s is malformed" % host)
     if not bind:
         raise FleetBusError(3, "keeper endpoint for %s names no host" % host)
     return bind
@@ -265,9 +355,11 @@ class Keyring:
     """The /inbox HMAC keys: per-host key files, or one explicit override.
 
     A key file is read once (first line, 0600) and cached in memory; an
-    unknown from-host or an unreadable key file is a 401 naming the path and
-    host, never the value. `override` is the transition's explicit
-    single-key mode: it answers for every sender and skips the inventory.
+    unknown from-host or an unreadable or non-UTF-8 key file is a 401 like
+    any other (the wire body is generic; the reason names the path and
+    host, never the value, and lives in the metadata log). `override` is
+    the transition's explicit single-key mode: it answers for every sender
+    and skips the inventory.
     """
 
     def __init__(self, override=None, inventory=None):
@@ -290,6 +382,13 @@ class Keyring:
                         path, "key file for host %s" % host)
                 except FleetBusError as e:
                     raise FleetBusError(401, e.reason)
+                except UnicodeDecodeError:
+                    # never a traceback through the request handler: a key
+                    # file that cannot be read is a 401, not a dropped
+                    # connection
+                    raise FleetBusError(
+                        401, "key file for host %s is not valid UTF-8: %s"
+                        % (host, path))
             return self._cache[host]
 
 
@@ -339,6 +438,14 @@ class FleetBusStore:
         self._seq = 0
         self._logdir = logdir
 
+    def _log(self, row):
+        """Append one metadata-only jsonl row (caller holds the lock)."""
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        os.makedirs(self._logdir, exist_ok=True)
+        with open(os.path.join(self._logdir, day + ".jsonl"), "a",
+                  encoding="utf-8") as f:
+            f.write(json.dumps(row) + "\n")
+
     def append(self, fields):
         """Store a checked record; returns it with its id. Logs metadata only."""
         with self._lock:
@@ -348,14 +455,23 @@ class FleetBusStore:
                       "from": fields["from"], "to": fields["to"],
                       "text": fields["text"]}
             self._records.append(record)
-            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            os.makedirs(self._logdir, exist_ok=True)
-            with open(os.path.join(self._logdir, day + ".jsonl"), "a",
-                      encoding="utf-8") as f:
-                f.write(json.dumps({"id": record["id"], "ts": record["ts"],
-                                    "from": record["from"], "to": record["to"],
-                                    "len": len(record["text"])}) + "\n")
+            self._log({"id": record["id"], "ts": record["ts"],
+                       "from": record["from"], "to": record["to"],
+                       "len": len(record["text"])})
             return dict(record)
+
+    def log_refusal(self, reason):
+        """The full refusal reason in the metadata-only log.
+
+        This is where the reason a 401 names lives - key file paths and host
+        names are fine here, key contents and message text never are - since
+        the wire body of a 401 is generic (D-2024: logs never hold text).
+        """
+        with self._lock:
+            self._seq += 1
+            self._log({"id": "%d-%06d" % (int(time.time() * 1000), self._seq),
+                       "ts": int(time.time()), "event": "refused",
+                       "reason": reason})
 
     def since(self, cursor):
         """Records after `cursor` (insertion order); unknown cursor -> all."""
@@ -403,7 +519,15 @@ class FleetBusHandler(BaseHTTPRequestHandler):
             record = self.server.store.append(fields)
             self._send(200, {"id": record["id"], "ts": record["ts"]})
         except FleetBusError as e:
-            self._send(e.status, {"error": e.reason})
+            if e.status == 401:
+                # The wire body is generic: a 401 must not enumerate key
+                # file paths or host names. The full reason (paths and host
+                # names, never key contents, never message text) goes to the
+                # metadata-only jsonl log.
+                self.server.store.log_refusal(e.reason)
+                self._send(401, {"error": UNAUTHORIZED})
+            else:
+                self._send(e.status, {"error": e.reason})
 
     def do_GET(self):  # noqa: N802 (http.server names the method)
         try:
