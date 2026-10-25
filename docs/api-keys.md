@@ -211,7 +211,8 @@ response header **names** only, session tag, run id, prompt sha256, token
 usage, UTC start/finish) into
 `--out-dir`, or `error.json` and exit 3 on a non-200, and prints only the two
 paths, the served model and the answer's verdict normalised as `VERDICT:
-pass` / `VERDICT: fail-with-findings` (or `VERDICT: missing`) by the tolerant
+pass` / `VERDICT: fail-with-findings`, seat `ACCEPT` / `REJECT` / `HOLD`,
+or `VERDICT: missing` by the tolerant
 D-337 parse (`**Verdict:** pass` counts; quoted lines, table rows, fenced code
 and diff-hunk bodies do not; the last qualifying line wins) — never the key,
 the request headers or the prompt. Exit **4** also
@@ -453,3 +454,9 @@ Every reader of `configuration/api-keys.yml` (Python, the bash launchers through
 rules of `tools/keys_file.py`: when a name appears twice, the FIRST filled-in value wins (`run-opencode-serve.sh` used to take the
 last line); an unquoted ` #` starts a comment (quote a value that contains one); a value containing `REPLACE` is a placeholder and
 is skipped, so a later real value of the same name is used.
+
+Review-call evidence retains `pass` / `fail-with-findings` / `null`: ACCEPT
+maps to pass, REJECT to fail-with-findings, and HOLD to null. Review-call
+rejects the agent legacy words ready/fix-first/not-ready; the agent rejects
+the call legacy words pass/fail-with-findings. Both share the seat grammar
+and reject ambiguous seat decisions.

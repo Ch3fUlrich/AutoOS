@@ -32,7 +32,7 @@ An opencode session is turn based. When the model ends its turn, the session goe
 - A record said "complete, seats approved". My probes showed the goal was not met; the seat "quotes" were the commit message. Run the card's behaviours as probes yourself, `grep -F` every quote in the tree, check `git cat-file -t <sha>` and the diff stat.
 - A passing unit test is not the goal. A test that only passes through old logic proves nothing: ask for the card's four behaviours as real probes and a named mutation test.
 - An L1 must not edit code itself. It writes a brief and spawns a writer. Cap each step to 3 files and 3 verifier rounds, then move the writer up one tier.
-- One non-writer family seat is enough for normal risk, two families for HIGH. Two seats from the same model are one family.
+- Current seat selection follows D-2488/D-2654: use `seats_for` for two available seats from different families, also different from the writer; see `docs/routing.md` "Seat selection".
 
 ## 5. Make rules mechanical, not trust
 - No Google-paid leg for a lane: give that session a gate file with verdict `block` (`AUTOOS_DAILY_GATE_FILE`); the spawner then refuses every Google-paid start. Refresh the file before its 2 hour max age.
