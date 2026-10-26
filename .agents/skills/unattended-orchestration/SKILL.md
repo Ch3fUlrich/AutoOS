@@ -84,8 +84,8 @@ rule yet. `python3 tools/skill-rules.py check` (CI) enforces format, uniqueness 
 near-duplicates. Old ids (R-spawn-*, R-review-*, etc.) resolve via
 [`references/rule-map.md`](references/rule-map.md).
 
-Rules migrate into code over time: once a check moves into `autoos-agent` MCP
-tools, `tools/autoos*.py` or the resolver, this file points to the tool instead of restating it
+Rules migrate into code over time: once a check moves into plangraph (the keeper's or the
+spawner's checks), `tools/autoos*.py` or the resolver, this file points to the tool instead of restating it
 (source: briefs/common.md "Skill rules bind every spawned agent", operator 2026-09-26T13:43:33Z).
 
 Every brief names this skill: the spawned session loads it, and a worker that cannot read files
@@ -93,21 +93,20 @@ gets the rules its task touches inlined (source: briefs/common.md "Skill rules b
 agent", operator 2026-09-26T13:45Z).
 
 Mechanical rules already in code — the interface R-coord-09 mandates, and what each part gates:
-`python3 tools/autoos-agent.py` (the MCP server exposes the same) `run` (MCP `spawn`) launches one
-worker, `route` prints the resolver's pick for a task card, `ready` appends the ready line only
-after `review-status`, the pushed sha, and a green `tools/prepush.py` record for that exact sha
-(D-110) check out, `heartbeat` reports pause/unpushed/context
-fill, `ps` lists every live worker, `usage` the spend by provider and lane, `context` this
-session's fill, `token-rate` orchestrator tokens per merged change (RESTART spec §5), `list` the tiers and who may spawn whom. Also in code:
+spawn by card only, through the plangraph spawner (`python -m plangraph.spawner.cli spawn --role <role>
+--card '<json>' <prompt>`; D-2918: no agent uses the autoos-agent MCP or `tools/autoos-agent.py`).
+The spawner CLI also covers `route` (the pick for a card), `ps` (live runs), `wait`, `result`,
+`status` and `cancel`. The keeper holds the lane state: `heartbeat` extends a claim's lease and
+`submit` offers claimed work for review, only after the pushed sha has a green `tools/prepush.py`
+record (D-110). Spend, context-fill and token-rate reports have no plangraph verb yet: no
+autoos-agent verbs for them either (D-2918). Also in code:
 `python3 tools/autoos_resolver.py` (leg order, TPM caps, unavailable_until) and
 `python3 tools/registry.py validate` (registry shape). See `references/rule-map.md` for the full
 list of code-enforced rules.
 
-Every `ready` call names both guard files (AO-READY-CALLERS): the gate only *requires*
-them when the diff reaches R2, so a command line copied without them is refused at a
-gate the lane had already cleared.
-
-`python3 tools/autoos-agent.py ready <RECORD> --branch <B> --sha <SHA> --inbox <INBOX> --brief <BRIEF path> --report <REPORT path>`
+A lane is offered for review through the keeper, never by an autoos-agent `ready` line
+(D-2918): keeper `submit` with the item key and the claim's epoch (MCP `submit`, `{"key": "<item>",
+"epoch": <n>}`), after the push and a green `tools/prepush.py` record for that exact sha.
 
 `tools/prepush.py` holds its own gate order and the `AUTOOS_PREPUSH_OVERRIDE="<reason>"` escape
 (orchestrators only — it is logged, and an overridden sha is never green); its docstring is the
@@ -156,7 +155,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-coord-07: Heartbeat: L1/L2 run a 10-min CronCreate beat from launch to stop, recreated after relaunch or clear. (why: an idle session is retired after 8 h; source: common.md Heartbeats never stop)
 - **Superseded by D-1364/D-1377:** no recurring cron beat; see "Fleet rules in force" item 6.
 - R-coord-08: Beat pushes, pongs pings, WIP-commits past-beat work, stamps status, reads inbox, relaunches a quiet child >25 min. (why: stale orders ran workers post-stop; source: common.md 15:3xZ)
-- R-coord-09: L3 spawns, routing, status: autoos-agent only, never hand-roll; L2 launches: the runner. (why: hand-rolls drift from gates; source: operator 04:50Z, REVGATE.record.md)
+- R-coord-09: L3 spawns, routing, status: plangraph spawner + keeper only, never hand-roll; L2 launches: the runner. (why: hand-rolls drift from gates; source: operator 04:50Z, REVGATE.record.md)
 - R-coord-10: After a cancel, `ps` the lane: no runner, client or reparented child may survive. (why: a runner-only kill orphans the client's ~480 MB serve; source: SB-A D-103 2026-09-28)
 - R-coord-11: MCP code loads from its cwd checkout: ff it to main, restart the MCP, probe isolated. (why: ff under a running server mixes old and new code; source: SCOPEBUS probes 1-4, 2026-09-29)
 - R-coord-12: Run `tools/prepush.py` before a push; `ready` refuses a sha it never recorded green. (why: three lanes green at home were red in CI; source: CI 36517453134, 36493098467, 36506339556)
