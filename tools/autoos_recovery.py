@@ -539,11 +539,10 @@ def record_lane(run_id, state=None):
     global _kill_reader
     if _kill_reader is _UNSET:
         try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("autoos_agent_cli",
-                                                           AGENT_CLI_PATH)
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
+            import importlib
+            # AO-SPAWNER-REMOVE S1a: the reader moved to autoos_run_records;
+            # still lazy, still fail closed - any import failure means no lane.
+            module = importlib.import_module("autoos_run_records")
             _kill_reader = getattr(module, "read_kill_record", None)
         except BaseException:                 # noqa: BLE001 - fail closed: no lane
             _kill_reader = None

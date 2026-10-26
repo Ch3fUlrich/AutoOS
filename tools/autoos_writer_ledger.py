@@ -32,6 +32,7 @@ import sys
 import unicodedata
 
 import autoos_clients as clients
+import autoos_run_records
 
 
 VERDICTS = ("accepted", "reworked", "rejected")
@@ -778,7 +779,7 @@ def run_record(run_id):
         if type(run_id) is not str or not _RUNID.fullmatch(run_id):
             return None
 
-        with io.open(os.path.join(_agent_module().workers_dir(), run_id + ".json"),
+        with io.open(os.path.join(autoos_run_records.workers_dir(), run_id + ".json"),
                      encoding="utf-8") as h:
             f = json.load(h)
     except Exception:
@@ -809,7 +810,7 @@ def writer_for_run(run_id):
         if type(run_id) is not str or not _RUNID.fullmatch(run_id):
             return None
 
-        w = _agent_module().worker_writer(run_id)
+        w = autoos_run_records.worker_writer(run_id)
     except Exception:
         return None
 
