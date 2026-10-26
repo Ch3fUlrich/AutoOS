@@ -11,6 +11,7 @@ Run directly:
 
     python3 tests/test_autoos_run_records.py
 """
+import datetime
 import importlib.util
 import io
 import json
@@ -114,6 +115,90 @@ class WorkersDirTest(unittest.TestCase):
                 os.environ["AUTOOS_WORKERS_DIR"] = saved
         self.assertTrue(path.endswith(os.path.join("logs", "workers")))
         self.assertTrue(os.path.isdir(path))
+
+
+class WriteKillRecordTests(unittest.TestCase):
+    """write_kill_record on a temp state tree: the nt refusal, the first-write
+    stamps and the asymmetric merge."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.state = os.path.join(tmp.name, "logs")          # state_dir() is logs/
+        os.makedirs(os.path.join(self.state, "kill"))
+
+    def _write(self, record, name):
+        # os.name is patched because the guard is exactly what is under test:
+        # the moved writer must refuse on nt and write on posix whatever host
+        # this suite runs on.
+        with mock.patch.object(rec.clients, "state_dir", return_value=self.state), \
+                mock.patch.object(rec.os, "name", name):
+            return rec.write_kill_record(RUN, record)
+
+    def test_write_kill_record_writes_nothing_on_nt(self):
+        self.assertIs(self._write({"pgid": 4242}, "nt"), False)
+        self.assertIsNone(rec.read_kill_record(RUN, state=self.state))
+
+    def test_write_kill_record_refuses_an_empty_record(self):
+        self.assertIs(self._write({}, "posix"), False)
+        self.assertIsNone(rec.read_kill_record(RUN, state=self.state))
+
+    def test_write_kill_record_stamps_run_id_and_created_at_on_first_write(self):
+        self.assertIs(self._write({"pgid": 4242}, "posix"), True)
+        record = rec.read_kill_record(RUN, state=self.state)
+        self.assertEqual(record["run_id"], RUN)
+        self.assertRegex(record["created_at"],
+                         r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+        self.assertEqual(record["pgid"], 4242)
+
+    def test_write_kill_record_re_records_the_group_but_not_the_decided_fields(self):
+        self._write({"pgid": 1, "mode": "write"}, "posix")
+        first = rec.read_kill_record(RUN, state=self.state)
+        self.assertIs(self._write({"pgid": 2, "mode": "review"}, "posix"), True)
+        record = rec.read_kill_record(RUN, state=self.state)
+        self.assertEqual(record["pgid"], 2)              # the group is re-recorded
+        self.assertEqual(record["mode"], "write")        # decided-at-spawn is not
+        self.assertEqual(record["created_at"], first["created_at"])
+        self.assertEqual(record["run_id"], RUN)
+
+
+class IsoZuluTests(unittest.TestCase):
+    """_iso_zulu is the one stamp shape the record readers trust."""
+
+    def test_an_offset_moment_is_stamped_as_utc_seconds_with_a_z(self):
+        moment = datetime.datetime(2026, 10, 26, 9, 0, 5, tzinfo=datetime.timezone(
+            datetime.timedelta(hours=2)))
+        self.assertEqual(rec._iso_zulu(moment), "2026-10-26T07:00:05Z")
+
+
+class ZenKeyTests(unittest.TestCase):
+    """zen_key and ZEN_KEYS_FIELD on a temp checkout's api-keys.yml."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+        self.keys = os.path.join(self.root, "configuration", "api-keys.yml")
+
+    def _write_keys(self, text):
+        os.makedirs(os.path.dirname(self.keys))
+        with io.open(self.keys, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def test_the_zen_field_name_is_the_one_the_keys_reader_parses(self):
+        self.assertEqual(ckeys.ZEN_KEYS_FIELD, "zen")
+
+    def test_zen_key_reads_the_zen_field(self):
+        self._write_keys("# fake values only, never a real key\nzen: fake-zen-key-123\n")
+        self.assertEqual(ckeys.zen_key(self.root), "fake-zen-key-123")
+
+    def test_zen_key_is_none_when_the_file_holds_no_zen_field(self):
+        self._write_keys("gateway: some-other-field\n")
+        self.assertIsNone(ckeys.zen_key(self.root))
+
+    def test_zen_key_is_none_for_a_placeholder_value(self):
+        self._write_keys("zen: REPLACE_WITH_ZEN_KEY\n")
+        self.assertIsNone(ckeys.zen_key(self.root))
 
 
 class AgentReExports(unittest.TestCase):
