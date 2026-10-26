@@ -93,8 +93,9 @@ gets the rules its task touches inlined (source: briefs/common.md "Skill rules b
 agent", operator 2026-09-26T13:45Z).
 
 Mechanical rules already in code — the interface R-coord-09 mandates, and what each part gates:
-`python3 tools/autoos-agent.py` (the MCP server exposes the same) `run` (MCP `spawn`) launches one
-worker, `route` prints the resolver's pick for a task card, `ready` appends the ready line only
+spawn by card only, through the plangraph spawner (`python -m plangraph.spawner.cli spawn --role <role>
+--card '<json>' <prompt>`; D-2918: never an `autoos-agent` run, never the autoos-agent MCP).
+`python3 tools/autoos-agent.py` keeps the other verbs: `ready` appends the ready line only
 after `review-status`, the pushed sha, and a green `tools/prepush.py` record for that exact sha
 (D-110) check out, `heartbeat` reports pause/unpushed/context
 fill, `ps` lists every live worker, `usage` the spend by provider and lane, `context` this
