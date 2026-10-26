@@ -13,5 +13,5 @@
 #   2. put this file on PATH (e.g. ln -s "$PWD/infra/mcp-servers/bin/graphify-mcp" /usr/local/bin/)
 #   3. register the one user-scope entry above; restart Claude Code
 #
-# Workstations do NOT use this — they use the uv entry (skills/mcp-servers-setup/SKILL.md).
+# Workstations do NOT use this — they use the uv entry (.agents/skills/mcp-servers-setup/SKILL.md).
 exec docker run -i --rm -v "$PWD:/repo" graphify-mcp:latest "$@"

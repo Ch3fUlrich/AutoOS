@@ -13,7 +13,9 @@ Run directly:
 
     python3 tests/test_skill_mcpsetup_split.py
 """
+import os
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -33,6 +35,32 @@ REFERENCE_MAX_LINES = 500
 OLD_TOTAL_LINES = 619
 OLD_NONBLANK_LINES = 518
 LINK_REWRITE_SLACK = 12
+
+# Per-file floors (fix round 2, 2026-10-26): the aggregate floor above lets one
+# file absorb another's truncation — measured at 658 total / 546 non-blank it
+# passed a 40-line truncation. Each file is pinned at its own non-blank count
+# at pin time minus at most 2 lines of slack (one re-wrapped link). Counts in
+# the comments are the pin-time values.
+PER_FILE_NONBLANK_FLOORS = {
+    "SKILL.md": 68,                  # 70 non-blank
+    "context7.md": 15,               # 17
+    "graphify.md": 91,               # 93
+    "infrastructure-harbor.md": 40,  # 42
+    "omnigraph.md": 46,              # 48
+    "playwright.md": 81,             # 83
+    "serena.md": 175,                # 177
+    "superpowers.md": 14,            # 16
+}
+
+# Path mentions that must resolve from the repo root (fix round 2): the skill
+# lives under .agents/skills/, so a mention of its directory without that
+# prefix is a dead path for anyone reading from the repo root. The needle is
+# built by concatenation so this file never matches its own scan.
+SKILL_PATH_NEEDLE = "skills/" + "mcp-servers-setup"
+PATH_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "0123456789._/-")
 
 # Every heading of the 619-line pre-split SKILL.md, verbatim (em dash = \u2014,
 # spelled as an escape so this file never depends on its own encoding).
@@ -100,6 +128,68 @@ def _missing_links(path):
     return missing
 
 
+def _tracked_files():
+    """Files git tracks, resolved against ROOT — the scope of the scan below.
+
+    Plain `git ls-files` first. When the checkout is a worktree created on
+    Windows and the suite runs under WSL, the worktree's .git file names its
+    gitdir with a drive letter, which POSIX git reads as a relative path and
+    rejects. Translate the drive letter to its /mnt/<drive> home and retry
+    with the gitdir named explicitly.
+    """
+    args = ["ls-files", "-z"]
+    out = subprocess.run(["git"] + args, cwd=str(ROOT), capture_output=True)
+    if out.returncode != 0:
+        gitfile = ROOT / ".git"
+        match = re.match(
+            r"gitdir:\s*([A-Za-z]):[/\\](.*)",
+            gitfile.read_text(encoding="utf-8") if gitfile.is_file() else "")
+        if not match or os.name == "nt":
+            raise RuntimeError(
+                "git ls-files failed: %s" % out.stderr.decode("utf-8", "replace"))
+        gitdir = "/mnt/%s/%s" % (match.group(1).lower(),
+                                 match.group(2).replace("\\", "/"))
+        out = subprocess.run(
+            ["git", "--git-dir=" + gitdir, "--work-tree=" + str(ROOT)] + args,
+            cwd=str(ROOT), capture_output=True)
+        if out.returncode != 0:
+            raise RuntimeError(
+                "git ls-files failed: %s" % out.stderr.decode("utf-8", "replace"))
+    return [ROOT / rel for rel in out.stdout.decode("utf-8").split("\0") if rel]
+
+
+def _dead_skill_mentions(path):
+    """(line, token) pairs where a skill-path mention is dead from ROOT.
+
+    A mention is fine when it carries the `.agents/` prefix the real tree has,
+    or when the path it spells exists at the repo root. Anything else is a dead
+    path for a reader following it from the root. Binary files yield [].
+    """
+    data = path.read_bytes()
+    if b"\0" in data:
+        return []
+    hits = []
+    for lineno, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+        start = 0
+        while True:
+            i = line.find(SKILL_PATH_NEEDLE, start)
+            if i < 0:
+                break
+            start = i + 1
+            if line[:i].endswith(".agents/"):
+                continue
+            lo = i
+            while lo > 0 and line[lo - 1] in PATH_CHARS:
+                lo -= 1
+            hi = i + len(SKILL_PATH_NEEDLE)
+            while hi < len(line) and line[hi] in PATH_CHARS:
+                hi += 1
+            token = line[lo:hi].rstrip("/")
+            if not (ROOT / token).exists():
+                hits.append((lineno, line[lo:hi]))
+    return hits
+
+
 class McpSetupSplitTests(unittest.TestCase):
     def test_index_is_at_most_150_lines(self):
         self.assertLessEqual(
@@ -151,7 +241,7 @@ class McpSetupSplitTests(unittest.TestCase):
             "reference file(s) not linked from SKILL.md: %r" % orphans)
 
     def test_the_split_did_not_lose_content(self):
-        """Line-count floor on top of the heading check (see constants above)."""
+        """Line-count floors on top of the heading check (see constants above)."""
         files = [SKILL] + sorted(REFS.rglob("*.md"))
         total = sum(_line_count(p) for p in files)
         nonblank = sum(_nonblank_count(p) for p in files)
@@ -165,6 +255,44 @@ class McpSetupSplitTests(unittest.TestCase):
             "SKILL.md + references hold %d non-blank lines; the pre-split file "
             "held %d (slack %d) — content was lost" % (
                 nonblank, OLD_NONBLANK_LINES, LINK_REWRITE_SLACK))
+
+    def test_each_file_keeps_its_own_nonblank_floor(self):
+        """Per-file floors: the aggregate check lets one file absorb another's
+        truncation, so pin SKILL.md and every reference at its own non-blank
+        count minus at most 2 (PER_FILE_NONBLANK_FLOORS)."""
+        actual = {"SKILL.md": SKILL}
+        actual.update({p.name: p for p in REFS.rglob("*.md")})
+        self.assertEqual(
+            sorted(actual), sorted(PER_FILE_NONBLANK_FLOORS),
+            "SKILL.md and every references/*.md need a pinned non-blank floor")
+        low = {}
+        for name in sorted(actual):
+            count = _nonblank_count(actual[name])
+            if count < PER_FILE_NONBLANK_FLOORS[name]:
+                low[name] = count
+        self.assertEqual(
+            low, {},
+            "file(s) below their pinned non-blank floor: %r (floors %r)" % (
+                low, PER_FILE_NONBLANK_FLOORS))
+
+    def test_no_dead_skill_paths_in_tracked_files(self):
+        """Every skill-path mention in a tracked text file must resolve from
+        the repo root (fix round 2): prose spelled the skill's home without the
+        leading .agents/ segment the real tree has, a dead path for any reader
+        following it from the root. The scan covers all tracked files, not just
+        the skill's own — the bad spelling spread into infra docs, a script and
+        a config comment."""
+        dead = {}
+        for path in _tracked_files():
+            if not path.is_file():
+                continue
+            hits = _dead_skill_mentions(path)
+            if hits:
+                dead[str(path.relative_to(ROOT))] = hits
+        self.assertEqual(
+            dead, {},
+            "skill-path mention(s) that do not resolve from the repo root — "
+            "prefix with .agents/ to point at the real tree: %r" % dead)
 
 
 if __name__ == "__main__":

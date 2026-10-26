@@ -10,7 +10,7 @@
     "command for the cwd wrapper -- \"graphify\": { \"command\": \"graphify-mcp\" }, from",
     "infra/mcp-servers/bin/graphify-mcp on PATH. The retired per-repo `graphify-docker` (2026-07-20)",
     "used a HARDCODED mount, which is what made one repo's graph answer for every repo.",
-    "Details: skills/mcp-servers-setup/SKILL.md -> Graphify.",
+    "Details: .agents/skills/mcp-servers-setup/SKILL.md -> Graphify.",
     "",
     "OMNIGRAPH is the opposite -- genuinely PER-REPO (project scope, pinned by OMNIGRAPH_GRAPH_ID).",
     "Keep user scope EMPTY of `omnigraph`: a 2026-07-17 incident had a user-scope `omnigraph` win",
