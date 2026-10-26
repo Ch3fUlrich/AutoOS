@@ -1,6 +1,7 @@
-# Tier order and windows (TORDER) — the folded combo-create rule
+# Tier order and windows (TORDER) — the folded predecessor rule
 
-This is combo-create's rule, kept in substance (TORDER 2026-10-01,
+This is the folded-in predecessor skill's rule, kept in substance (TORDER
+2026-10-01,
 D-TORDER-1b). It governs every leg curation in `catalog/ai-registry.json`.
 Code, tests and apply scripts reference the skill; they do not restate it.
 

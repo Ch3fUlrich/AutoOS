@@ -6,7 +6,7 @@ description: The one how-to for OmniRoute routing - combos, providers, models, r
 # Routing registry — OmniRoute combos, providers, models, routes
 
 The one home for OmniRoute routing how-to. It folds in and supersedes the
-retired `combo-create` skill (removed 2026-10-26; its tier-order rule is kept
+retired predecessor skill (removed 2026-10-26; its tier-order rule is kept
 verbatim in [tier-order](references/tier-order.md)). Code, tests and apply
 scripts reference this skill; they do not restate it.
 
@@ -37,8 +37,9 @@ GO (operator/router) -> apply**. Never reorder these steps.
    litellm|ide|openhands|models-doc --check`, `python tools/sync-ide-models.py
    --check` (or `python tools/sync-router-tiers.py --check`).
 5. `python tools/registry.py check` + `validate`, `python tools/audit-router.py
-   --offline`, `bash configuration/omniroute/apply.sh --dry-run` (Windows twin
-   `configuration/omniroute/apply.ps1 -DryRun`) — exit 0.
+   --offline`, `pytest`, `bash configuration/omniroute/apply.sh --dry-run`
+   (Windows twin `configuration/omniroute/apply.ps1 -DryRun`) — exit 0,
+   shellcheck/PSScriptAnalyzer clean.
 6. **GO (operator/router)**, then apply: `bash configuration/omniroute/apply.sh
    --go <ref> --go-sha <sha>`. A mutating run refuses without an explicit GO
    (fleet rule D-825) — see [add-modify](references/add-modify.md#go).

@@ -66,18 +66,27 @@ alternative. Prove the client limits moved too (e.g. opencode
 
 ## 5. Offline checks
 
+`python tools/registry.py check` + `validate`, `audit-router.py --offline`, `pytest`, `apply.ps1 -DryRun` exit 0, shellcheck/PSScriptAnalyzer clean.
+
+That is the folded-in predecessor procedure's step 6, restored word for word.
+When this skill replaced the predecessor, the step's `pytest` and
+shellcheck/PSScriptAnalyzer legs were dropped; they are part of this gate, not
+optional extras. Spelled out:
+
 ```sh
 python tools/registry.py check
 python tools/registry.py validate
 python tools/audit-router.py --offline
+pytest
 bash configuration/omniroute/apply.sh --dry-run       # Windows twin:
 # configuration/omniroute/apply.ps1 -DryRun
 ```
 
-All exit 0. A dry run plans without executing; read the plan output and confirm
-it says what you expect. Under the repo's test harnesses the gateway URL is
-aimed at a closed port (`AUTOOS_OMNIROUTE_URL`) so a dry run never reads the
-live gateway.
+All exit 0, and the linters are clean: shellcheck over every touched `.sh`,
+PSScriptAnalyzer over every touched `.ps1`/`.psm1` (a skip is not a pass). A
+dry run plans without executing; read the plan output and confirm it says what
+you expect. Under the repo's test harnesses the gateway URL is aimed at a
+closed port (`AUTOOS_OMNIROUTE_URL`) so a dry run never reads the live gateway.
 
 ## GO (operator/router), then apply {#go}
 
@@ -109,7 +118,7 @@ Optional: `--probe` sends one tiny request per combo and reports what answered
 
 - `--dry-run` plan read and understood before the GO.
 - Gate green (`combo-contract.py`, `registry.py check`, `validate`,
-  `audit-router.py --offline`).
+  `audit-router.py --offline`, `pytest`) and shellcheck/PSScriptAnalyzer clean.
 - Every `--check` green on all five surfaces + `sync-ide-models.py --check`.
 - The change is reasoned and dated (`$comment` + ledger record where a leg
   moved).
