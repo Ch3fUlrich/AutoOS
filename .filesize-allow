@@ -1,0 +1,13 @@
+# .filesize-allow - paths tools/check-file-size.py measures but does not judge.
+# Format: <path> <reason>. One entry per line; a reason is mandatory.
+#
+# Binary screenshot assets: the gate counts lines, and a line count over a
+# PNG is not a source-size signal - a screenshot cannot be split by
+# responsibility and a re-export can cross 400 newlines at any pixel size.
+docs/assets/webui-overview.png binary PNG asset - line count is not a source-size signal
+docs/assets/webui-providers.png binary PNG asset - line count is not a source-size signal
+docs/assets/webui-runlog.png binary PNG asset - line count is not a source-size signal
+# A changelog is a ledger, not source: it grows by exactly one line per merged
+# change and can never shrink, so a baseline entry for it would fail every
+# future entry that records itself. Ratcheting it is a structural no-op.
+CHANGELOG.md a ledger grows one line per merged change and never shrinks

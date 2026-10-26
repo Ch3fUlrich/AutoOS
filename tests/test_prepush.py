@@ -227,13 +227,13 @@ class RepoFixture(unittest.TestCase):
     # tests that build a suite stub skip on Windows by themselves.
     @unittest.skipIf(os.name == "nt", "the suite stub is a bash script")
     def suite_is_green(self):
-        for rel in ("tests/test_ci_shards.py", "tests/ci-shards.py"):
+        for rel in ("tools/check-file-size.py", "tests/test_ci_shards.py", "tests/ci-shards.py"):
             self._write(rel, "import sys\nsys.exit(0)\n")
         self._write("tests/run-tests.sh", "#!/usr/bin/env bash\n" + self.SH_GREEN)
 
     @unittest.skipIf(os.name == "nt", "the suite stub is a bash script")
     def suite_is_red(self):
-        for rel in ("tests/test_ci_shards.py", "tests/ci-shards.py"):
+        for rel in ("tools/check-file-size.py", "tests/test_ci_shards.py", "tests/ci-shards.py"):
             self._write(rel, "import sys\nsys.stderr.write('plan check failed\\n')\n"
                              "sys.exit(1)\n")
         self._write("tests/run-tests.sh", "#!/usr/bin/env bash\n" + self.SH_RED)
