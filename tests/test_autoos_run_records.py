@@ -212,12 +212,13 @@ class AgentReExports(unittest.TestCase):
         spec.loader.exec_module(cls.agent)
 
     def test_run_record_readers_are_the_moved_functions(self):
-        for name in ("kill_store_dir", "kill_store_path", "write_kill_record",
-                     "read_kill_record", "workers_dir", "worker_writer"):
+        for name in ("_iso_zulu", "kill_store_dir", "kill_store_path",
+                     "write_kill_record", "read_kill_record", "workers_dir",
+                     "worker_writer"):
             self.assertIs(getattr(self.agent, name), getattr(rec, name), name)
 
     def test_client_key_helpers_are_the_moved_functions(self):
-        for name in ("key_files", "client_key", "zen_key"):
+        for name in ("ZEN_KEYS_FIELD", "key_files", "client_key", "zen_key"):
             self.assertIs(getattr(self.agent, name), getattr(ckeys, name), name)
 
 
