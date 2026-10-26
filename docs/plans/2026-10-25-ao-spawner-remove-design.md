@@ -4,7 +4,8 @@ Status: DESIGN v4. Three qwen design-seat rounds (r1 run-7df2c280, r2 run-4d08ce
 round and found more MISSED REFERENCES (r1 18+, r2 5, r3 13+): a hand-made list over a 16k-line module and ~30k test lines
 does not converge. v4 therefore makes completeness MECHANICAL (§3c discovery rule, run by every slice writer and checked by
 every slice seat) and fixes r3's structural findings; the §3a/§3b lists are kept as a starting inventory, not as the contract.
-Round cap (D-2739) reached after r3: v4 goes to routing, not to a 4th design seat (map in §10). Base: AutoOS main da6a4f8e,
+Round cap (D-2739) reached after r3: v4 went to routing (D-2901: approved as the strong replan; one mimo-pro seat on §3c +
+the structural fixes, run-2ce4c3ef: 0 HIGH, 8 MED, 2 LOW). v4.1 folds those in without another design loop (map in §10). Base: AutoOS main da6a4f8e,
 plangraph main d66bf9e5 (plangraph excerpts quoted in Appendix A so the seat can verify them without a plangraph checkout).
 Author: AutoOS L1 (Claude Opus 5.5), 2026-10-26. Decisions: D-2576 (AutoOS keeps no spawner), D-2749 (plangraph spawner
 only), D-2758(4) (full removal incl. skills/docs), D-2810 (bulk cancel applied), D-2813 (rulings, §9).
@@ -69,7 +70,7 @@ MCP-server-name list (drop `autoos-agent` and its `pin-ok` in S2a).
 ### 3b. Test files (enumerated; disposition per slice)
 | File | Touches | Slice |
 |---|---|---|
-| `tests/test_autoos_spawner.py` (~30k) | kept classes (ReviewStatus, FinalReviewFamily, EvidenceGate, Ledger*, Ready*, Preflight, CIRunStatus; :10410-15008, ~7,100 lines) + spawn classes; module-level `import autoos_agent_mcp` (:40); every `mcp_server` use is in classes before ~:1850 (e.g. `McpToolTests` :1491) | NO move (a 7k-line move would count as adds): S3 deletes the classes that use `mcp_server` or name `autoos_agent_mcp` by PATH STRING (e.g. `McpStdioTests` :2571, `McpIsolateForceTests` :15557, `SubprocessEnvAuditTests` :17783,17955; §3c rule 1 finds all) and the :40 import; the spawn classes die with their verbs in S5a/S5b-route/S5b-run; the kept classes stay in place. The file keeps its name (a rename is a later cosmetic item, not this one) |
+| `tests/test_autoos_spawner.py` (~30k) | kept classes (ReviewStatus, FinalReviewFamily, EvidenceGate, Ledger*, Ready*, Preflight, CIRunStatus; :10410-15008, ~7,100 lines) + spawn classes; module-level `import autoos_agent_mcp as mcp_server` (:40); `mcp_server` is used ~349 times across the file (62 before :1850, the rest later, e.g. `HostAdmissionTests` :27168 at :27511-27517) | NO move (a 7k-line move would count as adds): S3 deletes (or, for kept classes, rewrites off the MCP) EVERY class that uses the `mcp_server` alias (§3c rule 1c finds all ~349 uses) or names `autoos_agent_mcp` by PATH STRING (e.g. `McpStdioTests` :2571, `McpIsolateForceTests` :15557, `SubprocessEnvAuditTests` :17783,17955; §3c rule 1 finds all) and the :40 import; the spawn classes die with their verbs in S5a/S5b-route/S5b-run; the kept classes stay in place. The file keeps its name (a rename is a later cosmetic item, not this one) |
 | `tests/test_autoos_heartbeat.py` | `import autoos_agent_mcp` (:41); class `McpHeartbeatTests` (:1184-1263; incl. the `autoos-agent.py run` text at :1212); class `RunRefusesOnPauseTests` (:1135-1181, subprocess `run --dry-run`) | S3: drop the import and the WHOLE `McpHeartbeatTests` class (keep the `if __name__` runner :1264-1266); S5b-run: delete `RunRefusesOnPauseTests`; CLI heartbeat cases stay |
 | `tests/test_t2_record_pin.py` | module-level `import autoos_agent_mcp` (:48); subprocess `autoos-agent.py run --dry-run` (:70,105,128); wired `33:843`, `run-tests.ps1:5468` | S3: drop the import and its MCP cases; S5b-run: delete the `run` cases (or the file if none remain) + unwire |
 | `tests/test_spawn_pin_allowed_id.py` | subprocess `autoos-agent.py run` (:105,128), asserts the `autoos-agent.py list` hint (:132); wired `33:1020` | S5b-run: delete (the whole file is spawn-pin) + unwire 33:1020 |
@@ -85,12 +86,19 @@ MCP-server-name list (drop `autoos-agent` and its `pin-ok` in S2a).
 
 ### 3c. Discovery rule (the completeness contract; replaces "the list is complete")
 Every slice writer, BEFORE the slice's review, runs and pastes into the slice report:
-1. `rg -n` over the whole tree (not only `tools/`/`tests/`) for every name the slice removes: module file names
-   (`autoos_agent_mcp`, `oc_l2`, `runner_pool`), verbs as argv (`"run"`, `'run'`, `run --`, `autoos-agent.py run`...), and every
-   deleted top-level symbol (from the slice's own diff: `git diff --stat` + the I9 closure report). Path-string references
-   count, not only identifiers.
+1. `rg -n` (or `grep -rnE`) over the whole tree (not only `tools/`/`tests/`) for every name the slice removes, in ALL forms:
+   (a) module/file names (`autoos_agent_mcp`, `oc_l2`, `runner_pool`) incl. path strings; (b) the hyphenated server/tool-name
+   family (`autoos-agent`, `autoos-agent_*`, `autoos-agent_spawn`) in JSON/YAML/TOML/shell/PowerShell/Markdown; (c) import
+   ALIASES of removed modules (e.g. `import autoos_agent_mcp as mcp_server` -> grep `mcp_server`) and by-path loader handles
+   (`agent.<removed symbol>`, `getattr(..., "<removed symbol>")`); (d) every deleted top-level symbol, taken from the slice's
+   diff (`git diff -U0 | grep '^-def \|^-class \|^-[A-Z_]* ='`) plus the I9 closure report; (e) verbs: argv forms (`"run"`,
+   `'run'`, `run --`), prose forms (`autoos-agent.py run`) and Markdown backtick forms (`` `run` ``, `` `ps` ``), counted ONLY in
+   files that also reference `autoos-agent`/`AGENT`/the removed module (co-occurrence filter, so generic `"run"` hits in
+   unrelated files are not noise work).
 2. Each hit outside the history allowlist gets a disposition IN THIS SLICE: deleted with its code, rewritten, or listed as
-   "dies in slice Sx" with the later slice that removes it (that later slice must then be green without it).
+   "dies in slice Sx" with the later slice that removes it (that later slice must then be green without it). A deferred hit
+   is NOT an I6 violation in the slice that defers it (I6 stage (a) is checked against the slice's own removed names only).
+   Where §3a/§3b and rule 2 disagree, rule 2 (the measured hit list) wins and the slice report says so.
 3. The full Linux unit wiring (parts 17/18/33/34/44) parses (`bash -n`) and runs, and `run-tests.ps1` lists no missing file
    (I5 both directions), plus the kept-verb suites (I3) and I1/I2/I9.
 The slice seats check the pasted discovery output against the diff; a hit without a disposition is a HIGH.
@@ -124,7 +132,10 @@ D-2739 rule 1), historical `docs/plans`, `docs/handoff/` (the directory of dated
 | I3 | kept verbs behave identically | the kept-verb suites of §3b and the kept classes of `test_autoos_spawner.py` green every slice |
 | I4 | historical run records stay readable | `autoos_run_records` tests (S1) on a fixture `logs/kill/<run>.json` + workers dir; note `kill_store_dir` needs `clients.state_dir()`, so `autoos_run_records` imports `autoos_clients` |
 | I5 | no unwired test file AND no wired-but-missing file | `tests/test_suite_wiring.py` gains the reverse check in S1 (every file named in parts 17/18/33/34/44 and `run-tests.ps1` exists); each deletion unwires in the SAME slice |
-| I6 | nothing live teaches or calls a removed verb/tool | two stages, to keep the order satisfiable: (a) S1b-S5: the §3c removed-name check over CODE + TESTS + CONFIG + CATALOG (not docs/skills), growing per slice; (b) S6, after S2b merged: the permanent `tests/test_no_autoos_spawn_refs.py` over the whole tree minus the history allowlist (`docs/plans/`, `docs/handoff/`, `docs/adr/`, `CHANGELOG.md`, `logs/`). Kept-file comments that match are rewritten (S2b or the slice that removes the name), not exempted |
+| I6 | nothing live teaches or calls a removed verb/tool | two stages, to keep the order satisfiable: (a) S1b-S5: the §3c removed-name check over CODE + TESTS + CONFIG + CATALOG (not docs/skills), growing per slice; (b) S6, after S2b merged: the permanent `tests/test_no_autoos_spawn_refs.py` over the whole tree minus the history allowlist, with
+the FINAL PATTERN = §3c rule 1 forms (a)-(e) for all removed names, where the bare `autoos-agent` / `tools/autoos-agent.py` name
+matches only together with a removed verb or the MCP/server context (`mcpServers`, `mcp`, `spawn`, `"autoos-agent":`), so kept
+uses of the CLI (`autoos-agent.py ready`, kept test blocks) stay legal (`docs/plans/`, `docs/handoff/`, `docs/adr/`, `CHANGELOG.md`, `logs/`). Kept-file comments that match are rewritten (S2b or the slice that removes the name), not exempted |
 | I7 | no secret value read or printed; `configuration/api-keys.yml` untouched | review check per slice (the file is git-ignored, `.gitignore:11`, so a diff check alone is vacuous): no slice adds code that opens it except the existing kept helpers |
 | I8 | merge fence of §1 | manual L1 check before each merge (not test-checkable; the seat checks only that each slice's PR text records it) |
 | I9 | every symbol reachable from KEEP_ROOTS still exists | NEW `tests/test_autoos_agent_keep_closure.py` (S1b): AST name-reference closure over `autoos-agent.py` from KEEP_ROOTS; fails on any missing reachable name (catches `CFG_VERBS` in `main()`, the prune-sandboxes cluster, `parse_now`/`load_registry`). Runs in EVERY slice |
@@ -170,12 +181,15 @@ file, not the history dir); `docs/tasks.md:23,41`; `docs/ai/opencode-fleet.md:10
 
 Suite wiring is unwired by WHOLE BLOCK, never by line: every `if it ...; then ... fi` block in `tests/linux/*.sh` and every
 entry in `run-tests.ps1` that runs a removed file is deleted as one unit (incl. its `pass||fail` and `fi`), in the slice that
-deletes the file; a block that also runs a kept file is split so the kept call keeps its own complete block. The line numbers
+deletes the file; a block that also runs a kept file is split so the kept call keeps its own complete block (also when the
+two files die in different slices: each keeps its own block until its slice). A block that runs a KEPT file filtered to
+deleted classes (e.g. `test_autoos_spawner.py -k admission`) is removed in the slice that deletes the last class it selects,
+because it would otherwise pass on "Ran 0 tests". The line numbers
 in this table are orientation only (§3), and `bash -n` on each part (§3c rule 3) proves the result parses.
 
 Line-cap reading (APPROVED D-2813, §9): count ADDED + MODIFIED lines (<= ~400); pure deletions uncapped, but each slice deletes
 ONE cohesive region (one file, or one connected symbol group of `autoos-agent.py`), proven by I6 + I9 + I3/I5. Seats read the
-full diff. Every slice runs I1, I2, I5, I6, I9 plus its own tests.
+full diff. Every slice runs I1, I2, I5, I6, I9 plus its own tests (S1a: see the S1a invariant set below the table).
 
 | Slice | Content | Adds/mods (est) | Deletes (est) | Tests |
 |---|---|---|---|---|
@@ -190,8 +204,12 @@ full diff. Every slice runs I1, I2, I5, I6, I9 plus its own tests.
 | S5b-run | delete `cmd_run` + parser/entry + `CFG_VERBS` and its `main()` line + unreachable group; rewrite `main()` guard text + module docstring; `autoos-ask.py` refusal text; delete `test_run_budget_spawner.py`, `test_spawn_pin_allowed_id.py`, the `run` cases of `test_t2_record_pin.py` and the remaining spawn classes of `test_autoos_spawner.py`; unwire 33:555-655,657,697,906,918,962,1017-1023,1240-1260, 33:1020 (+ 33:843 / `run-tests.ps1:5468` if `test_t2_record_pin.py` empties) | ~120 | ~9,000 + ~25,000 tests | I3, I5, I6 (+ verbs), I9 |
 | S6 fleet gate | I6 test becomes the permanent CI check (already live since S1, final pattern); L1 greps the fleet MCP configs on each fleet host (read only) and routing routes removals to each host's L1 (D-2813 ruling 2) | ~30 | 0 | I6 |
 
-If a S5 slice's adds/mods or its one-group rule does not hold when the writer runs I9, it splits further (S5b-run-1/-2 by
-symbol group) before review; the cap never stretches.
+If ANY slice's adds/mods exceed ~400 or its one-group rule does not hold, it splits further (e.g. S1a-1 modules + re-imports,
+S1a-2 repoints + I4 test; S5b-run-1/-2 by symbol group) before review; the cap never stretches.
+S1a runs before the guard tests exist, so its own invariant set is: I3 (kept suites), I4 (new test), and an identity test that
+the by-path-loaded `autoos-agent.py` still exposes every moved KEEP_ROOTS name as the same object (this also covers the two
+silent consumers: `autoos_recovery.py:547` `getattr(..., None)` and `diag-key-source.py:21` `hasattr`). From S1b on every
+slice runs I1, I2, I3, I5, I6(a), I9 plus its own tests.
 Order rationale: S1a/S1b build the decoupling and guards every later slice relies on; S2a before S3 so nothing starts the MCP when it is deleted; S3 removes the MCP imports from tests before S4/S5; S5a-S5b
 go from the smallest verb to `run`. S2b can be written in parallel with S1 but merges after MODEL-ROUTE-SPAWN; S3-S5 never wait for it because I6 stage (a)
 excludes docs/skills; S6 (I6 stage b) needs S2b merged.
@@ -250,6 +268,15 @@ writer. Main merged into the lane ONCE before each slice's final review (rule 7)
 | r3 LOW live text / `--help` / ISOLATE_TIERS | §3c + §6 `--help` row; `agent_harness.py:406` cite handled by §3c rule 2 in S5b-run |
 | r3 LOW I1 CLI surface | I1 extended (S1b) |
 | r3 LOW App. A.2 elides how `text` is read | I2 hashes the raw `providers` block; plangraph's JSONC handling is plangraph's contract, unchanged by any AutoOS slice |
+| v4 seat (mimo, run-2ce4c3ef) MED hyphen family / import aliases / backtick verbs missed by §3c | §3c rule 1 (b), (c), (e) |
+| v4 seat MED verb-argv hits are unbounded noise | §3c rule 1 (e) co-occurrence filter |
+| v4 seat MED S6 final pattern undefined | §5 I6 (b) FINAL PATTERN |
+| v4 seat MED `mcp_server` use claim false (349 uses) | §3b row 1 + S3 rule |
+| v4 seat MED mixed-fate and `-k`-filtered blocks | §8 whole-block rule extended |
+| v4 seat MED S1a has no invariant set; I9 lands one slice after the move | S1a invariant set (I3, I4, identity test) under §8 |
+| v4 seat MED I6 prose vs deferral | §3c rule 2: a deferred hit is not an I6(a) violation |
+| v4 seat MED S1a line budget, split clause only for S5 | split clause applies to every slice (S1a-1/S1a-2 example) |
+| v4 seat LOW 33:962 in two slices / S3 omits three spawn tests | §3c rule 2 wins over §3a/§3b and the report says so |
 | r3 S4/S5 wiring + `run-tests.ps1` unwires, `RunIdRecordTests` `ps` call | whole-block rule; §3c rule 2 (`RunIdRecordTests` either moves its `ps` call to a kept verb in S5a or dies in S5a) |
 
 ## Appendix A. plangraph excerpts (main d66bf9e5, verbatim; for the seat)
