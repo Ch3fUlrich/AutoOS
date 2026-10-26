@@ -306,7 +306,8 @@ if os.name != "nt":
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_card as card_mod  # noqa: E402
-from autoos_client_keys import client_key, key_files, zen_key  # noqa: E402  (AO-SPAWNER-REMOVE S1a)
+from autoos_client_keys import (  # noqa: E402  (AO-SPAWNER-REMOVE S1a)
+    ZEN_KEYS_FIELD, client_key, key_files, zen_key)
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
