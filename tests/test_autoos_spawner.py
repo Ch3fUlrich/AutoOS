@@ -12995,8 +12995,10 @@ class FleetLedgerPathTests(unittest.TestCase):
 
     # P6e: `record()` stamps both families through the resolver, read off THIS checkout's
     # catalog — so the fixture repo carries the whole read chain, not just the ledger.
-    LEDGER_TOOLS = ("autoos_writer_ledger.py", "autoos_clients.py", "autoos_resolver.py",
-                    "autoos_track.py", "registry.py")
+    # S1a: the ledger's run-record readers moved to `autoos_run_records`, so the chain
+    # (and this list) includes it.
+    LEDGER_TOOLS = ("autoos_writer_ledger.py", "autoos_clients.py", "autoos_run_records.py",
+                    "autoos_resolver.py", "autoos_track.py", "registry.py")
 
     def setUp(self):
         self.base = tempfile.mkdtemp()
@@ -13074,7 +13076,8 @@ class FleetLedgerPathTests(unittest.TestCase):
     def test_a_non_git_dir_falls_back_to_its_own_logs(self):
         plain = os.path.join(self.base, "plain")
         os.makedirs(os.path.join(plain, "tools"))
-        for name in ("autoos_writer_ledger.py", "autoos_clients.py"):
+        for name in ("autoos_writer_ledger.py", "autoos_clients.py",
+                     "autoos_run_records.py"):
             shutil.copyfile(str(TOOLS / name), os.path.join(plain, "tools", name))
         self.assertEqual(self.run_module(plain, "home"), [os.path.join(plain, "logs")])
 

@@ -5360,6 +5360,16 @@ Test-Case 'autoos_recovery: run classify, stall clock, attempt budget, continue 
     Assert-Equal $rc 0 "recovery unit tests failed: $out"
 }
 
+Test-Case 'autoos_run_records: kill store, workers dir, worker writer, re-export identity (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_autoos_run_records.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "run-records unit tests failed: $out"
+}
+
 Test-Case 'ready callers: tracked invocations name --brief and --report (lint)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }

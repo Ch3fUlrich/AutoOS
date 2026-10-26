@@ -769,6 +769,12 @@ if it "autoos_recovery: run classify, stall clock, attempt budget, continue task
     out="$(python3 tests/test_autoos_recovery.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# AO-SPAWNER-REMOVE S1a: the run-record readers and client-key helpers moved to
+# tools/autoos_run_records.py / tools/autoos_client_keys.py (invariant I4).
+if it "autoos_run_records: kill store, workers dir, worker writer, re-export identity (unit tests)"; then
+    out="$(python3 tests/test_autoos_run_records.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 # AO-READY-CALLERS: a tracked file that shows the ready gate names both guard files.
 if it "ready callers: tracked invocations name --brief and --report (lint)"; then
     out="$(python3 tests/test_ready_callers.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
