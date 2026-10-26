@@ -203,7 +203,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
   idempotent and read-only so cuts waste nothing. (why: every restart cuts in-flight calls; duplicate writers collided in one worktree twice; source: L1-backlog waves 6h/6i, 2026-09-30)
 - R-orch-29: Orchestrator seats (L1/L2) brief and pin 1M combos only
   (l1-orchestrator band, l2-orchestrator); ≤128k combos are L3 leaves, never
-  inferred from the tier name - windows are per-route data (combo-create
+  inferred from the tier name - windows are per-route data (routing-registry
   Skill, combo-contract gate). (why: under-windowed orchestrators drop context; source: operator 2026-10-07)
 - R-orch-30: Fan out at most 10 seats, default 3-5 judged on task complexity;
   prefer fewer; vary model families and prompt angles per seat so findings
