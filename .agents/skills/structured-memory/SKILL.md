@@ -214,7 +214,7 @@ answers **401**, and `/graphs` additionally needs the cluster-scoped `graph_list
 answers **403** rather than an empty list — so a silent empty roster is not a state you can
 reach. One token maps to one actor, and an actor sees exactly the graphs granted to it. Full
 auth model, the 401/403/200 measurements and the per-user path:
-`skills/mcp-servers-setup/SKILL.md` → *Discovering repository / project names*.
+`skills/mcp-servers-setup/references/omnigraph.md` → *Discovering repository / project names*.
 
 The third row is the whole point. `graphs_list` is cluster-wide, but `query` only ever
 reaches the one graph `OMNIGRAPH_GRAPH_ID` pinned, so you cannot compare URLs *across*

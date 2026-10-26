@@ -1141,6 +1141,13 @@ if it "skill-rules check: ids, length, source, near-duplicates (unit tests)"; th
     out="$(python3 tests/test_skill_rules.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
+# .agents/skills/mcp-servers-setup: SKILL.md is an index (<= 150 lines) with one
+# reference file per server (AO-SKILL-MCPSETUP-SPLIT, D-2144 S7 F1) - the test
+# guards the caps, that no old heading was lost, and that index links resolve.
+if it "mcp-servers-setup split: index <=150, references <=500, no heading lost (unit tests)"; then
+    out="$(python3 tests/test_skill_mcpsetup_split.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi
+
 if it "orchestration skill rules pass skill-rules check"; then out="$(python3 tools/skill-rules.py check 2>&1)" && pass || fail "$out"; fi
 
 # tools/affected-tests.py: the --filter a registry change actually needs
