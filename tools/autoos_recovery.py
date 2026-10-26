@@ -524,8 +524,6 @@ def check_lane_key(key):
 # The runner-private kill record is the one place a lane id may be READ from:
 # job.json is the worker's own file (R-orch-17). Its reader lives in the
 # launcher, loaded once and lazily; a store that will not load is 'no lane'.
-AGENT_CLI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "autoos-agent.py")
 _UNSET = object()
 _kill_reader = _UNSET
 

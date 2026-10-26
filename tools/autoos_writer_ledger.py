@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import importlib.util
 import io
 import json
 import math
@@ -756,16 +755,6 @@ def rollup(path=None, now=None, window_days=None):
             e["task_type"], {"accepted": 0, "reworked": 0, "rejected": 0})[e["verdict"]] += 1
 
     return o
-
-
-def _agent_module():
-    """The runner's own module, loaded from this file's sibling."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    spec = importlib.util.spec_from_file_location(
-        "autoos_agent_mod", os.path.join(here, "autoos-agent.py"))
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def run_record(run_id):
