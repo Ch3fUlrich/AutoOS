@@ -39,18 +39,21 @@ Each server's full usage lives in its own reference file:
 - [Playwright — Browser Automation (UI validation, E2E)](references/playwright.md)
 - [Context7 — Library Documentation](references/context7.md)
 
-Infrastructure ([Harbor — Private Container Registry](references/infrastructure-harbor.md)) follows the infra MCP stacks
-in its own reference file.
+Infrastructure — the shared stack table and
+[Harbor, the private container registry](references/infrastructure-harbor.md) —
+has its own reference file too.
 
 ## Project Initialization
 
-> ⚠️ **On coding.example.internal the Omnigraph stack is already deployed from
-> `<site-repo>/mcp-servers/docker-compose.yml`** (canonical, Dockhand,
-> viewer bound to `0.0.0.0:8090` for Caddy). The compose below is a **local/dev**
-> variant — it binds `127.0.0.1` and shares the project name `mcp-servers`, so
-> running it on coding.example.internal clobbers the live viewer and takes
-> `omnigraph-ui.example.org` down. On coding.example.internal, manage the stack from the
-> canonical Server compose instead. Use the below only for a standalone/dev host.
+> ⚠️ **Dev vs server compose.** On coding.example.internal the Omnigraph stack is
+> already deployed from `<site-repo>/mcp-servers/docker-compose.yml` (canonical,
+> Dockhand, viewer bound to `0.0.0.0:8090` for Caddy). This repo's
+> `infra/mcp-servers/docker-compose.server.yml` is the **local/dev** variant — it
+> binds `127.0.0.1` and shares the project name `mcp-servers`, so running it on
+> coding.example.internal clobbers the live viewer and takes
+> `omnigraph-ui.example.org` down. On coding.example.internal, manage the stack from
+> the canonical Server compose instead. Use the local/dev variant only for a
+> standalone/dev host.
 
 ```bash
 cd ${AGENT_SKILLS_ROOT}/infra/mcp-servers

@@ -25,6 +25,15 @@ REFS = SKILL_DIR / "references"
 INDEX_MAX_LINES = 150
 REFERENCE_MAX_LINES = 500
 
+# Content-proof floor: the heading check alone cannot see a truncated body.
+# The pre-split SKILL.md (measured at the split's parent commit, 9b5adb19^) was
+# 619 lines total, 518 of them non-blank. Index + references together must stay
+# at or above those counts minus a small slack for link lines rewritten during
+# the split (a re-wrapped link is legitimate; a dropped section is not).
+OLD_TOTAL_LINES = 619
+OLD_NONBLANK_LINES = 518
+LINK_REWRITE_SLACK = 12
+
 # Every heading of the 619-line pre-split SKILL.md, verbatim (em dash = \u2014,
 # spelled as an escape so this file never depends on its own encoding).
 OLD_HEADINGS = [
@@ -75,6 +84,22 @@ def _line_count(path):
     return len(path.read_text(encoding="utf-8").splitlines())
 
 
+def _nonblank_count(path):
+    return sum(1 for line in path.read_text(encoding="utf-8").splitlines()
+               if line.strip())
+
+
+def _missing_links(path):
+    """Relative link targets of `path` that do not resolve to a file."""
+    missing = []
+    for target in LINK_RE.findall(path.read_text(encoding="utf-8")):
+        if SCHEME_RE.match(target) or target.startswith("#") or target.startswith("/"):
+            continue
+        if not (path.parent / target.split("#")[0]).exists():
+            missing.append(target)
+    return missing
+
+
 class McpSetupSplitTests(unittest.TestCase):
     def test_index_is_at_most_150_lines(self):
         self.assertLessEqual(
@@ -83,7 +108,7 @@ class McpSetupSplitTests(unittest.TestCase):
             "MCPSETUP-SPLIT)" % INDEX_MAX_LINES)
 
     def test_every_reference_file_is_at_most_500_lines(self):
-        refs = sorted(REFS.glob("*.md"))
+        refs = sorted(REFS.rglob("*.md"))
         self.assertTrue(refs, "no reference files under %s" % REFS)
         over = [(p.name, _line_count(p)) for p in refs
                 if _line_count(p) > REFERENCE_MAX_LINES]
@@ -93,7 +118,7 @@ class McpSetupSplitTests(unittest.TestCase):
 
     def test_every_old_heading_appears_in_exactly_one_new_file(self):
         """The split was a move: no heading lost, none left duplicated."""
-        new_files = [SKILL] + sorted(REFS.glob("*.md"))
+        new_files = [SKILL] + sorted(REFS.rglob("*.md"))
         for old in OLD_HEADINGS:
             homes = [p.name for p in new_files if old in _headings(p)]
             self.assertEqual(
@@ -102,16 +127,44 @@ class McpSetupSplitTests(unittest.TestCase):
                 % (old, homes))
 
     def test_every_relative_link_in_the_index_resolves(self):
-        text = SKILL.read_text(encoding="utf-8")
-        missing = []
-        for target in LINK_RE.findall(text):
+        self.assertEqual(
+            _missing_links(SKILL), [],
+            "SKILL.md links to file(s) that do not exist")
+
+    def test_every_relative_link_in_a_reference_resolves(self):
+        for ref in sorted(REFS.rglob("*.md")):
+            self.assertEqual(
+                _missing_links(ref), [],
+                "%s links to file(s) that do not exist" % ref.relative_to(ROOT))
+
+    def test_every_reference_file_is_linked_from_the_index(self):
+        """No reference file may be orphaned from the SKILL.md index."""
+        linked = set()
+        for target in LINK_RE.findall(SKILL.read_text(encoding="utf-8")):
             if SCHEME_RE.match(target) or target.startswith("#") or target.startswith("/"):
                 continue
-            if not (SKILL.parent / target.split("#")[0]).exists():
-                missing.append(target)
+            linked.add((SKILL.parent / target.split("#")[0]).resolve())
+        orphans = [str(p.relative_to(ROOT)) for p in sorted(REFS.rglob("*.md"))
+                   if p.resolve() not in linked]
         self.assertEqual(
-            missing, [],
-            "SKILL.md links to file(s) that do not exist: %r" % missing)
+            orphans, [],
+            "reference file(s) not linked from SKILL.md: %r" % orphans)
+
+    def test_the_split_did_not_lose_content(self):
+        """Line-count floor on top of the heading check (see constants above)."""
+        files = [SKILL] + sorted(REFS.rglob("*.md"))
+        total = sum(_line_count(p) for p in files)
+        nonblank = sum(_nonblank_count(p) for p in files)
+        self.assertGreaterEqual(
+            total, OLD_TOTAL_LINES - LINK_REWRITE_SLACK,
+            "SKILL.md + references hold %d lines; the pre-split file held %d "
+            "(slack %d) — content was lost" % (
+                total, OLD_TOTAL_LINES, LINK_REWRITE_SLACK))
+        self.assertGreaterEqual(
+            nonblank, OLD_NONBLANK_LINES - LINK_REWRITE_SLACK,
+            "SKILL.md + references hold %d non-blank lines; the pre-split file "
+            "held %d (slack %d) — content was lost" % (
+                nonblank, OLD_NONBLANK_LINES, LINK_REWRITE_SLACK))
 
 
 if __name__ == "__main__":

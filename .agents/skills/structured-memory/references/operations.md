@@ -45,7 +45,7 @@ Server: `omnigraph-server` v0.13.0 (migrated from v0.8.1, D-1038) · MCP bridge
    `.mcp.json`, and nothing reports it: the bridge connects, answers, and is simply pointed
    somewhere else. (Measured for omnigraph, and true of omnigraph — it is *not* a general law
    of same-named servers. A duplicate `serena` produces two running processes and no winner;
-   see `skills/mcp-servers-setup/references/serena.md` → *Wiring*.) On 2026-07-17 a user-scope `omnigraph` pinned to `graph_id: memory` hid
+   see [Wiring in skills/mcp-servers-setup/references/serena.md](../../mcp-servers-setup/references/serena.md#wiring--user-scope-only-serena-is-graphify-shaped-not-omnigraph-shaped).) On 2026-07-17 a user-scope `omnigraph` pinned to `graph_id: memory` hid
    every repo's own pin. An agent saw `memory`'s contents — *every table rowCount 0 except
    2 `Preference`s* — concluded `sibling-analysis-repo` had been wiped, and started rebuilding it.
    `sibling-analysis-repo` was intact the whole time (135 nodes / 235 edges on both servers); the

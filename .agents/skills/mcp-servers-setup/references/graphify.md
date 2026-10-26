@@ -40,7 +40,7 @@ tool is Python-only (`graphifyy[mcp]`, upstream `github.com/safishamsi/graphify`
 
 - **Server** (e.g. `coding.example.internal` — runs graphify via Docker). MCP args aren't shell-expanded, so
   a raw entry can't inject `$PWD`; the tracked cwd wrapper
-  [`infra/mcp-servers/bin/graphify-mcp`](../../../infra/mcp-servers/bin/graphify-mcp) does it:
+  [`infra/mcp-servers/bin/graphify-mcp`](../../../../infra/mcp-servers/bin/graphify-mcp) does it:
   ```sh
   exec docker run -i --rm -v "$PWD:/repo" graphify-mcp:latest "$@"
   ```

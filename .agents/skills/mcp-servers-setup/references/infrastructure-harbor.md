@@ -2,6 +2,16 @@
 
 ## Infrastructure
 
+> ⚠️ **Dev vs server compose.** On coding.example.internal the Omnigraph stack is
+> already deployed from `<site-repo>/mcp-servers/docker-compose.yml` (canonical,
+> Dockhand, viewer bound to `0.0.0.0:8090` for Caddy). This repo's
+> `infra/mcp-servers/docker-compose.server.yml` is the **local/dev** variant — it
+> binds `127.0.0.1` and shares the project name `mcp-servers`, so running it on
+> coding.example.internal clobbers the live viewer and takes
+> `omnigraph-ui.example.org` down. On coding.example.internal, manage the stack from
+> the canonical Server compose instead. Use the local/dev variant only for a
+> standalone/dev host.
+
 | Service | Address | Model(s) | Purpose |
 |---------|---------|----------|---------|
 | omnigraph-server | `:8080` | — | The memory graph (bearer-auth; `/healthz` is open) |
