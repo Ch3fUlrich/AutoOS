@@ -306,6 +306,7 @@ if os.name != "nt":
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import autoos_card as card_mod  # noqa: E402
+from autoos_client_keys import client_key, key_files, zen_key  # noqa: E402  (AO-SPAWNER-REMOVE S1a)
 import autoos_clients as clients  # noqa: E402
 import autoos_context as ctx  # noqa: E402
 import autoos_heartbeat as heartbeat  # noqa: E402
@@ -318,6 +319,9 @@ import autoos_redact as redact  # noqa: E402
 import autoos_resolver as resolver  # noqa: E402
 import autoos_risk as risk  # noqa: E402
 import autoos_routing as routing  # noqa: E402
+from autoos_run_records import (  # noqa: E402  (AO-SPAWNER-REMOVE S1a)
+    _iso_zulu, kill_store_dir, kill_store_path, read_kill_record,
+    worker_writer, workers_dir, write_kill_record)
 import prepush as prepush_mod  # noqa: E402  (D-110: a ready line needs a green gate)
 import autoos_ready_guards as ready_guards  # noqa: E402  (AO-WRITER-GUARDS P4b: the ready gate)
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
@@ -5154,78 +5158,14 @@ def outside_fence(data_dir: str, task_dir: str | None = None) -> list:
             [{"action": "external_directory", "resource": p, "effect": "allow"} for p in allow])
 
 
-def key_files(root: str) -> list:
-    """This checkout's api-keys.yml, then the main checkout's.
-
-    The file is git-ignored, so a lane worktree has none (measured 2026-09-25:
-    exit 3 "No OmniRoute client key", and linking it in was refused).
-    """
-    roots = [root]
-    r = subprocess.run(["git", "-C", root, "rev-parse", "--path-format=absolute",
-                        "--git-common-dir"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    if r.returncode == 0 and r.stdout.strip():
-        main = os.path.dirname(r.stdout.strip())
-        if os.path.realpath(main) != os.path.realpath(root):
-            roots.append(main)
-    return [os.path.join(r_, "configuration", "api-keys.yml") for r_ in roots]
-
-
-def client_key(root: str) -> str | None:
-    """The gateway client key, or None when no source has one.
-
-    Resolution is tools/autoos_gateway_key.py's (the one rule): env
-    AUTOOS_OMNIROUTE_KEY wins, then the gateway-named api-keys.yml field
-    (`omniroute_server` / `omniroute_<host>`), then the legacy field with a
-    deprecation line. Each checkout's file is tried in key_files() order;
-    a missing key raises inside the helper and means "try the next file".
-    """
-    if (os.environ.get("AUTOOS_OMNIROUTE_KEY") or "").strip():
-        return os.environ["AUTOOS_OMNIROUTE_KEY"]
-    try:
-        from autoos_gateway_key import resolve_client_key
-    except ImportError:
-        return None
-    for path in key_files(root):
-        if not os.path.isfile(path):
-            continue
-        try:
-            return resolve_client_key(os.environ, Path(path))
-        except KeyError:
-            continue
-    return None
-
-
 # D-1214: opencode's own free promo ids (`opencode/<id>-free`) are served by Zen,
 # which since 2026-10 rejects the anonymous free-tier credential ("Invalid
 # credential"). The operator's Zen key is the `zen` field of api-keys.yml, and
 # opencode takes it from OPENCODE_API_KEY.
-ZEN_KEYS_FIELD = "zen"
 ZEN_KEY_ENV = "OPENCODE_API_KEY"
 ZEN_MISSING_LINE = ("autoos-agent: no zen key in configuration/api-keys.yml "
                     "(field zen); opencode/*-free seats may fail with "
                     "Invalid credential")
-
-
-def zen_key(root: str) -> str | None:
-    """The OpenCode Zen key, or None when no checkout's api-keys.yml holds one.
-
-    `client_key`'s shape: each checkout's file in `key_files()` order, the field
-    by NAME only, parsed by the repo's own keys reader (tools/keys_file.py) — the
-    reader is what makes `REPLACE_WITH_ZEN_KEY` and an empty field read as no key
-    rather than a truthy one. The value is returned or None; never printed,
-    logged or recorded.
-    """
-    try:
-        from keys_file import read_keys
-    except ImportError:
-        return None
-    for path in key_files(root):
-        if not os.path.isfile(path):
-            continue
-        value = read_keys(path).get(ZEN_KEYS_FIELD)
-        if value:
-            return value
-    return None
 
 
 def is_opencode_free_model(model) -> bool:
@@ -11356,11 +11296,6 @@ def _validated_provider_entries(state, now=None):
     return rows, reasons
 
 
-def _iso_zulu(moment) -> str:
-    return moment.astimezone(datetime.timezone.utc).isoformat(
-        timespec="seconds").replace("+00:00", "Z")
-
-
 def _until_is_expired(entry, now) -> bool:
     """True when `entry`'s window already passed (so it says nothing anymore)."""
     until = (entry or {}).get("unavailable_until")
@@ -12434,107 +12369,6 @@ def proc_start_time(pid) -> int | None:
     try:
         return int(fields[19])       # field 22 overall, fields[0] is field 3
     except ValueError:
-        return None
-
-
-def kill_store_dir(state: str | None = None) -> str:
-    """The runner-private home of each run's decided-at-spawn record (SB-A3,
-    D-103 item C; the run MODE joined it in SB-A4).
-
-    Deliberately NOT `AUTOOS_TASK_DIR`: the run dir is handed to the worker as an
-    environment variable, the worker is the same uid as everything in it, and a
-    kill record the cancelled process can rewrite is a channel it gives orders
-    through — which is what SB-A's `pgrp.json` and SB-A2's `job.json` group were.
-    This is a sibling of the `agents/` tree, 0700 with 0600 files, written by the
-    server and the runner and by nobody else.
-
-    RESIDUAL, stated rather than papered over: a same-uid worker that goes looking
-    can still find this directory (the state dir is in its environment) and write
-    into it, because a file cannot be hidden from the uid that owns it. What
-    closes that hole is the scope path, which is derived from the run id and
-    depends on no file at all; the private store is only the fallback for a host
-    with no user manager.
-
-    SB-B merge: this moved here from the fleet server, because the CLI is the
-    process that starts and re-starts the client — an attempt's group has to reach
-    the same record from inside `run_client`, and a second copy of a store is a
-    second place a killer's answer can come from. The server reads and writes it
-    through this one implementation.
-
-    `state` overrides the state root for a reader handed one (a recovery plan
-    pointed at another tree): the store is always <root>/kill, never a second layout.
-    """
-    return os.path.join(state or clients.state_dir(), "kill")
-
-
-def kill_store_path(run_id: str, state: str | None = None) -> str:
-    """The one record file for `run_id`, named so no run id escapes the store."""
-    name = os.path.basename(os.path.normpath(str(run_id or "")))
-    if not name or name.startswith(".") or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
-        raise ValueError("bad run id %r" % (run_id,))
-    return os.path.join(kill_store_dir(state), name + ".json")
-
-
-def write_kill_record(run_id: str, record: dict) -> bool:
-    """Write (or merge into) the runner's private record for one run.
-
-    SB-A4 (D-103, the rest of item C) grew this from a group record into the run's
-    whole decided-at-spawn identity: `run_id`, `mode` (review|write), `scope`,
-    `dry_run`, `allow_mode_only`, the spawning `lane` (AO-JOB-LANE-ID),
-    `created_at`, plus the `pgid`/`start` group record and the RUNMODEL `writer`
-    the run resolves at its end. It is the only
-    place any of that is read from, because everything a killer or a dispatcher
-    decides must come from a record the worker cannot rewrite through its own
-    `job.json`.
-
-    Merge semantics are deliberately asymmetric. The group is re-recorded by the
-    runner in `run_job` and by the spawner for every client attempt it launches
-    (`record_attempt_group`), so `pgid`/`start` are replaced whenever they are
-    given. The decided-at-spawn fields are IMMUTABLE: a later write cannot
-    re-decide the mode even by accident, and `created_at`/`run_id` are stamped on
-    the record's first write only.
-    """
-    if os.name == "nt" or not record:
-        return False
-    try:
-        path = kill_store_path(run_id)
-        directory = kill_store_dir()
-        os.makedirs(directory, exist_ok=True)
-        os.chmod(directory, 0o700)
-        existing = read_kill_record(run_id) or {}
-        merged = dict(existing)
-        merged.setdefault("run_id", run_id)
-        merged.setdefault("created_at", _iso_zulu(datetime.datetime.now(
-            datetime.timezone.utc)))
-        for key in ("pgid", "start", "writer", "attempt", "outside_writes",
-                    "toolhome_bytes_before", "toolhome_bytes_after"):
-            if record.get(key) is not None:
-                merged[key] = record[key]
-        for key in ("mode", "scope", "dry_run", "allow_mode_only", "lane", "item_key"):
-            if record.get(key) is not None:
-                merged.setdefault(key, record[key])
-        tmp = "%s.tmp-%d" % (path, os.getpid())
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with io.open(fd, "w", encoding="utf-8") as fh:
-            json.dump(merged, fh)
-        os.replace(tmp, path)
-    except (OSError, ValueError) as exc:
-        print("autoos-agent: no kill record for %s: %s" % (run_id, exc),
-              file=sys.stderr)
-        return False
-    return True
-
-
-def read_kill_record(run_id: str, state: str | None = None):
-    """The private record, or None. A run with no record is a run whose group and
-    mode were never decided by a server — the direct CLI path — and a killer must
-    say so rather than kill what it cannot identify. `state` reads the store of
-    that state root instead of the ambient one."""
-    try:
-        path = kill_store_path(run_id, state)
-        with io.open(path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
         return None
 
 
@@ -13738,27 +13572,6 @@ def _proc_starttime(pid):
         return None
 
 
-def workers_dir() -> str:
-    override = os.environ.get("AUTOOS_WORKERS_DIR")
-    if override:
-        path = override
-    else:
-        base = None
-        try:
-            out = subprocess.run(["git", "rev-parse", "--path-format=absolute",
-                                  "--git-common-dir"],
-                                 cwd=ROOT, capture_output=True, text=True,
-                                 stdin=subprocess.DEVNULL)
-            common = out.stdout.strip()
-            if out.returncode == 0 and common:
-                base = os.path.dirname(common)
-        except (OSError, subprocess.SubprocessError):
-            base = None
-        path = os.path.join(base or ROOT, "logs", "workers")
-    os.makedirs(path, mode=0o700, exist_ok=True)
-    return path
-
-
 def _write_worker_record(path: str, record: dict) -> None:
     tmp = "%s.tmp-%d" % (path, os.getpid())
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -13902,21 +13715,6 @@ def _fmt_elapsed(seconds) -> str:
         return "%dh%02dm" % (hours, mins)
     days, hours = divmod(hours, 24)
     return "%dd%02dh" % (days, hours)
-
-
-def worker_writer(run_id):
-    """The writer the RUNNER recorded for `run_id`, or None when nothing was.
-
-    The runner-private kill store and nothing else (R-orch-17): a `ps` row is read
-    by whoever is deciding whether a review is independent, and both the worker
-    record and job.json live in directories the worker itself can write. A run with
-    no record — one started by hand, one older than the store — answers None rather
-    than falling back to the ask.
-    """
-    if not run_id:
-        return None
-    writer = (read_kill_record(run_id) or {}).get("writer")
-    return writer if isinstance(writer, dict) else None
 
 
 def list_workers(directory: str, now=None, include_ended: bool = False) -> list:
