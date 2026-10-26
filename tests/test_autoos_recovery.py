@@ -2946,7 +2946,7 @@ class Cli(TempCase):
 
 class Hermetic(TempCase):
     # `importlib` is the one loader, used ONLY to reach the kill store's own
-    # reader in tools/autoos-agent.py for `record_lane` (AO-JOB-LANE-ID): the
+    # reader in tools/autoos_run_records.py for `record_lane` (AO-JOB-LANE-ID): the
     # lane recovery may plan on must come from the record the worker cannot
     # rewrite, and the reader is not copied here. Lazy, and a store that will not
     # load answers 'no lane' — never a second path implementation, never a spawn.

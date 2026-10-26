@@ -244,9 +244,9 @@ _TRAILER_MARKS = ("writer:", "scope:", "sandbox changes")
 # The two roots a printed sandbox path must live under to be a directory this
 # module will name as a continuation cwd — the same two `sandbox_path_for` builds
 # in tools/autoos-agent.py (S4). Mirrored, not imported: that file is a
-# hyphen-named launcher and its only import here is the kill store's one reader
-# (`record_lane`). A change there has to be repeated here, and the test asserts
-# both halves of the pair.
+# hyphen-named launcher and nothing here imports it (the kill store's one reader
+# for `record_lane` comes from tools/autoos_run_records.py). A change there has to
+# be repeated here, and the test asserts both halves of the pair.
 FLEET_SANDBOX_SUBPATH = os.path.join("fleet", "sandboxes")
 # Above this a number is not a pid on this host (Linux's default kernel.pid_max
 # is 2**22), and `os.kill` answers OverflowError rather than a verdict.
