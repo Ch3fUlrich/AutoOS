@@ -532,6 +532,12 @@
           "name": "cx-gpt-6.1-sol - direct GPT-6.1 Sol (codex subscription via OmniRoute cx, no combo)",
           "limit": { "context": 475000, "output": 128000 }
         },
+        // Direct review seat (D-3020): GPT-6 Luna through the same OmniRoute cx subscription; limits mirror the sol row.
+        "cx-gpt-6-luna": {
+          "modelID": "cx/gpt-6-luna",
+          "name": "cx-gpt-6-luna - direct GPT-6 Luna (codex subscription via OmniRoute cx, no combo)",
+          "limit": { "context": 475000, "output": 128000 }
+        },
         // Native DeepSeek V4.1 Flash is the one DeepSeek API leg policy.leg_rules
         // allows (allow-deepseek-native-flash); Pro is denied everywhere. Paid, under
         // the monthly cap in providers.deepseek.
