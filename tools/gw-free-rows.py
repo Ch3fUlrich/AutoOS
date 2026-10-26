@@ -1,9 +1,9 @@
 import json, os, sys, urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from probe_common import load_agent_module
+from autoos_client_keys import client_key  # noqa: E402  (AO-SPAWNER-REMOVE S1a F4)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-key = load_agent_module().client_key(ROOT)
+key = client_key(ROOT)
 req = urllib.request.Request("http://127.0.0.1:20128/v1/models",
                              headers={"Authorization": "Bearer " + key})
 data = json.loads(urllib.request.urlopen(req, timeout=30).read().decode())

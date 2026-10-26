@@ -13,6 +13,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
+from autoos_client_keys import client_key, key_files  # noqa: E402  (AO-SPAWNER-REMOVE S1a F4)
 from probe_common import load_agent_module  # noqa: E402
 
 
@@ -25,7 +26,7 @@ def main() -> int:
         env_key = os.environ.get("AUTOOS_OMNIROUTE_KEY")
     print("env_present=%s env_len=%s" % (
         bool(env_key), len(env_key) if env_key else 0))
-    for path in agent.key_files(ROOT):
+    for path in key_files(ROOT):  # (AO-SPAWNER-REMOVE S1a F4)
         try:
             st = os.stat(path)
             mtime = st.st_mtime_ns
@@ -44,7 +45,7 @@ def main() -> int:
             val = None
         print("file=%s present=yes size=%d mtime_ns=%d has_key=%s key_len=%d" % (
             path, size, mtime, val is not None, len(val) if val else 0))
-    resolved = agent.client_key(ROOT)
+    resolved = client_key(ROOT)  # (AO-SPAWNER-REMOVE S1a F4)
     print("resolved_len=%d resolved_source=%s" % (
         len(resolved) if resolved else 0,
         "env" if env_key else "file" if resolved else "none"))

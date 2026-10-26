@@ -56,7 +56,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
-from probe_common import load_agent_module  # noqa: E402
+from autoos_client_keys import client_key  # noqa: E402  (AO-SPAWNER-REMOVE S1a F4)
 
 GATEWAY = "http://127.0.0.1:20128"
 CHAT = GATEWAY + "/v1/chat/completions"
@@ -532,8 +532,7 @@ def main(argv=None) -> int:
     ap.add_argument("--tsv", default="", help="write the results as TSV to PATH")
     args = ap.parse_args(argv)
 
-    agent = load_agent_module()
-    key = agent.client_key(ROOT)
+    key = client_key(ROOT)  # (AO-SPAWNER-REMOVE S1a F4)
     if not key:
         print("probe-free: no client key", file=sys.stderr)
         return 3
