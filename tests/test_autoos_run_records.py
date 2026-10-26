@@ -108,13 +108,23 @@ class WorkersDirTest(unittest.TestCase):
 
     def test_default_lands_under_the_checkout_logs_workers(self):
         saved = os.environ.pop("AUTOOS_WORKERS_DIR", None)
+        made = []
+
+        def _record_only(path, mode=0o777, exist_ok=False):
+            # Deliberately not created: this test asserts the computed path
+            # and must leave the checkout (and its logs/) exactly as it was.
+            made.append(path)
+
         try:
-            path = rec.workers_dir()
+            with mock.patch.object(os, "makedirs", _record_only):
+                path = rec.workers_dir()
         finally:
             if saved is not None:
                 os.environ["AUTOOS_WORKERS_DIR"] = saved
+        # The stub created nothing, so workers_dir() only computed this dir:
+        # exactly the one mkdir it would have done, and nothing exists it did.
+        self.assertEqual(made, [path])
         self.assertTrue(path.endswith(os.path.join("logs", "workers")))
-        self.assertTrue(os.path.isdir(path))
 
 
 class WriteKillRecordTests(unittest.TestCase):
