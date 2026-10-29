@@ -97,15 +97,15 @@
   "$comment_linkDirs": [
     "Directories junctioned from the main checkout into every worktree, instead of",
     "being copied or regenerated. Use for generated artifacts that must stay single:",
-    "a graphify graph, a model cache. Skipped silently if absent in the main checkout."
+    "a model cache. Never a code graph: build graphify-out in postWorktree instead. Skipped silently if absent in the main checkout."
   ],
   "linkDirs": [
-    "graphify-out"
+    "model-cache"
   ],
   "$comment_copyDirs": [
     "Directories COPIED from the main checkout into every worktree, so each session",
     "owns an independent instance it may rebuild or append to without touching the",
-    "others' - a gitignored working ledger, a per-worktree code graph. linkDirs = one",
+    "others' - a gitignored working ledger. Never a code graph: build graphify-out in postWorktree instead. linkDirs = one",
     "shared artifact; copyDirs = one artifact per session. Skipped silently if absent."
   ],
   "copyDirs": [

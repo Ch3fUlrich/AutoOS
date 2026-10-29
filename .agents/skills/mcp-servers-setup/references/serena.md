@@ -124,7 +124,7 @@ data-format problem above. Two traps:
 > | `.serena/project.yml` **tracked** | absent, Serena autogenerates it, and autogeneration picks languages by file count — reintroducing `json`/`markdown`/`yaml` in every worktree, forever | `.serena/*` plus `!.serena/project.yml`, never a bare `.serena/` (a negation cannot re-include a file inside an excluded directory) |
 > | `project_name` **omitted** | every worktree registers the same name; by-name activation raises for all agents at once | delete the key (rule 1b) |
 >
-> **In a linked worktree, graphify is unavailable unless the runner provisioned `graphify-out/`; then say which tree and branch it describes. Never link or hand-build it yourself.** (reasons: [graphify.md](./graphify.md))
+> **In a linked worktree, graphify is unavailable unless the runner built `graphify-out/` for that worktree's own tree; say so. Never link it from another checkout or hand-build it.** (reasons: [graphify.md](./graphify.md))
 >
 > Only when a worktree genuinely cannot have its own session does the fallback apply:
 > `Glob`/`Grep`/`Read` **and `Edit`** — name `Edit` explicitly, because a fallback list omitting
