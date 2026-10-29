@@ -88,11 +88,18 @@ worktree never has one. Two ways that bites, neither of which errors:
 worktree: `post-commit` and `post-checkout` each compare `git rev-parse --git-dir` against
 `--git-common-dir` and `exit 0` when they differ, so N worktrees never produce N rebuilds or N
 competing graphs. `post-checkout` also exits when `graphify-out/` is absent, which is always
-true in a worktree. Confirmed by reading the installed hooks, 2026-09-01.
+true in a worktree. Source: graphify's own hook template — `graphify.hooks` (`_WORKTREE_GUARD`,
+spliced into both hook bodies), re-read 2026-10-29. The guard only applies while graphify's own
+hooks are installed — another tool's hook installer can replace them (measured on the workstation
+2026-10-29: Qoder tracker hooks), so check `.git/hooks/post-commit` names graphify; reinstall
+with `graphify hook install`.
 
-So the rule matches Serena's: **in a worktree, treat graphify as unavailable and say so** — the
-escape hatch that is not silent. Do **not** hand-build a graph inside a worktree to work around
-it; the hooks will not maintain it, so it goes stale with nothing to tell you.
+So the rule matches Serena's:
+
+**In a linked worktree, graphify is unavailable: say so; never link or hand-build `graphify-out/` there.**
+
+The hooks will not maintain a graph there, so it goes stale with nothing to tell you — the
+escape hatch that is not silent.
 
 Only the graph **file** is per-repo. Build it (no LLM/API key needed) and keep it fresh:
 ```bash

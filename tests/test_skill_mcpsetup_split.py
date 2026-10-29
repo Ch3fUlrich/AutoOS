@@ -44,11 +44,11 @@ LINK_REWRITE_SLACK = 12
 PER_FILE_NONBLANK_FLOORS = {
     "SKILL.md": 68,                  # 70 non-blank
     "context7.md": 15,               # 17
-    "graphify.md": 91,               # 93
+    "graphify.md": 96,               # 98 (re-pin 2026-10-29, MCPSETUP-WORKTREE-GRAPHIFY)
     "infrastructure-harbor.md": 40,  # 42
     "omnigraph.md": 46,              # 48
     "playwright.md": 81,             # 83
-    "serena.md": 175,                # 177
+    "serena.md": 163,                # 165 (re-pin 2026-10-29, MCPSETUP-WORKTREE-GRAPHIFY: link block removed; was 177)
     "superpowers.md": 14,            # 16
 }
 

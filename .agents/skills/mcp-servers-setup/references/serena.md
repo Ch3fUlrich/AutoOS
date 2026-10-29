@@ -112,31 +112,19 @@ data-format problem above. Two traps:
 >
 > **The consequence is not that worktree agents lose Serena** — that conclusion was drawn here
 > once and was wrong. **The unit of worktree parallelism is a SESSION, not a subagent.** One
-> `claude` process per worktree gives each its own Serena, its own `_active_project` and —
-> graphify being cwd-relative — its own graph. Subagents stay in their own session's worktree,
+> `claude` process per worktree gives each its own Serena and its own `_active_project`.
+> Subagents stay in their own session's worktree,
 > sharing one correctly-activated Serena. *Worktrees get sessions; subagents share the session's
 > worktree.* (`herdr-orchestration` panes are how you run one session per worktree.)
 >
-> Three artifacts must reach the worktree; all three fail identically, by being untracked:
+> Two artifacts must reach the worktree; both fail identically, by being untracked:
 >
 > | Requirement | Why it bites | Fix |
 > |---|---|---|
 > | `.serena/project.yml` **tracked** | absent, Serena autogenerates it, and autogeneration picks languages by file count — reintroducing `json`/`markdown`/`yaml` in every worktree, forever | `.serena/*` plus `!.serena/project.yml`, never a bare `.serena/` (a negation cannot re-include a file inside an excluded directory) |
 > | `project_name` **omitted** | every worktree registers the same name; by-name activation raises for all agents at once | delete the key (rule 1b) |
-> | `graphify-out/` **exists** | gitignored, and both hooks skip linked worktrees, so it is never created | link it to the main checkout |
 >
-> ```bash
-> ln -s "$(git rev-parse --show-toplevel)/graphify-out" "<worktree>/graphify-out"
-> cmd /c mklink /J "<worktree>\graphify-out" "<main>\graphify-out"    :: Windows, no admin
-> ```
->
-> Link rather than build a second graph: the hooks maintain exactly one, and a hand-built copy
-> goes stale silently. **Verified it cannot eat the real graph** (2026-09-01): with a canary in
-> the target, `Remove-Item -Recurse -Force <worktree>` left it intact — the junction is not
-> followed. Not tested against `git worktree remove` itself, so drop the link first if you want
-> belt and braces. The server only *reads* `graph.json`, so N sessions cannot race. Accept the
-> caveat: the graph describes the **main checkout's** code — right for structural questions,
-> wrong for code the branch restructured. Say which one you are answering from.
+> **In a linked worktree, graphify is unavailable: say so; never link or hand-build `graphify-out/` there.** (reasons: [graphify.md](./graphify.md))
 >
 > Only when a worktree genuinely cannot have its own session does the fallback apply:
 > `Glob`/`Grep`/`Read` **and `Edit`** — name `Edit` explicitly, because a fallback list omitting
