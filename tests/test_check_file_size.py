@@ -100,6 +100,13 @@ class LineLimitTests(RepoFixture):
         self.write("loose_module.py", blob(501))  # never `git add`-ed
         self.assertPasses(self.check())
 
+    def test_a_non_ascii_file_name_is_still_measured(self):
+        # `git ls-files` quotes non-ASCII names (core.quotePath) and newline
+        # splitting mangles them: the gate reads `ls-files -z` and splits on
+        # NUL, or a file like this one is silently never measured.
+        self.file("\u00fc.py", 401)
+        self.assertFails(self.check(), "\u00fc.py")
+
 
 class BaselineTests(RepoFixture):
     def test_a_baseline_file_growing_fails(self):
@@ -166,6 +173,25 @@ class UpdateBaselineTests(RepoFixture):
         self.assertPasses(self.check("--update-baseline"))
         self.assertEqual(self.baseline_map(), {"legacy.py": 500})
 
+    def test_update_baseline_refuses_a_baseline_that_would_grow(self):
+        # --update-baseline must not launder a hand-grown baseline: the
+        # baseline-vs-reference check (no entry added, none raised) runs BEFORE
+        # the write, and a refusal writes nothing at all - not even a rewritten
+        # copy that drops the comment the author left in the file.
+        self.file("legacy.py", 530)
+        self.baseline("# grandfathered by hand\nlegacy.py 500\n")
+        self.git("add", "--", ".filesize-baseline")
+        self.commit("grandfather legacy.py at 500")
+        path = self.repo / ".filesize-baseline"
+        self.baseline("# raised by hand\nlegacy.py 520\n")
+        before = path.read_bytes()
+        self.assertFails(self.check("--update-baseline"), "raised")
+        self.assertEqual(path.read_bytes(), before)
+        self.baseline("# entry added by hand\nlegacy.py 500\nother.py 500\n")
+        before = path.read_bytes()
+        self.assertFails(self.check("--update-baseline"), "added")
+        self.assertEqual(path.read_bytes(), before)
+
 
 class ExclusionTests(RepoFixture):
     def test_excluded_patterns_are_ignored(self):
@@ -188,6 +214,18 @@ class ExclusionTests(RepoFixture):
         self.file("legacy_dump.py", 500)
         self.write(".filesize-allow", "legacy_dump.py\n")
         self.assertFails(self.check(), "reason")
+
+    def test_binary_content_is_not_measured(self):
+        # A NUL byte in the first 8 KiB marks binary content: a line count
+        # over an image or a packed blob is not a source-size signal, so the
+        # gate skips the file and says how many it skipped.
+        self.write("payload_module.py", "\0" + blob(401))
+        self.git("add", "--", "payload_module.py")
+        run = self.check()
+        self.assertPasses(run)
+        self.assertIn("1 binary file(s) skipped", run.stdout)
+        self.write("payload_module.py", blob(401))  # same shape, now text
+        self.assertFails(self.check(), "payload_module.py")
 
 
 class GateHookTests(unittest.TestCase):

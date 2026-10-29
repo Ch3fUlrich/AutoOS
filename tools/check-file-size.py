@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """check-file-size.py - the 400-line file-size gate (AO-400LOC, D-653).
 
-Counts the lines of every TRACKED file (``git ls-files``) in the checkout the
-cwd is in and refuses a file that is too big. Hand-written source, test,
-script, playbook and doc files stay <= 400 lines; over 400 -> split by
-responsibility before adding more (coding-principles, Principle 3).
+Counts the lines of every TRACKED file (``git ls-files -z``, split on NUL:
+plain ``ls-files`` mangles non-ASCII names through ``core.quotePath``) in the
+checkout the cwd is in and refuses a file that is too big. Hand-written
+source, test, script, playbook and doc files stay <= 400 lines; over 400 ->
+split by responsibility before adding more (coding-principles, Principle 3).
 
 WHAT IS COUNTED
 ---------------
@@ -13,6 +14,8 @@ Everything tracked, minus:
   * ``*.lock``, data ``*.json``, ``*.svg``, ``*.min.*``;
   * anything under ``vendor/``, ``third_party/`` (this repo's own vendored
     dir) or ``node_modules/``;
+  * binary content (a NUL byte in the first 8 KiB): the gate counts text,
+    and a line count over an image is not a source-size signal;
   * paths listed in ``.filesize-allow`` - one ``path reason`` per line. The
     reason is mandatory: an exemption is a promise, not a shrug.
 
@@ -27,6 +30,9 @@ base the pre-push gate already requires fetched) or, failing that, HEAD.
 ``--update-baseline`` only LOWERS counts: it never raises one and never adds
 an entry. With no baseline present it writes the first one from the tree it
 sees (the one-time generation); from then on the file only ratchets down.
+The baseline-vs-reference check runs on the PROPOSED counts before any
+write: a refusal writes nothing, so the flag cannot launder a baseline a
+hand-edit grew.
 
 Lines are counted ``splitlines()``-style, so a final line without a trailing
 newline still counts - a ``wc -l`` count would drop exactly the file whose
@@ -49,6 +55,10 @@ EXCLUDED_SUFFIXES = (".lock", ".json", ".svg")
 EXCLUDED_NAME_PARTS = (".min.",)
 #: Where the "may shrink, never grow" ratchet reads its reference from.
 REFERENCE_REFS = ("origin/main", "HEAD")
+#: Binary sniff: a NUL byte in this window marks binary content (git's own
+#: test). The gate counts lines of text, and a line count over an image or a
+#: packed blob is not a source-size signal.
+BINARY_SNIFF_BYTES = 8 * 1024
 
 
 def git(root, *args):
@@ -78,6 +88,12 @@ def count_lines(path):
     with open(path, "rb") as handle:
         text = handle.read().decode("utf-8", errors="replace")
     return len(text.splitlines())
+
+
+def is_binary(path):
+    """A NUL byte in the first 8 KiB: binary content the gate does not count."""
+    with open(path, "rb") as handle:
+        return b"\0" in handle.read(BINARY_SNIFF_BYTES)
 
 
 def full_path(root, rel):
@@ -158,23 +174,32 @@ def reference_baseline(root):
 
 
 def measure(root, allowed):
-    """``{path: lines}`` for every tracked file the gate counts."""
-    run = git(root, "ls-files")
+    """``({path: lines}, binaries)`` for every tracked file the gate counts.
+
+    ``-z`` and a NUL split: a name may hold any byte, and plain ``ls-files``
+    mangles non-ASCII ones through ``core.quotePath`` into strings that name
+    no file at all - such a file would silently never be measured.
+    """
+    run = git(root, "ls-files", "-z")
     if run.returncode != 0:
         raise SystemExit("check-file-size: git ls-files failed: %s"
                          % run.stderr.strip())
-    measured = {}
-    for rel in run.stdout.splitlines():
+    measured, binaries = {}, 0
+    for rel in run.stdout.split("\0"):
         if not rel or is_excluded(rel) or rel in allowed:
             continue
         full = full_path(root, rel)
-        if os.path.isfile(full):
-            measured[rel] = count_lines(full)
-    return measured
+        if not os.path.isfile(full):
+            continue
+        if is_binary(full):
+            binaries += 1
+            continue
+        measured[rel] = count_lines(full)
+    return measured, binaries
 
 
-def violations(measured, counts, ref_counts, ref_origin):
-    """The refusal lines for a measured tree."""
+def limit_violations(measured, counts):
+    """The refusal lines for files over their cap (the limit, or their entry)."""
     problems = []
     for path in sorted(measured):
         lines = measured[path]
@@ -189,41 +214,52 @@ def violations(measured, counts, ref_counts, ref_origin):
             problems.append(
                 "FAIL %s: %d lines > %d - split it by responsibility, or add "
                 "a reasoned %s entry" % (path, lines, LIMIT, ALLOW_NAME))
-    if ref_counts is not None:
-        for path in sorted(counts):
-            if path not in ref_counts:
-                problems.append(
-                    "FAIL %s: entry %s added - %s has no such entry; the "
-                    "baseline may shrink, never grow"
-                    % (BASELINE_NAME, path, ref_origin))
-            elif counts[path] > ref_counts[path]:
-                problems.append(
-                    "FAIL %s: entry %s raised %d -> %d - the baseline may "
-                    "shrink, never grow; --update-baseline only lowers counts"
-                    % (BASELINE_NAME, path, ref_counts[path], counts[path]))
     return problems
 
 
-def update_baseline(root, counts, measured):
-    """Rewrite the baseline: create it once, afterwards only lower counts."""
-    path = full_path(root, BASELINE_NAME)
-    if not os.path.exists(path):
-        counts = {name: lines for name, lines in measured.items()
-                  if lines > LIMIT}
-        print("check-file-size: wrote %s - %d entr(y/ies) over %d lines"
-              % (BASELINE_NAME, len(counts), LIMIT))
-    else:
-        lowered = 0
-        for name in list(counts):
-            if name in measured and measured[name] < counts[name]:
-                counts[name] = measured[name]
-                lowered += 1
-        print("check-file-size: lowered %d count(s); %d entr(y/ies) kept"
-              % (lowered, len(counts)))
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
+def ratchet_violations(counts, ref_counts, ref_origin):
+    """The refusal lines for a baseline document that grew: no entry added,
+    none raised, wherever the reference can be read."""
+    problems = []
+    if ref_counts is None:
+        return problems
+    for path in sorted(counts):
+        if path not in ref_counts:
+            problems.append(
+                "FAIL %s: entry %s added - %s has no such entry; the "
+                "baseline may shrink, never grow"
+                % (BASELINE_NAME, path, ref_origin))
+        elif counts[path] > ref_counts[path]:
+            problems.append(
+                "FAIL %s: entry %s raised %d -> %d - the baseline may "
+                "shrink, never grow; --update-baseline only lowers counts"
+                % (BASELINE_NAME, path, ref_counts[path], counts[path]))
+    return problems
+
+
+def proposed_baseline(counts, measured, exists):
+    """``(counts, lowered, created)`` - what ``--update-baseline`` would write.
+
+    Computed before anything is written so the caller can run the ratchet on
+    the proposal first: a baseline written before the check is a baseline
+    that has already grown by the time the refusal arrives.
+    """
+    if not exists:
+        return ({name: lines for name, lines in measured.items()
+                 if lines > LIMIT}, 0, True)
+    lowered = 0
+    for name in list(counts):
+        if name in measured and measured[name] < counts[name]:
+            counts[name] = measured[name]
+            lowered += 1
+    return counts, lowered, False
+
+
+def write_baseline(root, counts):
+    with open(full_path(root, BASELINE_NAME), "w", encoding="utf-8",
+              newline="\n") as handle:
         for name in sorted(counts):
             handle.write("%s %d\n" % (name, counts[name]))
-    return counts
 
 
 def main(argv=None):
@@ -240,22 +276,42 @@ def main(argv=None):
     root = git_toplevel()
     allowed, allow_errors = read_allow(full_path(root, ALLOW_NAME))
     counts, base_errors = read_baseline(full_path(root, BASELINE_NAME))
-    measured = measure(root, allowed)
-    if args.update_baseline:
-        counts = update_baseline(root, counts, measured)
+    measured, binaries = measure(root, allowed)
     ref_counts, ref_errors, ref_origin = reference_baseline(root)
-
-    problems = violations(measured, counts, ref_counts, ref_origin)
+    if args.update_baseline:
+        counts, lowered, created = proposed_baseline(
+            counts, measured, os.path.exists(full_path(root, BASELINE_NAME)))
+        # The baseline-vs-reference check runs on the PROPOSED counts BEFORE
+        # any write: --update-baseline lowers counts, it must never launder
+        # an entry a hand-edit added or raised. A refusal writes nothing.
+        problems = ratchet_violations(counts, ref_counts, ref_origin)
+        problems += limit_violations(measured, counts)
+    else:
+        problems = limit_violations(measured, counts)
+        problems += ratchet_violations(counts, ref_counts, ref_origin)
     errors = allow_errors + base_errors + ref_errors
     for line in problems + errors:
         print(line)
     if problems or errors:
+        if args.update_baseline:
+            print("check-file-size: %s left unchanged" % BASELINE_NAME)
         print("check-file-size: %d violation(s), %d config error(s) - "
-              "%d tracked file(s) measured, %d baseline entr(y/ies)"
-              % (len(problems), len(errors), len(measured), len(counts)))
+              "%d tracked file(s) measured, %d binary file(s) skipped, "
+              "%d baseline entr(y/ies)"
+              % (len(problems), len(errors), len(measured), binaries,
+                 len(counts)))
         return 1
-    print("check-file-size: ok - %d tracked file(s) measured, %d baseline "
-          "entr(y/ies)" % (len(measured), len(counts)))
+    if args.update_baseline:
+        write_baseline(root, counts)
+        if created:
+            print("check-file-size: wrote %s - %d entr(y/ies) over %d lines"
+                  % (BASELINE_NAME, len(counts), LIMIT))
+        else:
+            print("check-file-size: lowered %d count(s); %d entr(y/ies) kept"
+                  % (lowered, len(counts)))
+    print("check-file-size: ok - %d tracked file(s) measured, %d binary "
+          "file(s) skipped, %d baseline entr(y/ies)"
+          % (len(measured), binaries, len(counts)))
     return 0
 
 
