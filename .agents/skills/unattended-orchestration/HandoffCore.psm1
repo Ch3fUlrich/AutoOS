@@ -211,7 +211,7 @@ function New-HandoffConfigScaffold {
         baseBranch     = $BaseBranch
         branchPrefix   = "handoff"
         stateDir       = "output/sessions"
-        linkDirs       = @("graphify-out")
+        linkDirs       = @()
         copyFiles      = @(".env")
         subagents      = [ordered]@{
             maxConcurrent = 2
@@ -1275,7 +1275,7 @@ function Build-HandoffMcpPolicy {
         "1. Router: Consult 'skills/repository-index/SKILL.md' first before loading skills.",
         "2. Serena: Activate project on this worktree by absolute path before reading or editing code: call activate_project('$wt'). One active project per session.",
         "3. Omnigraph: Persistent structured memory is mandatory. Recall prior architectural decisions and principles before changing code; persist durable decisions before completing (pinned to OMNIGRAPH_GRAPH_ID='$repoFolder'). Never write project data to the global 'memory' graph.",
-        "4. Graphify: For questions spanning multiple files or architectural blast radiuses, inspect and query the linked 'graphify-out/' directory for structural dependency maps."
+        "4. Graphify: in a linked worktree graphify-out/ exists only if this run built it for this worktree (postWorktree); if it is absent, say graphify is unavailable and use Serena/Grep instead; if present, say it describes this worktree's tree at session start (the hooks do not refresh it)."
     )
     return ($parts -join "`n")
 }

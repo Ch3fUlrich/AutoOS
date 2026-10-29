@@ -73,9 +73,11 @@ try {
         Assert-Match $policy "Never write project data to the global 'memory' graph" "must forbid writing to memory graph"
     }
 
-    It "Build-HandoffMcpPolicy points to linked graphify-out directory" {
+    It "Build-HandoffMcpPolicy states the postWorktree/unavailable graphify rule" {
         $policy = Build-HandoffMcpPolicy $cfg $vars
-        Assert-Match $policy "graphify-out" "must reference graphify-out"
+        Assert-True (-not ($policy -match "linked 'graphify-out/'")) "policy must not point at a linked graphify-out"
+        Assert-Match $policy "postWorktree" "must name the postWorktree build as the sanctioned route"
+        Assert-Match $policy "graphify is unavailable" "must state the unavailable rule"
     }
 
     It "Get-HandoffSessionVars exposes mcpPolicy without unresolved placeholders" {
@@ -142,11 +144,12 @@ try {
 
     Write-Host "`nScaffold Defaults with MCP Topology"
 
-    It "New-HandoffConfigScaffold declares linkDirs graphify-out and copyFiles .env" {
+    It "New-HandoffConfigScaffold keeps linkDirs empty and copyFiles .env" {
         $scaffoldPath = Join-Path $tmp "scaffold-mcp.json"
         New-HandoffConfigScaffold -Path $scaffoldPath -RepoRoot $fakeRepo -BaseBranch "main" | Out-Null
         $scaffold = Get-Content $scaffoldPath -Raw | ConvertFrom-Json
-        Assert-True (@($scaffold.linkDirs) -contains "graphify-out") "scaffold must declare linkDirs graphify-out"
+        Assert-True ($scaffold.PSObject.Properties.Name -contains 'linkDirs') "scaffold must keep the linkDirs key"
+        Assert-True (@($scaffold.linkDirs) -notcontains "graphify-out") "scaffold must NOT declare linkDirs graphify-out"
         Assert-True (@($scaffold.copyFiles) -contains ".env") "scaffold must declare copyFiles .env"
         Assert-Match $scaffold.briefTemplate "\{\{mcpPolicy\}\}" "scaffold briefTemplate must include {{mcpPolicy}}"
     }

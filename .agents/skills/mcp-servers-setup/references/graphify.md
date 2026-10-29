@@ -75,7 +75,7 @@ approved.
 
 **Worktrees: graphify is a main-checkout tool, and outside one it fails quietly.**
 `graphify-out/` is gitignored, so — exactly like `.env` in the Serena worktree rules — a linked
-worktree never has one. Two ways that bites, neither of which errors:
+worktree has none unless the runner built one there. Two ways that bites, neither of which errors:
 
 - **Session launched *in* the worktree.** `graphify.serve` is stdio and cwd-relative, so it
   looks for `<worktree>/graphify-out/graph.json`, which has never existed there.
@@ -87,8 +87,8 @@ worktree never has one. Two ways that bites, neither of which errors:
 **There is no rebuild spillover, though.** Both installed hooks refuse to run in a linked
 worktree: `post-commit` and `post-checkout` each compare `git rev-parse --git-dir` against
 `--git-common-dir` and `exit 0` when they differ, so N worktrees never produce N rebuilds or N
-competing graphs. `post-checkout` also exits when `graphify-out/` is absent, which is always
-true in a worktree. Source: graphify's own hook template — `graphify.hooks` (`_WORKTREE_GUARD`,
+competing graphs. `post-checkout` also exits when `graphify-out/` is absent, as it is in any
+worktree the runner did not build one for. Source: graphify's own hook template — `graphify.hooks` (`_WORKTREE_GUARD`,
 spliced into both hook bodies), re-read 2026-10-29. The guard only applies while graphify's own
 hooks are installed — another tool's hook installer can replace them (measured on the workstation
 2026-10-29: Qoder tracker hooks), so check `.git/hooks/post-commit` names graphify; reinstall
@@ -96,9 +96,9 @@ with `graphify hook install`.
 
 So the rule matches Serena's:
 
-**In a linked worktree, graphify is unavailable unless the runner provisioned `graphify-out/`; then say which tree and branch it describes. Never link or hand-build it yourself.**
+**In a linked worktree, graphify is unavailable unless the runner built `graphify-out/` for that worktree's own tree; say so. Never link it from another checkout or hand-build it.**
 
-A runner-provisioned graph (linkDirs junction = the main checkout's graph; postWorktree build = this worktree's tree at session start) is a snapshot the hooks do not maintain.
+A postWorktree build describes this worktree's tree at session start; the hooks do not refresh it.
 
 The hooks will not maintain a graph there, so it goes stale with nothing to tell you — the
 escape hatch that is not silent.
