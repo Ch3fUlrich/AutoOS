@@ -7,7 +7,7 @@ description: The one how-to for OmniRoute routing - combos, providers, models, r
 
 The one home for OmniRoute routing how-to. It folds in and supersedes the
 retired predecessor skill (removed 2026-10-26; its tier-order rule is kept
-verbatim in [tier-order](references/tier-order.md)). Code, tests and apply
+in substance in [tier-order](references/tier-order.md)). Code, tests and apply
 scripts reference this skill; they do not restate it.
 
 ## Files (details: [file map](references/file-map.md))
@@ -30,8 +30,9 @@ GO (operator/router) -> apply**. Never reorder these steps.
 1. Edit `catalog/ai-registry.json` under the [tier-order rule](references/tier-order.md).
    A new route also needs `IDE_MODEL_ORDER` in `tools/registry.py` and the
    litellm managed block in `configuration/litellm/config.yaml`.
-2. `python tools/registry.py render omniroute --check` — exit 0 (with `--out`
-   when the render must land in `combos.json` first).
+2. When the render must land first, run
+   `python tools/registry.py render omniroute --out configuration/omniroute/combos.json`;
+   then `python tools/registry.py render omniroute --check` — exit 0.
 3. `python tools/combo-contract.py` — exit 0, every combo PASS.
 4. Re-render/sync every surface until green: `python tools/registry.py render
    litellm|ide|openhands|models-doc --check`, `python tools/sync-ide-models.py
@@ -77,7 +78,7 @@ GO (operator/router) -> apply**. Never reorder these steps.
 
 ## Gate (fail-closed, details: [tier-order](references/tier-order.md#gate-fail-closed))
 
-`python tools/combo-contract.py` is wired fail-closed into `configuration/
-omniroute/apply.ps1` + `apply.sh` (also under the dry run: `-DryRun` on
+`python tools/combo-contract.py` is wired fail-closed into
+`configuration/omniroute/apply.ps1` + `apply.sh` (also under the dry run: `-DryRun` on
 apply.ps1, `--dry-run` on apply.sh), CI, the test harnesses and pytest. Green
 gate, then GO, then apply — never apply first.

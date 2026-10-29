@@ -102,8 +102,8 @@ the machine-readable mirror (git-ignored runtime state). No silent churn.
   layer twins carry own windows.
 
 Wired fail-closed (non-zero exit, also under the dry run: `-DryRun` on
-apply.ps1, `--dry-run` on apply.sh): `configuration/
-omniroute/apply.ps1` + `apply.sh` (before creating anything), CI
+apply.ps1, `--dry-run` on apply.sh):
+`configuration/omniroute/apply.ps1` + `apply.sh` (before creating anything), CI
 (`.github/workflows/ci.yml` lint job), harnesses (`tests/run-tests.ps1`
 registry drift case, `tests/linux/17-ai-routing.sh`), pytest
 (`tests/test_registry.py` ComboContractTests via subprocess).

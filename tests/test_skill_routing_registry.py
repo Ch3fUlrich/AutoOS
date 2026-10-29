@@ -301,6 +301,18 @@ class RoutingRegistrySkillTests(unittest.TestCase):
             "history (CHANGELOG.md / dated history docs / logs/): %s"
             % (NEEDLE, ", ".join(mentions)))
 
+    def test_backticked_repo_paths_do_not_wrap(self):
+        """Wrapped paths evade SCRIPT_RE and are not copyable repo paths."""
+        wrapped = []
+        for path in _skill_files():
+            for span in SPAN_RE.findall(path.read_text(encoding="utf-8")):
+                joined = re.sub(r"\r?\n[ \t]*", "", span)
+                if "\n" in span and re.fullmatch(
+                        r"(?:tools|configuration|catalog|tests|infra|logs)"
+                        r"/[A-Za-z0-9._/-]+", joined):
+                    wrapped.append("%s: %r" % (path.relative_to(ROOT), span))
+        self.assertEqual(wrapped, [], "wrapped repo path(s): %s" % wrapped)
+
     def test_every_script_path_named_exists(self):
         missing = ["%s: %s" % (p.relative_to(ROOT), s)
                    for p in _skill_files()
