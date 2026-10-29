@@ -57,7 +57,7 @@ stdin) ends the container.
 
 This image is the **server** transport for the single, cwd-relative user-scope
 `graphify` entry (workstations use `uv` instead — see
-`../../../../skills/mcp-servers-setup/SKILL.md` → Graphify). Do **not** register a
+`../../../../.agents/skills/mcp-servers-setup/references/graphify.md`). Do **not** register a
 per-repo, hardcoded-mount entry: that is the retired `graphify-docker`, which served
 one repo's graph to every repo.
 
