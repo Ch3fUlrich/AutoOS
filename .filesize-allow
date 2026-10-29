@@ -1,0 +1,7 @@
+# .filesize-allow - paths tools/check-file-size.py measures but does not judge.
+# Format: <path> <reason>. One entry per line; a reason is mandatory.
+#
+# A changelog is a ledger, not source: it grows by exactly one line per merged
+# change and can never shrink, so a baseline entry for it would fail every
+# future entry that records itself. Ratcheting it is a structural no-op.
+CHANGELOG.md a ledger grows one line per merged change and never shrinks
