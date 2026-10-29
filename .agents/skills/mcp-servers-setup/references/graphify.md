@@ -96,7 +96,9 @@ with `graphify hook install`.
 
 So the rule matches Serena's:
 
-**In a linked worktree, graphify is unavailable: say so; never link or hand-build `graphify-out/` there.**
+**In a linked worktree, graphify is unavailable unless the runner provisioned `graphify-out/`; then say which tree and branch it describes. Never link or hand-build it yourself.**
+
+A runner-provisioned graph (linkDirs junction = the main checkout's graph; postWorktree build = this worktree's tree at session start) is a snapshot the hooks do not maintain.
 
 The hooks will not maintain a graph there, so it goes stale with nothing to tell you — the
 escape hatch that is not silent.

@@ -23,8 +23,9 @@ GRAPHIFY = REFS / "graphify.md"
 
 # The one-line rule both references share verbatim. It sits on a single line in
 # each file, so this is a literal substring match, not a fuzzy one.
-RULE = ("**In a linked worktree, graphify is unavailable: say so; never link "
-        "or hand-build `graphify-out/` there.**")
+RULE = ("**In a linked worktree, graphify is unavailable unless the runner "
+        "provisioned `graphify-out/`; then say which tree and branch it "
+        "describes. Never link or hand-build it yourself.**")
 
 # Linking language on a line naming graphify-out/: the prescriptive fix this
 # rule replaces ("link it to the main checkout", ln -s / mklink recipes,
