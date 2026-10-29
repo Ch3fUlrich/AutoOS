@@ -30,16 +30,20 @@ GO (operator/router) -> apply**. Never reorder these steps.
 1. Edit `catalog/ai-registry.json` under the [tier-order rule](references/tier-order.md).
    A new route also needs `IDE_MODEL_ORDER` in `tools/registry.py` and the
    litellm managed block in `configuration/litellm/config.yaml`.
-2. When the render must land first, run
-   `python tools/registry.py render omniroute --out configuration/omniroute/combos.json`;
-   then `python tools/registry.py render omniroute --check` — exit 0.
+2. Prove the render: `python tools/registry.py render omniroute --check` —
+   exit 0. On drift, bring the committed file back in line through its
+   sanctioned updater ([surfaces](references/add-modify.md#surfaces));
+   `--out` is scratch-only except `render ide --out catalog/ide-models.json`.
 3. `python tools/combo-contract.py` — exit 0, every combo PASS.
 4. Re-render/sync every surface until green: `python tools/registry.py render
    litellm|ide|openhands|models-doc --check`, `python tools/sync-ide-models.py
    --check` (or `python tools/sync-router-tiers.py --check`).
 5. `python tools/registry.py check` + `validate`, `python tools/audit-router.py
-   --offline`, `pytest`, `bash configuration/omniroute/apply.sh --dry-run`
-   (Windows twin `configuration/omniroute/apply.ps1 -DryRun`) — exit 0,
+   --offline`, `pytest tests/test_registry.py` (the targeted registry gate —
+   a skill edit adds `tests/test_skill_routing_registry.py`; the full suite
+   runs in CI — it is long and carries unrelated collection errors), `bash
+   configuration/omniroute/apply.sh --dry-run` (Windows twin
+   `configuration/omniroute/apply.ps1 -DryRun`) — exit 0,
    shellcheck/PSScriptAnalyzer clean.
 6. **GO (operator/router)**, then apply: `bash configuration/omniroute/apply.sh
    --go <ref> --go-sha <sha>`. A mutating run refuses without an explicit GO

@@ -5,7 +5,7 @@ A skill is documentation with a contract: an agent follows its links, runs the
 commands it names, and trusts the paths it points at. Each of those rots
 silently — a renamed script leaves a command that fails only when somebody
 executes it, a moved reference breaks a link nobody clicks, and a folded-in
-skill leaves two half-homes for one rule. This asserts the six ways the
+skill leaves two half-homes for one rule. This asserts the seven ways the
 routing-registry skill (which folded in and retired its predecessor) can lie:
 
     * the index budget (SKILL.md <= 150 lines — it must stay an index) and the
@@ -19,7 +19,13 @@ routing-registry skill (which folded in and retired its predecessor) can lie:
       link still resolves — each step's heading/keyword must be present;
     * an apply.sh / apply.ps1 invocation names a flag the script's own
       argument handling refuses (apply.sh exits 2 on unknown arguments, so
-      such a command fails when it is run).
+      such a command fails when it is run);
+    * a `render <target> --out <path>` claim names the file that target's own
+      `render <target> --help` calls "never the real ..." — writing the render
+      there drops the rest of the file (an eval agent following step 2 emptied
+      config.yaml and docs/models.md), so the skill must never name that form;
+      `render ide --out catalog/ide-models.json`, the one sanctioned render
+      write, is pinned to stay named and allowed.
 
 Run directly:
 
@@ -27,6 +33,7 @@ Run directly:
 """
 import re
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
@@ -88,7 +95,7 @@ REQUIRED_STEPS = {
         ("apply", [r"then apply"]),
         ("pytest/shellcheck/PSScriptAnalyzer step", [
             r"(?m)^## 5\. Offline checks\b",
-            r"(?m)^\s*pytest\s*$",
+            r"(?m)^\s*pytest\s+tests/test_registry\.py\b",
             r"shellcheck over every touched",
             r"PSScriptAnalyzer over every touched"]),
     ],
@@ -120,6 +127,16 @@ SPAN_RE = re.compile(r"`([^`]*)`")
 REPO_PATH_RE = re.compile(
     r"(?:%s)/[A-Za-z0-9._/-]+" % "|".join(re.escape(d) for d in REPO_DIRS))
 
+# F1: a `render <target> --out <path>` claim as the skill may name one —
+# fenced or inline; wrapped commands are re-joined first. The path must look
+# like a path ("--out to a scratch file" is prose, not a file claim).
+RENDER_OUT_RE = re.compile(r"render\s+([A-Za-z][\w-]*)\s+--out\s+([^\s`\"']+)")
+
+# The tool's own refusal, read from its --help. Help text wraps mid-phrase
+# ("never the real\n combos.json)"), so the text is whitespace-normalized
+# before this is searched.
+NEVER_THE_REAL_RE = re.compile(r"never the real\s+([A-Za-z0-9._/-]+)")
+
 # A wrapped line as it appears in prose: the break, the indent, and the list
 # or quote marker a reader's eye skips but a copied path must not carry.
 WRAP_GAP_RE = re.compile(r"\r?\n[ \t]*(?:- |> )?")
@@ -140,6 +157,48 @@ def _links(path):
 def _script_paths(path):
     """Every repo-relative script path named in `path`."""
     return sorted(set(SCRIPT_RE.findall(path.read_text(encoding="utf-8"))))
+
+
+def _render_out_mentions(text):
+    """Every (target, path) claim of `render <target> --out <path>` in `text`:
+    fenced or inline, a wrapped command re-joined before matching."""
+    hits = []
+    for m in RENDER_OUT_RE.finditer(WRAP_GAP_RE.sub("", text)):
+        path = m.group(2).rstrip(".,;:)")
+        if "/" in path or "." in path:
+            hits.append((m.group(1), path))
+    return hits
+
+
+# One `render <target> --help` per target, read once (subprocess, no network).
+_RENDER_HELP = {}
+
+
+def _never_the_real(target):
+    """The file `render <target> --help` calls "never the real ...", or None.
+
+    That phrase is the tool's own refusal — the one the skill's `--out` claims
+    are checked against — so it is read from the help at run time, not from a
+    table here that would drift from the tool."""
+    if target not in _RENDER_HELP:
+        run = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "registry.py"),
+             "render", target, "--help"],
+            cwd=str(ROOT), capture_output=True, encoding="utf-8",
+            errors="replace")
+        _RENDER_HELP[target] = run.stdout + " " + run.stderr
+    m = NEVER_THE_REAL_RE.search(re.sub(r"\s+", " ", _RENDER_HELP[target]))
+    return m.group(1) if m else None
+
+
+def _out_violations(mentions):
+    """(target, path, named) per mention whose path IS the file the target's
+    help refuses: equal to the name, or carrying it as a tail (help text
+    abbreviates — `combos.json` is `configuration/omniroute/combos.json`)."""
+    return [(t, p, named) for t, p in mentions
+            for named in [_never_the_real(t)]
+            if named is not None and (p == named or p.endswith("/" + named)
+                                      or named.endswith("/" + p))]
 
 
 def _repo_markdown():
@@ -456,6 +515,61 @@ class RoutingRegistrySkillTests(unittest.TestCase):
             _unit_flags("apply.sh -DryRun"), [(APPLY_SH, "-DryRun")],
             "a PowerShell-style flag in a bash twin's invocation belongs to "
             "the bash twin, which refuses it")
+
+    def test_no_render_out_names_a_never_the_real_file(self):
+        """Every `render <target> --out <path>` the skill names — fenced or
+        inline — is checked against that target's own `render --help`: a path
+        the help calls "never the real ..." is the committed file the tool
+        refuses to own, and a render written there drops the rest of the file
+        (an eval agent following step 2 emptied config.yaml (-266 lines) and
+        docs/models.md (-848 lines, markers gone)). Each fixture form is
+        flagged first — a guard that cannot fail asserts nothing."""
+        for name, fixture in [
+                ("omniroute/combos.json",
+                 "run `python tools/registry.py render omniroute --out "
+                 "configuration/omniroute/combos.json`;"),
+                ("litellm/config.yaml",
+                 "fix drift with render litellm --out "
+                 "configuration/litellm/config.yaml"),
+                ("models-doc",
+                 "render models-doc --out docs/models.md"),
+        ]:
+            self.assertTrue(
+                _out_violations(_render_out_mentions(fixture)),
+                "guard missed the never-the-real fixture %s: %r"
+                % (name, fixture))
+        problems = ["%s: render %s --out %s (help: never the real %s)"
+                    % (p.relative_to(ROOT), t, path, named)
+                    for p in _skill_files()
+                    for t, path, named in _out_violations(
+                        _render_out_mentions(p.read_text(encoding="utf-8")))]
+        self.assertEqual(
+            problems, [],
+            "the skill names a --out onto a file that render's own --help "
+            "calls 'never the real': point --out at a scratch path and bring "
+            "the committed file back in line through its sanctioned updater "
+            "instead: %s" % "; ".join(problems))
+
+    def test_render_ide_out_stays_allowed(self):
+        """`render ide --out catalog/ide-models.json` is the one render write
+        a committed file may take — its own --help says "to update the
+        committed file". The guard must keep passing it and the skill must
+        keep naming it, or the sanctioned path silently disappears."""
+        self.assertNotEqual(
+            _never_the_real("ide"), "catalog/ide-models.json",
+            "render ide's --help now refuses catalog/ide-models.json; the "
+            "skill's sanctioned ide write is stale")
+        self.assertEqual(
+            _out_violations([("ide", "catalog/ide-models.json")]), [],
+            "the guard flags the one sanctioned render write")
+        named = [m for p in _skill_files()
+                 for m in _render_out_mentions(
+                     p.read_text(encoding="utf-8"))
+                 if m == ("ide", "catalog/ide-models.json")]
+        self.assertTrue(
+            named,
+            "the skill no longer names `render ide --out "
+            "catalog/ide-models.json`, the sanctioned way to update it")
 
 
 if __name__ == "__main__":

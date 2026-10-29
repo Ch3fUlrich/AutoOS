@@ -35,7 +35,10 @@ unusable (401, no active credentials), openrouter `:free` ids top out at
 ### t2/t3 order = trial -> free -> credits -> paid, DEEPSEEK LAST; 128k clamp on the legacy bands only
 
 Free band head `gemini/gemini-3.8-flash`, then groq/huggingface/openrouter/
-free_ai legs; `scaleway/*` and `antigravity/*` kept but NEVER heads. Credits
+free_ai legs; `scaleway/*` and `antigravity/*` kept but NEVER heads. A free leg
+from a provider this list does not name goes **last in the free band** — after
+every listed provider's legs, before any credit leg (rule (b) fixes the class
+order only). Credits
 after all free: `vertex/gemini-3.8-flash` (NEW to t2/t3 full). The `ovhcloud/*`
 credit legs are gone — the provider was removed 2026-10-18 (D-1816(12),
 credits empty), so **no OVH leg may be curated anywhere**. Paid: `meta_api`
