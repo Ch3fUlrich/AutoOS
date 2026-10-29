@@ -17,7 +17,7 @@ Usage:
   probe-ledger.py credit --provider ID --usd X  (records a balance sighting)
   probe-ledger.py dump  (whole ledger as JSON)
 
-Conventions (see also combo-create skill):
+Conventions (see also the routing-registry skill):
   - served: a real 200 with the expected shape, fresh TTL 7 days.
   - failed: a real error (4xx/5xx/skip); TTL 24h, then re-probe.
   - limited: serves but quota-capped (429/413/TPM) - usable for small work.
