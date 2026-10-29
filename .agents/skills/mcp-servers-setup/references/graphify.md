@@ -77,8 +77,9 @@ approved.
 `graphify-out/` is gitignored, so — exactly like `.env` in the Serena worktree rules — a linked
 worktree has none unless the runner built one there. Two ways that bites, neither of which errors:
 
-- **Session launched *in* the worktree.** `graphify.serve` is stdio and cwd-relative, so it
-  looks for `<worktree>/graphify-out/graph.json`, which has never existed there.
+- **Session launched *in* the worktree.** `graphify.serve` is stdio and cwd-relative,
+  so it looks for `<worktree>/graphify-out/graph.json`, which does not exist there
+  unless the runner built it.
 - **Session launched in the main checkout while an agent works in a worktree.** A stdio server
   inherits its launch directory *once*, at start, so it keeps answering from the main
   checkout's graph — built from a different branch's code. Confident answers about the wrong

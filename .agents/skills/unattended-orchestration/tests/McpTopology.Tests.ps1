@@ -75,7 +75,8 @@ try {
 
     It "Build-HandoffMcpPolicy states the postWorktree/unavailable graphify rule" {
         $policy = Build-HandoffMcpPolicy $cfg $vars
-        Assert-True (-not ($policy -match "linked 'graphify-out/'")) "policy must not point at a linked graphify-out"
+        Assert-True (-not ($policy -match "(?i)linked\W+graphify-out")) "policy must not point at a linked graphify-out"
+        Assert-Match $policy "linkDirs" "must name linkDirs as the not-yours case"
         Assert-Match $policy "postWorktree" "must name the postWorktree build as the sanctioned route"
         Assert-Match $policy "graphify is unavailable" "must state the unavailable rule"
     }

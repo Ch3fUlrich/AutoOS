@@ -1275,7 +1275,7 @@ function Build-HandoffMcpPolicy {
         "1. Router: Consult 'skills/repository-index/SKILL.md' first before loading skills.",
         "2. Serena: Activate project on this worktree by absolute path before reading or editing code: call activate_project('$wt'). One active project per session.",
         "3. Omnigraph: Persistent structured memory is mandatory. Recall prior architectural decisions and principles before changing code; persist durable decisions before completing (pinned to OMNIGRAPH_GRAPH_ID='$repoFolder'). Never write project data to the global 'memory' graph.",
-        "4. Graphify: in a linked worktree graphify-out/ exists only if this run built it for this worktree (postWorktree); if it is absent, say graphify is unavailable and use Serena/Grep instead; if present, say it describes this worktree's tree at session start (the hooks do not refresh it)."
+        "4. Graphify: in a linked worktree use graphify-out/ only if this run built it for this worktree (postWorktree) - then say it describes this worktree's tree at session start (the hooks do not refresh it); if it is absent, or was linked or copied from another checkout (linkDirs/copyDirs), say graphify is unavailable and use Serena/Grep instead."
     )
     return ($parts -join "`n")
 }
