@@ -52,13 +52,19 @@ DATE_IN_NAME_RE = re.compile(r"(?<!\d)(?:\d{4}-\d{2}-\d{2}|\d{8})(?!\d)")
 LINK_RE = re.compile(r"\[[^\]]*\]\(([^)\s]+)\)")
 SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
-# A repo-relative script path as the skill may name one: tools/…, configuration/
-# …, catalog/…, tests/…, infra/… ending in a script suffix. Data paths are not
-# asserted here — several name git-ignored runtime state (logs/routing/…), which
-# legitimately does not exist in a checkout.
+# Every top-level tracked directory a repo path can start with — one tuple,
+# two users: the wrap guard's shape of a repo path, and SCRIPT_RE below (a
+# script path is a repo path with a script suffix).
+REPO_DIRS = ("tools", "configuration", "catalog", "tests", "infra", "logs",
+             "docs", ".agents", "lib", ".github")
+
+# A repo-relative script path as the skill may name one: a REPO_DIRS path
+# ending in a script suffix. Data paths are not asserted here — several name
+# git-ignored runtime state (logs/routing/…), which legitimately does not
+# exist in a checkout.
 SCRIPT_RE = re.compile(
-    r"(?<![\w./-])(?:tools|configuration|catalog|tests|infra)"
-    r"/[A-Za-z0-9._/-]*\.(?:py|sh|ps1|psm1|mjs)\b")
+    r"(?<![\w./-])(?:%s)/[A-Za-z0-9._/-]*\.(?:py|sh|ps1|psm1|mjs)\b"
+    % "|".join(re.escape(d) for d in REPO_DIRS))
 
 MD_DIRS_SKIP = {".git", "node_modules", "third_party", "__pycache__"}
 
@@ -109,6 +115,14 @@ SH_TOKEN_RE = re.compile(r"(?<![\w.-])apply\.sh\b")
 PS_TOKEN_RE = re.compile(r"(?<![\w.-])apply\.ps1\b")
 FENCE_RE = re.compile(r"^\s*```")
 SPAN_RE = re.compile(r"`([^`]*)`")
+
+# The wrap guard's shape of a repo path: a REPO_DIRS prefix, then the rest.
+REPO_PATH_RE = re.compile(
+    r"(?:%s)/[A-Za-z0-9._/-]+" % "|".join(re.escape(d) for d in REPO_DIRS))
+
+# A wrapped line as it appears in prose: the break, the indent, and the list
+# or quote marker a reader's eye skips but a copied path must not carry.
+WRAP_GAP_RE = re.compile(r"\r?\n[ \t]*(?:- |> )?")
 
 
 def _skill_files():
@@ -239,6 +253,33 @@ def _apply_ps1_flags():
     return {"-" + n for n in re.findall(r"\]\$(\w+)", text[start:i - 1])}
 
 
+def _wrapped_repo_paths(text):
+    """Every backticked repo path in `text` that spans a line break.
+
+    A wrap hides inside one span or between two spans whose join is one
+    path. Fenced blocks are stripped before the single backticks are paired:
+    the fences' own backticks would shift the pairing and hide the wrap."""
+    prose, infence = [], False
+    for line in text.splitlines():
+        if FENCE_RE.match(line):
+            infence = not infence
+        elif not infence:
+            prose.append(line)
+    prose = "\n".join(prose)
+    found, spans = [], list(SPAN_RE.finditer(prose))
+    for i, span in enumerate(spans):
+        body = span.group(1)
+        if "\n" in body and REPO_PATH_RE.fullmatch(
+                WRAP_GAP_RE.sub("", body)):
+            found.append(body)
+        if (i + 1 < len(spans) and body.endswith("/")
+                and WRAP_GAP_RE.fullmatch(
+                    prose[span.end():spans[i + 1].start()])
+                and REPO_PATH_RE.fullmatch(body + spans[i + 1].group(1))):
+            found.append(prose[span.start():spans[i + 1].end()])
+    return found
+
+
 class RoutingRegistrySkillTests(unittest.TestCase):
     def test_index_is_at_most_150_lines(self):
         self.assertTrue(INDEX.is_file(), "missing %s" % INDEX)
@@ -302,15 +343,42 @@ class RoutingRegistrySkillTests(unittest.TestCase):
             % (NEEDLE, ", ".join(mentions)))
 
     def test_backticked_repo_paths_do_not_wrap(self):
-        """Wrapped paths evade SCRIPT_RE and are not copyable repo paths."""
-        wrapped = []
-        for path in _skill_files():
-            for span in SPAN_RE.findall(path.read_text(encoding="utf-8")):
-                joined = re.sub(r"\r?\n[ \t]*", "", span)
-                if "\n" in span and re.fullmatch(
-                        r"(?:tools|configuration|catalog|tests|infra|logs)"
-                        r"/[A-Za-z0-9._/-]+", joined):
-                    wrapped.append("%s: %r" % (path.relative_to(ROOT), span))
+        """Wrapped paths evade SCRIPT_RE and are not copyable repo paths.
+
+        A wrap hides inside one backtick span or between two spans whose
+        join is one path, the break may carry a list or quote marker, and
+        fenced blocks must not shift span pairing. One fixture string per
+        form is pinned first — a guard that cannot flag these asserts
+        nothing — and the real skill must stay clean."""
+        fixtures = [
+            ("one span", "run `configuration/\nomniroute/apply.ps1`"),
+            ("one span, list marker",
+             "run `configuration/\n- omniroute/apply.ps1`"),
+            ("one span, quote marker",
+             "run `configuration/\n> omniroute/apply.ps1`"),
+            ("one span, docs/", "see `docs/\nagents/leaf-contract.md`"),
+            ("one span, .agents/",
+             "see `.agents/\nskills/routing-registry/SKILL.md`"),
+            ("one span, lib/", "see `lib/\nwindows/AutoOS.Ui.psm1`"),
+            ("one span, .github/", "see `.github/\nworkflows/ci.yml`"),
+            ("two spans", "run `configuration/`\n`omniroute/apply.ps1`"),
+            ("two spans, indented", "run `logs/routing/`\n  `availability.json`"),
+            ("two spans, list marker",
+             "run `logs/routing/`\n- `availability.json`"),
+            ("two spans, quote marker",
+             "run `logs/routing/`\n> `availability.json`"),
+            ("fence must not shift pairing",
+             "```\necho `a` b `c\n```\nrun `configuration/"
+             "\nomniroute/apply.ps1`"),
+        ]
+        for name, text in fixtures:
+            self.assertTrue(
+                _wrapped_repo_paths(text),
+                "guard missed the %s wrap fixture: %r" % (name, text))
+        wrapped = ["%s: %r" % (path.relative_to(ROOT), s)
+                   for path in _skill_files()
+                   for s in _wrapped_repo_paths(
+                       path.read_text(encoding="utf-8"))]
         self.assertEqual(wrapped, [], "wrapped repo path(s): %s" % wrapped)
 
     def test_every_script_path_named_exists(self):
