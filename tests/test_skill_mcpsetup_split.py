@@ -62,6 +62,25 @@ PATH_CHARS = frozenset(
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     "0123456789._/-")
 
+# Topics whose guidance lives in references/<topic>.md since the split (fix
+# round 3): a pointer naming one of these topics must target that topic's
+# reference file. The SKILL.md such pointers kept naming is an index now, so
+# a reader following one lands a hop short of the guidance it names.
+TOPIC_REFERENCES = {
+    "context7": "references/context7.md",
+    "graphify": "references/graphify.md",
+    "omnigraph": "references/omnigraph.md",
+    "playwright": "references/playwright.md",
+    "serena": "references/serena.md",
+    "superpowers": "references/superpowers.md",
+}
+TOPIC_WORD_RE = re.compile(
+    r"\b(%s)\b" % "|".join(sorted(TOPIC_REFERENCES)), re.IGNORECASE)
+# A link's anchor text can name topics the pointer does not target (a serena
+# anchor reading "...-is-graphify-shaped-not-omnigraph-shaped"); strip anchors
+# before matching so those do not read as stray topic pointers.
+ANCHOR_RE = re.compile(r"#[^\s)\"]*")
+
 # Every heading of the 619-line pre-split SKILL.md, verbatim (em dash = \u2014,
 # spelled as an escape so this file never depends on its own encoding).
 OLD_HEADINGS = [
@@ -158,35 +177,81 @@ def _tracked_files():
     return [ROOT / rel for rel in out.stdout.decode("utf-8").split("\0") if rel]
 
 
-def _dead_skill_mentions(path):
-    """(line, token) pairs where a skill-path mention is dead from ROOT.
+def _skill_mentions(path):
+    """Scan records for every skill-path mention in `path` (binary: []).
 
-    A mention is fine when it carries the `.agents/` prefix the real tree has,
-    or when the path it spells exists at the repo root. Anything else is a dead
-    path for a reader following it from the root. Binary files yield [].
+    A record is (lineno, token, tail, prefixed, named): the path token as
+    spelled, the part of it after "mcp-servers-setup/" ("" when the mention
+    names only the directory, trailing sentence dots stripped), whether the
+    token carries the .agents/ prefix the real tree has, and the topic words
+    named by the line (link anchors stripped) or by the file's own path.
     """
     data = path.read_bytes()
     if b"\0" in data:
         return []
-    hits = []
+    rel = str(path.relative_to(ROOT)).replace(os.sep, "/")
+    file_topics = {t.lower() for t in TOPIC_WORD_RE.findall(rel)}
+    out = []
     for lineno, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+        named = file_topics | {
+            t.lower() for t in TOPIC_WORD_RE.findall(ANCHOR_RE.sub("", line))}
         start = 0
         while True:
             i = line.find(SKILL_PATH_NEEDLE, start)
             if i < 0:
                 break
             start = i + 1
-            if line[:i].endswith(".agents/"):
-                continue
             lo = i
             while lo > 0 and line[lo - 1] in PATH_CHARS:
                 lo -= 1
             hi = i + len(SKILL_PATH_NEEDLE)
             while hi < len(line) and line[hi] in PATH_CHARS:
                 hi += 1
-            token = line[lo:hi].rstrip("/")
-            if not (ROOT / token).exists():
-                hits.append((lineno, line[lo:hi]))
+            token = line[lo:hi]
+            parts = token.split("mcp-servers-setup/", 1)
+            tail = parts[1].rstrip(".") if len(parts) == 2 else ""
+            out.append((lineno, token, tail,
+                        line[:i].endswith(".agents/"), named))
+    return out
+
+
+def _dead_skill_mentions(path):
+    """(lineno, token, why) triples for skill-path mentions a reader cannot
+    follow from the repo root.
+
+    Round 2 required the .agents/ prefix the real tree has. Round 3 tightens
+    resolution: the part of the mention after "mcp-servers-setup/" must name
+    a file that exists under the skill dir. The old check accepted any token
+    that existed at the repo root, so a wrong skill path passed whenever some
+    unrelated path existed - and a prefixed mention was never checked at all.
+    """
+    hits = []
+    for lineno, token, tail, prefixed, _named in _skill_mentions(path):
+        if not prefixed:
+            hits.append((lineno, token,
+                         "no .agents/ prefix - dead from the repo root"))
+        elif not (SKILL_DIR / tail).exists():
+            hits.append((lineno, token,
+                         "no such file under %s"
+                         % SKILL_DIR.relative_to(ROOT)))
+    return hits
+
+
+def _topic_pointer_problems(path):
+    """(lineno, token, why) triples for pointers that name one of the topics
+    whose guidance lives in references/<topic>.md yet do not target it.
+
+    A pointer naming topic guidance must name that topic's reference file as
+    its target; naming several topics accepts any one of their references.
+    Topics come from the pointer's line and the file's own path - a pointer
+    inside graphify-mcp is Graphify guidance even when the line omits the word.
+    """
+    hits = []
+    for lineno, token, tail, _prefixed, named in _skill_mentions(path):
+        if named and tail not in {TOPIC_REFERENCES[t] for t in named}:
+            hits.append((lineno, token,
+                         "names %s guidance but targets %s"
+                         % ("/".join(sorted(named)), tail or "the skill dir")))
     return hits
 
 
@@ -281,7 +346,10 @@ class McpSetupSplitTests(unittest.TestCase):
         leading .agents/ segment the real tree has, a dead path for any reader
         following it from the root. The scan covers all tracked files, not just
         the skill's own — the bad spelling spread into infra docs, a script and
-        a config comment."""
+        a config comment. Round 3 tightens resolution to the skill dir itself:
+        the mention's own tail must name a file there, because the old check
+        accepted any path that existed at the repo root, so a wrong skill-path
+        mention passed whenever some unrelated path existed."""
         dead = {}
         for path in _tracked_files():
             if not path.is_file():
@@ -291,8 +359,29 @@ class McpSetupSplitTests(unittest.TestCase):
                 dead[str(path.relative_to(ROOT))] = hits
         self.assertEqual(
             dead, {},
-            "skill-path mention(s) that do not resolve from the repo root — "
-            "prefix with .agents/ to point at the real tree: %r" % dead)
+            "skill-path mention(s) that do not resolve under the skill dir: "
+            "point at .agents/skills/mcp-servers-setup/<file> as it exists "
+            "there, with the .agents/ prefix - %r" % dead)
+
+    def test_topic_pointers_target_the_topic_reference(self):
+        """A pointer naming one of the six per-server topics must target that
+        topic's references/<topic>.md (fix round 3): the index such pointers
+        kept naming after the split is a table of contents, so a reader lands
+        one hop short of the guidance the pointer claims to name. Topics are
+        read from the pointer's line (link anchors stripped) and from the
+        file's own path — a pointer inside graphify-mcp is Graphify guidance
+        even when the line itself omits the word."""
+        bad = {}
+        for path in _tracked_files():
+            if not path.is_file():
+                continue
+            hits = _topic_pointer_problems(path)
+            if hits:
+                bad[str(path.relative_to(ROOT))] = hits
+        self.assertEqual(
+            bad, {},
+            "pointer(s) naming topic guidance but not targeting that "
+            "topic's reference file under the skill dir: %r" % bad)
 
 
 if __name__ == "__main__":
