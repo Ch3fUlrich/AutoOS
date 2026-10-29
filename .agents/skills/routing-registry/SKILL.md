@@ -78,5 +78,6 @@ GO (operator/router) -> apply**. Never reorder these steps.
 ## Gate (fail-closed, details: [tier-order](references/tier-order.md#gate-fail-closed))
 
 `python tools/combo-contract.py` is wired fail-closed into `configuration/
-omniroute/apply.ps1` + `apply.sh` (also under `-DryRun`), CI, the test
-harnesses and pytest. Green gate, then GO, then apply — never apply first.
+omniroute/apply.ps1` + `apply.sh` (also under the dry run: `-DryRun` on
+apply.ps1, `--dry-run` on apply.sh), CI, the test harnesses and pytest. Green
+gate, then GO, then apply — never apply first.

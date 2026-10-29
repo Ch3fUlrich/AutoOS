@@ -96,12 +96,13 @@ the machine-readable mirror (git-ignored runtime state). No silent churn.
 - (b) trial -> free -> credits -> paid, paid last, no free after paid, deepseek
   last, openrouter servable `:free` + declared-paid gated;
 - (c) every leg resolves (live existence warn-only: apply skips unknown with
-  warning, exit 0, so the gate must not fail on dead huggingface/antigravity or
-  `apply -DryRun` breaks);
+  warning, exit 0, so the gate must not fail on dead huggingface/antigravity
+  or the dry run (`-DryRun` on apply.ps1, `--dry-run` on apply.sh) breaks);
 - (d) t1 1M + `>=600k`, legacy t2/t3 (l2-worker, l3-driver bands) 128k; D657
   layer twins carry own windows.
 
-Wired fail-closed (non-zero exit, also under `-DryRun`): `configuration/
+Wired fail-closed (non-zero exit, also under the dry run: `-DryRun` on
+apply.ps1, `--dry-run` on apply.sh): `configuration/
 omniroute/apply.ps1` + `apply.sh` (before creating anything), CI
 (`.github/workflows/ci.yml` lint job), harnesses (`tests/run-tests.ps1`
 registry drift case, `tests/linux/17-ai-routing.sh`), pytest
