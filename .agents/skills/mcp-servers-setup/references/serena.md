@@ -20,7 +20,7 @@ project-scope entry pins nothing the tracked file does not already say.
 `OMNIGRAPH_GRAPH_ID`) because each repo is a distinct graph on a shared server. Serena, like
 graphify, is selected at runtime.
 
-**A duplicate does not resolve to one winner — both run.** Measured in `second-analysis-repo` 2026-09-01:
+**A duplicate does not resolve to one winner — both run.** Measured in `repo-b` 2026-09-01:
 **five** Serena processes, one with `--context claude-code` (user scope) and four without
 (project scope, one per session). Calls landed on a *project-scope* one, reporting `Active
 context: desktop-app` and a one-project roster where the real home registers eleven. The
@@ -50,7 +50,7 @@ for twice.
 > **Never declare a language whose server is not in the image — `markdown` above all.** Its
 > `initialize` fails, the language-server **manager** fails with it, and every symbol tool for
 > the project then errors. The repo goes dark and the message names neither cause. `marksman` is
-> not in the image, and headings are a grep. This took Finance-Repo's Serena down until 2026-07-20.
+> not in the image, and headings are a grep. This took repo-c's Serena down until 2026-07-20.
 > **Restart Serena after editing `project.yml`** — it holds the activated project in memory.
 
 Measured with `serena project health-check`, one set at a time, 2026-09-01:
@@ -81,7 +81,7 @@ data-format problem above. Two traps:
   check finished. **Do not trust the exit code**: measured `1` on 2026-09-01 (serena 1.7.0). The
   log body is the verdict.
 - **Check *which* symbol it selected.** Both criteria can pass on nothing: against
-  `sibling-analysis-repo` (8 languages incl. `markdown`) it chose `AGENTS.md — sibling-analysis-repo`, kind
+  `repo-a` (8 languages incl. `markdown`) it chose `AGENTS.md — repo-a`, kind
   **Namespace** — a markdown heading — reported 1 reference and success, and never touched
   Python. If the symbol is not a Function or Class, the language list is polluted. Startup
   there: **34.4 s**.
@@ -112,31 +112,19 @@ data-format problem above. Two traps:
 >
 > **The consequence is not that worktree agents lose Serena** — that conclusion was drawn here
 > once and was wrong. **The unit of worktree parallelism is a SESSION, not a subagent.** One
-> `claude` process per worktree gives each its own Serena, its own `_active_project` and —
-> graphify being cwd-relative — its own graph. Subagents stay in their own session's worktree,
+> `claude` process per worktree gives each its own Serena and its own `_active_project`.
+> Subagents stay in their own session's worktree,
 > sharing one correctly-activated Serena. *Worktrees get sessions; subagents share the session's
 > worktree.* (`herdr-orchestration` panes are how you run one session per worktree.)
 >
-> Three artifacts must reach the worktree; all three fail identically, by being untracked:
+> Two artifacts must reach the worktree; both fail identically, by being untracked:
 >
 > | Requirement | Why it bites | Fix |
 > |---|---|---|
 > | `.serena/project.yml` **tracked** | absent, Serena autogenerates it, and autogeneration picks languages by file count — reintroducing `json`/`markdown`/`yaml` in every worktree, forever | `.serena/*` plus `!.serena/project.yml`, never a bare `.serena/` (a negation cannot re-include a file inside an excluded directory) |
 > | `project_name` **omitted** | every worktree registers the same name; by-name activation raises for all agents at once | delete the key (rule 1b) |
-> | `graphify-out/` **exists** | gitignored, and both hooks skip linked worktrees, so it is never created | link it to the main checkout |
 >
-> ```bash
-> ln -s "$(git rev-parse --show-toplevel)/graphify-out" "<worktree>/graphify-out"
-> cmd /c mklink /J "<worktree>\graphify-out" "<main>\graphify-out"    :: Windows, no admin
-> ```
->
-> Link rather than build a second graph: the hooks maintain exactly one, and a hand-built copy
-> goes stale silently. **Verified it cannot eat the real graph** (2026-09-01): with a canary in
-> the target, `Remove-Item -Recurse -Force <worktree>` left it intact — the junction is not
-> followed. Not tested against `git worktree remove` itself, so drop the link first if you want
-> belt and braces. The server only *reads* `graph.json`, so N sessions cannot race. Accept the
-> caveat: the graph describes the **main checkout's** code — right for structural questions,
-> wrong for code the branch restructured. Say which one you are answering from.
+> **In a linked worktree, graphify is unavailable unless the runner provisioned `graphify-out/`; then say which tree and branch it describes. Never link or hand-build it yourself.** (reasons: [graphify.md](./graphify.md))
 >
 > Only when a worktree genuinely cannot have its own session does the fallback apply:
 > `Glob`/`Grep`/`Read` **and `Edit`** — name `Edit` explicitly, because a fallback list omitting

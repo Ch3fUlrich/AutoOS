@@ -18,6 +18,7 @@ import re
 import subprocess
 import unittest
 from pathlib import Path
+from test_skill_mcpsetup_links import heading_slugs
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL_DIR = ROOT / ".agents" / "skills" / "mcp-servers-setup"
@@ -34,6 +35,8 @@ REFERENCE_MAX_LINES = 500
 # the split (a re-wrapped link is legitimate; a dropped section is not).
 OLD_TOTAL_LINES = 619
 OLD_NONBLANK_LINES = 518
+# Re-pin (this slack + the floors below) only after a deliberate content edit:
+# re-measure both totals and each file's non-blank count. Never to mask a loss.
 LINK_REWRITE_SLACK = 12
 
 # Per-file floors (fix round 2, 2026-10-26): the aggregate floor above lets one
@@ -44,19 +47,19 @@ LINK_REWRITE_SLACK = 12
 PER_FILE_NONBLANK_FLOORS = {
     "SKILL.md": 68,                  # 70 non-blank
     "context7.md": 15,               # 17
-    "graphify.md": 91,               # 93
+    "graphify.md": 96,               # 98 (re-pin 2026-10-29, MCPSETUP-WORKTREE-GRAPHIFY)
     "infrastructure-harbor.md": 40,  # 42
     "omnigraph.md": 46,              # 48
     "playwright.md": 81,             # 83
-    "serena.md": 175,                # 177
+    "serena.md": 163,                # 165 (re-pin 2026-10-29, MCPSETUP-WORKTREE-GRAPHIFY: link block removed; was 177)
     "superpowers.md": 14,            # 16
 }
 
-# Path mentions that must resolve from the repo root (fix round 2): the skill
-# lives under .agents/skills/, so a mention of its directory without that
-# prefix is a dead path for anyone reading from the repo root. The needle is
-# built by concatenation so this file never matches its own scan.
-SKILL_PATH_NEEDLE = "skills/" + "mcp-servers-setup"
+# Path mentions that must resolve from the repo root (fix round 2): a mention
+# of the skill's dir without the .agents/skills/ prefix is a dead path for a
+# reader at the root. L2 widens the needle to the bare dir name (\ -> / first;
+# no / in the token = a name). Name split in two: this file must not self-match.
+SKILL_DIR_NAME = "mcp-servers-" + "setup"
 PATH_CHARS = frozenset(
     "abcdefghijklmnopqrstuvwxyz"
     "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -137,12 +140,17 @@ def _nonblank_count(path):
 
 
 def _missing_links(path):
-    """Relative link targets of `path` that do not resolve to a file."""
+    """Link targets of `path` whose file or #anchor does not resolve."""
     missing = []
     for target in LINK_RE.findall(path.read_text(encoding="utf-8")):
-        if SCHEME_RE.match(target) or target.startswith("#") or target.startswith("/"):
+        if SCHEME_RE.match(target) or target.startswith("/"):
             continue
-        if not (path.parent / target.split("#")[0]).exists():
+        file_part, _, anchor = target.partition("#")
+        resolved = (path.parent / file_part) if file_part else path
+        if not resolved.exists():
+            missing.append(target)
+        elif (anchor and resolved.is_file()
+              and anchor not in heading_slugs(_headings(resolved))):
             missing.append(target)
     return missing
 
@@ -181,59 +189,63 @@ def _skill_mentions(path):
     """Scan records for every skill-path mention in `path` (binary: []).
 
     A record is (lineno, token, tail, prefixed, named): the path token as
-    spelled, the part of it after "mcp-servers-setup/" ("" when the mention
-    names only the directory, trailing sentence dots stripped), whether the
-    token carries the .agents/ prefix the real tree has, and the topic words
+    spelled (backslashes normalised to /), the part of it after "<dir>/"
+    ("" for the bare dir, trailing sentence dots stripped), whether the token
+    is spelled under .agents/skills/ as the real tree has, and the topic words
     named by the line (link anchors stripped) or by the file's own path.
     """
     data = path.read_bytes()
     if b"\0" in data:
         return []
-    rel = str(path.relative_to(ROOT)).replace(os.sep, "/")
+    rel = str(path.relative_to(ROOT)).replace(os.sep, "/") \
+        if ROOT in path.parents else path.name
     file_topics = {t.lower() for t in TOPIC_WORD_RE.findall(rel)}
     out = []
     for lineno, line in enumerate(data.decode("utf-8", "replace").splitlines(), 1):
+        line = line.replace("\\", "/")   # backslash spellings read as paths
         named = file_topics | {
             t.lower() for t in TOPIC_WORD_RE.findall(ANCHOR_RE.sub("", line))}
         start = 0
         while True:
-            i = line.find(SKILL_PATH_NEEDLE, start)
+            i = line.find(SKILL_DIR_NAME, start)
             if i < 0:
                 break
             start = i + 1
             lo = i
             while lo > 0 and line[lo - 1] in PATH_CHARS:
                 lo -= 1
-            hi = i + len(SKILL_PATH_NEEDLE)
+            hi = i + len(SKILL_DIR_NAME)
             while hi < len(line) and line[hi] in PATH_CHARS:
                 hi += 1
             token = line[lo:hi]
-            parts = token.split("mcp-servers-setup/", 1)
+            if "/" not in token:      # the bare dir name is a name, not a path
+                continue
+            parts = token.split(SKILL_DIR_NAME + "/", 1)
             tail = parts[1].rstrip(".") if len(parts) == 2 else ""
             out.append((lineno, token, tail,
-                        line[:i].endswith(".agents/"), named))
+                        line[:i].endswith(".agents/skills/"), named))
     return out
 
 
 def _dead_skill_mentions(path):
     """(lineno, token, why) triples for skill-path mentions a reader cannot
-    follow from the repo root.
+    follow.
 
-    Round 2 required the .agents/ prefix the real tree has. Round 3 tightens
-    resolution: the part of the mention after "mcp-servers-setup/" must name
-    a file that exists under the skill dir. The old check accepted any token
-    that existed at the repo root, so a wrong skill path passed whenever some
-    unrelated path existed - and a prefixed mention was never checked at all.
+    Round 2 required the .agents/skills/ prefix the real tree has; round 3 the
+    tail naming a file under the skill dir. L2 lets an unprefixed spelling
+    pass only when it resolves relative to its own file (a link target a
+    reader can follow) and flags every other one.
     """
     hits = []
     for lineno, token, tail, prefixed, _named in _skill_mentions(path):
-        if not prefixed:
+        if prefixed:
+            if not (SKILL_DIR / tail).exists():
+                hits.append((lineno, token,
+                             "no such file under %s"
+                             % SKILL_DIR.relative_to(ROOT)))
+        elif not (path.parent / token).exists():
             hits.append((lineno, token,
                          "no .agents/ prefix - dead from the repo root"))
-        elif not (SKILL_DIR / tail).exists():
-            hits.append((lineno, token,
-                         "no such file under %s"
-                         % SKILL_DIR.relative_to(ROOT)))
     return hits
 
 
@@ -341,15 +353,12 @@ class McpSetupSplitTests(unittest.TestCase):
                 low, PER_FILE_NONBLANK_FLOORS))
 
     def test_no_dead_skill_paths_in_tracked_files(self):
-        """Every skill-path mention in a tracked text file must resolve from
-        the repo root (fix round 2): prose spelled the skill's home without the
-        leading .agents/ segment the real tree has, a dead path for any reader
-        following it from the root. The scan covers all tracked files, not just
-        the skill's own — the bad spelling spread into infra docs, a script and
-        a config comment. Round 3 tightens resolution to the skill dir itself:
-        the mention's own tail must name a file there, because the old check
-        accepted any path that existed at the repo root, so a wrong skill-path
-        mention passed whenever some unrelated path existed."""
+        """Every skill-path mention in a tracked text file must be followable
+        (fix round 2): prose spelled the skill's home without the leading
+        .agents/ segment the real tree has is a dead path for any reader at the
+        root. The scan covers all tracked files, not just the skill's own - the
+        bad spelling spread into infra docs, a script and a config comment.
+        Resolution rules live on _dead_skill_mentions itself (round 3/4)."""
         dead = {}
         for path in _tracked_files():
             if not path.is_file():
