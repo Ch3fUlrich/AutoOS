@@ -298,15 +298,15 @@ def build_plan(repo, base: str, py: str):
 
 
 def commands_for(repo, plan: dict, py: str):
-    """The ordered ``([argv], extra_env)`` list a green run is made of.
-
-    The bash suite is only ever invoked narrowed — by a ``--filter`` term list, or
-    by a part selection the way CI's own shard runs one part. An unfiltered
+    """The ordered ``([argv], extra_env)`` list a green run is made of. The
+    file-size gate (AO-400LOC) is first and always runs. The bash suite is
+    only ever invoked narrowed — by a ``--filter`` term list, or a part
+    selection the way CI's own shard runs one part. An unfiltered
     whole-suite run is the shape that OOM-killed a 16 GB host (R-host-08), and a
     filter and a part selection are never intersected: the intersection of two
     narrowings silently drops coverage instead of adding it.
     """
-    cmds = [([py, rel], {}) for rel in PLAN_CHECKS]
+    cmds = [([py, rel], {}) for rel in ("tools/check-file-size.py",) + PLAN_CHECKS]
     files = sorted(set(plan.get("pytest") or []))
     if files:
         cmds.append(([py, "-m", "pytest", "-q"] + files, {}))

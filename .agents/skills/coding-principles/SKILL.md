@@ -54,6 +54,8 @@ change.
 - If you can't describe a unit without "and", split it.
 - File size is a smell: when a file grows past what you can hold in context,
   that usually means it took on a second responsibility.
+- Hand-written source, test, script, playbook and doc files <= 400 lines.
+  Over 400 -> split by responsibility before adding more.
 - Split by responsibility, not by technical layer. Things that change together
   live together.
 

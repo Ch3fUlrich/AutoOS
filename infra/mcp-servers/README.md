@@ -173,7 +173,7 @@ Graphify provides built-in tools to visualize your project graph. After extracti
 ## Graphify as a Docker Container — the SERVER path
 
 Graphify is wired as **one cwd-relative `graphify` entry in user scope**, never per repo
-(see `skills/mcp-servers-setup/SKILL.md` → Graphify). On a **workstation** that entry is
+(see `.agents/skills/mcp-servers-setup/references/graphify.md`). On a **workstation** that entry is
 `uv`. On a **server** (e.g. `coding.example.internal`) that lacks a per-user `uv`/Python toolchain,
 `servers/graphify-mcp/` builds a Docker image with `graphifyy[mcp]` preinstalled running the
 same stdio server (`graphify.serve`); the tracked wrapper `bin/graphify-mcp` injects

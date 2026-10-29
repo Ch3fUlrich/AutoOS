@@ -115,6 +115,8 @@ jobs:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install linters
         run: sudo apt-get update -y && sudo apt-get install -y shellcheck yamllint
@@ -140,6 +142,13 @@ jobs:
           python3 tools/registry.py render omniroute --check
           python3 tools/registry.py render ide --check
           python3 tools/sync-ide-models.py --check
+
+      # AO-400LOC (D-653): a tracked file over 400 lines must carry a
+      # .filesize-baseline entry, and that entry may only shrink. fetch-depth: 0
+      # above gives the checker origin/main to ratchet against - without it the
+      # gate would compare against HEAD, which in CI is always the tree itself.
+      - name: File size gate
+        run: python3 tools/check-file-size.py
 
       - name: Documentation links
         run: python3 tests/check-links.py .

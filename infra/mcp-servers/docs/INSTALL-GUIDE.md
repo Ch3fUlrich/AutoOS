@@ -67,7 +67,8 @@ mcp_omnigraph_query(branch="main", params={"slug": "deeplabcut-training-pipeline
   query read($slug: String) { match { $d: Decision { slug: $slug } } return { $d.title, $d.rationale } }""")
 ```
 
-The agent skill at `skills/mcp-servers-setup/SKILL.md` contains the full
+The agent skill at `.agents/skills/mcp-servers-setup/` — `SKILL.md` (index) plus its
+`references/` files — contains the full
 workflow instructions that agents follow automatically.
 
 ### How Graphify Fits In

@@ -485,7 +485,7 @@ if it "playwright lazy proxy installer: without claude on PATH it warns and call
 fi
 
 if it "playwright lazy proxy: the agent skills doc (mcp-servers-setup) records the live observation and no longer says it was never observed"; then
-    got="$(python3 - "$ROOT/.agents/skills/mcp-servers-setup/SKILL.md" <<'PY'
+    got="$(python3 - "$ROOT/.agents/skills/mcp-servers-setup/references/playwright.md" <<'PY'
 import re, sys
 with open(sys.argv[1], encoding="utf-8") as fh:
     text = re.sub(r"\s+", " ", fh.read())       # the sentence wraps across lines
