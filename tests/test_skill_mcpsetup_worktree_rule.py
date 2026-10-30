@@ -70,6 +70,10 @@ class WorktreeRuleTests(unittest.TestCase):
                     "mklink /J graphify-out ..\\main\\graphify-out"):
             self.assertTrue(LINKISH.search(_neutralised(fix)), fix)
         place = "`graphify-out/` is gitignored, so a linked\nworktree has none"
+        self.assertEqual(_neutralised(place).splitlines(),
+                         ["`graphify-out/` is gitignored, so a the",
+                          "worktree has none"],
+                         "the neutraliser must keep every line break")
         self.assertFalse(LINKISH.search(_neutralised(place).splitlines()[0]))
 
 
