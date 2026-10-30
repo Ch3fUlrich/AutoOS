@@ -32,8 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from routing_registry_skill_lib import (  # noqa: E402
     APPLY_PS1, APPLY_SH, ROOT, _apply_ps1_flags, _apply_sh_flags,
-    _invocation_units, _never_the_real, _out_violations,
-    _render_out_mentions, _skill_files, _unit_flags)
+    _invocation_units, _never_the_real, _out_violations, _render_help,
+    _render_out_mentions, _render_targets, _skill_files, _unit_flags)
 
 class RoutingRegistrySkillTests(unittest.TestCase):
     def test_every_apply_invocation_flag_is_handled_by_the_script(self):
@@ -135,6 +135,28 @@ class RoutingRegistrySkillTests(unittest.TestCase):
             named,
             "the skill no longer names `render ide --out "
             "catalog/ide-models.json`, the sanctioned way to update it")
+        self.assertIn(
+            "to update the committed file: --out catalog/ide-models.json",
+            _render_help("ide"),
+            "render ide's --help no longer sanctions the committed write; "
+            "the skill's ide --out is unsanctioned")
+
+    def test_every_target_but_ide_carries_its_refusal(self):
+        """The guard reads each target's refusal from its help, so a target
+        whose help names no "never the real" file is one it cannot see: its
+        `--out` claims would all pass. Only ide, whose write is sanctioned,
+        may lack it — a new target must state its refusal (or join ide)."""
+        targets = _render_targets()
+        self.assertIn("ide", targets, "render --help target list not parsed")
+        self.assertEqual(
+            [t for t in targets if _never_the_real(t) is None], ["ide"],
+            "render target(s) whose --help names no 'never the real' file: "
+            "the --out guard is blind to them")
+
+    def test_a_failing_help_fails_loudly(self):
+        """A help that cannot run must not read as "no refusal"."""
+        with self.assertRaises(AssertionError):
+            _render_help("no-such-target")
 
 
 if __name__ == "__main__":

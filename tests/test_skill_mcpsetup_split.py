@@ -18,7 +18,7 @@ import re
 import subprocess
 import unittest
 from pathlib import Path
-from test_skill_mcpsetup_links import heading_slugs
+from test_skill_mcpsetup_links import exists_exact, heading_slugs
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL_DIR = ROOT / ".agents" / "skills" / "mcp-servers-setup"
@@ -239,11 +239,11 @@ def _dead_skill_mentions(path):
     hits = []
     for lineno, token, tail, prefixed, _named in _skill_mentions(path):
         if prefixed:
-            if not (SKILL_DIR / tail).exists():
+            if not exists_exact(SKILL_DIR, tail):
                 hits.append((lineno, token,
                              "no such file under %s"
                              % SKILL_DIR.relative_to(ROOT)))
-        elif not (path.parent / token).exists():
+        elif not exists_exact(path.parent, token):
             hits.append((lineno, token,
                          "no .agents/ prefix - dead from the repo root"))
     return hits
