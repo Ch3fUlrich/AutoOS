@@ -154,20 +154,42 @@ def _render_out_mentions(text):
 _RENDER_HELP = {}
 
 
+def _render_help(*args):
+    """`registry.py render <args> --help`, whitespace-normalized and cached.
+
+    A help that exits non-zero or prints nothing fails loudly: an empty help
+    carries no "never the real", which would read as "no refusal" and let
+    every `--out` claim pass silently."""
+    if args not in _RENDER_HELP:
+        run = subprocess.run(
+            [sys.executable, str(ROOT / "tools" / "registry.py"),
+             "render", *args, "--help"],
+            cwd=str(ROOT), capture_output=True, encoding="utf-8",
+            errors="replace")
+        if run.returncode != 0 or not run.stdout.strip():
+            raise AssertionError(
+                "render %s --help failed (exit %d), so its refusal cannot be "
+                "read: %s" % (" ".join(args), run.returncode,
+                              (run.stderr or run.stdout).strip()[-300:]))
+        _RENDER_HELP[args] = re.sub(r"\s+", " ", run.stdout)
+    return _RENDER_HELP[args]
+
+
+def _render_targets():
+    """The targets `render --help` lists in its {a,b,...} choice set."""
+    m = re.search(r"\{([\w,-]+)\}", _render_help())
+    if not m:
+        raise AssertionError("render --help lists no {target,...} choices")
+    return m.group(1).split(",")
+
+
 def _never_the_real(target):
     """The file `render <target> --help` calls "never the real ...", or None.
 
     That phrase is the tool's own refusal — the one the skill's `--out` claims
     are checked against — so it is read from the help at run time, not from a
     table here that would drift from the tool."""
-    if target not in _RENDER_HELP:
-        run = subprocess.run(
-            [sys.executable, str(ROOT / "tools" / "registry.py"),
-             "render", target, "--help"],
-            cwd=str(ROOT), capture_output=True, encoding="utf-8",
-            errors="replace")
-        _RENDER_HELP[target] = run.stdout + " " + run.stderr
-    m = NEVER_THE_REAL_RE.search(re.sub(r"\s+", " ", _RENDER_HELP[target]))
+    m = NEVER_THE_REAL_RE.search(_render_help(target))
     return m.group(1) if m else None
 
 

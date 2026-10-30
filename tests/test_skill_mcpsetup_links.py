@@ -19,6 +19,7 @@ Run directly:
 
     python3 tests/test_skill_mcpsetup_links.py
 """
+import os
 import re
 import tempfile
 import unittest
@@ -41,6 +42,25 @@ def heading_slugs(headings):
         seen[base] = n + 1
         slugs.append(base if n == 0 else "%s-%d" % (base, n))
     return slugs
+
+
+def exists_exact(base, rel):
+    """(base / rel).exists(), with rel's spelling matched case-sensitively.
+
+    Windows and macOS filesystems resolve `Serena.md` to serena.md, so a
+    mention spelled in the wrong case passes there and is dead on Linux (CI).
+    Only the spelled part is checked, one directory listing per component."""
+    here = Path(base)
+    for part in rel.replace("\\", "/").split("/"):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            here = here.parent
+        elif not here.is_dir() or part not in os.listdir(here):
+            return False
+        else:
+            here = here / part
+    return here.exists()
 
 
 def _helpers():
@@ -138,6 +158,19 @@ class DeadMentionTests(_Fixture):
 
     def test_the_dir_name_alone_is_a_name_not_a_path(self):
         self.assertEqual(self.dead("the %s skill\n" % SKILL_DIR_NAME), [])
+
+    def test_wrong_case_spelling_is_reported_even_on_a_folding_fs(self):
+        """L5: exists() folds case on Windows/macOS; the check must not."""
+        got = self.dead("see .agents/skills/%s/references/Graphify.md\n"
+                        % SKILL_DIR_NAME)
+        self.assertEqual([t for t, _w in got],
+                         [".agents/skills/%s/references/Graphify.md"
+                          % SKILL_DIR_NAME])
+        (self.dir / SKILL_DIR_NAME).mkdir()
+        self.write("%s/SKILL.md" % SKILL_DIR_NAME, "")
+        self.assertEqual(self.dead("see %s/SKILL.md\n" % SKILL_DIR_NAME), [])
+        got = self.dead("see %s/skill.md\n" % SKILL_DIR_NAME)
+        self.assertEqual([t for t, _w in got], ["%s/skill.md" % SKILL_DIR_NAME])
 
 
 if __name__ == "__main__":
