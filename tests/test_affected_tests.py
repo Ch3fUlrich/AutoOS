@@ -23,6 +23,7 @@ Run directly:
 import copy
 import importlib.util
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -395,7 +396,8 @@ def make_fixture(root):
 
 def git(cwd, *args):
     return subprocess.run(["git"] + list(args), cwd=str(cwd), capture_output=True,
-                          text=True, check=True)
+                          text=True, check=True,
+                          env=dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"))
 
 
 def run_tool(args):
@@ -600,10 +602,8 @@ class DiffTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         make_fixture(self.root)
         git(self.root, "init", "-q", "--initial-branch=main")
-        git(self.root, "config", "user.email", "t@example.invalid")
-        git(self.root, "config", "user.name", "t")
         git(self.root, "add", "-A")
-        git(self.root, "commit", "-qm", "base")
+        git(self.root, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-qm", "base")
 
     def change(self, mutate):
         doc = registry_doc()

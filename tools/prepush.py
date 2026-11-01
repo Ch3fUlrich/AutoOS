@@ -72,6 +72,7 @@ USAGE
 -----
     python3 tools/prepush.py                    # the gate, on this checkout's HEAD
     python3 tools/prepush.py --repo DIR --base REF
+    python3 tools/prepush.py --hook-stdin       # the hook: gate each pushed sha
     python3 tools/prepush.py --check-ready <sha>
 
 Exit 0 green (or overridden), 1 a gate refused, 2 the gate itself could not run.
@@ -80,9 +81,10 @@ absence of one — no checkout, no HEAD commit, no ``tools/affected-tests.py`` t
 derive the run list from, or a mapper that died — and a caller that waits on 1
 must not wait forever on it.
 
-The pre-push hook is a three-line shim that calls this file; it is installed by
+The pre-push hook is a small shim that calls this file; it is installed by
 ``.agents/skills/unattended-orchestration/trust_worktree.py``, which chains rather
-than overwrites any hook that was already there.
+than overwrites any hook that was already there. ``tools/prepush_hook.py`` holds
+the fixture-identity refusal and, for ``--hook-stdin``, the per-pushed-sha gate.
 """
 from __future__ import annotations
 
@@ -109,6 +111,7 @@ try:
 except ImportError:  # the pre-push hook's shim may run a copy of this file
     clients = None                     # alone; store_root() falls back to the
                                        # same formula from the script's own dir
+import prepush_hook as hookgate  # noqa: E402  (no copy of this file runs without it)
 
 DEFAULT_BASE = "origin/main"
 OVERRIDE_ENV = "AUTOOS_PREPUSH_OVERRIDE"
@@ -224,15 +227,11 @@ def python_executable() -> str:
 
 
 def scrub_git_location_env(env) -> dict:
-    """Remove every repository-location pin from ``env``, in place.
+    """Remove every repository-location pin from ``env``, in place, and return it.
 
-    A hook runs with git's own view of which repository is in play exported
-    into its environment; a child that inherits it resolves git commands
-    against *that* repo no matter what cwd it was given. The gate's fixtures
-    work in tmp dirs and must see only their own cwd (AO-PREPUSH-HOOK-GITENV).
-    Returns ``env`` so callers can chain; nothing else in the dict is touched —
-    in particular ``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_NOSYSTEM`` stay, and
-    ``ci_env`` re-pins the identity keys after scrubbing.
+    A child that inherits a hook's pins resolves git against the pushing repo
+    whatever its cwd (AO-PREPUSH-HOOK-GITENV). Nothing else is touched:
+    ``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_NOSYSTEM`` stay; ``ci_env`` re-pins identity.
     """
     for name in GIT_LOCATION_VARS:
         env.pop(name, None)
@@ -242,8 +241,7 @@ def scrub_git_location_env(env) -> dict:
 def ci_env(extra=None) -> dict:
     """This host's env with the git identity CI does not have (rule d), and
     with git's repo-location pins removed (AO-PREPUSH-HOOK-GITENV — belt and
-    braces: ``main`` already scrubbed ``os.environ`` for the children it
-    launches without an explicit env, every child built here is scrubbed too)."""
+    braces: ``main`` already scrubbed ``os.environ``)."""
     env = dict(os.environ)
     scrub_git_location_env(env)
     for key in [k for k in env if k.startswith(GIT_IDENTITY_PREFIXES)]:
@@ -720,12 +718,13 @@ def main(argv=None) -> int:
                     help="exit 0 only if the runner-private store holds a green "
                          "gate record binding exactly this sha and its tree, with "
                          "every result ok (D-110, D-154)")
+    ap.add_argument("--hook-stdin", action="store_true",
+                    help="the pre-push hook: read git's ref lines on stdin and "
+                         "certify each pushed sha, not the checkout's HEAD")
     args = ap.parse_args(argv)
     # Scrub git's repo-location pins from this process's own environment before
-    # anything reads a repo: ``_git`` passes no env, so its children inherit
-    # whatever is in ``os.environ`` here. Run from the pre-push hook, that
-    # environment is git's view of the pushing repo, and a test fixture working
-    # in a tmp dir would otherwise edit that repo (AO-PREPUSH-HOOK-GITENV).
+    # anything reads a repo (``_git`` passes no env; under the pre-push hook they
+    # name the pushing repo — AO-PREPUSH-HOOK-GITENV).
     scrub_git_location_env(os.environ)
     try:
         repo = repo_root(args.repo)
@@ -733,7 +732,8 @@ def main(argv=None) -> int:
             ok, message = ready_gate(repo, args.check_ready)
             print(message)
             return REFUSED if not ok else 0
-        return gate(repo, args.base)
+        return hookgate.run(repo, args.base, sys.stdin.read() if args.hook_stdin
+                            else None, head_sha, resolve_sha, ready_gate, gate)
     except GateCouldNotRun as exc:
         print(exc)
         return COULD_NOT_RUN

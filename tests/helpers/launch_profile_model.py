@@ -278,7 +278,10 @@ class RealGitPremiseTests(unittest.TestCase):
     def _git_env(self):
         import os
         import tempfile
-        env = os.environ.copy()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        # Identity by env, never a `git config` write (AO-PREPUSH-HOOK-GITENV-2).
+        for who in ("AUTHOR", "COMMITTER"):
+            env["GIT_%s_NAME" % who], env["GIT_%s_EMAIL" % who] = "Test User", "test@example.com"
         # Force git to use only local config, no global/system config.
         # Create a temporary empty file for GIT_CONFIG_GLOBAL (works on Windows too).
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.gitconfig') as f:
@@ -312,11 +315,7 @@ class RealGitPremiseTests(unittest.TestCase):
         if repo_name.endswith('.git'):
             repo_name = repo_name[:-4]
         self._run_git(["clone", src], dst, env)
-        # Configure user for commits
-        repo_dir = os.path.join(dst, repo_name)
-        self._run_git(["config", "user.name", "Test User"], repo_dir, env)
-        self._run_git(["config", "user.email", "test@example.com"], repo_dir, env)
-        return repo_dir
+        return os.path.join(dst, repo_name)
 
     def _get_main_sha(self, bare_path, env):
         """Get the current SHA of refs/heads/main in the bare repo."""

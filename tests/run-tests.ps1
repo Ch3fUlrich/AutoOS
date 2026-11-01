@@ -9774,8 +9774,6 @@ Test-Case 'secrets: new file inside a git work tree with no .gitignore -> 409' {
         try {
             Set-Location $scratch
             $null = & git init -q 2>$null | Out-Null
-            $null = & git config user.email "t@t" 2>$null | Out-Null
-            $null = & git config user.name "t" 2>$null | Out-Null
         } finally { Set-Location $prevDir }
         New-Item -ItemType Directory -Path (Join-Path $scratch 'configuration') -Force | Out-Null
         $keysFile = Join-Path $scratch 'configuration\api-keys.yml'
