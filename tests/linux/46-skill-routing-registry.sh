@@ -17,3 +17,9 @@ fi
 if it "routing-registry skill: apply flags and render --out guard (unit tests)"; then
     out="$( (cd "$ROOT" && python3 tests/test_skill_routing_registry_commands.py) 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
+
+# tests/test_skill_phase_batch_review.py: the unattended-orchestration skill's
+# phase-batch review rule R-orch-31 and its seat/fixer templates (SKILL-PHASE-BATCH-REVIEW).
+if it "unattended-orchestration skill: phase-batch review rule and templates (unit tests)"; then
+    out="$( (cd "$ROOT" && python3 tests/test_skill_phase_batch_review.py) 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+fi

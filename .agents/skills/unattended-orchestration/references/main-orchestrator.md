@@ -63,8 +63,8 @@ R-coord-07 and R-coord-08 in [`../SKILL.md`](../SKILL.md) — not restated here;
 - **The L2 brief carries**, in this order:
   - the chunk and its "Done means";
   - the files it owns, and the files it must not touch;
-  - the L3 routing and cross-family review rule (§4), and the time-window rule (§4a), which
-    applies to L2 exactly as to you;
+  - the L3 routing, cross-family review and phase-batch review rules (§4, R-orch-31), and the
+    time-window rule (§4a), which applies to L2 exactly as to you;
   - the token rules and the machine rules (§5, §6);
   - "your DONE note states commits, what remains, refusals verbatim, and the evidence for
     every claim".
@@ -73,12 +73,16 @@ R-coord-07 and R-coord-08 in [`../SKILL.md`](../SKILL.md) — not restated here;
 
 ## 4. L3 executors, and cross-family review
 
-Cross-family review is rule R-orch-13 in [`../SKILL.md`](../SKILL.md); Haiku's place is
-R-orch-14. Put both ids in every L2 brief.
+Cross-family review is rule R-orch-13 in [`../SKILL.md`](../SKILL.md); seat selection is
+R-orch-14; the phase-batch review (D-2534 as amended by D-3468/D-3474) is R-orch-31. Put all
+three ids in every L2 brief; the steps and templates are in §4c below.
+
+**Superseded by D-3468:** the earlier "Haiku's place is R-orch-14" (a Haiku first-pass review,
+D-2539). Claude reviewers never count as a review seat; Haiku and Sonnet stay executors and closers.
 
 | Executor | Family | How to reach it (measured status, 2026-09-18) |
 |---|---|---|
-| Claude Haiku / Sonnet | anthropic | Stable. Runner launcher `claude` with `"model": "haiku"`/`"sonnet"`, or the Agent tool inside an L2 |
+| Claude Haiku / Sonnet | anthropic | Stable. Runner launcher `claude` with `"model": "haiku"`/`"sonnet"`, or the Agent tool inside an L2. **Superseded as reviewers (D-3468):** a Claude reviewer never counts as a review seat |
 | Gemini 3.8 Flash | google | Stable. Runner launcher `agy` |
 | DeepSeek | deepseek | Reviews are **measured**: `deepseek_review.sh`, or `deepseek_chunked_review.sh` for diffs over ~900 lines (SKILL.md §9.7 of the pre-removal revision). Implementation: per-session `"launcher": "codewhale"`, which is **experimental** (named explicitly = allowed); or OpenCode with `deepseek/deepseek-chat` |
 | Muse Spark 1.3-contributor | meta | **Not yet measured as a batch executor.** The route to test first is OpenCode (AutoOS configures provider `meta`, model `muse-spark-1.3-contributor`): `opencode run -m meta/muse-spark-1.3-contributor`. In OpenHands it's the `orchestrator`/`suborchestrator` profile (a human-watched canvas, not headless) |
@@ -155,6 +159,67 @@ rerun, and one found on ten rows costs seconds.
    run on a tiny task before it is scaled (see the rule above the pairings).
 5. L2 briefs name each rung's command and expected result. The DONE note quotes each rung's
    summary line.
+
+## 4c. Phase-batch review (R-orch-31; D-2534, amended D-3468/D-3474)
+
+The six steps are the "Phase-batch review" block in [`../SKILL.md`](../SKILL.md); this is the
+detail behind them. Seat order is read from the live route policy
+(`python3 tools/autoos-agent.py route --explain`), never copied into a brief. Every seat of the
+phase is a non-Claude family and differs from the families that wrote the phase; Claude reviewers
+never count. A HIGH phase needs a second non-Claude family besides mimo (not anthropic, not the
+writers' families), because mimo is one seat, not two.
+
+### Phase review seat: prompt and card
+
+One seat is one spawn per round. The card carries the range for the record; the seat itself reads
+only what is in the prompt. Card keys follow the spawner's `CARD_SCHEMA` (plangraph
+`src/plangraph/spawner/mcp.py`): `estimate_tokens` is required; `diff_ref` is `{repo, base, head}`.
+
+```json
+{"estimate_tokens": 40000, "max_min": 30, "stall_min": 15, "diff_ref": {"repo": "<worktree>", "base": "<base-sha>", "head": "<head-sha>"}}
+```
+
+Paste the full diff inline in the prompt, never a path: the `mimo-v2.6-pro` seat is inline-only
+and has no tools, so a path is unreadable to it (PROPOSALS item 28 measured the same for `agy`).
+The verdict is the first line of the reply, so the runner can parse it. The last line is the
+no-tools admission; a seat that claims tests ran is rejected, because it cannot have run them.
+
+```text
+You review ONE phase diff. You have no tools: do not read files or run commands.
+First line of your reply, exactly one of: VERDICT: ACCEPT|REQUEST_CHANGES
+Then one finding per line: SEVERITY(HIGH|MED|LOW) file:line - defect - why - fix.
+Last line, exactly: tests not run (no tools)
+Phase: <key>   Range: <base-sha>..<head-sha>   Writers' families: <families>
+Done means: <the phase's done text>
+--- FULL DIFF (inline) ---
+<git diff --no-color base..head>
+```
+
+Re-review (step 4) is the same prompt on the fix delta, with one non-Claude seat. Set the card's
+`diff_ref` to `{repo, base: <old-head>, head: <new-head>}` and the prompt's line to
+`Range: <old-head>..<new-head>`; paste `git diff --no-color <old-head>..<new-head>` inline and the
+previous round's findings above it, never the phase range. Record per seat: family, model,
+verdict and the closing line as returned.
+
+### Phase fixer brief
+
+One brief per round (D-2458) carries ALL open findings of ALL seats of the last round, LOW and
+MED included, and a same-pattern sweep of the whole diff. Every fixer of a round runs, gated by
+its affected tests + CI, and ONE review follows over the collected delta (D-2643). The fixer is a
+leaf: it never commits or spawns, and it must fail closed (an unfixed finding is reported, never
+marked fixed).
+
+```text
+Fix ALL open findings below, in this worktree, on phase/<key>. Use the failing-test-first order.
+FINDINGS (every seat, round <n>, incl. LOW and MED):
+  1. [<family> <SEV>] file:line - <finding>
+Same-pattern check: for each finding, search the whole phase diff <base-sha>..<head-sha> for the
+same pattern; fix every other instance, or list it under open:.
+Fail closed: a finding you cannot fix, or are unsure of, is listed under open: with the reason;
+never mark it fixed. If a finding is unclear or contradicts AGENTS.md, stop and say which.
+Leave the edits in the working tree: no commit, no push.
+Return: changed: <files> / test: <summary line, verbatim> / open: <finding ids not fixed, why>
+```
 
 ## 4a. Timing: spawn where it is off-peak
 

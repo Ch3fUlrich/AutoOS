@@ -150,6 +150,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-coord-01: Cut lanes from main; merge main before spawn and CI, not between green CI and ready; lane→orch→main no-ff; one merger, mutex, freeze parent. (why: ready needs tested tip; source: 2c3e4f7)
 - R-coord-02: Verify cheap done, judge it: tests, diff vs brief, files-read; no REPORT = incomplete, resume its WIP; Opus picks critical. (why: cheap done unproven; source: review-a8.out, REDACTFIX.out)
 - R-coord-03: Claude orchestrates, final-checks, never implements/researches; Haiku first-passes only as Q-003's fallback; writers via `route`. (why: a Claude limit stops the run; source: common.md)
+- **Superseded for review by D-3468 (R-orch-31):** Haiku never first-passes a review and sits in no review route; it stays a mechanical executor only.
 - R-coord-04: Hold headroom via `heartbeat`: ≤3 lanes + 3 readers, MemAvailable ≥3 GB, heavy suites 1/orchestrator, 2/host. (why: headroom keeps tests and builds alive; source: briefs/common.md)
 - R-coord-06: At cap (plangraph cap check; registry `handoff_caps`): rewrite state, brief successor, append handoff, stop. (why: successor resumes from state alone; source: common.md Context cap)
 - R-coord-07: Heartbeat: L1/L2 run a 10-min CronCreate beat from launch to stop, recreated after relaunch or clear. (why: an idle session is retired after 8 h; source: common.md Heartbeats never stop)
@@ -174,8 +175,10 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-orch-11: A lane that changes a route id or return code greps every consumer (lanes.md list), catalog postInstall too. (why: stale ids and bare postInstall abort CI; source: CI 36320592493, 765f189)
 - R-orch-12: Approve each fresh worktree with `trust_worktree.py` before its first session. (why: background sessions cannot answer a trust dialog; source: three lanes blocked in 3s)
 - R-orch-13: Plan, spec, decision, or bucket-table-big diff (lines incl. tests): pinned cross-family review before execute/merge, then Sonnet. (why: same family shares blind spots; source: inbox 00:31Z)
+- **Superseded by D-2534/D-3468 (R-orch-31):** the per-lane review and the "then Sonnet" close above; review is one pass per phase by non-Claude seats, and a Claude close never counts as a seat.
 - R-orch-14: Select available review seats per D-2488/D-2654; record writer, reviewer, verdict and provider skip text. (why: unavailable seats cannot supply independent evidence;
   source: docs/routing.md Seat selection)
+- **Superseded by D-2534/D-3468 (R-orch-31):** per-lane seat selection; seats are chosen once per phase from the live route policy, never a Claude seat. Recording writer, reviewer, verdict and skip text still applies.
 - R-orch-15: Send the skill owner one `lesson: … evidence=…` line per bug or surprise; only a tested lesson becomes a rule. (why: unmeasured lessons corrupt the skill; source: briefs/common.md)
 - R-orch-16: Code that acts on a report (merge, ready, push) is re-audited cross-family before it gates; names match exactly. (why: a substring let notsonnet sign off; source: REVGATE2.brief, 4ff89c8)
 - R-orch-17: Kill targets, run id and mode come only from a runner-private record, never job.json. (why: each fix that read job.json re-opened the hole it closed; source: SB-A2..A3 Muse/Sonnet)
@@ -208,6 +211,26 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-orch-30: Fan out at most 10 seats, default 3-5 judged on task complexity;
   prefer fewer; vary model families and prompt angles per seat so findings
   diverge. (why: identical seats duplicate findings and cost; source: operator 2026-10-07)
+- **Superseded for phase review by D-2534/D-2540 (R-orch-31):** the 3-5 default and the "judged on complexity" count do not apply to a phase review; round 1 is exactly two seats, a re-review is one seat, never a panel. R-orch-30 still bounds every other fan-out.
+- R-orch-31: Review per phase, not per task: follow "Phase-batch review" below (D-2534, amended D-3468/D-3474); Claude reviewers never count as a seat.
+  (why: per-task seats cost more; Claude shares writers' blind spots;
+  source: D-2534, D-3468, tests/test_skill_phase_batch_review.py)
+
+#### Phase-batch review (D-2534, amended D-3468/D-3474)
+
+Rule R-orch-31; seat card, prompt and fixer brief: [`references/main-orchestrator.md`](references/main-orchestrator.md) §4c.
+Seat order is the live route policy (`route --explain`), never a list in prose; no Haiku or Claude reviewer sits in it.
+
+1. **Writers.** All tasks of a phase run in parallel on `phase/<key>`, each gated by its affected tests + CI; no per-task review seat (D-2643).
+2. **Round 1.** ONE review of the whole phase diff by two seats of distinct non-Claude families, both different from the writers' families:
+   `mimo-v2.6-pro` inline-only (the card carries `diff_ref`, the full diff is inline in the prompt, the seat has no tools and says
+   "tests not run (no tools)") plus one other non-Claude family. Claude reviewers never count (D-3468). `mimo-v2.6-pro` is always one of
+   the two seats, never the only one (D-2540). HIGH risk adds: the second seat is a non-Claude family besides mimo and unlike the writers (D-3474).
+3. **Fix.** ONE fixer brief carries ALL findings of ALL seats of the last round (incl. LOW/MED) plus a same-pattern sweep over the
+   whole diff (D-2458); every fixer of a round runs, gated by affected tests + CI, with no seat per fixer (D-2643).
+4. **Re-review.** ONE non-Claude reviewer on the fix delta, not a panel (D-2540).
+5. **Cap.** The loop runs max 3 rounds; findings still open after round 3 mean replan (ask the router).
+6. **Ship.** One phase PR, then a verdict on every item.
 
 ### worker (L3)
 

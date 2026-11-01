@@ -163,11 +163,11 @@ before, so the rows below record what each one absorbed and where the lesson cam
 | `R-orch-16` | new | report-driven gates are re-audited cross-family and match names exactly (L33b, REVGATE2) |
 | `R-router-01` | merged | parent's inbox on a refused write, and the batched `Q:` line to a live L0; the literal format lives in `references/layers.md` (A38 + A59 + A65) |
 | `R-coord-01` | merged | merge main into a lane before it spawns and before its CI runs — never between green CI and `ready`, so `ready` always names a tested tip (L07b; the ready window, 2c3e4f7) |
-| `R-coord-03` | merged | never researches either; Haiku is the allowed first-pass fallback per operator Q-003 (A42) |
+| `R-coord-03` | merged | never researches either; Haiku is the allowed first-pass fallback per operator Q-003 (A42). **Superseded for review (D-3468):** Haiku never first-passes a review (D-2539 "Haiku reviews first" is void); Claude reviewers never count |
 | `R-coord-04` | merged | heavy suites counted: one per orchestrator, two per host (A21) |
 | `R-coord-08` | merged | answers a ping with a pong, and WIP-commits work older than one beat (A09 + A28) |
 | `R-orch-10` | merged | widened from sudo/root to installer and state-mutating changes (L21) |
-| `R-orch-13` | merged | "bigger" sized as diff lines including tests, read off the bucket table (L24-25) |
+| `R-orch-13` | merged | "bigger" sized as diff lines including tests, read off the bucket table (L24-25). **Superseded in part (D-2534/D-3468):** the per-lane review and the Sonnet close - review is one non-Claude pass per phase, `R-orch-31` |
 | `R-worker-08` | merged | the detached copy is `git clone --no-hardlinks` **or** `git worktree add --detach`; `cp -r` of a worktree is forbidden outright — the copy shares the original's index, so a later `git checkout` mutates it (ci7); `tar` is usable only where no test reads git — a tar export broke 37 git-fixture tests (L30) |
 
 ## Fourth-generation ids (fold 2026-09-29, SKILLFOLD-1)
@@ -182,3 +182,11 @@ the full lesson — the detail the 200-char rule cap dropped — lives here.
 | `R-orch-18` | new | a lane that changes the registry, routes or combos lists in its Verify line: `tests/test_registry_render.py`, every renderer's `--check`, and the bash filters that exercise the renders and apply (`tests/linux/17-ai-routing.sh`: sync-router-tiers, apply) — a pytest-only verify let FREEKEYS-2 pass review with 3 CI reds (CI 36506339556, FREEKEYS-2c) |
 | `R-orch-19` | new | a spawner change that alters how a child is launched (wrapper, env, cwd) needs one unmocked spawn test through the real Popen chain **and**, before READY, one live MCP spawn to rc 0 with `job.json` naming the scope when `scope_supported` — mocked tests and CI were green while every live MCP spawn broke (SCOPEBUS 01:30-01:45Z; `tests/test_autoos_spawner.py::test_a_real_spawn_runs_in_its_scope`) |
 | `R-coord-11` | new | the autoos-agent MCP server loads its code from the session's cwd checkout: ff that checkout to main **first**, then restart the MCP, then verify with one isolated probe spawn (sandbox HEAD + `job.json` scope) — ff-ing under a running server mixed old server code with a new runner (SCOPEBUS probes 1-4, 2026-09-29) |
+
+## Fifth-generation ids (2026-11-01, SKILL-PHASE-BATCH-REVIEW)
+
+One new rule, bound by `tests/test_skill_phase_batch_review.py`. The `SKILL.md` line is the compressed rule; the steps, seat card and fixer brief live in `main-orchestrator.md` §4c.
+
+| id | from | what it absorbed or changed |
+|---|---|---|
+| `R-orch-31` | new | phase-batch review (D-2534, amended D-3468/D-3474): parallel writers per phase on `phase/<key>`, one round-1 review of the whole phase diff by `mimo-v2.6-pro` inline-only plus one other non-Claude family (both unlike the writers), one fixer brief with all findings, re-review by one non-Claude reviewer, max 3 rounds then replan, one phase PR. Claude reviewers never count (D-3468); it supersedes the per-lane seat wording of `R-orch-13`/`R-orch-14` and the Haiku first pass of D-2539/`R-coord-03` |
