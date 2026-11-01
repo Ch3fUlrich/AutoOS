@@ -33,7 +33,7 @@ enforces family separation. **Nothing downstream changes; only where the ladder 
 | **Privacy** (added) | `public` / `private` | Content from a private repo never goes to an endpoint that may train on or publish prompts; preview and stealth models see public content only |
 | **Tool calling** (added) | `agentic: true/false` | An agentic leaf needs reliable tool calls. Filter on `supported_parameters ∋ tools`, and on a local model that is known to work with Ollama's tool calls |
 | **Verifiability** (added) | `guard: <command>` | A task with a guard fails loudly, so a cheaper tier is safe. With no guard, the floor rises by one |
-| **Role** (added) | `write` / `review` / `close` | `review` excludes the writer's family. `close` is always Claude Sonnet (logic) or Haiku (mechanical) |
+| **Role** (added) | `write` / `review` / `close` | `review` excludes the writer's family. `close` is always Claude Sonnet (logic) or Haiku (mechanical). **Superseded for review (D-3468, R-orch-31):** a Claude `close` is never a review seat; review is one non-Claude pass per phase |
 | **Track record** (added) | the ledger | The measured pass rate per (model, task class) in `verify.ndjson`. A model that failed a class twice is demoted for that class |
 | **Off-peak window** (added) | `provider_windows.py` | A small bonus for a pool that is `offpeak`/`quiet` now. Price never outranks urgency |
 
@@ -90,7 +90,7 @@ openrouter.ai/docs/api_reference/limits).
 | **1 mechanical** | closed-file edits to a convention, scaffolding, doc sweeps | `inclusionai/ling-3.0-flash` $0.021/$0.063 (cheapest, 262K); `poolside/laguna-xs-2.1(:free)` $0.06/$0.12; `nvidia/nemotron-3-nano-30b-a3b` $0.06/$0.24 (no free variant); `google/gemma-4-26b-a4b-it(:free)` $0.09/$0.30 | MoE with 3–4B active, partial offload, "usable" (I): `gemma4:26b` (19 GB), `laguna-xs-2.1` (20 GB), `north-mini-code-1.0` (19 GB), `nemotron-3-nano:30b-a3b-q4_K_M` (24 GB); `gpt-oss:20b` (14 GB; tool calls need manual config, S) |
 | **2 standard** | a function plus its tests, a bounded bug | **DeepSeek v4 Flash** (operator: first choice); `nvidia/nemotron-3-super-120b-a12b(:free)` $0.08/$0.45; `poolside/laguna-s-2.1(:free)` $0.09/$0.18 (1M paid / 262K free); `cohere/north-mini-code:free` (free only, no paid fallback); `google/gemma-4-31b-it(:free)`; `openai/gpt-oss-120b` $0.15/$0.60 (131K); `minimax/minimax-m2.7` $0.30/$1.20 | `qwen3-coder:30b` (pulled; ~5 tok/s, M): batch only |
 | **3 hard** | multi-file, subtle, long-horizon agentic | DeepSeek's strongest model; `moonshotai/kimi-k2.6` $0.95/$4.00 (paid only); `z-ai/glm-5.2` $0.56/$1.76 (**1M paid; the free variant is 32K and unusable**); `nvidia/nemotron-3-ultra-550b-a55b:free` (**1M free**, huge diffs); `thinkingmachines/inkling` $1.00/$4.05 (1M) | none practical: `gpt-oss:120b`, `gemma4:31b` (dense), MiniMax and GLM are too slow or too big (I) |
-| **closer** | the last check / final pass | Claude **Haiku** (mechanical) · Claude **Sonnet** (logic), via the Agent tool | — |
+| **closer** | the last check / final pass | Claude **Haiku** (mechanical) · Claude **Sonnet** (logic), via the Agent tool. **Superseded as a reviewer (D-3468):** a closer is never counted as a review seat | — |
 
 Not routable:
 - **Ox Alpha** is gone from the API (M), reportedly unmasked as a GLM model (S).
