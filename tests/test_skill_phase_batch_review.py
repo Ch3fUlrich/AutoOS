@@ -160,6 +160,12 @@ class PhaseBatchRuleBlockTests(unittest.TestCase):
         self.assertIn('never fewer seats', preface)
         self.assertIn("If mimo is among the writers' families, the phase is BLOCKED", preface)
 
+    def test_a_mimo_written_phase_blocks_with_no_substitute_seat(self):
+        for text in (self.block.split('1. **Writers.**')[0], section(read(MAIN), '## 4c. Phase-batch review')):
+            flat = ' '.join(text.split())
+            self.assertIn('BLOCKED too (fail closed): seat 1 cannot sit, no other seat replaces it', flat)
+            self.assertNotIn('and the router picks the seats', flat)
+
     def test_mimo_is_always_one_of_the_two_round_1_seats(self):
         step = self.steps[2]
         self.assertIn('always one of the two seats', step)
@@ -168,8 +174,14 @@ class PhaseBatchRuleBlockTests(unittest.TestCase):
 
     def test_the_fixer_edits_are_committed_by_the_briefing_orchestrator(self):
         step = self.steps[3]
-        self.assertIn('the L1/L2 that briefed the fixer verifies and commits its edits', step)
+        self.assertIn("the L1/L2 that briefed the round's fixers verifies and commits all their edits as ONE commit", step)
         self.assertIn('<new-head>', step)
+
+    def test_one_new_head_per_round_however_many_fixers(self):
+        block = ' '.join(section(read(MAIN), '### Phase fixer brief').split())
+        self.assertIn("verifies and commits all their edits as ONE commit", block)
+        seat = ' '.join(section(read(MAIN), '### Phase review seat: prompt and card').split())
+        self.assertIn("made of the round's fixers' verified edits, one commit", seat)
 
     def test_the_templates_pointer_names_section_4c(self):
         self.assertIn('(references/main-orchestrator.md) \u00a74c', self.block)
@@ -226,7 +238,7 @@ class TemplateTests(unittest.TestCase):
         brief = re.search(r'```text\n(.*?)```', block, re.S).group(1)
         self.assertIn('no commit, no push (your briefing L1/L2 verifies and commits them)', brief)
         seat = self._block('### Phase review seat: prompt and card')
-        self.assertIn('`<new-head>` is the commit the briefing L1/L2 made of the fixer', ' '.join(seat.split()))
+        self.assertIn("`<new-head>` is the commit the briefing L1/L2 made of the round's fixers", ' '.join(seat.split()))
 
     def test_seat_record_keeps_writer_and_provider_skip_text(self):
         block = self._block('### Phase review seat: prompt and card')
@@ -309,6 +321,13 @@ class SupersededMarkerTests(unittest.TestCase):
         for line in read(SKILL).splitlines():
             if '**Superseded' in line:
                 self.assertIsNone(_sr.parse_rule(line), line)
+
+    def test_the_doc_test_is_wired_into_the_linux_suite(self):
+        # run-tests.sh sources every tests/linux/NN-*.sh part by glob; one part must run this file.
+        self.assertIn('for __part in "$ROOT"/tests/linux/[0-9][0-9]-*.sh;', read(REPO / 'tests' / 'run-tests.sh'))
+        parts = [f for f in sorted((REPO / 'tests' / 'linux').glob('[0-9][0-9]-*.sh'))
+                 if 'python3 tests/test_skill_phase_batch_review.py' in read(f)]
+        self.assertEqual([f.name for f in parts], ['46-skill-unattended-orchestration.sh'])
 
     def test_touched_files_stay_under_the_line_budget(self):
         for path in (SKILL, MAIN, L3, RULE_MAP, Path(__file__)):
