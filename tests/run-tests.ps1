@@ -5620,7 +5620,7 @@ Test-Case 'oc_l1 launcher: status + token-usage recycle (unit tests)' {
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try { $out = ''; $rc = 0; foreach ($t in 'tests\test_oc_l1_status.py','tests\test_oc_l1_recycle.py','tests\test_oc_l1_recycle_config.py','tests\test_oc_l1_recycle_measure.py','tests\test_oc_l1_recycle_poll.py') { $out += & $py.Source (Join-Path $Root $t) 2>&1 | Out-String; if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE; break } } }
     finally { $ErrorActionPreference = $prev }
-    Assert-Equal $rc 0 "test_oc_l1_status unit tests failed: $out"
+    Assert-Equal $rc 0 "oc_l1 status + recycle unit tests failed: $out"
 }
 
 Test-Case 'oc_l1 launcher: bash-guard canary (unit tests)' {

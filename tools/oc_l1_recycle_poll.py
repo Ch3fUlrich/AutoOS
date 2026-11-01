@@ -27,7 +27,7 @@ from pathlib import Path
 HINT_PREFIX = "recycle-command: "
 LOCK_NAME = "recycle.lock"
 LOCK_STALE_S = 600  # a check is a few HTTP calls; a lock older than this is a crashed check
-POLL_TIMEOUT_S = 120
+POLL_TIMEOUT_S = 30  # one MCP oc_status call must not block for minutes on a hung lane
 _DEAD = ("dead", "absent", "error")
 
 
@@ -96,11 +96,14 @@ def poll_l2(result, name, run, cfg_path):
     """oc_l2.main: run ONE recycle check for the lane a status / resume / inbox poll just
     answered for, and put its summary in `result["recycle"]`. `run` is oc_l2.run_oc_l1. Skipped
     for a lane the poll found gone (dead / absent / restarted / refused): there is no session to measure.
-    The poll's own exit code is not affected."""
+    The poll's own answer and exit code are not affected, also when the check raises."""
     if not isinstance(result, dict) or result.get("verdict") in _DEAD \
             or result.get("restarted") or result.get("restart_refused") or result.get("refused"):
         return
-    result["recycle"] = _summary(*run("recycle", name, cfg_path))
+    try:
+        result["recycle"] = _summary(*run("recycle", name, cfg_path))
+    except Exception as e:  # L2Error / LaneError / TimeoutExpired / OSError: the poll still answers
+        result["recycle"] = {"exit_code": 4, "action": "error", "detail": type(e).__name__}
 
 
 def poll_l1(lane, env, tools_dir):

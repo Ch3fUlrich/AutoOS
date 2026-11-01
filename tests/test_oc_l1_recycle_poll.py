@@ -253,6 +253,19 @@ class PollWiringTest(unittest.TestCase):
         self.assertEqual((out["recycle"]["exit_code"], out["recycle"]["action"]), (6, "error"))
         self.assertEqual(code, 0)
 
+    def test_a_check_that_raises_does_not_change_the_polls_answer(self):
+        for exc in (oc_l2.L2Error("no config"), oc_l1.LaneError("bad lane"),
+                    subprocess.TimeoutExpired("oc_l1.py", 30), OSError("spawn failed")):
+            def run(cmd, name, cfg, exc=exc):
+                raise exc
+            buf = io.StringIO()
+            with mock.patch.object(oc_l2, "cmd_status", return_value=({"verdict": "live"}, 0)),                     mock.patch.object(oc_l2, "run_oc_l1", run), contextlib.redirect_stdout(buf):
+                code = oc_l2.main(self.ARGV["status"])
+            out = json.loads(buf.getvalue())
+            self.assertEqual((code, out["verdict"]), (0, "live"), exc)
+            self.assertEqual((out["recycle"]["exit_code"], out["recycle"]["action"]), (4, "error"), exc)
+            self.assertEqual(out["recycle"]["detail"], type(exc).__name__)
+
 
 class McpWiringTest(unittest.TestCase):
     def setUp(self):

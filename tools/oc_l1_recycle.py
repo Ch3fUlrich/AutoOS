@@ -223,7 +223,11 @@ def cmd_recycle(lane, args):
             if not got:
                 return _out(EXIT_OK, lane, "busy", [warn], session_id=sid,
                             detail="another recycle check of this lane is running")
-            return _check(lane, state, sid, port, password, thr, warn, http, serve)
+            try:
+                return _check(lane, state, sid, port, password, thr, warn, http, serve)
+            except OSError as e:  # the check's own failure, not the lock's
+                return _out(EXIT_FAILED, lane, "error", [warn], session_id=sid,
+                            detail=http._scrub("recycle check failed: %s" % e, password))
     except OSError as e:
         return _out(EXIT_FAILED, lane, "error", [warn], session_id=sid,
                     detail="recycle lock unusable: %s" % e)

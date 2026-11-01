@@ -84,7 +84,9 @@ class ModelWindowTest(RecycleBase):
         lane = dict(self.lane_with(limit={"context": 1000000}), ctx_handoff=700000, ctx_hard=800000)
         self.assertEqual(measure.model_window(lane), 1000000)
         self.srv.items = [assistant(100000)]
-        self.assertNotIn("warning", self.run_check(lane))
+        res = self.run_check(lane)
+        self.assertEqual((res.get("action"), res.get("ctx")), ("noop", 100000), res)
+        self.assertNotIn("warning", res)
 
     def test_without_the_pin_the_same_limits_are_warned_about(self):
         lane = dict(self.lane_with(), ctx_handoff=700000, ctx_hard=800000)
