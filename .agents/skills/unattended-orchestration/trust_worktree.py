@@ -509,8 +509,8 @@ def install_prepush_hook(worktree: Path, check: bool = False) -> str:
                 "runs after the gate passes)" % (hook, CHAINED_NAME))
     if existing:
         old = re.search(HOOK_MARKER + r" v(\d+)", existing)
-        return (f"pre-push gate: upgraded {hook} (shim v{old.group(1) if old else 1}"
-                f" -> v{HOOK_VERSION})")
+        was = "v" + old.group(1) if old else "unversioned"
+        return f"pre-push gate: upgraded {hook} (shim {was} -> v{HOOK_VERSION})"
     return f"pre-push gate: installed {hook}"
 
 

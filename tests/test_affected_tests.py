@@ -395,9 +395,9 @@ def make_fixture(root):
 
 
 def git(cwd, *args):
-    return subprocess.run(["git"] + list(args), cwd=str(cwd), capture_output=True,
-                          text=True, check=True,
-                          env=dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1"))
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True, env=env)
 
 
 def run_tool(args):

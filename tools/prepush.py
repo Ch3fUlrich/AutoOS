@@ -728,12 +728,9 @@ def main(argv=None) -> int:
     scrub_git_location_env(os.environ)
     try:
         repo = repo_root(args.repo)
-        if args.check_ready:
-            ok, message = ready_gate(repo, args.check_ready)
-            print(message)
-            return REFUSED if not ok else 0
         return hookgate.run(repo, args.base, sys.stdin.read() if args.hook_stdin
-                            else None, head_sha, resolve_sha, ready_gate, gate)
+                            else None, head_sha, resolve_sha, ready_gate, gate,
+                            args.check_ready)
     except GateCouldNotRun as exc:
         print(exc)
         return COULD_NOT_RUN

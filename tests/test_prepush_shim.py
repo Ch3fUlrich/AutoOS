@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Tests for the pre-push shim that hands git's ref lines to the gate
+(AO-PREPUSH-HOOK-GITENV-2). Split from tests/test_prepush_hook.py (AO-400LOC); the
+fixture and the real-config-unchanged module check are shared from there. Run directly:
+
+    python3 tests/test_prepush_shim.py
+"""
+import os
+import subprocess
+import sys
+import unittest
+
+from test_prepush import run_git
+from test_prepush_hook import GateFixture, TRUST, setUpModule, tearDownModule  # noqa: F401
+
+class ShimTests(GateFixture):
+    """The installed shim: stdin to the gate and the chained hook, and upgrades."""
+
+    #: The v1 shim, as installed before this change (kept verbatim as test data).
+    V1 = ("#!/bin/sh\n# autoos-prepush-gate \u2014 installed by .agents/skills/"
+          "unattended-orchestration/trust_worktree.py\n"
+          '"$py" "$gate" || exit 1\n[ -x "$chained" ] && exec "$chained" "$@"\nexit 0\n')
+
+    def setUp(self):
+        super().setUp()
+        self.home = self.tmp / "home"
+        self.home.mkdir()
+        self.hooks = self.repo / ".git" / "hooks"
+
+    def install(self):
+        env = dict(os.environ, HOME=str(self.home), USERPROFILE=str(self.home))
+        proc = subprocess.run([sys.executable, str(TRUST), str(self.repo), "--hook-only"],
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return proc.stdout
+
+    def test_the_shim_hands_git_stdin_to_the_gate_and_to_the_chained_hook(self):
+        self.install()
+        text = (self.hooks / "pre-push").read_text(encoding="utf-8")
+        self.assertIn("autoos-prepush-gate v2", text)
+        self.assertRegex(text, r'\| "\$py" "\$gate" --hook-stdin \|\| exit 1')
+        self.assertRegex(text, r'\| "\$chained" "\$@"')
+        self.assertNotIn("exec", text.replace("# ", ""), "the chained hook lost its stdin")
+
+    def test_an_old_shim_is_upgraded_in_place_and_is_never_chained(self):
+        self.hooks.mkdir(exist_ok=True)
+        (self.hooks / "pre-push").write_text(self.V1, encoding="utf-8", newline="\n")
+        out = self.install()
+        self.assertIn("upgraded", out)
+        self.assertIn("unversioned -> v2", out)
+        self.assertNotIn("v1", out)
+        self.assertIn("--hook-stdin", (self.hooks / "pre-push").read_text(encoding="utf-8"))
+        self.assertFalse((self.hooks / "pre-push.autoos-chained").exists())
+        self.assertIn("skipped", self.install())
+
+    @unittest.skipIf(os.name == "nt", "the shim is an sh script; git runs it through a POSIX sh")
+    def test_a_real_push_is_gated_per_sha_and_the_chained_hook_still_gets_the_refs(self):
+        origin = self.tmp / "origin.git"
+        run_git("init", "-q", "--bare", str(origin))
+        seen = self.tmp / "chained-stdin.txt"
+        self.hooks.mkdir(exist_ok=True)
+        theirs = self.hooks / "pre-push"
+        theirs.write_text("#!/bin/sh\ncat > %s\nexit 0\n" % seen, encoding="utf-8")
+        theirs.chmod(0o755)
+        self.install()
+
+        def push(ref):
+            proc = subprocess.run(["git", "-C", str(self.repo), "push", str(origin), ref],
+                                  capture_output=True, text=True, env=self.base_env())
+            return proc.returncode, proc.stdout + proc.stderr
+
+        rc, out = push("other:refs/heads/other")
+        self.assertNotEqual(rc, 0, out)
+        self.assertIn("run prepush on a checkout of %s first" % self.x, out)
+        self.assertEqual(run_git("--git-dir", str(origin), "for-each-ref", cwd=self.repo), "")
+        self.assertFalse(seen.exists(), "the chained hook ran after a refusal")
+        self.certify(self.x)
+        rc, out = push("other:refs/heads/other")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("refs/heads/other %s refs/heads/other" % self.x,
+                      seen.read_text(encoding="utf-8"))
+        self.assertIn(self.x, run_git("--git-dir", str(origin), "for-each-ref", cwd=self.repo))
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

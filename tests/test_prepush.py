@@ -93,7 +93,6 @@ def _run(path):
             failed += 1
     return failed, len(names) - failed
 
-
 argv = sys.argv[1:]
 if len(argv) >= 3 and argv[0] == "-m" and argv[1] == "pytest":
     files = [a for a in argv[2:] if not a.startswith("-")]
@@ -142,7 +141,8 @@ sys.stdout.write(json.dumps(json.loads(os.environ.get("PREPUSH_FIXTURE_PLAN", "{
 
 
 def run_git(*args, cwd=None, check=True):
-    env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     proc = subprocess.run(GIT + list(args), cwd=(str(cwd) if cwd is not None else None),
                           capture_output=True, text=True, env=env)
     if check and proc.returncode != 0:

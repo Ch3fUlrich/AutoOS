@@ -54,8 +54,9 @@ class StaticIdentityGuardTests(unittest.TestCase):
 
     def test_no_test_writes_a_git_identity_through_git_config(self):
         tests = ROOT / "tests"
+        me = Path(__file__).resolve()
         files = [p for p in sorted(tests.rglob("*")) if p.is_file()
-                 and p.suffix in self.SUFFIXES and p.name != Path(__file__).name]
+                 and p.suffix in self.SUFFIXES and p.resolve() != me]
         self.assertIn(tests / "test_autoos_risk.py", files)
         offenders = ["%s:%d" % (p.relative_to(ROOT).as_posix(), n) for p in files
                      for n in writes_identity(p.read_text(encoding="utf-8", errors="replace"))]

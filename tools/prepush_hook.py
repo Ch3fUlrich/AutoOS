@@ -84,7 +84,7 @@ def identity_findings(repo, env=None):
     found = []
     for scope in scopes:
         for key in IDENTITY_KEYS:
-            for value in _config(repo, env, scope, "--get-all", key):
+            for value in _config(repo, env, scope, "--includes", "--get-all", key):
                 pattern = fixture_pattern(key, value)
                 if pattern:
                     found.append((scope[2:], key, pattern))
@@ -139,6 +139,11 @@ def hook_gate(repo, base, text, head_sha, resolve_sha, ready_gate, gate):
         print("prepush: the hook's stdin is not git's ref list (%s) -- cannot "
               "tell what is being pushed, so nothing is certified." % exc)
         return COULD_NOT_RUN
+    if not rows:
+        print("prepush: the hook's stdin carried no ref line -- cannot tell what "
+              "is being pushed, so nothing is certified (exit 2; git always "
+              "sends at least one line to a pre-push hook).")
+        return COULD_NOT_RUN
     head = None
     run_head = False
     refused = 0
@@ -176,17 +181,22 @@ def hook_gate(repo, base, text, head_sha, resolve_sha, ready_gate, gate):
         return gate(repo, base)
     print("prepush: nothing to run -- %s" % (
         "every pushed sha carries a green record" if seen
-        else "no ref being pushed carries a commit"))
+        else "every ref being pushed is a deletion"))
     return 0
 
 
-def run(repo, base, text, head_sha, resolve_sha, ready_gate, gate):
-    """The gate's push-time entry: identity first (always), then the checkout's
-    HEAD (``text`` is None: a manual run) or the pushed shas (``text`` is the
-    hook's stdin)."""
+def run(repo, base, text, head_sha, resolve_sha, ready_gate, gate, check=None):
+    """The gate's push-time entry: identity first (always, ``--check-ready``
+    included), then ``check`` (a sha: only ask the record store), else the
+    checkout's HEAD (``text`` is None: a manual run) or the pushed shas
+    (``text`` is the hook's stdin)."""
     rc = identity_gate(repo)
     if rc is not None:
         return rc
+    if check:
+        ok, message = ready_gate(repo, check)
+        print(message)
+        return 0 if ok else REFUSED
     if text is None:
         return gate(repo, base)
     return hook_gate(repo, base, text, head_sha, resolve_sha, ready_gate, gate)

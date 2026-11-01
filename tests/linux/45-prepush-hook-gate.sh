@@ -9,7 +9,7 @@
 describe "prepush hook gate"
 
 if it "prepush: a pushed sha is gated, not the checkout's HEAD; a fixture git identity is refused (unit tests)"; then
-    if out="$(python3 tests/test_prepush_hook.py 2>&1)"; then pass; else fail "$(printf '%s\n' "$out" | tail -n 20)"; fi
+    if out="$(python3 tests/test_prepush_hook.py 2>&1 && python3 tests/test_prepush_shim.py 2>&1)"; then pass; else fail "$(printf '%s\n' "$out" | tail -n 20)"; fi
 fi
 
 if it "no test writes a git identity with 'git config' (static guard)"; then

@@ -28,6 +28,7 @@ from test_prepush import RepoFixture, ROOT, SCRIPT, run_git
 
 sys.path.insert(0, str(ROOT / "tools"))
 import prepush_hook as hook  # noqa: E402
+import test_affected_tests  # noqa: E402
 import test_autoos_risk  # noqa: E402
 
 ZERO = "0" * 40
@@ -177,14 +178,25 @@ class PushedShaTests(GateFixture):
         self.assertEqual(rc, 0, out)
         self.assertIn("for %s" % self.y[:12], out)
 
-    def test_an_empty_ref_list_has_nothing_to_certify(self):
-        rc, out = self.gate("--hook-stdin", stdin="")
-        self.assertEqual(rc, 0, out)
-        self.assertIn("nothing to run", out)
+    def test_zero_parsable_ref_lines_on_the_hook_path_is_could_not_run(self):
+        for text in ("", "\n", "  \n\n"):
+            rc, out = self.gate("--hook-stdin", stdin=text)
+            self.assertEqual(rc, 2, out)
+            self.assertIn("no ref line", out)
+            self.assertNotIn("nothing to run", out)
 
     def test_a_malformed_ref_line_is_could_not_run(self):
-        rc, out = self.gate("--hook-stdin", stdin="refs/heads/other %s\n" % self.x)
-        self.assertEqual(rc, 2, out)
+        good = "refs/heads/lane %s refs/heads/lane %s\n" % (self.y, ZERO)
+        for text in ("refs/heads/other %s\n" % self.x, good + "refs/heads/other\n"):
+            rc, out = self.gate("--hook-stdin", stdin=text)
+            self.assertEqual(rc, 2, out)
+            self.assertNotIn("green -", out)
+
+    def test_exit_0_without_a_run_needs_every_line_to_be_a_deletion(self):
+        text = "".join("(delete) %s refs/heads/%s %s\n" % (ZERO, n, self.x) for n in "ab")
+        rc, out = self.gate("--hook-stdin", stdin=text)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("every ref being pushed is a deletion", out)
 
     def test_a_manual_run_without_the_flag_gates_head_and_ignores_stdin(self):
         rc, out = self.gate(stdin="refs/heads/other %s refs/heads/other %s\n"
@@ -244,6 +256,35 @@ class FixtureIdentityTests(GateFixture):
         rc, out = self.gate(env={"AUTOOS_PREPUSH_OVERRIDE": "orchestrator ran it"})
         self.assertEqual(rc, 1, out)
 
+    def test_an_identity_pulled_in_by_include_or_includeif_is_refused(self):
+        inc = self.tmp / "inc.cfg"
+        inc.write_text(self.user("user.email", "inc@example.invalid"), encoding="utf-8")
+        gitdir = (self.repo / ".git").resolve().as_posix()
+        for header in ("[include]", '[includeIf "gitdir:%s"]' % gitdir):
+            with self.subTest(header=header):
+                path = self.repo / ".git" / "config"
+                saved = path.read_bytes()
+                self.put("%s\n\tpath = %s\n" % (header, inc.as_posix()))
+                try:
+                    self.assertEqual(hook.identity_findings(self.repo),
+                                     [("local", "user.email", hook.FIXTURE_HOST)])
+                    rc, out = self.gate()
+                    self.assertEqual(rc, 1, out)
+                    self.assertIn("user.email", out)
+                finally:
+                    path.write_bytes(saved)
+
+    def test_check_ready_runs_the_identity_gate_first(self):
+        self.certify(self.y)
+        rc, out = self.gate("--check-ready", self.y)
+        self.assertEqual(rc, 0, out)
+        self.put(self.user("user.name", "risk-test"))
+        rc, out = self.gate("--check-ready", self.y)
+        self.assertEqual(rc, 1, out)
+        self.assertIn("REFUSED", out)
+        self.assertIn("user.name", out)
+        self.assertNotIn("ready", out.lower().replace("check-ready", ""))
+
     def test_a_clean_identity_passes(self):
         self.put(self.user("user.name", "Ada") + self.user("user.email", "ada@example.com"))
         rc, out = self.gate()
@@ -298,72 +339,20 @@ class RealConfigIsolationTests(unittest.TestCase):
             self.assertNotIn("user.", local, "the risk fixture wrote an identity")
 
 
-class ShimTests(GateFixture):
-    """The installed shim: stdin to the gate and the chained hook, and upgrades."""
-
-    #: The v1 shim, as installed before this change (kept verbatim as test data).
-    V1 = ("#!/bin/sh\n# autoos-prepush-gate \u2014 installed by .agents/skills/"
-          "unattended-orchestration/trust_worktree.py\n"
-          '"$py" "$gate" || exit 1\n[ -x "$chained" ] && exec "$chained" "$@"\nexit 0\n')
-
-    def setUp(self):
-        super().setUp()
-        self.home = self.tmp / "home"
-        self.home.mkdir()
-        self.hooks = self.repo / ".git" / "hooks"
-
-    def install(self):
-        env = dict(os.environ, HOME=str(self.home), USERPROFILE=str(self.home))
-        proc = subprocess.run([sys.executable, str(TRUST), str(self.repo), "--hook-only"],
-                              capture_output=True, text=True, env=env)
-        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        return proc.stdout
-
-    def test_the_shim_hands_git_stdin_to_the_gate_and_to_the_chained_hook(self):
-        self.install()
-        text = (self.hooks / "pre-push").read_text(encoding="utf-8")
-        self.assertIn("autoos-prepush-gate v2", text)
-        self.assertRegex(text, r'\| "\$py" "\$gate" --hook-stdin \|\| exit 1')
-        self.assertRegex(text, r'\| "\$chained" "\$@"')
-        self.assertNotIn("exec", text.replace("# ", ""), "the chained hook lost its stdin")
-
-    def test_an_old_shim_is_upgraded_in_place_and_is_never_chained(self):
-        self.hooks.mkdir(exist_ok=True)
-        (self.hooks / "pre-push").write_text(self.V1, encoding="utf-8", newline="\n")
-        out = self.install()
-        self.assertIn("upgraded", out)
-        self.assertIn("v1 -> v2", out)
-        self.assertIn("--hook-stdin", (self.hooks / "pre-push").read_text(encoding="utf-8"))
-        self.assertFalse((self.hooks / "pre-push.autoos-chained").exists())
-        self.assertIn("skipped", self.install())
-
-    @unittest.skipIf(os.name == "nt", "the shim is an sh script; git runs it through a POSIX sh")
-    def test_a_real_push_is_gated_per_sha_and_the_chained_hook_still_gets_the_refs(self):
-        origin = self.tmp / "origin.git"
-        run_git("init", "-q", "--bare", str(origin))
-        seen = self.tmp / "chained-stdin.txt"
-        self.hooks.mkdir(exist_ok=True)
-        theirs = self.hooks / "pre-push"
-        theirs.write_text("#!/bin/sh\ncat > %s\nexit 0\n" % seen, encoding="utf-8")
-        theirs.chmod(0o755)
-        self.install()
-
-        def push(ref):
-            proc = subprocess.run(["git", "-C", str(self.repo), "push", str(origin), ref],
-                                  capture_output=True, text=True, env=self.base_env())
-            return proc.returncode, proc.stdout + proc.stderr
-
-        rc, out = push("other:refs/heads/other")
-        self.assertNotEqual(rc, 0, out)
-        self.assertIn("run prepush on a checkout of %s first" % self.x, out)
-        self.assertEqual(run_git("--git-dir", str(origin), "for-each-ref", cwd=self.repo), "")
-        self.assertFalse(seen.exists(), "the chained hook ran after a refusal")
-        self.certify(self.x)
-        rc, out = push("other:refs/heads/other")
-        self.assertEqual(rc, 0, out)
-        self.assertIn("refs/heads/other %s refs/heads/other" % self.x,
-                      seen.read_text(encoding="utf-8"))
-        self.assertIn(self.x, run_git("--git-dir", str(origin), "for-each-ref", cwd=self.repo))
+    def test_the_git_helpers_ignore_an_inherited_git_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            victim, work = Path(tmp, "victim"), Path(tmp, "work")
+            for d in (victim, work):
+                d.mkdir()
+                run_git("init", "-q", cwd=d)
+            cfg = victim / ".git" / "config"
+            before = cfg.read_bytes()
+            leak = {"GIT_DIR": str(victim / ".git"), "GIT_WORK_TREE": str(victim)}
+            with mock.patch.dict(os.environ, leak):
+                run_git("config", "sentinel.key", "v1", cwd=work)
+                test_affected_tests.git(work, "config", "sentinel.key", "v2")
+            self.assertEqual(cfg.read_bytes(), before, "a helper wrote the inherited GIT_DIR")
+            self.assertEqual(run_git("config", "--local", "sentinel.key", cwd=work), "v2")
 
 
 if __name__ == "__main__":
