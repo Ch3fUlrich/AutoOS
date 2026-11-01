@@ -1204,8 +1204,8 @@ if it "oc_l1 launcher: start (unit tests)"; then
     out="$(python3 tests/test_oc_l1_serve.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
-if it "oc_l1 launcher: status (unit tests)"; then
-    out="$(python3 tests/test_oc_l1_status.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+if it "oc_l1 launcher: status + token-usage recycle (unit tests)"; then
+    out="$(python3 tests/test_oc_l1_status.py 2>&1 && python3 tests/test_oc_l1_recycle.py 2>&1 && python3 tests/test_oc_l1_recycle_config.py 2>&1 && python3 tests/test_oc_l1_recycle_measure.py 2>&1 && python3 tests/test_oc_l1_recycle_poll.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "oc_l1 launcher: bash-guard canary (unit tests)"; then

@@ -184,10 +184,42 @@ timeout (the child is killed by its recorded PID), 5 canary not denied.
 no new assistant message or tool item for `silent_minutes`, default 10) or `dead` (exit 2: no answer, or the session ended as
 failed or interrupted).
 
+### recycle (token usage, AO-OC-CONTEXT-RECYCLE, D-2267)
+
+Claude sessions recycle through `tools/hooks/context_guard.py`; `python3 tools/oc_l1.py recycle --name <lane> [--config PATH]`
+(`tools/oc_l1_recycle.py`) is the same rule for OpenCode lanes. It checks ONE lane ONCE and acts — no loop inside, the caller
+schedules it: `start` prints `recycle-command: ...` (`oc_l2.py start` / MCP `oc_start` / `l2_start` return `recycle_command`),
+`oc_l2.py status|resume|inbox` and the MCP `oc_status` run one check per poll, `configuration/oc-l1/` has the timer / Scheduled Task
+examples. An L2 lane's generated config is an oc_l1 lane config: `--config` is `$AUTOOS_OCL2_STATE_DIR/<lane>.json`.
+
+- **Measure.** The newest assistant message with usage in `GET /api/session/<id>/message?order=desc` on the lane's own server; fill = input + cache read + cache write (output
+  never counts), the definition `context_guard.fill_from_usage` owns and both sides call. "Newest" is the record's own timestamp / id, never its list position. A turn in
+  flight (all-zero, no output) is passed over; no usage record yet is `waiting` (exit 0); usage present but not numeric, or records with nothing to order them by, is exit 6
+  (no action).
+- **Thresholds.** Lane keys `ctx_handoff` / `ctx_hard` (positive ints, handoff < hard, validated with the lane), else `AUTOOS_CTX_HANDOFF` / `AUTOOS_CTX_HARD`, else the D-1708
+  defaults 270000 / 300000. A lane on a 1M model raises them in its own config; the registry is not extended. opencode compacts at its model window (`model.limit.context`,
+  else the registry's `context_advertised`, else 128k; the smaller of primary and fallback model): a hard limit at or above it is unreachable, so the result carries a
+  `warning` — set both keys below the window.
+- **Handoff limit.** Once per session: a prompt says write handoff + card to the lane's `handoff` path, commit, stop taking new work (an L2 cannot write files and is asked for
+  an `l2_report`). Recorded in `context_guard`'s state dir (`$XDG_STATE_HOME/autoos/ctx-guard/<session id>.json`), so the second check says `skipped`. A fill that falls back
+  under the handoff limit (a compaction) clears that record, as the Claude hook does, so the next climb is announced afresh. Every scheduler of one lane must see the same
+  `XDG_STATE_HOME` and `AUTOOS_CTX_*` (the MCP `oc_status` poll child forwards them), or the same session is announced from two state dirs.
+- **Hard limit.** A new session on the same lane server, first prompt = the handoff head exactly as `start` posts it (tried twice; a session still without it is re-posted by
+  the next check, `reposted`); the state file takes the new session id (`recycled_from` keeps the old one) and `status`/`oc_status` follow it. The old session is left idle,
+  not deleted. `handoff_fresh` reports whether the handoff is newer than the announcement; a crossing with no announcement restarts anyway and says so. An L2 restarts from its
+  brief (`handoff`). A session that is itself a restart's, made under 15 min ago (`RESTART_MIN_AGE_S`), is not restarted again yet: `cooldown` (exit 0), so an oversized
+  handoff head cannot restart the lane on every tick.
+- **Never mid-merge.** `deferred: merge in progress` (exit 3, retried on the next check) when `<scratch_dir>/merge.lock` is younger than 4 h (a session that merges by script
+  creates it and removes it after; an older one is stale) or the lane cwd's git dir holds `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge` or `rebase-apply`.
+
+One JSON object per check, `action` = `noop | waiting | announced | skipped | reposted | restarted | cooldown | deferred | busy | error`. Exit codes: 0 ok
+(all but deferred / error), 2 config (thresholds, password env unset), 3 deferred, 4 server or session unreachable / no session recorded /
+HTTP step failed / handoff file missing, 6 usage present but unreadable. Checks of one lane never overlap (`<scratch_dir>/recycle.lock`; the second says `busy`).
+
 ### Templates
 
-- `configuration/oc-l1/autoos-oc-l1.service`: example systemd user unit that runs `start`.
-- `configuration/oc-l1/windows-task.md`: the Windows Scheduled Task equivalent.
+- `configuration/oc-l1/autoos-oc-l1.service`: systemd user unit that runs `start`; `autoos-oc-l1-recycle.service` + `.timer`: the `recycle` check.
+- `configuration/oc-l1/windows-task.md`: the Windows Scheduled Task equivalents, `start` and `recycle`.
 
 ## oc_l2.py phase lanes (D-665)
 

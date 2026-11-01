@@ -23,6 +23,10 @@ Thresholds come from the environment: `AUTOOS_CTX_HANDOFF` (default 270000) and
 `AUTOOS_CTX_HARD` (default 300000); a non-integer or empty value falls back.
 State lives under `$XDG_STATE_HOME/autoos/ctx-guard/`, else
 `~/.local/state/autoos/ctx-guard/`.
+
+`fill_from_usage` and `resolve_thresholds` are the shared definitions: the OpenCode
+lane supervisor (tools/oc_l1_recycle.py) reuses them, plus the state dir, so both
+sides agree on what "full" means.
 """
 from __future__ import annotations
 
@@ -88,6 +92,31 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def fill_from_usage(usage) -> int | None:
+    """The context fill of one usage record: input + cache read + cache write.
+
+    The one definition of "fill" - the hook's transcript scan and the OpenCode
+    lane supervisor (tools/oc_l1_recycle.py) both call it. A missing field counts
+    as zero; a field that is not a plain integer (or a non-dict usage) yields
+    None, never a guess.
+    """
+    if not isinstance(usage, dict):
+        return None
+    total = 0
+    for field in _USAGE_FIELDS:
+        value = usage.get(field, 0)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        total += value
+    return total
+
+
+def resolve_thresholds(handoff=None, hard=None) -> tuple[int, int]:
+    """(handoff, hard) thresholds: the given value, else the environment, else the defaults."""
+    return (handoff if handoff is not None else _env_int("AUTOOS_CTX_HANDOFF", DEFAULT_HANDOFF),
+            hard if hard is not None else _env_int("AUTOOS_CTX_HARD", DEFAULT_HARD))
+
+
 def _tail_ctx(line):
     """The context fill of one tail line, `_SKIP`, or None (a non-numeric usage).
 
@@ -108,13 +137,7 @@ def _tail_ctx(line):
     usage = message.get("usage") if isinstance(message, dict) else None
     if not isinstance(usage, dict):
         return _SKIP
-    total = 0
-    for field in _USAGE_FIELDS:
-        value = usage.get(field, 0)
-        if isinstance(value, bool) or not isinstance(value, int):
-            return None
-        total += value
-    return total
+    return fill_from_usage(usage)
 
 
 def context_tokens(path) -> int | None:
@@ -230,8 +253,7 @@ def run_hook() -> int:
         ctx = context_tokens(transcript_path)
         if ctx is None:
             return 0
-        handoff = _env_int("AUTOOS_CTX_HANDOFF", DEFAULT_HANDOFF)
-        hard = _env_int("AUTOOS_CTX_HARD", DEFAULT_HARD)
+        handoff, hard = resolve_thresholds()
         if ctx < handoff:
             clear_state(session_id)  # back under the line (compaction): the next climb is announced afresh
             return 0

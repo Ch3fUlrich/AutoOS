@@ -102,6 +102,7 @@ import autoos_report as report_parser  # noqa: E402
 from autoos_verdict import (TRANSCRIPT_VERDICTS, VERDICTS, LEGACY_AGENT_VERDICTS,
                             transcript_value, transcript_verdict)  # noqa: E402
 import autoos_routing as routing  # noqa: E402
+import oc_l1_recycle_poll as recycle_poll  # noqa: E402
 from registry import resolve_leg, unavailable_now  # noqa: E402
 
 TAIL_CHARS = 6000
@@ -145,20 +146,17 @@ def state_root() -> str:
 # --- lane lifecycle (c2 2026-10-06): oc_l1.py through MCP, so a calling agent
 # never has to trial-and-error shell commands to manage a lane. The lane
 # password travels in the environment variable the lane config names
-# (AUTOOS_OCL1_PW); these helpers never read, print or log it - a missing one
-# comes back as the exact remediation instead of a stack trace.
+# (AUTOOS_OCL1_PW); never read, printed or logged here - a missing one comes back as the remediation.
 
 _LANES_CONFIG = os.path.expanduser("~/.config/autoos/oc-l1.json")
 # The oc_l1 children get an ALLOWLIST env, not the caller's whole environment
 # (the same hygiene test_every_non_plumbing_child_call_passes_an_env enforces
 # everywhere else): only what the launcher and its canary need.
 _OC_L1_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
-                   "AUTOOS_OCL1_PW", "SESSION_GATEWAY_URL",
-                   "AUTOOS_DAILY_GATE_FILE", "AUTOOS_HOST_NAME",
-                   # the gateway PAIR: the rendered lane config references both
-                   # as {env:...}, and the lane child inherits this process's
-                   # environment - forward only the URL and a lane starts with no
-                   # key for its model
+                   "AUTOOS_OCL1_PW", "SESSION_GATEWAY_URL", "XDG_STATE_HOME", "AUTOOS_CTX_HANDOFF",
+                   "AUTOOS_DAILY_GATE_FILE", "AUTOOS_HOST_NAME", "AUTOOS_CTX_HARD",
+                   # the gateway PAIR: the rendered lane config references both as
+                   # {env:...}; forward only the URL and a lane has no key for its model
                    "AUTOOS_OMNIROUTE_URL", "AUTOOS_OMNIROUTE_KEY")
 
 
@@ -306,7 +304,7 @@ def _oc_l1_args(lane: str, subcommand: str) -> list:
     the subcommand and dies on invalid choice)."""
     if not isinstance(lane, str) or not _LANE_NAME_RE.match(lane):
         raise ValueError("lane must match [a-z0-9][a-z0-9-]{0,31}")
-    if subcommand not in ("render", "start", "status"):
+    if subcommand not in ("render", "start", "status", "recycle"):
         raise ValueError("unsupported oc_l1.py subcommand")
     return [sys.executable, os.path.join(TOOLS_DIR, "oc_l1.py"), subcommand, "--name", lane]
 
@@ -330,6 +328,8 @@ def oc_status(lane: str) -> dict:
         out["advice"] = "the watcher restarts it within ~2 minutes; to force it now use oc_restart"
     if r.returncode not in (0, 1, 2):
         out["detail"] = (r.stdout.strip().splitlines() or [""])[-1][:200] + (r.stderr.strip().splitlines() or [""])[-1][:200]
+    if verdict in ("live", "silent") and lane_control_fence("oc_status") is None:  # one token check per poll
+        out["recycle"] = recycle_poll.poll_l1(lane, _oc_l1_env(), TOOLS_DIR)
     return out
 
 
@@ -345,9 +345,12 @@ def oc_start(lane: str) -> dict:
                        stdin=subprocess.DEVNULL, env=_oc_l1_env())
     out = {"lane": lane, "exit_code": r.returncode,
            "outcome": _OC_EXIT_HINT.get(r.returncode, "unknown")}
-    tail = (r.stdout.strip().splitlines() or [""])[-1][:200]
+    stdout, cmd = recycle_poll.split_hint(r.stdout)
+    tail = (stdout.splitlines() or [""])[-1][:200]
     if tail:
         out["last_line"] = tail
+    if cmd:
+        out["recycle_command"] = cmd  # schedule it: configuration/oc-l1/autoos-oc-l1-recycle.timer
     return out
 
 
@@ -386,21 +389,18 @@ def oc_restart(lane: str) -> dict:
 
 # --- L2 phase lanes (D-665 AO-L2-LAUNCH, AO-L2-RESUME): l2_start / l2_status /
 # l2_stop / l2_inbox / l2_resume through tools/oc_l2.py, which resolves a phase
-# into a lane and hands the render-serve-canary-prompt pipeline to
-# tools/oc_l1.py. The shape mirrors
-# the oc_* helpers above: an allowlisted environment, the server password
-# present by NAME only and never read here, and the CLI's own JSON as the
+# into a lane and hands the render-serve-canary-prompt pipeline to tools/oc_l1.py.
+# The shape mirrors the oc_* helpers above: an allowlisted environment, the server
+# password present by NAME only and never read here, and the CLI's own JSON as the
 # answer - this server renders no lane and kills no pid itself.
 
 _OC_L2_SCRIPT = os.path.join(TOOLS_DIR, "oc_l2.py")
 # What oc_l2.py reads. AUTOOS_OCL1_PW is already in the L1 allowlist; the rest
 # are the binary path, where the L2 reports to, the run dir whose inbox the
 # L2's own lines land in, and where the lane state lives.
-# AUTOOS_STATE_DIR is deliberately NOT on this list: the CLI child of an MCP tool
-# gets an allowlist, not this server's whole environment. So the lane records the
-# agents root it will spawn into at start (oc_l2 `l2.agents_root`) and reads its
-# children from there, instead of re-deriving it from an environment that no
-# longer has the variable.
+# AUTOOS_STATE_DIR is deliberately NOT on this list: the CLI child gets an allowlist,
+# not this server's whole environment. So the lane records the agents root it will spawn
+# into at start (oc_l2 `l2.agents_root`) and reads its children from there.
 _OC_L2_ENV_KEYS = _OC_L1_ENV_KEYS + ("AUTOOS_OPENCODE_BIN", "AUTOOS_L1_INBOX",
                                      "AUTOOS_RUN_DIR", "AUTOOS_OCL2_STATE_DIR",
                                      "AUTOOS_OCL2_GUARD_DIR")

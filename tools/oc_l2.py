@@ -68,6 +68,9 @@ Subcommands (each prints one JSON object on stdout):
      session: `restart_refused` with the `probe` reason, and nothing stopped. A
      restart whose stop was refused reports `restart_failed` and starts nothing.
 
+Token recycle (AO-OC-CONTEXT-RECYCLE): `start` returns `recycle_command`; status / resume / inbox
+each run one `oc_l1.py recycle` check per poll (`recycle` in the answer).
+
 Exit codes: 0 ok - 2 config/validation/refusal (an unknown combo, a lane
 already running, a missing binary or password env) - 4 server not healthy -
 5 UNATTENDED-REFUSED (canary not denied; the codes are oc_l1's, forwarded).
@@ -92,6 +95,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import oc_l1  # noqa: E402
 import oc_l1_serve  # noqa: E402
 import oc_l1_render  # noqa: E402
+import oc_l1_recycle_poll as recycle_poll  # noqa: E402
 from oc_l1_http import ServerDown, _data, _read_state, _request  # noqa: E402
 
 # The spawner resolves the run-state root with this helper; a lane's children are
@@ -106,8 +110,7 @@ REGISTRY_PATH = REPO_ROOT / "catalog" / "ai-registry.json"
 
 DEFAULT_COMBO = "l2-orchestrator"
 LANE_PREFIX = "l2-"
-# The lane name is also a directory name and the MCP tools' one argument:
-# [a-z0-9][a-z0-9-]{0,31}, the same shape tools/autoos_agent_mcp.py validates.
+# The lane name is a directory name and the MCP tools' one argument: [a-z0-9][a-z0-9-]{0,31}.
 LANE_MAX = 32
 
 ENV_PW = "AUTOOS_OCL1_PW"
@@ -121,20 +124,14 @@ GUARD_PLUGIN_RELPATH = Path("configuration") / "opencode" / "plugins" / "bash-gu
 # The renderer's own defaults, imported not restated (one home): an L2 lane
 # overrides a subset of them and everything else renders unchanged.
 PERMISSION_DEFAULTS = oc_l1_render.PERMISSIONS
-# What an L2 may not do, in opencode's own permission vocabulary.
-#
-# Sonnet final REJECT 2026-10-08 finding 1: this used to be `{"task": "deny"}`
-# alone, and the renderer's default `edit: allow` therefore survived into the
-# L2's config - an orchestrator that can edit files has no reason to spawn, and
-# the whole tier contract (L2 coordinates, L3 writes) silently disappeared.
-# `write` is the older spelling of the same key and `apply_patch` the alias of
-# `patch` (opencode v2's rename map is {bash: shell, task: subagent,
-# apply_patch: patch}); both spellings are emitted because a rule only binds
-# under the name the build matches - see lib/agent_harness.py KEYDENY3b.
-# `read` and `bash` stay allowed: an L2 inspects the tree and runs read-only
-# checks, and `bash` is fenced by the guard plugin in the read-only `l2` role -
-# a closed list of inspection commands, no redirection anywhere - which the
-# canary proves before the lane is ever prompted.
+# What an L2 may not do, in opencode's own permission vocabulary. It used to be
+# `{"task": "deny"}` alone, so the renderer's default `edit: allow` survived and the
+# tier contract (L2 coordinates, L3 writes) silently disappeared (Sonnet final REJECT
+# 2026-10-08 finding 1). `write` / `apply_patch` are the older spellings of `edit` /
+# `patch` (opencode v2's rename map is {bash: shell, task: subagent, apply_patch: patch});
+# both are emitted because a rule only binds under the name the build matches
+# (lib/agent_harness.py KEYDENY3b). `read` and `bash` stay allowed: `bash` is fenced by
+# the guard plugin in the read-only `l2` role, which the canary proves before any prompt.
 L2_PERMISSIONS = {
     "edit": "deny", "write": "deny",
     "patch": "deny", "apply_patch": "deny",
@@ -1455,6 +1452,7 @@ def cmd_start(repo, phase, brief, combo=DEFAULT_COMBO, l1_inbox=None,
     cfg = write_config(lane)
 
     rc, output = run_oc_l1("start", name, cfg)
+    output, recycle_cmd = recycle_poll.split_hint(output)
     # The canary MERGES heartbeat.json, so a wake marker from the lane this one
     # replaces (a restart, or a stop and start over the same scratch dir)
     # survived the launch into the new session. Nothing of this session was
@@ -1470,7 +1468,7 @@ def cmd_start(repo, phase, brief, combo=DEFAULT_COMBO, l1_inbox=None,
         "canary": {"denied": canary.get("denied"), "detail": canary.get("detail"),
                    "ts": canary.get("ts"), "plugin": canary.get("plugin_path")},
         "l1_inbox": str(inbox), "lane_inbox": lane["l2"]["lane_inbox"],
-        "config": str(cfg), "prompt_file": str(prompt_file),
+        "config": str(cfg), "prompt_file": str(prompt_file), "recycle_command": recycle_cmd,
         "launcher_output": output.strip().splitlines()[-1:] or [""],
     }
     if rc == 0:
@@ -1621,6 +1619,8 @@ def main(argv=None):
             # well as in the JSON, so an L1 that reads neither cannot count the
             # line as handed over.
             rc = 2 if result.get("refused") else 0
+        if args.cmd in ("status", "resume", "inbox"):  # one recycle check per supervisor poll
+            recycle_poll.poll_l2(result, args.lane, run_oc_l1, config_path)
     except (L2Error, oc_l1.LaneError) as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         return 2

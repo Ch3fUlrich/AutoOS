@@ -82,6 +82,8 @@ class FakeServer:
         self.canary_items = None
         self.session_outcome = "succeeded"
         self.items = []
+        self.session_items = {}  # per-session message list; falls back to .items
+        self.next_session_ids = []  # ids handed out by POST /api/session, in order
         self.requests = []  # {method, path, auth_ok, body}
         self._lock = threading.Lock()
         self._stopped = False
@@ -135,7 +137,9 @@ class FakeServer:
                     if body and isinstance(body, dict) and body.get("title", "").endswith("-canary"):
                         self._send(200, {"data": {"id": outer.canary_session_id}})
                     else:
-                        self._send(200, {"data": {"id": FAKE_SESSION_ID}})
+                        sid = (outer.next_session_ids.pop(0)
+                               if outer.next_session_ids else FAKE_SESSION_ID)
+                        self._send(200, {"data": {"id": sid}})
                 elif method == "POST" and path.endswith("/prompt"):
                     self._send(200, {"data": {"id": "inbox_fake"}})
                 elif method == "GET" and path.endswith("/message"):
@@ -193,7 +197,8 @@ class FakeServer:
                         else:
                             self._send(200, {"data": outer.items})
                     else:
-                        self._send(200, {"data": outer.items})
+                        sid = path.rsplit("/", 2)[-2]
+                        self._send(200, {"data": outer.session_items.get(sid, outer.items)})
                 elif method == "GET" and path.startswith("/api/session/"):
                     sid = path.rsplit("/", 1)[-1]
                     now = int(time.time())

@@ -1,0 +1,45 @@
+# autoos-oc-l1-recycle.service — example systemd USER unit: ONE token-usage check of a lane
+#
+# AO-OC-CONTEXT-RECYCLE (D-2267). Sits next to autoos-oc-l1.service (which starts the lane);
+# autoos-oc-l1-recycle.timer fires THIS unit every few minutes. One run = one check of one lane,
+# no loop (tools/oc_l1_recycle.py): below the handoff limit it does nothing, past it it posts the
+# handoff prompt once, past the hard limit it restarts the session from the handoff - never in the
+# middle of a merge. `oc_l1.py start` prints the exact command as `recycle-command: ...` (oc_l2
+# start / the MCP oc_start return it as `recycle_command`); this unit is that command.
+#
+# Every value below is a placeholder - replace <checkout>, <lane> and <config> before use, and keep
+# the filled-in unit + env file git-ignored (never committed):
+#   * <checkout>   absolute path of this repo checkout
+#   * <lane>       the lane's name
+#   * <config>     the lane config: an L1 lane's host-local oc-l1.json
+#                  (${XDG_CONFIG_HOME:-~/.config}/autoos/oc-l1.json, the default - then drop
+#                  --config); an L2 lane's generated config is
+#                  $AUTOOS_OCL2_STATE_DIR/<lane>.json (default <tmp>/autoos-oc-l2/<lane>.json)
+#
+# USER unit, installed by the operator - this file installs and registers nothing:
+#   cp configuration/oc-l1/autoos-oc-l1-recycle.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now autoos-oc-l1-recycle.timer
+#
+# Type=oneshot WITHOUT RemainAfterExit: each tick is a fresh run, and systemd does not start a
+# oneshot unit again while the previous run is still active, so ticks never overlap (the check
+# also holds <scratch_dir>/recycle.lock and answers `busy` if another check is running).
+#
+# Exit codes: 0 ok (noop | waiting | announced | skipped | reposted | restarted | cooldown | busy) - 2 config
+# error (bad thresholds, `password_env` unset) - 3 deferred: a merge is in progress, retried on the
+# next tick (declared a success below) - 4 session/server unreachable or a step failed - 6 token
+# usage present but unreadable. 2, 4 and 6 leave the unit "failed": nothing was restarted.
+#
+# The password travels through the environment, never through the unit: EnvironmentFile= points at
+# a protected host-local file holding the lane's `password_env` variable (the same file as the
+# start unit's). The check refuses (exit 2) unless that variable is set.
+
+[Unit]
+Description=AutoOS oc_l1.py token-usage recycle check - <lane>
+After=network.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=<path/to/host-local/oc-l1-<lane>.env>
+SuccessExitStatus=3
+ExecStart=/usr/bin/python3 <checkout>/tools/oc_l1.py recycle --name <lane> --config <config>

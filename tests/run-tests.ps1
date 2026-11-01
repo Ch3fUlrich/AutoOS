@@ -5614,13 +5614,13 @@ Test-Case 'oc_l1 launcher: start (unit tests)' {
     Assert-Equal $rc 0 "test_oc_l1_serve unit tests failed: $out"
 }
 
-Test-Case 'oc_l1 launcher: status (unit tests)' {
+Test-Case 'oc_l1 launcher: status + token-usage recycle (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l1_status.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    try { $out = ''; $rc = 0; foreach ($t in 'tests\test_oc_l1_status.py','tests\test_oc_l1_recycle.py','tests\test_oc_l1_recycle_config.py','tests\test_oc_l1_recycle_measure.py','tests\test_oc_l1_recycle_poll.py') { $out += & $py.Source (Join-Path $Root $t) 2>&1 | Out-String; if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE; break } } }
     finally { $ErrorActionPreference = $prev }
-    Assert-Equal $rc 0 "test_oc_l1_status unit tests failed: $out"
+    Assert-Equal $rc 0 "oc_l1 status + recycle unit tests failed: $out"
 }
 
 Test-Case 'oc_l1 launcher: bash-guard canary (unit tests)' {
