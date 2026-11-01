@@ -39,6 +39,8 @@ Actions (one JSON object on stdout; the exit code is below):
              card to the lane's `handoff` path, stop taking new work). State file
              <ctx-guard state dir>/<session id>.json (context_guard.state_dir) records it.
   skipped    already announced for this session: nothing sent - a second check is silent.
+             A fill that falls back below the handoff limit (compaction) clears the announcement,
+             as context_guard's hook does, so the next climb is announced afresh.
   restarted  fill >= hard limit: a NEW session on the same lane server, first prompt = the
              handoff head, exactly what `start` posts (first_prompt_file is not used: a
              recycle restarts from the handoff, not the original brief). The state file
@@ -46,6 +48,8 @@ Actions (one JSON object on stdout; the exit code is below):
              deleted. `handoff_fresh` says whether the handoff file is newer than the
              announcement; a hard crossing with no prior announcement restarts anyway
              (the limit is hard) and says so in `warning`.
+  cooldown   hard limit, but the session is a restart's made less than RESTART_MIN_AGE_S (15 min)
+             ago: nothing done, exit 0 - the check after that restarts it (`recycles` counts them).
   deferred   hard limit but a merge is in progress: nothing done, retried next check.
              Merge markers: <scratch_dir>/merge.lock younger than 4 h (a session that
              merges by script touches it; an older one is stale and ignored), or a
@@ -56,7 +60,7 @@ Actions (one JSON object on stdout; the exit code is below):
 An L2 lane (agent_layer == "L2") cannot write files (every write permission is denied), so its
 announcement asks for an `l2_report` instead and its restart prompt is its brief (its `handoff`).
 
-Exit codes: 0 ok (noop | waiting | announced | skipped | reposted | restarted | busy) - 2 config error
+Exit codes: 0 ok (noop | waiting | announced | skipped | reposted | restarted | cooldown | busy) - 2 config error
 (thresholds, password env unset) - 3 deferred: merge in progress (retry next check) - 4 session or
 server unreachable, no session recorded, an HTTP step failed, handoff file missing, lock dir unusable -
 6 usage PRESENT but not numeric / newest record not establishable (fail-safe: no prompt, no
@@ -86,6 +90,7 @@ from oc_l1_recycle_measure import (  # noqa: E402,F401  (re-exported: the module
 from oc_l1_recycle_poll import lane_lock  # noqa: E402
 
 MESSAGE_LIMIT = 20
+RESTART_MIN_AGE_S = 900  # a restarted session is not restarted again sooner than this
 EXIT_OK, EXIT_CONFIG, EXIT_DEFERRED, EXIT_FAILED, EXIT_USAGE = 0, 2, 3, 4, 6
 
 
@@ -168,6 +173,22 @@ def _post_first(lane, port, password, sid, http, serve):
                 raise
 
 
+def _too_soon(state):
+    """Why a restart is held back: the session is itself a restart's, made under RESTART_MIN_AGE_S
+    ago (an oversized handoff head, or an agent that reloads a huge context at once, would
+    otherwise be restarted on every tick, each restart abandoning the session mid-work)."""
+    try:
+        made = datetime.strptime(state["recycled_utc"], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return ""
+    age = time.time() - made
+    if 0 <= age < RESTART_MIN_AGE_S:
+        return ("session %s was restarted %d s ago (minimum %d s between restarts); not restarted "
+                "again yet" % (state.get("session_id"), age, RESTART_MIN_AGE_S))
+    return ""
+
+
 def _restart(lane, port, password, sid, state, http, serve):
     """New session on the same lane server, first prompt = the handoff head (as `start`)."""
     serve._handoff_head(lane["handoff"])  # raises LaneError BEFORE a session exists
@@ -212,17 +233,20 @@ def cmd_recycle(lane, args):
     if not password:
         return _out(EXIT_CONFIG, lane, "error", [warn], detail=(
             "environment variable %s is not set; cannot authenticate" % lane["password_env"]))
-    state = http._read_state(lane["state_file"])
-    sid = state.get("session_id") if isinstance(state, dict) else None
-    if not safe_id(sid):
-        return _out(EXIT_FAILED, lane, "error", [warn], detail=(
-            "no usable session recorded in %s - run `start` first" % lane["state_file"]))
-    port = state.get("port") or lane["serve_port"]
+    sid = None
     try:
         with lane_lock(lane) as got:
             if not got:
-                return _out(EXIT_OK, lane, "busy", [warn], session_id=sid,
+                return _out(EXIT_OK, lane, "busy", [warn],
                             detail="another recycle check of this lane is running")
+            # read under the lock: a check that finished a restart while this one waited has
+            # moved the lane to a new session, and acting on the old snapshot would make a second
+            state = http._read_state(lane["state_file"])
+            sid = state.get("session_id") if isinstance(state, dict) else None
+            if not safe_id(sid):
+                return _out(EXIT_FAILED, lane, "error", [warn], detail=(
+                    "no usable session recorded in %s - run `start` first" % lane["state_file"]))
+            port = state.get("port") or lane["serve_port"]
             try:
                 return _check(lane, state, sid, port, password, thr, warn, http, serve)
             except OSError as e:  # the check's own failure, not the lock's
@@ -265,6 +289,8 @@ def _check(lane, state, sid, port, password, thr, warn, http, serve):
     level = "hard" if ctx >= hard_at else "handoff" if ctx >= handoff_at else None
     info = dict(session_id=sid, ctx=ctx, handoff_limit=handoff_at, hard_limit=hard_at)
     if level is None:
+        with contextlib.suppress(OSError):  # back under the line (compaction): announce the next climb afresh
+            clear_state(sid)
         return _out(EXIT_OK, lane, "noop", [warn], **info)
 
     announced = read_state(sid)
@@ -275,6 +301,9 @@ def _check(lane, state, sid, port, password, thr, warn, http, serve):
             _announce(lane, port, password, sid, ctx, level, thr, http)
             return _out(EXIT_OK, lane, "announced", [warn], level=level, **info)
 
+        held = _too_soon(state)
+        if held:
+            return _out(EXIT_OK, lane, "cooldown", [warn], level=level, detail=held, **info)
         reason = merge_in_progress(lane)
         if reason:
             return _out(EXIT_DEFERRED, lane, "deferred", [warn], level=level, detail=(

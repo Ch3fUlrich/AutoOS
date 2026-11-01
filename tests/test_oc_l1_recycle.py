@@ -193,6 +193,79 @@ class ThresholdCrossingTest(RecycleBase):
         self.assertEqual(json.loads(out.getvalue())["action"], "announced")
 
 
+class ReclimbTest(RecycleBase):
+    def test_a_fill_that_drops_back_re_arms_the_announcement(self):
+        self.fill(280000)
+        self.assertEqual(self.check()[1]["action"], "announced")
+        self.fill(60000)  # a compaction
+        self.assertEqual(self.check()[1]["action"], "noop")
+        self.fill(285000)
+        self.assertEqual(self.check()[1]["action"], "announced")
+        self.assertEqual(len(prompts(self.srv)), 2, "the next climb is announced afresh")
+        self.fill(60000)
+        self.check()
+        self.fill(310000)  # hard with the announcement cleared: the warning is back
+        res = self.check()[1]
+        self.assertEqual(res["action"], "restarted")
+        self.assertIn("no handoff announcement", res["warning"])
+
+
+class StaleSnapshotTest(RecycleBase):
+    def test_the_session_is_re_read_once_the_lane_lock_is_held(self):
+        self.fill(310000)  # the OLD session is over hard
+        self.srv.session_items[NEW_SESSION_ID] = [assistant(4000)]
+        real = oc_l1_recycle.lane_lock
+
+        @contextlib.contextmanager
+        def racing(lane):
+            with real(lane) as got:  # a concurrent check finished its restart before we got the lock
+                self.write_state(sid=NEW_SESSION_ID)
+                yield got
+
+        old = oc_l1_recycle.lane_lock
+        oc_l1_recycle.lane_lock = racing
+        try:
+            rc, res, _ = self.check()
+        finally:
+            oc_l1_recycle.lane_lock = old
+        self.assertEqual((rc, res["action"], res["session_id"]), (0, "noop", NEW_SESSION_ID))
+        self.assertEqual((creates(self.srv), prompts(self.srv)), ([], []))
+        self.assertEqual(self.state()["session_id"], NEW_SESSION_ID)
+
+
+class RestartCooldownTest(RecycleBase):
+    def test_a_session_over_hard_straight_after_a_restart_is_not_restarted_again(self):
+        self.srv.next_session_ids = [NEW_SESSION_ID, "ses_recycled8"]
+        self.fill(310000)
+        self.assertEqual(self.check()[1]["action"], "restarted")
+        self.srv.session_items[NEW_SESSION_ID] = [assistant(320000)]  # the handoff head alone is huge
+        for _ in range(2):
+            rc, res, _ = self.check()
+            self.assertEqual((rc, res["action"], res["session_id"]), (0, "cooldown", NEW_SESSION_ID))
+            self.assertIn("restarted", res["detail"])
+        self.assertEqual(len(creates(self.srv)), 1)
+        self.assertEqual(self.state()["session_id"], NEW_SESSION_ID)
+
+    def test_the_restart_is_allowed_again_once_the_session_is_old_enough(self):
+        self.srv.next_session_ids = [NEW_SESSION_ID, "ses_recycled8"]
+        self.fill(310000)
+        self.check()
+        self.srv.session_items[NEW_SESSION_ID] = [assistant(320000)]
+        st = self.state()
+        old = time.time() - oc_l1_recycle.RESTART_MIN_AGE_S - 60
+        st["recycled_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(old))
+        Path(self.lane["state_file"]).write_text(json.dumps(st), encoding="utf-8")
+        res = self.check()[1]
+        self.assertEqual((res["action"], res["session_id"]), ("restarted", "ses_recycled8"))
+        self.assertEqual(self.state()["recycles"], 2)
+
+    def test_a_handoff_crossing_during_the_cooldown_is_still_announced(self):
+        self.fill(310000)
+        self.check()
+        self.srv.session_items[NEW_SESSION_ID] = [assistant(280000)]
+        self.assertEqual(self.check()[1]["action"], "announced")
+
+
 class MergeDeferTest(RecycleBase):
     def test_merge_head_defers_the_restart_until_it_clears(self):
         self.fill(310000)

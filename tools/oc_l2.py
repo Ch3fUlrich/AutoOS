@@ -1620,7 +1620,7 @@ def main(argv=None):
             # line as handed over.
             rc = 2 if result.get("refused") else 0
         if args.cmd in ("status", "resume", "inbox"):  # one recycle check per supervisor poll
-            recycle_poll.poll_l2(result, args.lane, run_oc_l1, config_path(args.lane))
+            recycle_poll.poll_l2(result, args.lane, run_oc_l1, config_path)
     except (L2Error, oc_l1.LaneError) as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         return 2

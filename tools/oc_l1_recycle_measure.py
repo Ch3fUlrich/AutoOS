@@ -107,7 +107,7 @@ def _record(item):
     if not isinstance(tokens, dict):
         return (None, 0)
     fill = fill_from_usage(_opencode_usage(tokens))
-    out = tokens.get("output")
+    out = _first(tokens.get("output"), tokens.get("output_tokens"))
     return (fill if fill is not None and fill >= 0 else None,
             out if isinstance(out, (int, float)) and not isinstance(out, bool) else 0)
 

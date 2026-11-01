@@ -25,7 +25,7 @@
 # oneshot unit again while the previous run is still active, so ticks never overlap (the check
 # also holds <scratch_dir>/recycle.lock and answers `busy` if another check is running).
 #
-# Exit codes: 0 ok (noop | waiting | announced | skipped | reposted | restarted | busy) - 2 config
+# Exit codes: 0 ok (noop | waiting | announced | skipped | reposted | restarted | cooldown | busy) - 2 config
 # error (bad thresholds, `password_env` unset) - 3 deferred: a merge is in progress, retried on the
 # next tick (declared a success below) - 4 session/server unreachable or a step failed - 6 token
 # usage present but unreadable. 2, 4 and 6 leave the unit "failed": nothing was restarted.

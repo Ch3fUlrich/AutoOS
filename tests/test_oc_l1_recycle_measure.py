@@ -62,6 +62,14 @@ class InFlightVersusUnmappedTest(unittest.TestCase):
         rec["info"]["tokens"]["cache"] = {"cacheRead": 270000, "cacheWrite": 5000}
         self.assertEqual(measure.fill_of([rec]), (measure.OK, 276000))
 
+    def test_a_completed_record_spelling_its_output_output_tokens_is_not_in_flight(self):
+        done = assistant(0, output=0, seq=2)
+        done["info"]["tokens"] = {"input": 0, "output_tokens": 900, "cache": {"weird": 280000}}
+        self.assertEqual(measure.fill_of([done, assistant(1000, seq=1)])[0], measure.BAD)
+        flying = assistant(0, output=0, seq=2)
+        flying["info"]["tokens"] = {"input": 0, "output_tokens": 0, "cache": {}}
+        self.assertEqual(measure.fill_of([flying, assistant(7, seq=1)]), (measure.OK, 7))
+
     def test_an_in_flight_record_is_zero_with_no_output(self):
         self.assertEqual(measure.fill_of([assistant(0, output=0, seq=2), assistant(7, seq=1)]),
                          (measure.OK, 7))

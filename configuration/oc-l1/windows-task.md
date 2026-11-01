@@ -80,6 +80,10 @@ the protected file, never put in the task), with `recycle` in place of `start`:
 @echo off
 for /f %%v in (<protected-file>) do set AUTOOS_OCL1_LANEX_PW=%%v
 python <checkout>\tools\oc_l1.py recycle --name <lane> --config <config>
+set RC=%errorlevel%
+rem exit 3 = deferred (a merge is in progress): expected, not a failed run (systemd: SuccessExitStatus=3)
+if %RC%==3 exit /b 0
+exit /b %RC%
 ```
 
 `<config>` is the lane's config: an L1 lane's host-local `%LOCALAPPDATA%\autoos\oc-l1.json` (the default -
@@ -108,6 +112,7 @@ schtasks /Create /SC MINUTE /MO 3 /TN "OcL1Recycle-<lane>" /TR "cmd.exe /c <chec
 `-MultipleInstances IgnoreNew` keeps runs from overlapping (the check also holds
 `<scratch_dir>\recycle.lock` and answers `busy` if another check is running). The exit code is the check's:
 exit 0 ok, 2 config error (bad thresholds, or the lane's `password_env` unset), 3 deferred (a merge is in
-progress, retried next run), 4 server/session unreachable or a step failed, 6 token usage present but
+progress, retried next run - **expected, not a failure**: Task Scheduler shows "Last Run Result" 0x3 for every
+merge window; the systemd unit declares it with `SuccessExitStatus=3`, so the wrapper above maps it to 0), 4 server/session unreachable or a step failed, 6 token usage present but
 unreadable (nothing restarted). A monitoring hook can act on 2/4/6. Details: `docs/ai/opencode-fleet.md`,
 section "recycle".

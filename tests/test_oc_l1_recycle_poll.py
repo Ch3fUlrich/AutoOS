@@ -266,6 +266,14 @@ class PollWiringTest(unittest.TestCase):
             self.assertEqual((out["recycle"]["exit_code"], out["recycle"]["action"]), (4, "error"), exc)
             self.assertEqual(out["recycle"]["detail"], type(exc).__name__)
 
+    def test_a_config_path_that_raises_does_not_change_the_polls_answer(self):
+        buf = io.StringIO()
+        with mock.patch.object(oc_l2, "cmd_status", return_value=({"verdict": "live"}, 0)),                 mock.patch.object(oc_l2, "config_path", side_effect=oc_l2.L2Error("no state root")),                 mock.patch.object(oc_l2, "run_oc_l1", return_value=(0, "{}")),                 contextlib.redirect_stdout(buf):
+            code = oc_l2.main(self.ARGV["status"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual((code, out["verdict"]), (0, "live"))
+        self.assertEqual((out["recycle"]["exit_code"], out["recycle"]["detail"]), (4, "L2Error"))
+
 
 class McpWiringTest(unittest.TestCase):
     def setUp(self):
@@ -290,6 +298,14 @@ class McpWiringTest(unittest.TestCase):
         self.assertEqual(out["recycle"]["action"], "announced")
         self.assertEqual(len(self.calls), 2)
         self.assertEqual(self.calls[1][2:], ["recycle", "--name", "lane-a"])
+
+    def test_the_poll_child_shares_the_schedulers_ctx_guard_state_dir_and_thresholds(self):
+        names = ("XDG_STATE_HOME", "AUTOOS_CTX_HANDOFF", "AUTOOS_CTX_HARD")
+        env = {k: "/custom/%s" % k for k in names}
+        with mock.patch.dict(os.environ, env):
+            child = self.mcp._oc_l1_env()
+        for k in names:
+            self.assertEqual(child.get(k), env[k], k)
 
     def test_oc_status_runs_no_check_for_a_dead_lane_or_inside_a_marked_lane(self):
         out = self.call(self.mcp.oc_status, [(2, "dead\n")])
@@ -323,6 +339,7 @@ class ExamplesTest(unittest.TestCase):
         tail = self.read("windows-task.md").split("Token recycle")[1]
         self.assertIn("oc_l1.py recycle --name", tail)
         self.assertIn("Register-ScheduledTask", tail)
+        self.assertIn("if %RC%==3 exit /b 0", tail)  # deferred (3) is a success run, as SuccessExitStatus=3
         self.assertIn("-RepetitionInterval", tail)
         self.assertIn("exit 0 ok, 2 config", tail)
 
