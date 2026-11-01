@@ -27,11 +27,15 @@ NEW_SESSION_ID = "ses_recycled7"
 ENV_NAMES = ("AUTOOS_CTX_HANDOFF", "AUTOOS_CTX_HARD", "XDG_STATE_HOME", PW_ENV)
 
 
-def assistant(input_tokens, cache_read=0, cache_write=0, output=500):
-    """An opencode v2 assistant message item (newest first in a listing)."""
-    return {"type": "assistant", "info": {"role": "assistant", "tokens": {
+def assistant(input_tokens, cache_read=0, cache_write=0, output=500, seq=None):
+    """An opencode v2 assistant message item (newest first in a listing). `seq` stamps an
+    id and a creation time, the way the real records carry them (a bigger seq is newer)."""
+    item = {"type": "assistant", "info": {"role": "assistant", "tokens": {
         "input": input_tokens, "output": output, "reasoning": 0,
         "cache": {"read": cache_read, "write": cache_write}}}}
+    if seq is not None:
+        item["info"].update(id="msg_%06d" % seq, time={"created": 1700000000000 + seq * 1000})
+    return item
 
 
 def prompts(srv):
@@ -159,13 +163,13 @@ class ThresholdCrossingTest(RecycleBase):
         self.fill(350000)
         rc, res, _ = self.check()
         self.assertEqual((rc, res["action"]), (0, "restarted"))
-        self.assertIn("warning", res)
+        self.assertIn("no handoff announcement", res["warning"])
         self.assertFalse(res["handoff_fresh"])
 
     def test_fill_is_input_plus_both_cache_buckets_of_the_last_message(self):
         # 100k + 150k + 25k = 275k; output must not count; an older big message must not count
-        self.srv.items = [assistant(100000, 150000, 25000, output=999999),
-                          {"type": "user"}, assistant(900000)]
+        self.srv.items = [assistant(100000, 150000, 25000, output=999999, seq=3),
+                          {"type": "user"}, assistant(900000, seq=1)]
         rc, res, _ = self.check()
         self.assertEqual(res["ctx"], 275000)
         self.assertEqual(res["action"], "announced")
@@ -240,12 +244,14 @@ class FailSafeTest(RecycleBase):
         self.assertEqual(creates(self.srv), [])
         self.assertEqual(self.state()["session_id"], FAKE_SESSION_ID)
 
-    def test_no_assistant_message_is_an_error_and_no_restart(self):
-        self.srv.items = [{"type": "user"}]
-        rc, res, _ = self.check()
-        self.assertEqual((rc, res["action"]), (6, "error"))
-        self.assertIn("usage", res["detail"])
-        self.assert_nothing_done()
+    def test_no_usage_record_yet_is_waiting_not_a_fault(self):
+        for items in ([], [{"type": "user"}], [assistant(0, output=0)],
+                      [{"type": "assistant", "info": {"role": "assistant"}}]):
+            self.srv.items = items
+            rc, res, err = self.check()
+            self.assertEqual((rc, res["action"]), (0, "waiting"), items)
+            self.assertEqual(err, "")
+            self.assert_nothing_done()
 
     def test_non_numeric_usage_is_an_error_and_no_restart(self):
         self.srv.items = [{"type": "assistant", "info": {"tokens": {
@@ -255,8 +261,9 @@ class FailSafeTest(RecycleBase):
         self.assert_nothing_done()
 
     def test_a_bad_newest_record_is_not_papered_over_by_an_older_good_one(self):
-        self.srv.items = [{"type": "assistant", "info": {"tokens": {"input": True}}},
-                          assistant(400000)]
+        self.srv.items = [{"type": "assistant", "info": {
+            "id": "msg_000002", "time": {"created": 1700000002000}, "tokens": {"input": True}}},
+            assistant(400000, seq=1)]
         rc, res, _ = self.check()
         self.assertEqual((rc, res["action"]), (6, "error"))
         self.assert_nothing_done()
@@ -267,7 +274,7 @@ class FailSafeTest(RecycleBase):
         self.assert_nothing_done()
 
     def test_an_in_flight_zero_record_falls_back_to_the_last_measured_one(self):
-        self.srv.items = [assistant(0), assistant(280000)]
+        self.srv.items = [assistant(0, output=0), assistant(280000)]
         self.assertEqual(self.check()[1]["ctx"], 280000)
 
     def test_server_down_is_an_error_not_a_restart(self):

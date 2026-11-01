@@ -65,9 +65,49 @@ Notes:
 * The exit code is the launcher's: 0 ok, 2 config/validation (including a
   missing `password_env`), 4 health timeout, 5 UNATTENDED-REFUSED (the server
   stays up for supervised use). A monitoring hook can act on 4/5.
-* Token recycle (D-2267): a second task, same wrapper shape with `recycle` in
-  place of `start` and a repetition of a few minutes, runs
-  `python <checkout>\tools\oc_l1.py recycle --name <lane>`. One check per run,
-  no loop; exit 0 ok, 3 deferred (a merge is in progress, retried next run),
-  4/6 unreachable or usage unreadable (nothing restarted). Details:
-  `docs/ai/opencode-fleet.md`, section "recycle".
+* Token usage is measured by a second task (below), not by this one.
+
+## Token recycle (D-2267): the second task
+
+`oc_l1.py start` prints `recycle-command: <command>` when it succeeds (`oc_l2.py start` returns it as
+`recycle_command`, and so do the MCP `oc_start` / `l2_start`): that command is one token-usage check of one
+lane, and this task runs it every few minutes. One check per run, no loop - below the handoff limit it does
+nothing, past it it posts the handoff prompt once, past the hard limit it restarts the session from the
+handoff, never in the middle of a merge. Same wrapper shape as the start task (the password is read from
+the protected file, never put in the task), with `recycle` in place of `start`:
+
+```
+@echo off
+for /f %%v in (<protected-file>) do set AUTOOS_OCL1_LANEX_PW=%%v
+python <checkout>\tools\oc_l1.py recycle --name <lane> --config <config>
+```
+
+`<config>` is the lane's config: an L1 lane's host-local `%LOCALAPPDATA%\autoos\oc-l1.json` (the default -
+drop `--config`); an L2 lane's generated config is `%AUTOOS_OCL2_STATE_DIR%\<lane>.json` (default
+`%TEMP%\autoos-oc-l2\<lane>.json`; `oc_l2.py start` returns it as `config`).
+
+`Register-ScheduledTask` (an example - nothing here registers a task for you):
+
+```powershell
+Register-ScheduledTask `
+  -TaskName "OcL1Recycle-<lane>" `
+  -Action (New-ScheduledTaskAction `
+      -Execute "cmd.exe" `
+      -Argument "/c `"<checkout>\tools\oc-l1\oc-l1-recycle-<lane>.cmd`"") `
+  -Trigger (New-ScheduledTaskTrigger -Once -At (Get-Date) `
+      -RepetitionInterval (New-TimeSpan -Minutes 3)) `
+  -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -MultipleInstances IgnoreNew)
+```
+
+`schtasks` equivalent:
+
+```
+schtasks /Create /SC MINUTE /MO 3 /TN "OcL1Recycle-<lane>" /TR "cmd.exe /c <checkout>\tools\oc-l1\oc-l1-recycle-<lane>.cmd"
+```
+
+`-MultipleInstances IgnoreNew` keeps runs from overlapping (the check also holds
+`<scratch_dir>\recycle.lock` and answers `busy` if another check is running). The exit code is the check's:
+exit 0 ok, 2 config error (bad thresholds, or the lane's `password_env` unset), 3 deferred (a merge is in
+progress, retried next run), 4 server/session unreachable or a step failed, 6 token usage present but
+unreadable (nothing restarted). A monitoring hook can act on 2/4/6. Details: `docs/ai/opencode-fleet.md`,
+section "recycle".

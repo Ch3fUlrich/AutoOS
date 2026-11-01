@@ -6,15 +6,20 @@ rule for the OpenCode L1/L2 lanes `oc_l1.py start` / `oc_l2.py start` launch.
 `oc_l1.py recycle --name LANE [--config PATH]` checks ONE lane ONCE and acts;
 there is no loop in here - the caller schedules it (systemd timer, Scheduled
 Task, the L1's own watcher). An L2 lane's generated config is an oc_l1 lane
-config, so the same command measures it: --config <$AUTOOS_OCL2_STATE_DIR>/<lane>/<its config>.
+config, so the same command measures it: --config <$AUTOOS_OCL2_STATE_DIR>/<lane>.json.
 
-Measure: GET /api/session/<id>/message?order=desc&limit=20 on the lane's running
-`opencode serve`, newest first; the fill is input + cache read + cache write of the
-LAST assistant message that carries usage - the definition context_guard owns
-(`fill_from_usage`, reused, not copied; output tokens never count). A record
-with no usage, or all-zero (a turn still in flight), is passed over; a newest
-usage that is present but not numeric is an error, never papered over by an older
-record.
+How a lane gets measured without an operator hand-building a schedule: tools/oc_l1_recycle_poll.py.
+`start` prints the lane's recycle command (`recycle-command: ...`, also returned by oc_l2
+start / the MCP oc_start); the examples in configuration/oc-l1/ (systemd timer, Windows task) run it;
+and oc_l2 status / resume / inbox and the MCP oc_status run one check per poll. Checks of one lane
+never overlap (<scratch_dir>/recycle.lock; the second one answers `busy`, exit 0).
+
+Measure (tools/oc_l1_recycle_measure.py): GET /api/session/<id>/message?order=desc&limit=20 on the
+lane's running `opencode serve`; the fill is input + cache read + cache write of the NEWEST
+assistant message that carries usage - the definition context_guard owns (`fill_from_usage`,
+reused, not copied; output tokens never count). Newest is decided by the records' timestamp /
+id, never by list position. A turn still in flight (all-zero, no output) is passed over; a
+newest usage that is present but not numeric is an error, never papered over by an older record.
 
 Thresholds (D-1708 defaults): lane keys `ctx_handoff` / `ctx_hard` (positive ints,
 handoff < hard, validated in oc_l1.validate_lane), else AUTOOS_CTX_HANDOFF /
@@ -26,6 +31,10 @@ limit at or above it can never be reached: the result carries a `warning`.
 
 Actions (one JSON object on stdout; the exit code is below):
   noop       fill below the handoff limit; nothing sent.
+  waiting    no assistant usage record exists yet (a session `start` or a restart just created, or
+             its first turn still running): nothing to measure, nothing sent, exit 0.
+  reposted   the session a restart created never got its first prompt (the post failed): posted now.
+  busy       another check of this lane is running: nothing done, exit 0.
   announced  fill >= handoff limit: ONE prompt posted into the session (write handoff +
              card to the lane's `handoff` path, stop taking new work). State file
              <ctx-guard state dir>/<session id>.json (context_guard.state_dir) records it.
@@ -44,14 +53,14 @@ Actions (one JSON object on stdout; the exit code is below):
              git dir of the lane cwd (worktree `.git` files are followed).
   error      see the exit code; NOTHING is restarted on any error (fail-safe).
 
-An L2 cannot write files (every write permission is denied), so its announcement asks
-for an `l2_report` instead and its restart prompt is its brief (its `handoff`).
+An L2 lane (agent_layer == "L2") cannot write files (every write permission is denied), so its
+announcement asks for an `l2_report` instead and its restart prompt is its brief (its `handoff`).
 
-Exit codes: 0 ok (noop | announced | skipped | restarted) - 2 config error (thresholds,
-password env unset) - 3 deferred: merge in progress (retry next check) - 4 session or
-server unreachable, no session recorded, an HTTP step failed, handoff file missing -
-6 usage missing or not numeric (fail-safe: no prompt, no restart). Checks must not
-overlap for one lane; a second sequential check is safe.
+Exit codes: 0 ok (noop | waiting | announced | skipped | reposted | restarted | busy) - 2 config error
+(thresholds, password env unset) - 3 deferred: merge in progress (retry next check) - 4 session or
+server unreachable, no session recorded, an HTTP step failed, handoff file missing, lock dir unusable -
+6 usage PRESENT but not numeric / newest record not establishable (fail-safe: no prompt, no
+restart). A second sequential check is safe.
 
 Stdlib only; the tests never contact a real opencode.
 """
@@ -68,16 +77,16 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.append(str(HERE / "hooks"))  # appended: a hook module must never shadow a tool
 
-from oc_l1_render import MODEL_LIMIT, LaneError, _registry_models  # noqa: E402
-from context_guard import (  # noqa: E402
+from oc_l1_render import LaneError  # noqa: E402
+from context_guard import (  # noqa: E402,F401
     clear_state, fill_from_usage, read_state, resolve_thresholds, safe_id, write_state)
+from oc_l1_recycle_measure import (  # noqa: E402,F401  (re-exported: the module's public surface)
+    BAD, GIT_MARKERS, MERGE_LOCK_MAX_AGE_S, MERGE_LOCK_NAME, NONE, OK, fill_of, merge_in_progress,
+    model_window)
+from oc_l1_recycle_poll import lane_lock  # noqa: E402
 
-MERGE_LOCK_NAME = "merge.lock"
-MERGE_LOCK_MAX_AGE_S = 4 * 3600
-GIT_MARKERS = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "rebase-merge", "rebase-apply")
 MESSAGE_LIMIT = 20
 EXIT_OK, EXIT_CONFIG, EXIT_DEFERRED, EXIT_FAILED, EXIT_USAGE = 0, 2, 3, 4, 6
-_SKIP = object()
 
 
 def validate_ctx(lane, name):
@@ -98,101 +107,6 @@ def thresholds(lane):
     return resolve_thresholds(lane.get("ctx_handoff"), lane.get("ctx_hard"))
 
 
-def model_window(lane):
-    """The window opencode is told for this lane's model (see oc_l1_render): the lane's
-    model.limit.context, else the registry's context_advertised, else the 128k default."""
-    model = lane.get("model") or {}
-    limit = model.get("limit")
-    cands = [limit.get("context") if isinstance(limit, dict) else None,
-             (_registry_models().get(str(model.get("modelID", "")).rsplit("/", 1)[-1]) or {})
-             .get("context_advertised"), MODEL_LIMIT["context"]]
-    return next(v for v in cands if isinstance(v, int) and not isinstance(v, bool) and v > 0)
-
-
-# --- measuring ------------------------------------------------------------------
-
-
-def _opencode_usage(tokens):
-    """opencode's token record mapped onto the three guard fields. A field that is
-    missing from `input` stays None (so the shared sum rejects it); a cache bucket
-    absent altogether is zero, as in the guard."""
-    cache = tokens.get("cache", {})
-    if not isinstance(cache, dict):
-        return {"input_tokens": None}
-    return {
-        "input_tokens": tokens.get("input", tokens.get("input_tokens")),
-        "cache_read_input_tokens": cache.get("read", tokens.get(
-            "cacheRead", tokens.get("cache_read_input_tokens", 0))),
-        "cache_creation_input_tokens": cache.get("write", tokens.get(
-            "cacheWrite", tokens.get("cache_creation_input_tokens", 0))),
-    }
-
-
-def _item_fill(item):
-    """The fill of one message item: an int, None (usage present but not numeric), or
-    _SKIP (not an assistant message, or one that carries no usage)."""
-    if not isinstance(item, dict):
-        return _SKIP
-    info = item.get("info") if isinstance(item.get("info"), dict) else {}
-    if "assistant" not in (item.get("type"), item.get("role"), info.get("type"), info.get("role")):
-        return _SKIP
-    tokens = next((t for t in (info.get("tokens"), item.get("tokens"), info.get("usage"),
-                               item.get("usage")) if t is not None), None)
-    if tokens is None:
-        return _SKIP
-    if not isinstance(tokens, dict):
-        return None
-    fill = fill_from_usage(_opencode_usage(tokens))
-    return fill if fill is not None and fill >= 0 else None
-
-
-def fill_of(items):
-    """The context fill of the newest assistant message with usage; None when there is
-    none or its usage is bad. An all-zero record is an in-flight turn and is passed over."""
-    for item in items if isinstance(items, list) else []:
-        fill = _item_fill(item)
-        if fill is _SKIP or fill == 0:
-            continue
-        return fill
-    return None
-
-
-# --- merge marker ---------------------------------------------------------------
-
-
-def _git_dir(cwd):
-    """The git dir of `cwd` (first `.git` going up; a worktree's `.git` file is followed)."""
-    for d in (cwd, *cwd.parents):
-        dot = d / ".git"
-        try:
-            if dot.is_dir():
-                return dot
-            if dot.is_file():
-                first = dot.read_text(encoding="utf-8", errors="replace").strip()
-                if first.lower().startswith("gitdir:"):
-                    target = Path(first[7:].strip())
-                    return target if target.is_absolute() else (d / target)
-                return None
-        except OSError:
-            return None
-    return None
-
-
-def merge_in_progress(lane):
-    """A reason string when the lane is inside a merge, else None."""
-    lock = Path(lane["scratch_dir"]) / MERGE_LOCK_NAME
-    try:
-        if time.time() - lock.stat().st_mtime <= MERGE_LOCK_MAX_AGE_S:
-            return "lane merge lock %s" % lock
-    except OSError:
-        pass
-    gitdir = _git_dir(Path(lane["cwd"]))
-    for marker in GIT_MARKERS if gitdir else ():
-        if (gitdir / marker).exists():
-            return "git %s in %s" % (marker, gitdir)
-    return None
-
-
 # --- acting ---------------------------------------------------------------------
 
 
@@ -200,7 +114,7 @@ def announce_text(lane, ctx, handoff_at, hard_at):
     n, h, hard = ctx // 1000, handoff_at // 1000, hard_at // 1000
     head = ("CONTEXT-RECYCLE: your context is %dk tokens, past the %dk handoff limit. "
             "Finish the step in hand, do not start a merge you cannot finish, " % (n, h))
-    if lane.get("agent_layer"):
+    if lane.get("agent_layer") == "L2":
         deliver = ("then send your handoff and card with the l2_report tool (your lane "
                    "cannot write files) and stop taking new work. At %dk this session is "
                    "restarted from your brief, %s." % (hard, lane["handoff"]))
@@ -243,22 +157,40 @@ def _announce(lane, port, password, sid, ctx, level, thr, http):
         raise LaneError("handoff prompt failed: HTTP %d" % status)
 
 
+def _post_first(lane, port, password, sid, http, serve):
+    """The handoff head as the first prompt of `sid`, tried twice (a transient 5xx / reset)."""
+    relaunch = dict(lane, first_prompt_file=None)  # the handoff, never the original brief
+    for attempt in (1, 2):
+        try:
+            return serve._post_first_prompt(port, password, sid, relaunch)
+        except (LaneError, http.ServerDown):
+            if attempt == 2:
+                raise
+
+
 def _restart(lane, port, password, sid, state, http, serve):
     """New session on the same lane server, first prompt = the handoff head (as `start`)."""
-    relaunch = dict(lane, first_prompt_file=None)  # the handoff, never the original brief
     serve._handoff_head(lane["handoff"])  # raises LaneError BEFORE a session exists
     new_sid = serve._create_session(port, password, lane)
     st = dict(state, session_id=new_sid, prompted=False, recycled_from=sid,
               recycled_utc=_now_utc(), recycles=int(state.get("recycles") or 0) + 1)
     http._write_state(lane["state_file"], st)
     try:
-        serve._post_first_prompt(port, password, new_sid, relaunch)
+        _post_first(lane, port, password, new_sid, http, serve)
     except (LaneError, http.ServerDown) as e:
-        raise LaneError("new session %s was created but its first prompt failed (%s); "
-                        "run `start` to post it" % (new_sid, http._scrub(str(e), password)))
+        raise LaneError("new session %s was created but its first prompt failed (%s); the next "
+                        "recycle check re-posts it" % (new_sid, http._scrub(str(e), password)))
     st["prompted"] = True
     http._write_state(lane["state_file"], st)
     return new_sid
+
+
+def _repost(lane, port, password, sid, state, http, serve):
+    """A restart's session whose first prompt never landed gets it now (state `prompted` False
+    AND `recycled_from`: only a session this module made; a `start` session that was never
+    prompted has not cleared its canary and is none of our business)."""
+    _post_first(lane, port, password, sid, http, serve)
+    http._write_state(lane["state_file"], dict(state, prompted=True))
 
 
 def cmd_recycle(lane, args):
@@ -286,7 +218,26 @@ def cmd_recycle(lane, args):
         return _out(EXIT_FAILED, lane, "error", [warn], detail=(
             "no usable session recorded in %s - run `start` first" % lane["state_file"]))
     port = state.get("port") or lane["serve_port"]
+    try:
+        with lane_lock(lane) as got:
+            if not got:
+                return _out(EXIT_OK, lane, "busy", [warn], session_id=sid,
+                            detail="another recycle check of this lane is running")
+            return _check(lane, state, sid, port, password, thr, warn, http, serve)
+    except OSError as e:
+        return _out(EXIT_FAILED, lane, "error", [warn], session_id=sid,
+                    detail="recycle lock unusable: %s" % e)
 
+
+def _check(lane, state, sid, port, password, thr, warn, http, serve):
+    handoff_at, hard_at = thr
+    if state.get("recycled_from") and state.get("prompted") is False:
+        try:
+            _repost(lane, port, password, sid, state, http, serve)
+        except (LaneError, http.ServerDown) as e:
+            return _out(EXIT_FAILED, lane, "error", [warn], session_id=sid, detail=http._scrub(
+                "the restarted session still has no first prompt: %s" % e, password))
+        return _out(EXIT_OK, lane, "reposted", [warn], session_id=sid)
     try:
         status, payload = http._request(
             port, "GET", "/api/session/%s/message?order=desc&limit=%d" % (sid, MESSAGE_LIMIT),
@@ -299,11 +250,14 @@ def cmd_recycle(lane, args):
                     detail="reading the session messages failed: HTTP %d" % status)
     items = http._data(payload)
     items = items.get("items") if isinstance(items, dict) else items
-    ctx = fill_of(items)
-    if ctx is None:
+    kind, ctx = fill_of(items)
+    if kind == NONE:
+        return _out(EXIT_OK, lane, "waiting", [warn], session_id=sid, handoff_limit=handoff_at,
+                    hard_limit=hard_at, detail="no assistant usage record yet - nothing to measure")
+    if kind == BAD:
         return _out(EXIT_USAGE, lane, "error", [warn], session_id=sid, detail=(
-            "token usage missing or not numeric on the newest assistant message - nothing "
-            "announced, nothing restarted"))
+            "token usage present but not numeric, or the newest assistant record cannot be "
+            "established - nothing announced, nothing restarted"))
     level = "hard" if ctx >= hard_at else "handoff" if ctx >= handoff_at else None
     info = dict(session_id=sid, ctx=ctx, handoff_limit=handoff_at, hard_limit=hard_at)
     if level is None:

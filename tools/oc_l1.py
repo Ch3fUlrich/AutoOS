@@ -35,11 +35,12 @@ post the pilot's first prompt. Canary not denied -> the pilot session stays idle
 supervised use, exit 5 (also for a second `start`).
 
 recycle: one token-usage check of one lane, then act (tools/oc_l1_recycle.py: handoff prompt
-once, hard-limit restart from the handoff, never mid-merge; no loop - the caller schedules it).
+once, hard-limit restart from the handoff, never mid-merge; no loop). A successful `start` prints
+`recycle-command: <the command>`; schedule it (configuration/oc-l1/autoos-oc-l1-recycle.timer).
 
 Exit codes: 0 ok - 2 config/validation error - 4 health timeout - 5 canary not denied
 (UNATTENDED-REFUSED); `status`: 0 live - 1 silent - 2 dead; `recycle`: 0 ok - 2 config -
-3 deferred (merge in progress) - 4 unreachable/failed - 6 usage unreadable.
+3 deferred (merge in progress) - 4 unreachable/failed - 6 usage unreadable (none yet: 0 `waiting`).
 """
 
 import argparse
@@ -165,6 +166,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from oc_l1_render import (ENV_KEY, ENV_URL, RENDERED_FILENAME, LaneError, _strip_jsonc,  # noqa: E402,F401
                           render)
 import oc_l1_recycle  # noqa: E402
+import oc_l1_recycle_poll  # noqa: E402
 
 
 def default_config_path():
@@ -560,7 +562,11 @@ def main(argv=None):
     import oc_l1_serve  # lazy: step A2 pipeline (next to this file)
 
     if args.cmd == "start":
-        return oc_l1_serve.cmd_start(lane, args)
+        rc = oc_l1_serve.cmd_start(lane, args)
+        if rc == 0:  # the caller schedules the check: systemd timer / Windows task (configuration/oc-l1/)
+            print(oc_l1_recycle_poll.HINT_PREFIX + oc_l1_recycle_poll.recycle_command(
+                lane["name"], cfg_path.resolve()))
+        return rc
     return oc_l1_serve.cmd_status(lane, args)
 
 

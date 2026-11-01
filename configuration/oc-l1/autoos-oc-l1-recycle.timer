@@ -1,0 +1,23 @@
+# autoos-oc-l1-recycle.timer — example systemd USER timer for autoos-oc-l1-recycle.service
+#
+# AO-OC-CONTEXT-RECYCLE (D-2267): fires one token-usage check of one lane every 3 minutes (the
+# lane's context grows a turn at a time; a few minutes is well inside the 30k-token gap between the
+# 270k handoff limit and the 300k hard limit). Placeholders as in the service file; this file
+# installs and registers nothing:
+#   cp configuration/oc-l1/autoos-oc-l1-recycle.{service,timer} ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now autoos-oc-l1-recycle.timer
+# One timer per lane: copy both files with the lane in the name (autoos-oc-l1-recycle-<lane>.*)
+# and point Unit= at the copied service.
+
+[Unit]
+Description=AutoOS oc_l1.py token-usage recycle check, every 3 minutes - <lane>
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=3min
+AccuracySec=15s
+Unit=autoos-oc-l1-recycle.service
+
+[Install]
+WantedBy=timers.target
