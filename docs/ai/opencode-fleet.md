@@ -184,6 +184,37 @@ timeout (the child is killed by its recorded PID), 5 canary not denied.
 no new assistant message or tool item for `silent_minutes`, default 10) or `dead` (exit 2: no answer, or the session ended as
 failed or interrupted).
 
+### recycle (token usage, AO-OC-CONTEXT-RECYCLE, D-2267)
+
+Claude sessions recycle through `tools/hooks/context_guard.py`; `python3 tools/oc_l1.py recycle --name <lane> [--config PATH]`
+(`tools/oc_l1_recycle.py`) is the same rule for OpenCode lanes. It checks ONE lane ONCE and acts — no loop inside, the caller
+schedules it (a timer or Scheduled Task running it next to `start`'s). An L2 lane's generated config is an oc_l1 lane config, so
+the same command measures it: `--config` is the lane config under `$AUTOOS_OCL2_STATE_DIR/<lane>/` that `l2_start` wrote.
+
+- **Measure.** The newest assistant message with usage in `GET /api/session/<id>/message?order=desc` on the lane's own server;
+  fill = input + cache read + cache write (output never counts), the definition `context_guard.fill_from_usage` owns and both sides
+  call. An all-zero record (a turn in flight) is passed over; usage that is missing or not numeric is exit 6 — nothing is
+  announced or restarted on a number that could not be read.
+- **Thresholds.** Lane keys `ctx_handoff` / `ctx_hard` (positive ints, handoff < hard, validated with the lane), else
+  `AUTOOS_CTX_HANDOFF` / `AUTOOS_CTX_HARD`, else the D-1708 defaults 270000 / 300000. A lane on a 1M model raises them in its own
+  config; the registry is not extended. opencode compacts at its model window (`model.limit.context`, else the registry's
+  `context_advertised`, else 128k): a hard limit at or above that window is unreachable, so the result carries a `warning` — set
+  both keys below the window.
+- **Handoff limit.** Once per session: a prompt into the session says write handoff + card to the lane's `handoff` path, commit, stop
+  taking new work (an L2 cannot write files and is asked for an `l2_report` instead). The announcement is recorded in
+  `context_guard`'s state dir (`$XDG_STATE_HOME/autoos/ctx-guard/<session id>.json`), so the second check says `skipped`.
+- **Hard limit.** A new session on the same lane server, first prompt = the handoff head exactly as `start` posts it; the state file
+  takes the new session id (`recycled_from` keeps the old one) and `status`/`oc_status` follow it. The old session is left idle, not
+  deleted. `handoff_fresh` reports whether the handoff is newer than the announcement; a crossing with no announcement restarts anyway
+  and says so. An L2 restarts from its brief, which is its `handoff`.
+- **Never mid-merge.** `deferred: merge in progress` (exit 3, retried on the next check) when `<scratch_dir>/merge.lock` is younger
+  than 4 h (a session that merges by script creates it and removes it after; an older one is stale) or the lane cwd's git dir holds
+  `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge` or `rebase-apply`.
+
+One JSON object per check, `action` = `noop | announced | skipped | restarted | deferred | error`. Exit codes: 0 ok (noop, announced,
+skipped, restarted), 2 config (thresholds, password env unset), 3 deferred, 4 server or session unreachable / no session recorded /
+HTTP step failed / handoff file missing, 6 usage unreadable. Checks of one lane must not overlap.
+
 ### Templates
 
 - `configuration/oc-l1/autoos-oc-l1.service`: example systemd user unit that runs `start`.

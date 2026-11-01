@@ -3,7 +3,7 @@
 
 One project, one `opencode serve` (localhost only), one session, relaunched
 from a HANDOFF card. Subcommands: `render`, `start` (tools/oc_l1_serve.py,
-with the bash-guard canary of tools/oc_l1_canary.py) and `status`.
+with the bash-guard canary of tools/oc_l1_canary.py), `status` and `recycle`.
 
 render
   Loads the host-local lane config (never committed):
@@ -34,8 +34,12 @@ start order: spawn, health, create the pilot session, run the bash-guard canary,
 post the pilot's first prompt. Canary not denied -> the pilot session stays idle, the server stays up for
 supervised use, exit 5 (also for a second `start`).
 
+recycle: one token-usage check of one lane, then act (tools/oc_l1_recycle.py: handoff prompt
+once, hard-limit restart from the handoff, never mid-merge; no loop - the caller schedules it).
+
 Exit codes: 0 ok - 2 config/validation error - 4 health timeout - 5 canary not denied
-(UNATTENDED-REFUSED); `status`: 0 live - 1 silent - 2 dead.
+(UNATTENDED-REFUSED); `status`: 0 live - 1 silent - 2 dead; `recycle`: 0 ok - 2 config -
+3 deferred (merge in progress) - 4 unreachable/failed - 6 usage unreadable.
 """
 
 import argparse
@@ -51,7 +55,6 @@ from pathlib import Path
 DEFAULT_BASE_URL = "http://127.0.0.1:20128"  # start-time default (step A2)
 PORT_MIN = 47200
 PORT_MAX = 47299
-NOT_IMPLEMENTED = "not implemented in step A1"
 _IDENT_RE = re.compile(r"[A-Z_][A-Z0-9_]*\Z")
 # Lane keys D-665 (AO-L2-LAUNCH): the rendered permission block and the two
 # child-env vars an orchestrator lane needs are config, so they are validated
@@ -161,6 +164,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from oc_l1_render import (ENV_KEY, ENV_URL, RENDERED_FILENAME, LaneError, _strip_jsonc,  # noqa: E402,F401
                           render)
+import oc_l1_recycle  # noqa: E402
 
 
 def default_config_path():
@@ -462,6 +466,8 @@ def validate_lane(lane, name):
             % (name, ENV_AGENT_LAYER)
         )
 
+    ctx_handoff, ctx_hard = oc_l1_recycle.validate_ctx(lane, name)
+
     return {
         "name": name,
         "cwd": cwd,
@@ -494,6 +500,8 @@ def validate_lane(lane, name):
         # extra name or a layer mark that validation drops never reaches a child.
         "child_env": list(child_env),
         "agent_layer": agent_layer,
+        "ctx_handoff": ctx_handoff,  # AO-OC-CONTEXT-RECYCLE: None -> env -> 270000/300000
+        "ctx_hard": ctx_hard,
     }
 
 
@@ -505,11 +513,12 @@ def build_parser():
             "localhost-only opencode serve, one session."
         ),
     )
-    sub = ap.add_subparsers(dest="cmd", required=True, metavar="{render,start,status}")
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="{render,start,status,recycle}")
     for cmd, help_ in (
         ("render", "write the scratch opencode config for one lane"),
         ("start", "start serve, create the session, post the first prompt"),
         ("status", "print live | silent | dead for the lane's session"),
+        ("recycle", "check the session's token usage once; handoff prompt / restart"),
     ):
         p = sub.add_parser(cmd, help=help_)
         p.add_argument("--name", required=True, help="lane name (top-level config key)")
@@ -530,32 +539,6 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
-    if args.cmd in ("start", "status"):
-        import oc_l1_serve  # lazy: step A2 pipeline (next to this file)
-
-        try:
-            lanes = load_config(
-                Path(args.config) if args.config else default_config_path()
-            )
-        except LaneError as e:
-            print("oc_l1: error: %s" % e, file=sys.stderr)
-            return 2
-        if args.name not in lanes:
-            available = ", ".join(sorted(lanes)) or "(none)"
-            print(
-                "oc_l1: error: no lane named '%s' (available: %s)"
-                % (args.name, available),
-                file=sys.stderr,
-            )
-            return 2
-        try:
-            lane = validate_lane(lanes[args.name], args.name)
-        except LaneError as e:
-            print("oc_l1: error: %s" % e, file=sys.stderr)
-            return 2
-        if args.cmd == "start":
-            return oc_l1_serve.cmd_start(lane, args)
-        return oc_l1_serve.cmd_status(lane, args)
     cfg_path = Path(args.config) if args.config else default_config_path()
     try:
         lanes = load_config(cfg_path)
@@ -565,13 +548,20 @@ def main(argv=None):
                 "no lane named '%s' in %s (available: %s)" % (args.name, cfg_path, available)
             )
         lane = validate_lane(lanes[args.name], args.name)
-        repo_cfg = Path(args.repo_config) if args.repo_config else REPO_ROOT / "opencode.jsonc"
-        out = render(lane, repo_cfg)
+        if args.cmd == "render":
+            repo_cfg = Path(args.repo_config) if args.repo_config else REPO_ROOT / "opencode.jsonc"
+            print(render(lane, repo_cfg))
+            return 0
     except LaneError as e:
         print("oc_l1: error: %s" % e, file=sys.stderr)
         return 2
-    print(out)
-    return 0
+    if args.cmd == "recycle":
+        return oc_l1_recycle.cmd_recycle(lane, args)
+    import oc_l1_serve  # lazy: step A2 pipeline (next to this file)
+
+    if args.cmd == "start":
+        return oc_l1_serve.cmd_start(lane, args)
+    return oc_l1_serve.cmd_status(lane, args)
 
 
 if __name__ == "__main__":

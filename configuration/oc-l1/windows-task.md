@@ -65,3 +65,9 @@ Notes:
 * The exit code is the launcher's: 0 ok, 2 config/validation (including a
   missing `password_env`), 4 health timeout, 5 UNATTENDED-REFUSED (the server
   stays up for supervised use). A monitoring hook can act on 4/5.
+* Token recycle (D-2267): a second task, same wrapper shape with `recycle` in
+  place of `start` and a repetition of a few minutes, runs
+  `python <checkout>\tools\oc_l1.py recycle --name <lane>`. One check per run,
+  no loop; exit 0 ok, 3 deferred (a merge is in progress, retried next run),
+  4/6 unreachable or usage unreadable (nothing restarted). Details:
+  `docs/ai/opencode-fleet.md`, section "recycle".
