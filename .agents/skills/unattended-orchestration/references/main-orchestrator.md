@@ -163,11 +163,13 @@ rerun, and one found on ten rows costs seconds.
 ## 4c. Phase-batch review (R-orch-31; D-2534, amended D-3468/D-3474)
 
 The six steps are the "Phase-batch review" block in [`../SKILL.md`](../SKILL.md); this is the
-detail behind them. Seat order is read from the live route policy
-(`python3 tools/autoos-agent.py route --explain`), never copied into a brief. Every seat of the
-phase is a non-Claude family and differs from the families that wrote the phase; Claude reviewers
-never count. A HIGH phase needs a second non-Claude family besides mimo (not anthropic, not the
-writers' families), because mimo is one seat, not two.
+detail behind them. Seat 1 is pinned: `mimo-v2.6-pro`. The live route policy
+(`python3 tools/autoos-agent.py route --explain`) chooses only seat 2. If it offers no qualifying
+second family, the phase is BLOCKED (fail closed): never fewer seats, never a Claude seat.
+If mimo is among the writers' families, the phase is BLOCKED too: seat 1 cannot sit, and the
+router picks the seats. Every
+seat of the phase is a non-Claude family and differs from the families that wrote the phase;
+Claude reviewers never count.
 
 ### Phase review seat: prompt and card
 
@@ -198,15 +200,17 @@ Done means: <the phase's done text>
 Re-review (step 4) is the same prompt on the fix delta, with one non-Claude seat. Set the card's
 `diff_ref` to `{repo, base: <old-head>, head: <new-head>}` and the prompt's line to
 `Range: <old-head>..<new-head>`; paste `git diff --no-color <old-head>..<new-head>` inline and the
-previous round's findings above it, never the phase range. Record per seat: family, model,
-verdict and the closing line as returned.
+previous round's findings above it, never the phase range. `<new-head>` is the commit the briefing
+L1/L2 made of the fixer's verified edits (see the fixer brief). Record per seat: writer, family,
+model, verdict, the closing line as returned, and any provider skip text.
 
 ### Phase fixer brief
 
 One brief per round (D-2458) carries ALL open findings of ALL seats of the last round, LOW and
 MED included, and a same-pattern sweep of the whole diff. Every fixer of a round runs, gated by
 its affected tests + CI, and ONE review follows over the collected delta (D-2643). The fixer is a
-leaf: it never commits or spawns, and it must fail closed (an unfixed finding is reported, never
+leaf: it never commits or spawns (the L1/L2 that briefed it verifies and commits its edits; that
+commit is `<new-head>` for step 4), and it must fail closed (an unfixed finding is reported, never
 marked fixed).
 
 ```text
@@ -217,7 +221,7 @@ Same-pattern check: for each finding, search the whole phase diff <base-sha>..<h
 same pattern; fix every other instance, or list it under open:.
 Fail closed: a finding you cannot fix, or are unsure of, is listed under open: with the reason;
 never mark it fixed. If a finding is unclear or contradicts AGENTS.md, stop and say which.
-Leave the edits in the working tree: no commit, no push.
+Leave the edits in the working tree: no commit, no push (your briefing L1/L2 verifies and commits them).
 Return: changed: <files> / test: <summary line, verbatim> / open: <finding ids not fixed, why>
 ```
 
