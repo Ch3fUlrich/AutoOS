@@ -221,7 +221,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 Rule R-orch-31; seat card, prompt and fixer brief: [`references/main-orchestrator.md`](references/main-orchestrator.md) §4c.
 Seat 1 is pinned: `mimo-v2.6-pro`. The live route policy (`route --explain`) chooses only seat 2, a non-Claude family unlike mimo
 and the writers. If it offers no qualifying second family, the phase is BLOCKED (fail closed): never fewer seats, never a Claude seat (Haiku included).
-If mimo is among the writers' families, the phase is BLOCKED too: seat 1 cannot sit, and the router picks the seats.
+If mimo is among the writers' families, the phase is BLOCKED too (fail closed): seat 1 cannot sit, no other seat replaces it.
 
 1. **Writers.** All tasks of a phase run in parallel on `phase/<key>`, each gated by its affected tests + CI; no per-task review seat (D-2643).
 2. **Round 1.** Every phase gets it, whatever its bucket. ONE review of the whole phase diff by two seats of distinct non-Claude families, both different from the writers' families:
@@ -230,7 +230,7 @@ If mimo is among the writers' families, the phase is BLOCKED too: seat 1 cannot 
    the two seats, never the only one (D-2540).
 3. **Fix.** ONE fixer brief carries ALL findings of ALL seats of the last round (incl. LOW/MED) plus a same-pattern sweep over the
    whole diff (D-2458); every fixer of a round runs, gated by affected tests + CI, with no seat per fixer (D-2643). A fixer never commits:
-   the L1/L2 that briefed the fixer verifies and commits its edits; that commit is `<new-head>`.
+   the L1/L2 that briefed the round's fixers verifies and commits all their edits as ONE commit; that commit is `<new-head>`.
 4. **Re-review.** ONE non-Claude reviewer on the fix delta `<old-head>..<new-head>`, not a panel (D-2540).
 5. **Cap.** The loop runs max 3 rounds; findings still open after round 3 mean replan (ask the router).
 6. **Ship.** One phase PR, then a verdict on every item.

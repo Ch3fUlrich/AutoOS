@@ -166,9 +166,8 @@ The six steps are the "Phase-batch review" block in [`../SKILL.md`](../SKILL.md)
 detail behind them. Seat 1 is pinned: `mimo-v2.6-pro`. The live route policy
 (`python3 tools/autoos-agent.py route --explain`) chooses only seat 2. If it offers no qualifying
 second family, the phase is BLOCKED (fail closed): never fewer seats, never a Claude seat.
-If mimo is among the writers' families, the phase is BLOCKED too: seat 1 cannot sit, and the
-router picks the seats. Every
-seat of the phase is a non-Claude family and differs from the families that wrote the phase;
+If mimo is among the writers' families, the phase is BLOCKED too (fail closed): seat 1 cannot
+sit, no other seat replaces it. Every seat of the phase is a non-Claude family and differs from the families that wrote the phase;
 Claude reviewers never count.
 
 ### Phase review seat: prompt and card
@@ -201,7 +200,7 @@ Re-review (step 4) is the same prompt on the fix delta, with one non-Claude seat
 `diff_ref` to `{repo, base: <old-head>, head: <new-head>}` and the prompt's line to
 `Range: <old-head>..<new-head>`; paste `git diff --no-color <old-head>..<new-head>` inline and the
 previous round's findings above it, never the phase range. `<new-head>` is the commit the briefing
-L1/L2 made of the fixer's verified edits (see the fixer brief). Record per seat: writer, family,
+L1/L2 made of the round's fixers' verified edits, one commit (see the fixer brief). Record per seat: writer, family,
 model, verdict, the closing line as returned, and any provider skip text.
 
 ### Phase fixer brief
@@ -209,7 +208,7 @@ model, verdict, the closing line as returned, and any provider skip text.
 One brief per round (D-2458) carries ALL open findings of ALL seats of the last round, LOW and
 MED included, and a same-pattern sweep of the whole diff. Every fixer of a round runs, gated by
 its affected tests + CI, and ONE review follows over the collected delta (D-2643). The fixer is a
-leaf: it never commits or spawns (the L1/L2 that briefed it verifies and commits its edits; that
+leaf: it never commits or spawns (the L1/L2 that briefed the round's fixers verifies and commits all their edits as ONE commit; that
 commit is `<new-head>` for step 4), and it must fail closed (an unfixed finding is reported, never
 marked fixed).
 
