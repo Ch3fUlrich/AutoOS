@@ -165,7 +165,9 @@ rerun, and one found on ten rows costs seconds.
 The six steps are the "Phase-batch review" block in [`../SKILL.md`](../SKILL.md); this is the
 detail behind them. Seat 1 is pinned: `mimo-v2.6-pro`. The live route policy
 (`python3 tools/autoos-agent.py route --explain`) chooses only seat 2. If it offers no qualifying
-second family, the phase is BLOCKED (fail closed): never fewer seats, never a Claude seat. Every
+second family, the phase is BLOCKED (fail closed): never fewer seats, never a Claude seat.
+If mimo is among the writers' families, the phase is BLOCKED too: seat 1 cannot sit, and the
+router picks the seats. Every
 seat of the phase is a non-Claude family and differs from the families that wrote the phase;
 Claude reviewers never count.
 

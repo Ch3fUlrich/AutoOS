@@ -221,11 +221,12 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 Rule R-orch-31; seat card, prompt and fixer brief: [`references/main-orchestrator.md`](references/main-orchestrator.md) §4c.
 Seat 1 is pinned: `mimo-v2.6-pro`. The live route policy (`route --explain`) chooses only seat 2, a non-Claude family unlike mimo
 and the writers. If it offers no qualifying second family, the phase is BLOCKED (fail closed): never fewer seats, never a Claude seat (Haiku included).
+If mimo is among the writers' families, the phase is BLOCKED too: seat 1 cannot sit, and the router picks the seats.
 
 1. **Writers.** All tasks of a phase run in parallel on `phase/<key>`, each gated by its affected tests + CI; no per-task review seat (D-2643).
 2. **Round 1.** Every phase gets it, whatever its bucket. ONE review of the whole phase diff by two seats of distinct non-Claude families, both different from the writers' families:
    `mimo-v2.6-pro` inline-only (the card carries `diff_ref`, the full diff is inline in the prompt, the seat has no tools and says
-   "tests not run (no tools)") plus one other non-Claude family (D-3474). Claude reviewers never count (D-3468). `mimo-v2.6-pro` is always one of
+   "tests not run (no tools)") plus one other non-Claude family (D-3474), a family unlike mimo and the writers. Claude reviewers never count (D-3468). `mimo-v2.6-pro` is always one of
    the two seats, never the only one (D-2540).
 3. **Fix.** ONE fixer brief carries ALL findings of ALL seats of the last round (incl. LOW/MED) plus a same-pattern sweep over the
    whole diff (D-2458); every fixer of a round runs, gated by affected tests + CI, with no seat per fixer (D-2643). A fixer never commits:

@@ -34,7 +34,8 @@ LINE_BUDGET = 400
 STEPS = [
     ('writers', ['parallel', 'phase/<key>', 'tests + CI', 'no per-task']),
     ('round-1 review', ['whole phase diff', 'mimo-v2.6-pro', 'inline-only', 'diff_ref',
-                        'plus one other non-Claude family', 'Claude reviewers never count']),
+                        'plus one other non-Claude family', 'a family unlike mimo and the writers',
+                        'Claude reviewers never count']),
     ('fixer', ['ONE fixer brief', 'ALL findings', 'same-pattern', 'verifies and commits',
                '<new-head>']),
     ('re-review', ['ONE non-Claude reviewer', 'fix delta', '<old-head>..<new-head>']),
@@ -157,6 +158,7 @@ class PhaseBatchRuleBlockTests(unittest.TestCase):
         self.assertIn('no qualifying second family', preface)
         self.assertIn('BLOCKED (fail closed)', preface)
         self.assertIn('never fewer seats', preface)
+        self.assertIn("If mimo is among the writers' families, the phase is BLOCKED", preface)
 
     def test_mimo_is_always_one_of_the_two_round_1_seats(self):
         step = self.steps[2]
@@ -237,6 +239,7 @@ class TemplateTests(unittest.TestCase):
         self.assertIn('Seat 1 is pinned: `mimo-v2.6-pro`', intro)
         self.assertIn('chooses only seat 2', intro)
         self.assertIn('BLOCKED (fail closed)', intro)
+        self.assertIn("If mimo is among the writers' families, the phase is BLOCKED", intro)
         self.assertNotIn('never copied into a brief', intro)
 
     def test_the_main_orchestrator_stays_under_the_line_budget(self):
