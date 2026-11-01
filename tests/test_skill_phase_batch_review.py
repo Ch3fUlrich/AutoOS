@@ -34,9 +34,10 @@ LINE_BUDGET = 400
 STEPS = [
     ('writers', ['parallel', 'phase/<key>', 'tests + CI', 'no per-task']),
     ('round-1 review', ['whole phase diff', 'mimo-v2.6-pro', 'inline-only', 'diff_ref',
-                        'non-Claude family', 'Claude reviewers never count']),
-    ('fixer', ['ONE fixer brief', 'ALL findings', 'same-pattern']),
-    ('re-review', ['ONE non-Claude reviewer', 'fix delta']),
+                        'plus one other non-Claude family', 'Claude reviewers never count']),
+    ('fixer', ['ONE fixer brief', 'ALL findings', 'same-pattern', 'verifies and commits',
+               '<new-head>']),
+    ('re-review', ['ONE non-Claude reviewer', 'fix delta', '<old-head>..<new-head>']),
     ('round cap', ['max 3 rounds', 'replan']),
     ('phase PR', ['phase PR', 'verdict']),
 ]
@@ -127,25 +128,46 @@ class PhaseBatchRuleBlockTests(unittest.TestCase):
         self.assertIn('no tools', step)
         self.assertIn('tests not run (no tools)', step)
 
-    def test_both_seats_differ_from_the_writers_and_high_needs_a_second_family(self):
+    def test_both_seats_differ_from_the_writers_and_the_second_seat_cites_d_3474(self):
         step = self.steps[2]
         self.assertIn("different from the writers' families", step)
-        self.assertIn('HIGH', step)
+        self.assertIn('plus one other non-Claude family (D-3474)', step)
+
+    def test_high_risk_adds_nothing_beyond_the_two_seats(self):
+        self.assertNotIn('HIGH', self.block)
+        self.assertNotIn('HIGH', section(read(MAIN), '## 4c. Phase-batch review'))
+
+    def test_every_phase_is_reviewed_whatever_its_bucket(self):
+        self.assertIn('Every phase', self.steps[2])
+        self.assertIn('whatever its bucket', self.steps[2])
 
     def test_claude_never_counts_and_no_haiku_reviewer(self):
         self.assertIn('Claude reviewers never count', self.block)
-        self.assertIn('no Haiku', self.block)
+        self.assertIn('never a Claude seat (Haiku included)', self.block)
 
-    def test_review_route_order_is_read_from_the_live_policy_not_listed(self):
-        self.assertIn('route --explain', self.block)
-        self.assertIn('never a list in prose', self.block)
+    def test_mimo_is_pinned_seat_1_and_the_route_policy_picks_only_seat_2(self):
+        preface = self.block.split('1. **Writers.**')[0]
+        self.assertIn('Seat 1 is pinned: `mimo-v2.6-pro`', preface)
+        self.assertIn('`route --explain`) chooses only seat 2', preface)
+        self.assertNotIn('never a list in prose', self.block)
+        self.assertNotIn('sits in it', self.block)
+
+    def test_no_qualifying_second_seat_blocks_the_phase_fail_closed(self):
+        preface = self.block.split('1. **Writers.**')[0]
+        self.assertIn('no qualifying second family', preface)
+        self.assertIn('BLOCKED (fail closed)', preface)
+        self.assertIn('never fewer seats', preface)
 
     def test_mimo_is_always_one_of_the_two_round_1_seats(self):
         step = self.steps[2]
         self.assertIn('always one of the two seats', step)
         self.assertIn('never the only one', step)
-        self.assertIn('HIGH risk adds', step)
         self.assertNotIn('never stands alone', step)
+
+    def test_the_fixer_edits_are_committed_by_the_briefing_orchestrator(self):
+        step = self.steps[3]
+        self.assertIn('the L1/L2 that briefed the fixer verifies and commits its edits', step)
+        self.assertIn('<new-head>', step)
 
     def test_the_templates_pointer_names_section_4c(self):
         self.assertIn('(references/main-orchestrator.md) \u00a74c', self.block)
@@ -195,6 +217,28 @@ class TemplateTests(unittest.TestCase):
                          'no commit'):
             self.assertIn(fragment, block)
 
+    def test_fixer_template_names_who_commits_new_head(self):
+        block = self._block('### Phase fixer brief')
+        self.assertIn('verifies and commits', block)
+        self.assertIn('<new-head>', block)
+        brief = re.search(r'```text\n(.*?)```', block, re.S).group(1)
+        self.assertIn('no commit, no push (your briefing L1/L2 verifies and commits them)', brief)
+        seat = self._block('### Phase review seat: prompt and card')
+        self.assertIn('`<new-head>` is the commit the briefing L1/L2 made of the fixer', ' '.join(seat.split()))
+
+    def test_seat_record_keeps_writer_and_provider_skip_text(self):
+        block = self._block('### Phase review seat: prompt and card')
+        record = block[block.index('Record per seat:'):]
+        for fragment in ('writer', 'family', 'model', 'verdict', 'closing line', 'provider skip text'):
+            self.assertIn(fragment, record)
+
+    def test_4c_pins_seat_1_and_blocks_without_a_second_family(self):
+        intro = section(self.main, '## 4c. Phase-batch review')
+        self.assertIn('Seat 1 is pinned: `mimo-v2.6-pro`', intro)
+        self.assertIn('chooses only seat 2', intro)
+        self.assertIn('BLOCKED (fail closed)', intro)
+        self.assertNotIn('never copied into a brief', intro)
+
     def test_the_main_orchestrator_stays_under_the_line_budget(self):
         self.assertLessEqual(len(self.main.splitlines()), LINE_BUDGET)
 
@@ -221,6 +265,10 @@ class SupersededMarkerTests(unittest.TestCase):
     def test_skill_r_orch_13_per_lane_seats(self):
         self.assertMarked(SKILL, '- R-orch-13:', 'D-2534', RULE_ID)
 
+    def test_skill_r_orch_13_timing_and_trigger_are_superseded_for_phase_work(self):
+        self.assertMarked(SKILL, '- R-orch-13:', 'before execute', 'finished phase diff',
+                          'before merge', 'every phase regardless of bucket')
+
     def test_skill_r_orch_14_per_lane_seats(self):
         self.assertMarked(SKILL, '- R-orch-14:', 'D-2534', RULE_ID)
 
@@ -233,8 +281,15 @@ class SupersededMarkerTests(unittest.TestCase):
     def test_main_orchestrator_haiku_sonnet_row_is_not_a_reviewer(self):
         self.assertMarked(MAIN, '| Claude Haiku / Sonnet |', 'D-3468', 'never counts')
 
-    def test_main_orchestrator_haiku_place_sentence(self):
-        self.assertMarked(MAIN, "Haiku's place is", 'D-3468')
+    def test_main_orchestrator_haiku_place_sentence_survives_only_inside_its_marker(self):
+        text = read(MAIN)
+        hits = [line for line in text.splitlines() if "Haiku's place is" in line]
+        self.assertTrue(hits, 'the superseded marker lost the sentence it supersedes')
+        for line in hits:
+            self.assertIn('**Superseded by D-3468', line)
+        live = section(text, '## 4. L3 executors').split('**Superseded by D-3468')[0]
+        self.assertIn('seat selection is', live)
+        self.assertNotIn('Haiku', live)
 
     def test_l3_routing_closer_and_review_role(self):
         self.assertMarked(L3, '| **Role** (added) |', 'D-3468')

@@ -175,7 +175,7 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-orch-11: A lane that changes a route id or return code greps every consumer (lanes.md list), catalog postInstall too. (why: stale ids and bare postInstall abort CI; source: CI 36320592493, 765f189)
 - R-orch-12: Approve each fresh worktree with `trust_worktree.py` before its first session. (why: background sessions cannot answer a trust dialog; source: three lanes blocked in 3s)
 - R-orch-13: Plan, spec, decision, or bucket-table-big diff (lines incl. tests): pinned cross-family review before execute/merge, then Sonnet. (why: same family shares blind spots; source: inbox 00:31Z)
-- **Superseded by D-2534/D-3468 (R-orch-31):** the per-lane review and the "then Sonnet" close above; review is one pass per phase by non-Claude seats, and a Claude close never counts as a seat.
+- **Superseded by D-2534/D-3468 (R-orch-31):** the per-lane review, the "before execute" timing and the "then Sonnet" close above; phase work is reviewed on the finished phase diff, before merge, once per phase by non-Claude seats, and a Claude close never counts as a seat. R-orch-31 reviews every phase regardless of bucket; the plan/spec/decision/bucket-table-big trigger above no longer decides whether a phase is reviewed.
 - R-orch-14: Select available review seats per D-2488/D-2654; record writer, reviewer, verdict and provider skip text. (why: unavailable seats cannot supply independent evidence;
   source: docs/routing.md Seat selection)
 - **Superseded by D-2534/D-3468 (R-orch-31):** per-lane seat selection; seats are chosen once per phase from the live route policy, never a Claude seat. Recording writer, reviewer, verdict and skip text still applies.
@@ -219,16 +219,18 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 #### Phase-batch review (D-2534, amended D-3468/D-3474)
 
 Rule R-orch-31; seat card, prompt and fixer brief: [`references/main-orchestrator.md`](references/main-orchestrator.md) §4c.
-Seat order is the live route policy (`route --explain`), never a list in prose; no Haiku or Claude reviewer sits in it.
+Seat 1 is pinned: `mimo-v2.6-pro`. The live route policy (`route --explain`) chooses only seat 2, a non-Claude family unlike mimo
+and the writers. If it offers no qualifying second family, the phase is BLOCKED (fail closed): never fewer seats, never a Claude seat (Haiku included).
 
 1. **Writers.** All tasks of a phase run in parallel on `phase/<key>`, each gated by its affected tests + CI; no per-task review seat (D-2643).
-2. **Round 1.** ONE review of the whole phase diff by two seats of distinct non-Claude families, both different from the writers' families:
+2. **Round 1.** Every phase gets it, whatever its bucket. ONE review of the whole phase diff by two seats of distinct non-Claude families, both different from the writers' families:
    `mimo-v2.6-pro` inline-only (the card carries `diff_ref`, the full diff is inline in the prompt, the seat has no tools and says
-   "tests not run (no tools)") plus one other non-Claude family. Claude reviewers never count (D-3468). `mimo-v2.6-pro` is always one of
-   the two seats, never the only one (D-2540). HIGH risk adds: the second seat is a non-Claude family besides mimo and unlike the writers (D-3474).
+   "tests not run (no tools)") plus one other non-Claude family (D-3474). Claude reviewers never count (D-3468). `mimo-v2.6-pro` is always one of
+   the two seats, never the only one (D-2540).
 3. **Fix.** ONE fixer brief carries ALL findings of ALL seats of the last round (incl. LOW/MED) plus a same-pattern sweep over the
-   whole diff (D-2458); every fixer of a round runs, gated by affected tests + CI, with no seat per fixer (D-2643).
-4. **Re-review.** ONE non-Claude reviewer on the fix delta, not a panel (D-2540).
+   whole diff (D-2458); every fixer of a round runs, gated by affected tests + CI, with no seat per fixer (D-2643). A fixer never commits:
+   the L1/L2 that briefed the fixer verifies and commits its edits; that commit is `<new-head>`.
+4. **Re-review.** ONE non-Claude reviewer on the fix delta `<old-head>..<new-head>`, not a panel (D-2540).
 5. **Cap.** The loop runs max 3 rounds; findings still open after round 3 mean replan (ask the router).
 6. **Ship.** One phase PR, then a verdict on every item.
 
