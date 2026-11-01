@@ -152,10 +152,11 @@ writers' families), because mimo is one seat, not two.
 ### Phase review seat: prompt and card
 
 One seat is one spawn per round. The card carries the range for the record; the seat itself reads
-only what is in the prompt. `risk` is `high` for a HIGH phase.
+only what is in the prompt. Card keys follow the spawner's `CARD_SCHEMA` (plangraph
+`src/plangraph/spawner/mcp.py`): `estimate_tokens` is required; `diff_ref` is `{repo, base, head}`.
 
 ```json
-{"kind": "review", "mode": "balanced", "risk": "normal", "diff_ref": "<base-sha>..<head-sha>"}
+{"estimate_tokens": 40000, "max_min": 30, "stall_min": 15, "diff_ref": {"repo": "<worktree>", "base": "<base-sha>", "head": "<head-sha>"}}
 ```
 
 Paste the full diff inline in the prompt, never a path: the `mimo-v2.6-pro` seat is inline-only

@@ -171,10 +171,8 @@ class TemplateTests(unittest.TestCase):
         fenced = re.search(r'```json\n(.*?)```', block, re.S)
         self.assertIsNotNone(fenced, 'no ```json card in the seat template')
         card = json.loads(fenced.group(1))
-        self.assertEqual(card['kind'], 'review')
-        self.assertIn('diff_ref', card)
-        for key in ('kind', 'mode', 'risk'):
-            self.assertIn(key, card, 'the resolver requires card key %r' % key)
+        self.assertIsInstance(card.get('estimate_tokens'), int, 'CARD_SCHEMA requires estimate_tokens')
+        self.assertEqual(set(card['diff_ref']), {'repo', 'base', 'head'})
 
     def test_seat_template_says_the_diff_is_inline_not_by_path(self):
         block = self._block('### Phase review seat: prompt and card')
