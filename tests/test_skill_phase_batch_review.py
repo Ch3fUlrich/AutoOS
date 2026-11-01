@@ -140,7 +140,17 @@ class PhaseBatchRuleBlockTests(unittest.TestCase):
         self.assertIn('route --explain', self.block)
         self.assertIn('never a list in prose', self.block)
 
-    def test_the_skill_stays_under_the_line_budget_and_passes_the_checker(self):
+    def test_mimo_is_always_one_of_the_two_round_1_seats(self):
+        step = self.steps[2]
+        self.assertIn('always one of the two seats', step)
+        self.assertIn('never the only one', step)
+        self.assertIn('HIGH risk adds', step)
+        self.assertNotIn('never stands alone', step)
+
+    def test_the_templates_pointer_names_section_4c(self):
+        self.assertIn('(references/main-orchestrator.md) \u00a74c', self.block)
+
+    def test_the_skill_stays_under_the_line_budget(self):
         self.assertLessEqual(len(self.text.splitlines()), LINE_BUDGET)
 
 
@@ -171,6 +181,7 @@ class TemplateTests(unittest.TestCase):
         fenced = re.search(r'```json\n(.*?)```', block, re.S)
         self.assertIsNotNone(fenced, 'no ```json card in the seat template')
         card = json.loads(fenced.group(1))
+        self.assertEqual(set(card), {'estimate_tokens', 'max_min', 'stall_min', 'diff_ref'})
         self.assertIsInstance(card.get('estimate_tokens'), int, 'CARD_SCHEMA requires estimate_tokens')
         self.assertEqual(set(card['diff_ref']), {'repo', 'base', 'head'})
 
@@ -187,6 +198,16 @@ class TemplateTests(unittest.TestCase):
     def test_the_main_orchestrator_stays_under_the_line_budget(self):
         self.assertLessEqual(len(self.main.splitlines()), LINE_BUDGET)
 
+    def test_phase_batch_section_sits_after_4b_and_before_4a(self):
+        heads = [l for l in self.main.splitlines() if l.startswith('## 4')]
+        order = [l.split('.')[0] for l in heads]
+        self.assertEqual(order, ['## 4', '## 4b', '## 4c', '## 4a'])
+
+    def test_re_review_card_and_range_carry_the_fix_delta(self):
+        block = self._block('### Phase review seat: prompt and card')
+        self.assertIn('{repo, base: <old-head>, head: <new-head>}', block)
+        self.assertIn('Range: <old-head>..<new-head>', block)
+
 
 class SupersededMarkerTests(unittest.TestCase):
     """The older per-lane / Claude-reviewer wording stays as history, marked in place."""
@@ -202,6 +223,9 @@ class SupersededMarkerTests(unittest.TestCase):
 
     def test_skill_r_orch_14_per_lane_seats(self):
         self.assertMarked(SKILL, '- R-orch-14:', 'D-2534', RULE_ID)
+
+    def test_skill_r_orch_30_fan_out_is_scoped_away_from_phase_review(self):
+        self.assertMarked(SKILL, '- R-orch-30:', 'D-2534', 'D-2540', RULE_ID, 'exactly two seats', 'never a panel')
 
     def test_skill_r_coord_03_haiku_first_pass_is_not_a_review_seat(self):
         self.assertMarked(SKILL, '- R-coord-03:', 'D-3468', 'Haiku')

@@ -140,6 +140,26 @@ carries them:
      L2s launch leaves only through it.
    - This rule overrides the routing order wherever the two disagree.
 
+## 4b. Build piecewise; test on a data ladder
+
+Plan first, then build in small verified pieces. A defect found on the full data costs a full
+rerun, and one found on ten rows costs seconds.
+
+1. **Plan with the superpowers skills.** Brainstorm, then `writing-plans`, then execute with
+   `subagent-driven-development` or `executing-plans`. A plan's tasks are small enough that each
+   has its own test and its own commit.
+2. **Test-driven and fast.** Failing test first ([`AGENTS.md`](../../../../AGENTS.md) §5). A test that needs minutes is split until the inner loop takes seconds.
+3. **The data ladder** (synthetic data with a known output → a small, varied real batch → the
+   full data once, at the end) is owned by
+   [`coding-principles` Principle 10](../../coding-principles/SKILL.md). Follow it there. What
+   orchestration adds:
+   - an investigator or L2/L3 brief never asks for a full-data pass to answer a question;
+   - it names the small batch and says that a full run needs L1's approval.
+4. The same ladder applies to **tooling**: a new L3 route, a new script or a new migration is
+   run on a tiny task before it is scaled (see the rule above the pairings).
+5. L2 briefs name each rung's command and expected result. The DONE note quotes each rung's
+   summary line.
+
 ## 4c. Phase-batch review (R-orch-31; D-2534, amended D-3468/D-3474)
 
 The six steps are the "Phase-batch review" block in [`../SKILL.md`](../SKILL.md); this is the
@@ -175,8 +195,10 @@ Done means: <the phase's done text>
 <git diff --no-color base..head>
 ```
 
-Re-review (step 4) is the same prompt with the fix delta (`<old-head>..<new-head>`) inline, the
-previous round's findings above it, and one non-Claude seat. Record per seat: family, model,
+Re-review (step 4) is the same prompt on the fix delta, with one non-Claude seat. Set the card's
+`diff_ref` to `{repo, base: <old-head>, head: <new-head>}` and the prompt's line to
+`Range: <old-head>..<new-head>`; paste `git diff --no-color <old-head>..<new-head>` inline and the
+previous round's findings above it, never the phase range. Record per seat: family, model,
 verdict and the closing line as returned.
 
 ### Phase fixer brief
@@ -198,26 +220,6 @@ never mark it fixed. If a finding is unclear or contradicts AGENTS.md, stop and 
 Leave the edits in the working tree: no commit, no push.
 Return: changed: <files> / test: <summary line, verbatim> / open: <finding ids not fixed, why>
 ```
-
-## 4b. Build piecewise; test on a data ladder
-
-Plan first, then build in small verified pieces. A defect found on the full data costs a full
-rerun, and one found on ten rows costs seconds.
-
-1. **Plan with the superpowers skills.** Brainstorm, then `writing-plans`, then execute with
-   `subagent-driven-development` or `executing-plans`. A plan's tasks are small enough that each
-   has its own test and its own commit.
-2. **Test-driven and fast.** Failing test first ([`AGENTS.md`](../../../../AGENTS.md) §5). A test that needs minutes is split until the inner loop takes seconds.
-3. **The data ladder** (synthetic data with a known output → a small, varied real batch → the
-   full data once, at the end) is owned by
-   [`coding-principles` Principle 10](../../coding-principles/SKILL.md). Follow it there. What
-   orchestration adds:
-   - an investigator or L2/L3 brief never asks for a full-data pass to answer a question;
-   - it names the small batch and says that a full run needs L1's approval.
-4. The same ladder applies to **tooling**: a new L3 route, a new script or a new migration is
-   run on a tiny task before it is scaled (see the rule above the pairings).
-5. L2 briefs name each rung's command and expected result. The DONE note quotes each rung's
-   summary line.
 
 ## 4a. Timing: spawn where it is off-peak
 

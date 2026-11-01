@@ -211,20 +211,21 @@ L2 as well); `orch` rules bind whoever briefs or reviews workers.
 - R-orch-30: Fan out at most 10 seats, default 3-5 judged on task complexity;
   prefer fewer; vary model families and prompt angles per seat so findings
   diverge. (why: identical seats duplicate findings and cost; source: operator 2026-10-07)
+- **Superseded for phase review by D-2534/D-2540 (R-orch-31):** the 3-5 default and the "judged on complexity" count do not apply to a phase review; round 1 is exactly two seats, a re-review is one seat, never a panel. R-orch-30 still bounds every other fan-out.
 - R-orch-31: Review per phase, not per task: follow "Phase-batch review" below (D-2534, amended D-3468/D-3474); Claude reviewers never count as a seat.
   (why: per-task seats cost more; Claude shares writers' blind spots;
   source: D-2534, D-3468, tests/test_skill_phase_batch_review.py)
 
 #### Phase-batch review (D-2534, amended D-3468/D-3474)
 
-Rule R-orch-31; seat card, prompt and fixer brief: [`references/main-orchestrator.md`](references/main-orchestrator.md) §4.
+Rule R-orch-31; seat card, prompt and fixer brief: [`references/main-orchestrator.md`](references/main-orchestrator.md) §4c.
 Seat order is the live route policy (`route --explain`), never a list in prose; no Haiku or Claude reviewer sits in it.
 
 1. **Writers.** All tasks of a phase run in parallel on `phase/<key>`, each gated by its affected tests + CI; no per-task review seat (D-2643).
 2. **Round 1.** ONE review of the whole phase diff by two seats of distinct non-Claude families, both different from the writers' families:
    `mimo-v2.6-pro` inline-only (the card carries `diff_ref`, the full diff is inline in the prompt, the seat has no tools and says
-   "tests not run (no tools)") plus one other non-Claude family. Claude reviewers never count (D-3468). HIGH risk: mimo never stands
-   alone, the other seat is a non-Claude family besides mimo (D-3474).
+   "tests not run (no tools)") plus one other non-Claude family. Claude reviewers never count (D-3468). `mimo-v2.6-pro` is always one of
+   the two seats, never the only one (D-2540). HIGH risk adds: the second seat is a non-Claude family besides mimo and unlike the writers (D-3474).
 3. **Fix.** ONE fixer brief carries ALL findings of ALL seats of the last round (incl. LOW/MED) plus a same-pattern sweep over the
    whole diff (D-2458); every fixer of a round runs, gated by affected tests + CI, with no seat per fixer (D-2643).
 4. **Re-review.** ONE non-Claude reviewer on the fix delta, not a panel (D-2540).
