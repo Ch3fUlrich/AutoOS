@@ -307,6 +307,11 @@ class McpWiringTest(unittest.TestCase):
         for k in names:
             self.assertEqual(child.get(k), env[k], k)
 
+    def test_the_windows_system_names_reach_the_launcher(self):
+        with mock.patch.dict(os.environ, {"SystemDrive": "C:"}):
+            child = self.mcp._oc_l1_env()
+        self.assertEqual(child.get("SystemDrive"), "C:")
+
     def test_oc_status_runs_no_check_for_a_dead_lane_or_inside_a_marked_lane(self):
         out = self.call(self.mcp.oc_status, [(2, "dead\n")])
         self.assertEqual((len(self.calls), "recycle" in out), (1, False))
