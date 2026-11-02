@@ -67,6 +67,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -369,6 +370,7 @@ def configure_omnigraph_env(worktree: Path, repo: Path, check: bool = False) -> 
 #: installer was clever.
 HOOK_NAME = "pre-push"
 HOOK_MARKER = "autoos-prepush-gate"
+HOOK_VERSION = 2  # v1 passed no ref lines; a shim of another version is upgraded
 CHAINED_NAME = "pre-push.autoos-chained"
 GATE_TOOL = Path("tools") / "prepush.py"
 
@@ -414,26 +416,25 @@ def hooks_dir(worktree: Path) -> Path | None:
 
 
 def hook_text() -> str:
-    """The shim: run the gate, then exec the chained hook if there is one.
+    """The shim: run the gate on git's ref lines, then run the chained hook.
 
     A missing gate is a refusal, not a pass (NB2): a lane that lost
-    ``tools/prepush.py`` — rebased onto a base without it, checked out an older
-    branch — would otherwise push exactly the untested sha the gate exists to stop.
-    The chained hook is what runs *after* the gate passes, so it is not exec'd here.
-    An orchestrator that means to step over the gate does it with the logged
-    override (``AUTOOS_PREPUSH_OVERRIDE``), which leaves a record ``--check-ready``
-    refuses to call ready.
+    ``tools/prepush.py`` would otherwise push exactly the untested sha the gate
+    exists to stop; the chained hook runs only *after* the gate passes. git's
+    stdin (``<local ref> <local sha> <remote ref> <remote sha>`` lines) goes to
+    the gate (``--hook-stdin``: each pushed sha is certified, not the checkout's
+    HEAD) and again to the chained hook. The logged ``AUTOOS_PREPUSH_OVERRIDE``
+    is the way to step over the gate.
     """
     return (
         "#!/bin/sh\n"
-        "# %s — installed by .agents/skills/unattended-orchestration/"
+        "# %s v%d — installed by .agents/skills/unattended-orchestration/"
         "trust_worktree.py\n"
         "# (operator D-154). All logic is in tools/prepush.py; this shim only\n"
         "# finds it, runs it, and hands over to a hook that was here first.\n"
         "root=$(git rev-parse --show-toplevel) || exit 1\n"
-        "# git exports its repo-location pins to hooks (git rev-parse\n"
-        "# --local-env-vars). Drop them before any child runs, or a test fixture\n"
-        "# working in a tmp dir edits the pushing repo (AO-PREPUSH-HOOK-GITENV).\n"
+        "# git's repo-location pins (git rev-parse --local-env-vars) must not reach\n"
+        "# the gate's children (AO-PREPUSH-HOOK-GITENV).\n"
         "unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG GIT_CONFIG_PARAMETERS\n"
         "unset GIT_CONFIG_COUNT GIT_OBJECT_DIRECTORY GIT_DIR GIT_WORK_TREE\n"
         "unset GIT_IMPLICIT_WORK_TREE GIT_GRAFT_FILE GIT_INDEX_FILE\n"
@@ -447,10 +448,11 @@ def hook_text() -> str:
         "    exit 1\n"
         "fi\n"
         'if [ -x /usr/bin/python3 ]; then py=/usr/bin/python3; else py=python3; fi\n'
-        '"$py" "$gate" || exit 1\n'
+        'refs=$(cat)\n'
+        'printf "%%s\\n" "$refs" | "$py" "$gate" --hook-stdin || exit 1\n'
         'chained="$(dirname "$0")/%s"\n'
-        '[ -x "$chained" ] && exec "$chained" "$@"\n'
-        "exit 0\n" % (HOOK_MARKER, CHAINED_NAME)
+        '[ -x "$chained" ] && { printf "%%s\\n" "$refs" | "$chained" "$@"; exit $?; }\n'
+        "exit 0\n" % (HOOK_MARKER, HOOK_VERSION, CHAINED_NAME)
     )
 
 
@@ -459,26 +461,22 @@ def install_prepush_hook(worktree: Path, check: bool = False) -> str:
 
     WHY A WORKTREE NEEDS THIS
     -------------------------
-    A lane pushes a branch it tested on its own host, and three of them went red in
-    CI while green at home (operator order D-154: "make sure it works BEFORE you
-    push"). The gate that stops that is ``tools/prepush.py``; the runner that
-    creates the worktree is the only place that can install it, because nothing
-    afterwards is guaranteed to remember.
+    Three lanes went red in CI while green at home (operator order D-154: "make
+    sure it works BEFORE you push"). The gate that stops that is
+    ``tools/prepush.py``; only the runner that creates the worktree can install
+    it. An installed shim of another version is upgraded in place (HOOK_VERSION).
 
     THE TWO RULES IT IS WRITTEN TO
     ------------------------------
     * **Chain, never overwrite.** A ``pre-push`` hook that exists and is not ours is
-      kept verbatim as ``pre-push.autoos-chained``, and our shim execs it after the
-      gate passes. A lane's own check silently deleted by an installer is worse than
-      no installer (AGENTS.md: read the existing value, merge, write back).
+      kept verbatim as ``pre-push.autoos-chained``, and our shim runs it after the
+      gate passes (AGENTS.md: read the existing value, merge, write back).
     * **Touch nothing else.** This step never reads or writes ``~/.claude.json``
       (rule D-111), so it is callable on its own with ``--hook-only`` and a
       repository with no Claude trust entry still gets its gate.
 
-    A repository without ``tools/prepush.py`` gets no hook and a line saying so: an
-    installer that quietly installs nothing is how a gate goes missing. That check
-    comes *first* because the git helper is the gate's own (NB6) — asking where the
-    hooks are before there is anything to install would import a module the
+    A repository without ``tools/prepush.py`` gets no hook and a line saying so. That
+    check comes *first*: the git helper is the gate's own (NB6), a module the
     repository may not have.
     """
     gate = worktree / GATE_TOOL
@@ -510,7 +508,9 @@ def install_prepush_hook(worktree: Path, check: bool = False) -> str:
         return ("pre-push gate: installed %s (the previous hook is kept as %s and "
                 "runs after the gate passes)" % (hook, CHAINED_NAME))
     if existing:
-        return f"pre-push gate: refreshed {hook}"
+        old = re.search(HOOK_MARKER + r" v(\d+)", existing)
+        was = "v" + old.group(1) if old else "unversioned"
+        return f"pre-push gate: upgraded {hook} (shim {was} -> v{HOOK_VERSION})"
     return f"pre-push gate: installed {hook}"
 
 
