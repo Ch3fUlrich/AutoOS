@@ -521,7 +521,6 @@ def main(argv=None):
     import oc_l1_serve  # lazy: step A2 pipeline (next to this file)
     import oc_l1_stop  # lazy: oc_l1_serve imports this module
 
-
     if args.cmd == "start":
         rc = oc_l1_serve.cmd_start(lane, args)
         if rc == 0:  # the caller schedules the check: systemd timer / Windows task (configuration/oc-l1/)

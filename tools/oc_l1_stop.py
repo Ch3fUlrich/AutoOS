@@ -84,7 +84,8 @@ def _nt_alive(pid):
         return ctypes.get_last_error() == 5  # access denied: it exists; 87: no such pid
     try:
         code = ctypes.c_ulong()
-        return bool(k32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)))             and code.value == 259
+        return bool(k32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code))) \
+            and code.value == 259
     finally:
         k32.CloseHandle(ctypes.c_void_p(handle))
 
