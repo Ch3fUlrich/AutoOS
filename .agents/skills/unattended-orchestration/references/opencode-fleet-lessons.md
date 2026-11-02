@@ -4,7 +4,7 @@ Everything below was measured on one day of running OpenCode sessions (L0 router
 Read it before you start, restart or supervise an OpenCode session. It extends `unattended-orchestration.md` and `references/layers.md`.
 
 Where the tools are:
-- Launcher: `tools/oc_l1.py` (`render`, `start`, `status`), docs in `docs/ai/opencode-fleet.md` section "oc_l1.py launcher".
+- Launcher: `tools/oc_l1.py` (`render`, `start`, `status`, `recycle`, `stop`), docs in `docs/ai/opencode-fleet.md` section "oc_l1.py launcher".
 - Spawner (writers, seats, researchers): `tools/autoos-agent.py` and the `autoos-agent` MCP tool, see `unattended-orchestration.md` "Spawning".
 - Seats: `tools/review-call.py` (single tool-less call, `evidence.json`, quotes checked by you with `grep -F`).
 - Cost gate: `tools/cost-gate-status.py`, `docs/ai/cost-guard.md`. Bash guard: `docs/ai/fleet-hooks.md`.

@@ -181,10 +181,10 @@ tools/hostexec/policy.py 1895
 tools/launch_profiles.py 424
 tools/memory_facade_engine.py 415
 tools/memory_facade_mcp.py 544
-tools/oc_l1.py 578
+tools/oc_l1.py 537
 tools/oc_l1_render.py 410
-tools/oc_l1_serve.py 748
-tools/oc_l2.py 1632
+tools/oc_l1_serve.py 743
+tools/oc_l2.py 1477
 tools/playwright_mcp_lazy.py 927
 tools/prepush.py 743
 tools/probe-clamp.py 467

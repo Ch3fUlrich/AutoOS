@@ -342,6 +342,11 @@ class ExamplesTest(unittest.TestCase):
         self.assertIn("if %RC%==3 exit /b 0", tail)  # deferred (3) is a success run, as SuccessExitStatus=3
         self.assertIn("-RepetitionInterval", tail)
         self.assertIn("exit 0 ok, 2 config", tail)
+        # with the wrapper the run shows 0x0; 0x3 only if the mapping is removed
+        flat = " ".join(tail.split())
+        self.assertIn('Task Scheduler\'s "Last Run Result" shows 0x0 for a merge window; '
+                      "0x3 appears only if that mapping is removed", flat)
+        self.assertNotIn('"Last Run Result" 0x3 for every', flat)
 
     def test_the_l2_config_path_is_documented(self):
         self.assertIn("AUTOOS_OCL2_STATE_DIR", self.read("autoos-oc-l1-recycle.service"))

@@ -83,7 +83,6 @@ import io
 import json
 import os
 import re
-import signal
 import sys
 import tempfile
 import time
@@ -94,6 +93,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import oc_l1  # noqa: E402
 import oc_l1_serve  # noqa: E402
+import oc_l1_stop  # noqa: E402
 import oc_l1_render  # noqa: E402
 import oc_l1_recycle_poll as recycle_poll  # noqa: E402
 from oc_l1_http import ServerDown, _data, _read_state, _request  # noqa: E402
@@ -198,9 +198,6 @@ ROLE_LINES = (
     "must not spend a tier-3 worker on a report: the tool is the one write path "
     "an L2 has.",
 )
-
-_KILL_WAIT_S = 5.0
-_KILL_HARD_WAIT_S = 2.0
 
 
 class L2Error(Exception):
@@ -1125,180 +1122,28 @@ def cmd_resume(name):
 # --- stop / inbox ------------------------------------------------------------
 
 
-def _identity_ok(pid, state):
-    """May this PID be signalled as the lane? (True, None) or (False, why).
-
-    Identity is the recorded command line AND the kernel start time of that
-    exact PID - not a token of the command line that resembles the binary's
-    name. A recycled PID can inherit the dead lane's number, and a wrapper's
-    `exec` chain means the live head token is not the recorded one, so the
-    comparison is made over the launcher's own arguments (everything after the
-    head) plus the start time, which is the one fact a recycler cannot copy.
-    A state file written before the launcher recorded either fact proves
-    nothing: refusing keeps the process that is not provably the lane alive and
-    keeps the state that describes it. An unreadable /proc (Windows, or already
-    gone) is not evidence to refuse on.
-    """
-    recorded = state.get("argv")
-    start = state.get("start_time")
-    if not isinstance(recorded, list) or not recorded or \
-            not isinstance(start, int):
-        return False, ("pid %d cannot be verified: the state file records no "
-                       "argv/start_time - leave it running and kill it by hand "
-                       "if the lane must go" % pid)
-    live = oc_l1_serve.proc_argv(pid)
-    if live is None:
-        return True, None
-    args = recorded[1:]
-    if live[len(live) - len(args):] != args:
-        return False, ("pid %d is not the lane's recorded command - refused to "
-                       "kill it, the state file stays" % pid)
-    now = oc_l1_serve.proc_starttime(pid)
-    if now is not None and now != start:
-        return False, ("pid %d is the lane's command but not its process: start "
-                       "time %s is not the recorded %s (a recycled pid) - "
-                       "refused to kill it, the state file stays"
-                       % (pid, now, start))
-    return True, None
-
-
-def _pgid(pid):
-    try:
-        return os.getpgid(pid)
-    except (OSError, ProcessLookupError):
-        return None
-
-
-def _pid_gone(pid):
-    """Is the recorded PID finished? `kill(pid, 0)` also answers for a ZOMBIE -
-    killed, not yet waited for by its parent - so reading that as alive would
-    report an orphan that cannot exist. Reap it when it is our own child,
-    else read /proc's state letter where it exists (the same reasoning as
-    tests/_oc_l1_fakes.pid_alive, which the L1 suite already needs)."""
-    if os.name == "nt":
-        try:
-            os.kill(pid, 0)
-        except (OSError, ProcessLookupError):
-            return True
-        return False
-    try:
-        done, _ = os.waitpid(pid, os.WNOHANG)
-        if done == pid:
-            return True
-    except (ChildProcessError, OSError):
-        pass  # not our child: its own parent reaps it
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False
-    except OSError:
-        return True
-    try:
-        with open("/proc/%d/stat" % pid, encoding="utf-8") as fh:
-            state = fh.read().rsplit(")", 1)[1].split()[0]
-    except (OSError, IndexError):
-        return False
-    return state == "Z"
-
-
-def _wait_gone(pid, seconds):
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline and not _pid_gone(pid):
-        time.sleep(0.1)
-    return _pid_gone(pid)
+_identity_ok = oc_l1_stop.identity_ok
+_pgid = oc_l1_stop.pgid
+_pid_gone = oc_l1_stop.pid_gone
+_wait_gone = oc_l1_stop.wait_gone
 
 
 def cmd_stop(name):
     """Clean stop (R-coord-10): the recorded PID's whole process group, then
     the state file goes - a stopped lane that leaves a `serve` bound to its
-    port would make the next start's health poll answer for the orphan."""
+    port would make the next start's health poll answer for the orphan. The
+    kill itself is tools/oc_l1_stop.py, shared with `oc_l1.py stop`."""
     name = check_lane(name)
     lane = read_config(name)
     if lane is None:
         return {"lane": name, "stopped": False,
                 "detail": "no lane config at %s - nothing was started" % config_path(name)}
     state = _read_state(lane.get("state_file") or "")
-    pid = state.get("pid") if isinstance(state, dict) else None
     # the port the server actually took (fix 6 moves a lane off a held port),
     # with the config's number only as the fallback for a lane that never started
     port = ((state.get("port") if isinstance(state, dict) else None)
             or lane.get("serve_port") or oc_l1.derive_port(name))
-    out = {"lane": name, "port": port,
-           "killed_pids": [], "orphan": False, "removed_state": []}
-    if not (isinstance(pid, int) and pid > 0):
-        out["stopped"] = True
-        out["detail"] = "no live pid recorded; nothing to kill"
-        return out
-    if os.name == "nt":
-        # taskkill /F /T walks the tree itself (oc_l1's own kill path).
-        oc_l1_serve._kill_pid(pid)
-        out["killed_pids"].append(pid)
-    else:
-        ok, why = _identity_ok(pid, state)
-        if not ok:
-            out.update(stopped=False, orphan=True, detail=why)
-            return out
-        # start_new_session=True made the child its own group leader, so the
-        # group is the tree: whatever `opencode serve` forks dies with it.
-        # Anywhere else the process belongs to whoever started it - possibly
-        # this very caller - and only the recorded PID may be signalled.
-        group_leader = _pgid(pid) == pid
-        if group_leader:
-            try:
-                os.killpg(pid, signal.SIGTERM)
-                out["killed_pids"].append(pid)
-            except (ProcessLookupError, PermissionError, OSError):
-                oc_l1_serve._kill_pid(pid)
-                out["killed_pids"].append(pid)
-        else:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-            out["killed_pids"].append(pid)
-        if group_leader:
-            # AO-L2-LAUNCH criterion b: the group is the whole tree, and a
-            # grandchild that IGNORES SIGTERM outlives both it and the leader.
-            # The lone recorded PID dying is therefore no proof the lane is gone:
-            # after the graceful window, SIGKILL the ENTIRE group regardless of
-            # whether the leader already died. The group's id equals the leader's
-            # (now-dead) PID and the group still exists while any member does, so
-            # killpg keeps reaching the survivors. A stop that signals only the
-            # leader would leave that stubborn child running - the exact orphan
-            # R-coord-10 forbids.
-            _wait_gone(pid, _KILL_WAIT_S)
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-            _wait_gone(pid, _KILL_HARD_WAIT_S)
-        elif not _wait_gone(pid, _KILL_WAIT_S):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-            _wait_gone(pid, _KILL_HARD_WAIT_S)
-    if not _pid_gone(pid):
-        out.update(stopped=False, orphan=True,
-                   detail="pid %d is still alive after SIGKILL to its process group; "
-                          "the state file stays so the lane is not reported as "
-                          "stopped" % pid)
-        return out
-    # The state file goes last: while it exists the lane is still "running"
-    # to anything that reads it.
-    try:
-        os.remove(lane["state_file"])
-        out["removed_state"].append(lane["state_file"])
-    except OSError as e:
-        out.update(stopped=False, orphan=False,
-                   detail="the server is stopped but the state file could not be "
-                          "removed: %s" % e)
-        return out
-    out["stopped"] = True
-    out["detail"] = "stopped"
-    return out
+    return oc_l1_stop.stop_lane(name, lane, state, port)
 
 
 def append_record(path, text, source="l1"):

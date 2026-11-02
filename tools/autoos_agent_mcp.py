@@ -304,7 +304,7 @@ def _oc_l1_args(lane: str, subcommand: str) -> list:
     the subcommand and dies on invalid choice)."""
     if not isinstance(lane, str) or not _LANE_NAME_RE.match(lane):
         raise ValueError("lane must match [a-z0-9][a-z0-9-]{0,31}")
-    if subcommand not in ("render", "start", "status", "recycle"):
+    if subcommand not in ("render", "start", "status", "recycle", "stop"):
         raise ValueError("unsupported oc_l1.py subcommand")
     return [sys.executable, os.path.join(TOOLS_DIR, "oc_l1.py"), subcommand, "--name", lane]
 

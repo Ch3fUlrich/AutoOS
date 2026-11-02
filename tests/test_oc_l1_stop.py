@@ -1,0 +1,151 @@
+"""tests/test_oc_l1_stop.py - AO-OC-RECYCLE-FOLLOWUPS: `oc_l1.py stop` (tools/oc_l1_stop.py).
+
+Hermetic: the "lane server" is a throwaway python sleeper (plus a grandchild of
+its own) in a tmp dir, no opencode and no network. The kill path is the one
+`oc_l2.py stop` shares (process group on POSIX, `taskkill /T` on Windows)."""
+
+import contextlib
+import io
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+import oc_l1  # noqa: E402
+import oc_l1_serve  # noqa: E402
+import oc_l1_stop  # noqa: E402
+import oc_l2  # noqa: E402
+from _oc_l1_fakes import make_lane, pid_alive, wait_file, write_cfg  # noqa: E402
+
+# the parent starts a child of its own and records its pid, so a tree kill is observable
+SERVER = ("import subprocess, sys, time\n"
+          "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+          "open(sys.argv[1], 'w').write(str(kid.pid))\n"
+          "time.sleep(120)\n")
+
+
+def run_main(*argv):
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = oc_l1.main(list(argv))
+    return rc, out.getvalue(), err.getvalue()
+
+
+class StopTest(unittest.TestCase):
+    def setUp(self):
+        self._td = tempfile.TemporaryDirectory(prefix="oc_l1_stop_test_")
+        self.td = Path(self._td.name)
+        self.lane = make_lane(self.td, 47251)
+        self.cfg = write_cfg(self.td, self.lane)
+        self.state_file = Path(self.lane["state_file"])
+        self.procs = []
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        for p in self.procs:
+            if p.poll() is None:
+                p.kill()
+            p.wait()
+        self._td.cleanup()
+
+    def start_server(self):
+        """A live 'serve' with a grandchild; its state file as `start` writes it."""
+        kid_file = self.td / "kid.pid"
+        kwargs = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True  # a group leader, as `start` spawns it
+        argv = [sys.executable, "-c", SERVER, str(kid_file)]
+        proc = subprocess.Popen(argv, **kwargs)
+        self.procs.append(proc)
+        wait_file(kid_file)
+        kid = int(kid_file.read_text())
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file.write_text(json.dumps({
+            "name": "l1test", "session_id": "ses_x", "port": 47251, "pid": proc.pid,
+            "argv": argv, "start_time": oc_l1_serve.proc_starttime(proc.pid) or 0}), encoding="utf-8")
+        return proc, kid
+
+    def gone(self, proc, pid):
+        deadline = time.time() + 10
+        while time.time() < deadline and (proc.poll() is None or pid_alive(pid)):
+            time.sleep(0.1)
+        return proc.poll() is not None and not pid_alive(pid)
+
+    def stop(self):
+        return run_main("stop", "--name", "l1test", "--config", str(self.cfg))
+
+    def test_stop_kills_the_process_tree_and_removes_the_state_file(self):
+        proc, kid = self.start_server()
+        self.assertTrue(pid_alive(kid))
+        rc, out, err = self.stop()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("stopped", out)
+        self.assertIn(str(proc.pid), out)
+        self.assertTrue(self.gone(proc, kid), "the server or its child survived stop")
+        self.assertFalse(self.state_file.exists())
+
+    def test_a_second_stop_is_not_running_and_kills_nothing(self):
+        self.start_server()
+        self.assertEqual(self.stop()[0], 0)
+        killed = []
+        real = oc_l1_serve._kill_pid
+        oc_l1_serve._kill_pid = killed.append
+        self.addCleanup(setattr, oc_l1_serve, "_kill_pid", real)
+        rc, out, err = self.stop()
+        self.assertEqual((rc, killed), (0, []))
+        self.assertIn("not running", out)
+
+    def test_stop_with_no_state_file_ever_written_is_not_running(self):
+        rc, out, _ = self.stop()
+        self.assertEqual(rc, 0)
+        self.assertIn("not running", out)
+
+    def test_a_state_file_with_no_pid_is_dropped(self):
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file.write_text(json.dumps({"name": "l1test", "port": 47251}), encoding="utf-8")
+        rc, out, _ = self.stop()
+        self.assertEqual(rc, 0)
+        self.assertFalse(self.state_file.exists())
+
+    @unittest.skipIf(os.name == "nt", "the identity check is POSIX-only (no /proc on Windows)")
+    def test_a_pid_that_is_not_provably_the_lane_is_not_killed(self):
+        proc, kid = self.start_server()
+        st = json.loads(self.state_file.read_text(encoding="utf-8"))
+        st.pop("start_time")
+        self.state_file.write_text(json.dumps(st), encoding="utf-8")
+        rc, _, err = self.stop()
+        self.assertEqual(rc, 2)
+        self.assertIn("NOT stopped", err)
+        self.assertIsNone(proc.poll())
+        self.assertTrue(self.state_file.exists())
+
+    def test_an_unknown_lane_is_exit_2(self):
+        rc, out, err = run_main("stop", "--name", "nosuch", "--config", str(self.cfg))
+        self.assertEqual(rc, 2)
+        self.assertIn("no lane named 'nosuch'", err)
+
+    def test_stop_is_a_listed_subcommand(self):
+        self.assertIn("stop", oc_l1.build_parser().format_help().split("{")[1].split("}")[0])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            oc_l1.main(["stop"])  # --name is required
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_the_l2_stop_shares_the_helpers(self):
+        self.assertIs(oc_l2._wait_gone, oc_l1_stop.wait_gone)
+        self.assertIs(oc_l2._pid_gone, oc_l1_stop.pid_gone)
+        self.assertIs(oc_l2._identity_ok, oc_l1_stop.identity_ok)
+        self.assertIs(oc_l2._pgid, oc_l1_stop.pgid)
+
+
+if __name__ == "__main__":
+    unittest.main()

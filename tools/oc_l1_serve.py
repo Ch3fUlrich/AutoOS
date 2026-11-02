@@ -75,6 +75,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import oc_l1_env  # noqa: E402
 import oc_l1  # noqa: E402  (LaneError, render, REPO_ROOT, default_config_path)
 import oc_l1_canary  # noqa: E402
 import oc_l1_http  # noqa: E402
@@ -325,24 +326,18 @@ def _child_env(lane, rendered, password):
     # kept, so read it from the launcher env even though the allowlist does
     # not cover it): a project `{env:...}` reference then resolves to the
     # same endpoint without editing the other checkout. A system endpoint
-    # alias, not a credential (WINDIR precedent in oc_l1.LANE_ENV_ALLOW).
+    # alias, not a credential (WINDIR precedent in oc_l1_env.LANE_ENV_ALLOW).
     explicit_review = (os.environ.get("PLANGRAPH_REVIEW_URL") or "").strip()
     if explicit_review:
         env["PLANGRAPH_REVIEW_URL"] = explicit_review
     elif not (env.get("PLANGRAPH_REVIEW_URL") or "").strip():
         env["PLANGRAPH_REVIEW_URL"] = env[oc_l1.ENV_URL]
-    # Windows server children need SystemRoot in their environment (see
-    # _needs_systemroot): the allowlist above drops it, and lanes that declare
-    # no child_env — every L2 lane, any L1 from the example config — could
-    # never start. Forwarded by presence only when the launcher has it; never
-    # invented. A system path, not a credential (WINDIR precedent in
-    # oc_l1.LANE_ENV_ALLOW). A lane that already names it keeps its own entry.
-    if _needs_systemroot() and not any(
-            n.upper() == "SYSTEMROOT" for n in env):
-        for _name, _value in os.environ.items():
-            if _name.upper() == "SYSTEMROOT" and _value:
-                env["SystemRoot"] = _value
-                break
+    # Windows server children need SystemRoot (see _needs_systemroot) and the
+    # other system paths of oc_l1_env.LANE_ENV_WINDOWS: the allowlist above never
+    # matches them there, so lanes with no child_env (every L2 lane) could not
+    # start. Forwarded by presence only; see oc_l1_env.forward_windows_names.
+    if _needs_systemroot():
+        oc_l1_env.forward_windows_names(env, os.environ)
     env["OPENCODE_CONFIG"] = str(rendered)
     env["OPENCODE_SERVER_PASSWORD"] = password  # child env ONLY
     # D-665 (AO-L2-LAUNCH): the bash-guard role, the L1 inbox and the agent layer
