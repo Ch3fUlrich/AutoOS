@@ -8,6 +8,7 @@ import contextlib
 import io
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -46,7 +47,7 @@ class StopTest(unittest.TestCase):
         self.lane = make_lane(self.td, 47251)
         self.cfg = write_cfg(self.td, self.lane)
         self.state_file = Path(self.lane["state_file"])
-        self.procs = []
+        self.procs, self.kids = [], []
         self.addCleanup(self._cleanup)
 
     def _cleanup(self):
@@ -54,6 +55,11 @@ class StopTest(unittest.TestCase):
             if p.poll() is None:
                 p.kill()
             p.wait()
+        for kid in filter(pid_alive, self.kids):  # the grandchild outlives a parent-only kill
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(kid), "/F"], capture_output=True)
+            else:
+                os.kill(kid, signal.SIGTERM)
         self._td.cleanup()
 
     def start_server(self):
@@ -69,6 +75,7 @@ class StopTest(unittest.TestCase):
         self.procs.append(proc)
         wait_file(kid_file)
         kid = int(kid_file.read_text())
+        self.kids.append(kid)
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state_file.write_text(json.dumps({
             "name": "l1test", "session_id": "ses_x", "port": 47251, "pid": proc.pid,
