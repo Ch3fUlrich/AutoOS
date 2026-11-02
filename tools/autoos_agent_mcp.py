@@ -103,6 +103,7 @@ from autoos_verdict import (TRANSCRIPT_VERDICTS, VERDICTS, LEGACY_AGENT_VERDICTS
                             transcript_value, transcript_verdict)  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import oc_l1_recycle_poll as recycle_poll  # noqa: E402
+from oc_l1_env import LANE_ENV_WINDOWS  # noqa: E402
 from registry import resolve_leg, unavailable_now  # noqa: E402
 
 TAIL_CHARS = 6000
@@ -149,15 +150,14 @@ def state_root() -> str:
 # (AUTOOS_OCL1_PW); never read, printed or logged here - a missing one comes back as the remediation.
 
 _LANES_CONFIG = os.path.expanduser("~/.config/autoos/oc-l1.json")
-# The oc_l1 children get an ALLOWLIST env, not the caller's whole environment
-# (the same hygiene test_every_non_plumbing_child_call_passes_an_env enforces
-# everywhere else): only what the launcher and its canary need.
+# The oc_l1 children get an ALLOWLIST env, not the caller's whole environment (the same hygiene
+# test_every_non_plumbing_child_call_passes_an_env enforces everywhere else): only what the launcher and its canary need.
 _OC_L1_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
                    "AUTOOS_OCL1_PW", "SESSION_GATEWAY_URL", "XDG_STATE_HOME", "AUTOOS_CTX_HANDOFF",
                    "AUTOOS_DAILY_GATE_FILE", "AUTOOS_HOST_NAME", "AUTOOS_CTX_HARD",
                    # the gateway PAIR: the rendered lane config references both as
                    # {env:...}; forward only the URL and a lane has no key for its model
-                   "AUTOOS_OMNIROUTE_URL", "AUTOOS_OMNIROUTE_KEY")
+                   "AUTOOS_OMNIROUTE_URL", "AUTOOS_OMNIROUTE_KEY") + LANE_ENV_WINDOWS
 
 
 def _oc_l1_env() -> dict:
@@ -304,7 +304,7 @@ def _oc_l1_args(lane: str, subcommand: str) -> list:
     the subcommand and dies on invalid choice)."""
     if not isinstance(lane, str) or not _LANE_NAME_RE.match(lane):
         raise ValueError("lane must match [a-z0-9][a-z0-9-]{0,31}")
-    if subcommand not in ("render", "start", "status", "recycle"):
+    if subcommand not in ("render", "start", "status", "recycle", "stop"):
         raise ValueError("unsupported oc_l1.py subcommand")
     return [sys.executable, os.path.join(TOOLS_DIR, "oc_l1.py"), subcommand, "--name", lane]
 

@@ -65,12 +65,13 @@ OpenCode L1 sessions MUST load the `bash-guard` plugin before they run unattende
 ## oc_l1.py launcher
 
 `tools/oc_l1.py` starts ONE OpenCode orchestrator (an "L1") for ONE lane from a host-local config: one `opencode serve`
-bound to 127.0.0.1, one session, relaunchable from a handoff card. It has three subcommands:
+bound to 127.0.0.1, one session, relaunchable from a handoff card. It has five subcommands (`recycle` has its own section below):
 
 ```bash
 python3 tools/oc_l1.py render --name <lane> [--config PATH]   # write the scratch opencode config, nothing else
 python3 tools/oc_l1.py start  --name <lane> [--config PATH]   # render, start the server, create the session, run the canary
 python3 tools/oc_l1.py status --name <lane> [--config PATH]   # live | silent | dead
+python3 tools/oc_l1.py stop   --name <lane> [--config PATH]   # kill the serve process tree, remove the state file; idempotent
 ```
 
 ### Config
@@ -341,11 +342,11 @@ State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`), o
 `~/.config/autoos/oc-l1.json`, so the `autoos-oc-l1` watcher never restarts an L2 lane**: recovery is `l2_start` again, which is
 also why a `start` on a lane that is already live is refused rather than silently restarted.
 
-`stop` kills the recorded PID's process group (the child is its own session leader, so everything `opencode serve` forked dies
+`stop` (`oc_l2.py stop`; `oc_l1.py stop --name <lane>` shares the kill, `tools/oc_l1_stop.py`: `taskkill /F /T` on Windows) kills the recorded PID's process group (the child is its own session leader, so everything `opencode serve` forked dies
 with it) and removes the state file only after proving the PID gone — a zombie answers `kill(pid, 0)`, so death is read from
 `/proc/<pid>/stat` (R-coord-10: an orphan `serve` holding the port would make the next start's health poll answer for the wrong
 server). A PID whose argv holds no token that IS the lane's binary is never killed; the stop reports `stopped=false, orphan=true`
-and keeps the state file.
+and keeps the state file. A second `oc_l1.py stop` says `not running` (exit 0, nothing killed); an unknown lane is exit 2.
 
 A manual live check (real binary, real gateway, the host password env — the value never leaves the environment):
 
@@ -392,8 +393,7 @@ never blank out the gateway `baseURL`.
   every source — `--bind` / `FLEET_BUS_BIND` (exit 2) or a discovered endpoint (exit 3) — because the read path is open: the address is
   resolved first, so every spelling of the all-zeros address is refused (`0.0.0.0`, `0`, `0.0`, `000.000.000.000`, `0x0`, `::`, `::0`,
   `0:0:0:0:0:0:0:0`, empty), and an address the OS will not hand out is the same one-line exit-3 error naming the address, never a
-  traceback. `--secret-file` together
-  with `--inventory` is refused (exit 2): exactly one key source. A host that names the address itself sets the variable in its
+  traceback. `--secret-file` together with `--inventory` is refused (exit 2): exactly one key source. A host that names the address itself sets the variable in its
   own 0600 unit/config, never in a tracked file.
 
 The relay above uses its own `X-Fleet-Sig` format; the separate, versioned fleet-bus v2 wire contract (signing, canonical form, cursors, signed reads, validation, test vectors) is specified in plangraph's [`docs/FLEET-BUS.md`](https://github.com/Ch3fUlrich/plangraph/blob/main/docs/FLEET-BUS.md), implemented by plangraph `src/plangraph/fleet_bus/contract.py`.

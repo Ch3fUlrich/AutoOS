@@ -75,51 +75,7 @@ ENV_AGENT_LAYER = "AUTOOS_AGENT_LAYER"
 ENV_L2_LANE = "AUTOOS_L2_LANE"
 
 # --- the lane child environment (Sonnet final REJECT 2026-10-08, finding 2) ---
-#
-# `start` handed the lane `dict(os.environ)`, so every credential the launcher's
-# shell happened to export - a GitHub token, a provider key, a database password -
-# sat in /proc/<pid>/environ where the lane, the MCP server it starts and every
-# worker it spawns could read it. A lane is a model session: it gets the variables
-# a session legitimately needs and nothing else.
-#
-# The rule is one allowlist of NAMES plus one allowlist of NAME PREFIXES (the
-# families a real session needs: git's own internals, XDG, locale, the fleet's
-# AUTOOS_* knobs), minus every credential-shaped name inside those families.
-# LANE_ENV_ALLOW beats the credential pattern - the two gateway names below are
-# the rendered config's own `{env:...}` references, so the lane cannot reach its
-# model without them, and they are the only credentials a lane is ever handed.
-# Anything else a lane needs is declared by NAME in the lane's `child_env`; the
-# value is inherited, never stored in a lane config file.
-LANE_ENV_ALLOW = (
-    # finding the binaries and writing to a home
-    "PATH", "HOME", "SHELL", "USER", "LOGNAME", "TMPDIR", "TEMP", "TMP",
-    "APPDATA", "LOCALAPPDATA", "USERPROFILE", "SystemRoot", "WINDIR", "COMSPEC",
-    "PATHEXT", "HOMEDRIVE", "HOMEPATH", "NUMBER_OF_PROCESSORS",
-    # locale, terminal, timezone and colour, so output matches the launcher's
-    "LANG", "LANGUAGE", "TERM", "TZ", "PAGER", "EDITOR", "VISUAL",
-    "NO_COLOR", "FORCE_COLOR", "COLORTERM",
-    # reaching the gateway through a proxy, and trusting its certificate
-    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
-    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
-    "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
-    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
-    "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
-    "DISPLAY", "WAYLAND_DISPLAY",
-    # the gateway pair: the rendered config references them as {env:...} and the
-    # lane has no other way to its model. NAMES only - the values stay in the
-    # launcher's environment.
-    "AUTOOS_OMNIROUTE_URL", "AUTOOS_OMNIROUTE_KEY",
-)
-LANE_ENV_ALLOW_PREFIXES = (
-    "LC_", "XDG_", "GIT_", "OPENCODE_", "NODE_", "PYTHON", "SSL_", "OPENSSL_",
-    "AUTOOS_", "SESSION_", "OMNIGRAPH_", "OMNIROUTE_",  # non-secret names, see below
-)
-# A name ending in one of these holds a credential, whatever family it sits in.
-LANE_ENV_CREDENTIAL_SUFFIXES = ("_PW", "_PWD", "_KEY", "_KEYFILE", "_APIKEY",
-                                "_TOKEN", "_SECRET", "_PASSWORD", "_PASSPHRASE",
-                                "_CREDENTIAL")
-LANE_ENV_CREDENTIAL_WORDS = ("PASSWORD", "PASSPHRASE", "SECRET", "CREDENTIAL",
-                             "TOKEN", "APIKEY")
+# The name lists live in oc_l1_env.py; env_is_allowed below applies them.
 _ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 # These variables are LANE properties, never host ones: the guard's role, where
 # the lane reports to, which level the lane runs at, and the lane's own name.
@@ -165,6 +121,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from oc_l1_render import (ENV_KEY, ENV_URL, RENDERED_FILENAME, LaneError, _strip_jsonc,  # noqa: E402,F401
                           render)
+from oc_l1_env import (LANE_ENV_ALLOW, LANE_ENV_ALLOW_PREFIXES, LANE_ENV_CREDENTIAL_SUFFIXES,  # noqa: E402,F401
+                       LANE_ENV_CREDENTIAL_WORDS, LANE_ENV_WINDOWS)
 import oc_l1_recycle  # noqa: E402
 import oc_l1_recycle_poll  # noqa: E402
 
@@ -515,12 +473,13 @@ def build_parser():
             "localhost-only opencode serve, one session."
         ),
     )
-    sub = ap.add_subparsers(dest="cmd", required=True, metavar="{render,start,status,recycle}")
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="{render,start,status,recycle,stop}")
     for cmd, help_ in (
         ("render", "write the scratch opencode config for one lane"),
         ("start", "start serve, create the session, post the first prompt"),
         ("status", "print live | silent | dead for the lane's session"),
         ("recycle", "check the session's token usage once; handoff prompt / restart"),
+        ("stop", "kill the lane's serve process tree and remove its state file"),
     ):
         p = sub.add_parser(cmd, help=help_)
         p.add_argument("--name", required=True, help="lane name (top-level config key)")
@@ -560,6 +519,7 @@ def main(argv=None):
     if args.cmd == "recycle":
         return oc_l1_recycle.cmd_recycle(lane, args)
     import oc_l1_serve  # lazy: step A2 pipeline (next to this file)
+    import oc_l1_stop  # lazy: oc_l1_serve imports this module
 
     if args.cmd == "start":
         rc = oc_l1_serve.cmd_start(lane, args)
@@ -567,6 +527,8 @@ def main(argv=None):
             print(oc_l1_recycle_poll.HINT_PREFIX + oc_l1_recycle_poll.recycle_command(
                 lane["name"], cfg_path.resolve()))
         return rc
+    if args.cmd == "stop":
+        return oc_l1_stop.cmd_stop(lane, args)
     return oc_l1_serve.cmd_status(lane, args)
 
 

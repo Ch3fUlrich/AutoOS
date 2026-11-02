@@ -112,7 +112,8 @@ schtasks /Create /SC MINUTE /MO 3 /TN "OcL1Recycle-<lane>" /TR "cmd.exe /c <chec
 `-MultipleInstances IgnoreNew` keeps runs from overlapping (the check also holds
 `<scratch_dir>\recycle.lock` and answers `busy` if another check is running). The exit code is the check's:
 exit 0 ok, 2 config error (bad thresholds, or the lane's `password_env` unset), 3 deferred (a merge is in
-progress, retried next run - **expected, not a failure**: Task Scheduler shows "Last Run Result" 0x3 for every
-merge window; the systemd unit declares it with `SuccessExitStatus=3`, so the wrapper above maps it to 0), 4 server/session unreachable or a step failed, 6 token usage present but
+progress, retried next run - **expected, not a failure**: with the wrapper above, which maps 3 to 0 (the
+systemd unit declares the same with `SuccessExitStatus=3`), Task Scheduler's "Last Run Result" shows 0x0 for a
+merge window; 0x3 appears only if that mapping is removed), 4 server/session unreachable or a step failed, 6 token usage present but
 unreadable (nothing restarted). A monitoring hook can act on 2/4/6. Details: `docs/ai/opencode-fleet.md`,
 section "recycle".

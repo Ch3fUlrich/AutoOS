@@ -301,13 +301,13 @@ def _check(lane, state, sid, port, password, thr, warn, http, serve):
             _announce(lane, port, password, sid, ctx, level, thr, http)
             return _out(EXIT_OK, lane, "announced", [warn], level=level, **info)
 
-        held = _too_soon(state)
-        if held:
-            return _out(EXIT_OK, lane, "cooldown", [warn], level=level, detail=held, **info)
-        reason = merge_in_progress(lane)
+        reason = merge_in_progress(lane)  # a merge wins over the cooldown: deferred (exit 3), not cooldown
         if reason:
             return _out(EXIT_DEFERRED, lane, "deferred", [warn], level=level, detail=(
                 "deferred: merge in progress (%s); retried on the next check" % reason), **info)
+        held = _too_soon(state)
+        if held:
+            return _out(EXIT_OK, lane, "cooldown", [warn], level=level, detail=held, **info)
         fresh = False
         try:
             fresh = bool(announced) and Path(lane["handoff"]).stat().st_mtime >= announced["ts"]
