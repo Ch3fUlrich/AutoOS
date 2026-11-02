@@ -12,6 +12,7 @@ Run directly:
 
     python3 tests/test_check_file_size.py
 """
+import os
 import shutil
 import subprocess
 import sys
@@ -37,14 +38,17 @@ class RepoFixture(unittest.TestCase):
         self.repo = self.tmp / "repo"
         self.repo.mkdir()
         self.git("init", "-q")
-        # CI runners carry no git identity (the SBA red in tools/prepush.py):
-        # a fixture commit must carry its own.
-        self.git("config", "user.name", "file-size tests")
-        self.git("config", "user.email", "filesize@example.invalid")
 
     def git(self, *args):
-        return subprocess.run(["git"] + list(args), cwd=str(self.repo),
-                              capture_output=True, text=True)
+        # CI runners carry no git identity (the SBA red in tools/prepush.py): a
+        # fixture commit carries its own through -c, never a `git config` write
+        # (AO-PREPUSH-HOOK-GITENV-2), and no host config is read.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        ident = ["-c", "user.name=file-size tests",
+                 "-c", "user.email=filesize@example.invalid"]
+        return subprocess.run(["git"] + ident + list(args), cwd=str(self.repo),
+                              env=env, capture_output=True, text=True)
 
     def write(self, rel, text):
         path = self.repo / rel

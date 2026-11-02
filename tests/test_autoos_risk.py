@@ -762,20 +762,20 @@ class GitParsingTests(unittest.TestCase):
 # ── assess against a real temp git repo ────────────────────────────────────
 
 class _Repo(unittest.TestCase):
-    """A throwaway commit-per-test repo, driven by the real default runner."""
+    """A throwaway commit-per-test repo (identity via -c, never a config write)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="autoos-risk-repo-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self._git(["init", "-q", "-b", "main"])
-        self._git(["config", "user.name", "risk-test"])
-        self._git(["config", "user.email", "risk-test@example.invalid"])
-        self._git(["config", "commit.gpgsign", "false"])
         self.base = self.write_and_commit({"README.md": "hello\n"})
 
     def _git(self, args):
-        return subprocess.run(["git"] + args, cwd=self.tmp, capture_output=True,
-                              text=True, check=True).stdout
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        ident = ["-c", "user.name=risk-test", "-c", "user.email=risk-test@example.invalid"]
+        return subprocess.run(["git"] + ident + args, cwd=self.tmp, env=env,
+                              capture_output=True, text=True, check=True).stdout
 
     def write_and_commit(self, changes):
         """Write (or delete, when the text is None) then commit; return the sha."""

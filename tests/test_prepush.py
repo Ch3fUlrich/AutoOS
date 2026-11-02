@@ -93,7 +93,6 @@ def _run(path):
             failed += 1
     return failed, len(names) - failed
 
-
 argv = sys.argv[1:]
 if len(argv) >= 3 and argv[0] == "-m" and argv[1] == "pytest":
     files = [a for a in argv[2:] if not a.startswith("-")]
@@ -142,9 +141,10 @@ sys.stdout.write(json.dumps(json.loads(os.environ.get("PREPUSH_FIXTURE_PLAN", "{
 
 
 def run_git(*args, cwd=None, check=True):
-    proc = subprocess.run(GIT + list(args),
-                          cwd=(str(cwd) if cwd is not None else None),
-                          capture_output=True, text=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    proc = subprocess.run(GIT + list(args), cwd=(str(cwd) if cwd is not None else None),
+                          capture_output=True, text=True, env=env)
     if check and proc.returncode != 0:
         raise AssertionError("git %s failed: %s" % (" ".join(args), proc.stderr))
     return proc.stdout.strip()
@@ -536,14 +536,13 @@ class GitEnvTests(RepoFixture):
         self.assertIn("status 128", out)
 
     def test_a_repo_that_carries_its_own_identity_still_passes(self):
-        # The isolation is of the HOST's config, not of the repository's: a test
-        # that sets its own identity (the way CI's fixtures do) must stay green —
-        # refusing that would turn the gate into a wall instead of a mirror.
+        # The isolation is of the HOST's config, not of the repository's: a repo
+        # that carries its own identity must stay green (a wall, not a mirror).
         cfg = self.tmp / "global-gitconfig"
         cfg.write_text("[user]\n\tname = Dev Host\n\temail = dev@example.invalid\n",
                        encoding="utf-8")
-        run_git("config", "user.name", "repo local", cwd=self.repo)
-        run_git("config", "user.email", "repo@local.invalid", cwd=self.repo)
+        with open(self.repo / ".git" / "config", "a", encoding="utf-8") as fh:
+            fh.write("[user]\n\tname = repo local\n\temail = repo@local.invalid\n")
         self.suite_is_green()
         self._write("tests/test_ci_shards.py", self.COMMIT_STUB % str(self.repo))
         self.set_plan({})
@@ -1181,7 +1180,8 @@ class HookInstallTests(RepoFixture):
 
     def place_gate_tool(self):
         """The gate's own script, so the hook the installer writes has something to run."""
-        shutil.copy(str(SCRIPT), str(self.repo / "tools" / "prepush.py"))
+        for name in ("prepush.py", "prepush_hook.py"):
+            shutil.copy(str(SCRIPT.parent / name), str(self.repo / "tools" / name))
 
     def install(self, *extra):
         self.place_gate_tool()
