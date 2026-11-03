@@ -7,6 +7,8 @@ lane, or any lane whose config is on disk) and `oc_l2.py stop --lane LANE`
 the whole group, after the PID's identity is checked against the state file.
 Windows: `taskkill /F /T` (the tree walk is the OS's). The state file goes last,
 so while it exists the lane still reads as "running" to anything that looks.
+Windows refuses a PID created later than the recorded start plus tolerance.
+An existing unreadable state file is preserved and stop is refused.
 
 Idempotent: a lane with no state file is "not running" (exit 0, nothing killed).
 Nothing here reads a value from the environment or the config beyond the lane's
@@ -16,6 +18,7 @@ import os
 import signal
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -24,6 +27,7 @@ from oc_l1_http import _read_state  # noqa: E402
 
 KILL_WAIT_S = 5.0
 KILL_HARD_WAIT_S = 2.0
+NT_START_TOLERANCE_S = 2.0  # Allow creation this far AFTER the stamp; any earlier time is valid.
 EXIT_OK = 0
 EXIT_NOT_STOPPED = 2  # an orphan is not a stop: nonzero so an exit-code reader cannot miss it
 
@@ -88,6 +92,45 @@ def _nt_alive(pid):
             and code.value == 259
     finally:
         k32.CloseHandle(ctypes.c_void_p(handle))
+
+
+def _nt_identity_ok(pid, state):
+    """Refuse a recycled Windows PID when both creation times are available."""
+    try:
+        stamp = datetime.fromisoformat(state["started_utc"].replace("Z", "+00:00"))
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        recorded = stamp.timestamp()
+    except (KeyError, AttributeError, TypeError, ValueError, OverflowError, OSError):
+        return True, None  # Older states without a start retain the legacy kill path.
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = ctypes.c_void_p
+    k32.GetProcessTimes.argtypes = [ctypes.c_void_p] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    k32.GetProcessTimes.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [ctypes.c_void_p]
+    k32.CloseHandle.restype = wintypes.BOOL
+    handle = k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return True, None  # An unavailable OS time retains the legacy behaviour.
+    try:
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not k32.GetProcessTimes(ctypes.c_void_p(handle), ctypes.byref(created),
+                                  ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)):
+            return True, None  # Query failure is not evidence of PID recycling.
+        live = ((created.dwHighDateTime << 32) | created.dwLowDateTime) / 10000000 - 11644473600
+    finally:
+        k32.CloseHandle(ctypes.c_void_p(handle))
+    if live > recorded + NT_START_TOLERANCE_S:
+        live_utc = datetime.fromtimestamp(live, timezone.utc).isoformat().replace("+00:00", "Z")
+        recorded_utc = stamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return False, ("pid %d creation time %s is after the lane's recorded start %s "
+                       "(a recycled pid) - refused to kill it, the state file stays; "
+                       "delete the state file if that pid is not the lane"
+                       % (pid, live_utc, recorded_utc))
+    return True, None
 
 
 def pid_gone(pid):
@@ -193,9 +236,14 @@ def stop_lane(name, lane, state, port, remove_pidless_state=False):
     left (an orphan or an unremovable state file reports False and says why).
     `remove_pidless_state`: a state file that names no pid is deleted too
     (oc_l1 stop); oc_l2 leaves it, as it always did.
+    Windows checks process creation time against the recorded start plus tolerance.
+    An existing unreadable state file is preserved and stop is refused.
     """
     out = {"lane": name, "port": port,
            "killed_pids": [], "orphan": False, "removed_state": []}
+    if not isinstance(state, dict) and Path(lane["state_file"]).exists():
+        out.update(stopped=False, detail="unreadable state file: %s" % lane["state_file"])
+        return out
     pid = state.get("pid") if isinstance(state, dict) else None
     if not (isinstance(pid, int) and pid > 0):
         out["stopped"] = True
@@ -204,6 +252,10 @@ def stop_lane(name, lane, state, port, remove_pidless_state=False):
             _remove_state(lane, out)
         return out
     if os.name == "nt":
+        ok, why = _nt_identity_ok(pid, state)
+        if not ok:
+            out.update(stopped=False, orphan=True, detail=why)
+            return out
         # taskkill /F /T walks the tree itself (oc_l1's own kill path).
         oc_l1_serve._kill_pid(pid)
         out["killed_pids"].append(pid)
@@ -214,10 +266,11 @@ def stop_lane(name, lane, state, port, remove_pidless_state=False):
             return out
         _kill_posix(pid, out)
     if not pid_gone(pid):
+        method = "taskkill /F /T" if os.name == "nt" else "SIGKILL to its process group"
         out.update(stopped=False, orphan=True,
-                   detail="pid %d is still alive after SIGKILL to its process group; "
-                          "the state file stays so the lane is not reported as "
-                          "stopped" % pid)
+                   detail="pid %d is still alive after %s; "
+                           "the state file stays so the lane is not reported as "
+                           "stopped" % (pid, method))
         return out
     # The state file goes last: while it exists the lane is still "running"
     # to anything that reads it.
@@ -236,7 +289,7 @@ def cmd_stop(lane, args):
               % (lane["name"], state_file))
         return EXIT_OK
     state = _read_state(str(state_file))
-    port = (state or {}).get("port") or lane["serve_port"]
+    port = (state.get("port") if isinstance(state, dict) else None) or lane["serve_port"]
     out = stop_lane(lane["name"], lane, state, port, remove_pidless_state=True)
     if not out["stopped"]:
         print("oc_l1: lane '%s' NOT stopped: %s" % (lane["name"], out["detail"]),
