@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -140,6 +141,73 @@ class StopTest(unittest.TestCase):
         rc, out, err = run_main("stop", "--name", "nosuch", "--config", str(self.cfg))
         self.assertEqual(rc, 2)
         self.assertIn("no lane named 'nosuch'", err)
+
+    def test_unreadable_state_is_kept_and_refused(self):
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        for text in ('{broken', '[]', 'null', '42'):
+            with self.subTest(text=text):
+                self.state_file.write_text(text, encoding="utf-8")
+                rc, _, err = self.stop()
+                self.assertEqual(rc, 2)
+                self.assertIn("unreadable state file", err)
+                self.assertIn(str(self.state_file), err)
+                self.assertTrue(self.state_file.exists())
+        with mock.patch.object(oc_l1_stop, "_read_state", return_value=None):
+            result = oc_l1_stop.stop_lane("l1test", self.lane, None, 47251)
+        self.assertFalse(result["stopped"])
+        self.assertFalse(result["orphan"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows kernel32")
+    def test_nt_alive_direct(self):
+        import ctypes
+        for handle, error, code, success, alive in (
+                (0, 5, 0, 0, True), (0, 87, 0, 0, False),
+                (123, 0, 259, 1, True), (123, 0, 0, 1, False),
+                (123, 0, 259, 0, False)):
+            with self.subTest(handle=handle, error=error, code=code, success=success):
+                kernel = mock.Mock()
+                kernel.OpenProcess.return_value = handle
+                def exit_code(h, ptr):
+                    ptr._obj.value = code
+                    return success
+                kernel.GetExitCodeProcess.side_effect = exit_code
+                with mock.patch.object(ctypes, "WinDLL", return_value=kernel), \
+                        mock.patch.object(ctypes, "get_last_error", return_value=error):
+                    self.assertEqual(oc_l1_stop._nt_alive(42), alive)
+                self.assertEqual(kernel.CloseHandle.call_count, bool(handle))
+
+    @unittest.skipUnless(os.name == "nt", "Windows kernel32")
+    def test_windows_identity_and_survivor_detail(self):
+        import ctypes
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file.write_text('{}', encoding="utf-8")
+        for recorded, seconds, readable, refused in (
+                ('2026-01-01T00:00:00Z', 10, True, True),
+                ('2026-01-01T00:00:00Z', 1, True, False),
+                (None, 10, True, False),
+                ('2026-01-01T00:00:00Z', 10, False, False)):
+            with self.subTest(recorded=recorded, seconds=seconds, readable=readable):
+                kernel = mock.Mock()
+                kernel.OpenProcess.return_value = 123
+                def times(h, created, *rest):
+                    ticks = int((1767225600 + seconds + 11644473600) * 10000000)
+                    created._obj.dwLowDateTime = ticks & 0xffffffff
+                    created._obj.dwHighDateTime = ticks >> 32
+                    return readable
+                kernel.GetProcessTimes.side_effect = times
+                with mock.patch.object(ctypes, "WinDLL", return_value=kernel), \
+                        mock.patch.object(oc_l1_serve, "_kill_pid") as kill, \
+                        mock.patch.object(oc_l1_stop, "pid_gone", return_value=False):
+                    result = oc_l1_stop.stop_lane("l1test", self.lane,
+                        {"pid": 42, "started_utc": recorded}, 47251)
+                self.assertFalse(result["stopped"])
+                self.assertTrue(result["orphan"])
+                self.assertTrue(self.state_file.exists())
+                self.assertEqual(kill.call_count, 0 if refused else 1)
+                self.assertIn("recycled pid" if refused else "after taskkill /F /T",
+                              result["detail"])
+                if recorded:
+                    kernel.CloseHandle.assert_called_once()
 
     def test_stop_is_a_listed_subcommand(self):
         self.assertIn("stop", oc_l1.build_parser().format_help().split("{")[1].split("}")[0])
