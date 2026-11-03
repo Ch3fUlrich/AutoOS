@@ -8,9 +8,8 @@ import test_autoos_spawner as fixtures
 
 class ReadyFixtures(unittest.TestCase):
     locals().update({name: value for name, value in vars(fixtures.ReadyCommandTests).items()
-                     if not name.startswith("test_") and name not in (
-                         "__dict__", "__weakref__", "__module__", "__doc__", "__qualname__",
-                         "_class_cleanups")})
+                     if not name.startswith(("test_", "_class"))
+                     and not (name.startswith("__") and name.endswith("__"))})
 
 
 class WriterGateTests(ReadyFixtures):
