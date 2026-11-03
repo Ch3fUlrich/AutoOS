@@ -147,11 +147,12 @@ def port_is_free(port, host="127.0.0.1"):
     spawned: a port somebody else holds costs a health-poll timeout (30 s by
     default) and a killed child, and reads as a broken lane rather than a
     collision. SO_REUSEADDR skips the wait over a socket nobody is listening on
-    any more, while a live listener still answers EADDRINUSE."""
+    any more; Windows uses SO_EXCLUSIVEADDRUSE to reject held ports."""
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        option = getattr(socket, "SO_EXCLUSIVEADDRUSE", None) if os.name == "nt" else socket.SO_REUSEADDR
+        sock.setsockopt(socket.SOL_SOCKET, option, 1)
         sock.bind((host, int(port)))
         return True
     except OSError:

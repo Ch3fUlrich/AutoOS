@@ -215,10 +215,8 @@ class PortFreeTest(unittest.TestCase):
         held = held_port = None
         for p in range(oc_l1.PORT_MIN, oc_l1.PORT_MAX):
             if oc_l1.port_is_free(p):
-                held = self._listen(p); held_port = p
-                break
-        if held is None:
-            self.skipTest("no free port in the lane range on this host")
+                held = self._listen(p); held_port = p; break
+        if held is None: self.skipTest("no free port in the lane range on this host")
         try:
             self.assertFalse(oc_l1.port_is_free(held_port))
             chosen = oc_l1.next_free_port(held_port)
@@ -232,8 +230,7 @@ class PortFreeTest(unittest.TestCase):
         from unittest.mock import Mock, patch
         for platform in ("nt", "posix"):
             with self.subTest(platform=platform):
-                fake = Mock()
-                exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", 4)
+                fake = Mock(); exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", 4)
                 with patch.object(socket, "SO_EXCLUSIVEADDRUSE", exclusive, create=True), \
                      patch.object(oc_l1.os, "name", platform), \
                      patch.object(socket, "socket", return_value=fake):
