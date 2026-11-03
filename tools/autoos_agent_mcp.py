@@ -364,9 +364,14 @@ def oc_restart(lane: str) -> dict:
     if fence is not None:
         return fence
     argv = _oc_l1_args(lane, "stop")
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=90,
-                       stdin=subprocess.DEVNULL, env=_oc_l1_env())
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True, timeout=90, stdin=subprocess.DEVNULL, env=_oc_l1_env())
+    except subprocess.TimeoutExpired:
+        return {"lane": lane, "action": "error", "exit_code": None, "detail": "oc_l1 stop timed out after 90s"}
     if r.returncode == 0:
+        if "not running" in r.stdout:
+            return {"lane": lane, "action": "none", "exit_code": 0,
+                    "detail": "the lane was not running; its watcher starts it on its own"}
         return {"lane": lane, "action": "restarted", "exit_code": 0,
                 "last_line": (r.stdout.strip().splitlines() or [""])[-1][:200],
                 "detail": "the lane's watcher starts it within ~2 minutes; verify with oc_status"}
@@ -374,7 +379,12 @@ def oc_restart(lane: str) -> dict:
            "exit_code": r.returncode,
            "detail": (r.stderr.strip().splitlines() or [""])[-1][:200]}
     if r.returncode == 2:
-        out["advice"] = "nothing was restarted; the state file was kept - read the detail, fix it, retry"
+        error = next((line for line in r.stderr.splitlines() if line.startswith("oc_l1: error:")), None)
+        if error is not None:
+            out.update(action="config-error", detail=error[:200],
+                       advice="check the lane name and ~/.config/autoos/oc-l1.json; nothing was stopped")
+        else:
+            out["advice"] = "nothing was restarted; read the detail, fix it, retry"
     return out
 
 
@@ -2145,10 +2155,9 @@ def build_server(profile: str | None = None):
 
     @_register("oc_restart")
     def _oc_restart(lane: str) -> dict:
-        """c2 (2026-10-06): force-restart a lane the way the handoff card
-        prescribes (kill the recorded pid, delete the state file; the watcher
-        starts the lane within ~2 minutes). Never kills by process name and
-        never touches passwords. Verify afterwards with oc_status. 
+        """Delegate to identity-checked oc_l1.py stop; the watcher starts a
+        stopped lane within ~2 minutes. Actions: restarted | none | not-stopped |
+        config-error | error. Never kills by process name or touches passwords; verify with oc_status.
         Refused from inside an L2 lane
         (AUTOOS_AGENT_LAYER=L2): only the L1 that owns lanes steers them; an L2 reports to
         the L1 inbox instead."""
