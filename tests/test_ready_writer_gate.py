@@ -106,6 +106,24 @@ class WriterWaiverTests(fixtures.ReadyCommandTests):
                 self.assertEqual(self.read_inbox(inbox), "")
 
 
+class RealRegistryWriterFamilyTests(unittest.TestCase):
+    """The shipped catalog places every writer spelling the fleet signs (D-3465, D-3666; luna stays
+    unregistered under the newest-only Codex policy, D-2144):
+    a fixture-only family would let the gate pass here and refuse the real lane."""
+
+    def test_fleet_writer_spellings_resolve_in_the_real_catalog(self):
+        from autoos_resolver import author_family
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "catalog",
+                            "ai-registry.json")
+        with open(path, encoding="utf-8") as stream:
+            registry = json.load(stream)
+        for model, family in (("claude-sonnet-5-5", "anthropic"),
+                              ("console-anthropic/claude-sonnet-5-5", "anthropic"),
+                              ("omniroute/cx-gpt-6.1-sol", "openai")):
+            with self.subTest(model=model):
+                self.assertEqual(author_family(model, registry)[0], family)
+
+
 # Inherit helper methods, not a second copy of the original suite's tests.
 for cls in (WriterGateTests, WriterWaiverTests):
     for name in dir(fixtures.ReadyCommandTests):
