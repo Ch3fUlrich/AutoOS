@@ -393,7 +393,7 @@ __part_selected() {
 # that starts `for __part in`, so the whole loop must live on it.
 for __part in "$ROOT"/tests/linux/[0-9][0-9]-*.sh; do PART_SELECTED="$(__part_selected "$__part")"; . "$__part"; done
 PART_SELECTED=1
-
+if it 'ready writer gate'; then if out="$(python3 "$ROOT/tests/test_ready_writer_gate.py" 2>&1)"; then pass; else fail "$out"; fi; fi
 # ─── Summary ────────────────────────────────────────────────────────────────
 printf '\n%s%s%s\n' "$DIM" "$(printf '─%.0s' $(seq 1 56))" "$RESET"
 printf '  %spassed %d%s   %sfailed %d%s   %sskipped %d%s\n' \

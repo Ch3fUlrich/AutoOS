@@ -5242,7 +5242,7 @@ Test-Case 'ready main-CI freeze gate: red main blocks, fixes-main waives (unit t
     if (-not $py) { Skip 'no python on PATH'; return }
     # unittest reports on stderr; keep Windows PowerShell 5.1 from turning it into a throw.
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $out = & $py.Source (Join-Path $Root 'tests\test_ready_main_freeze.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_ready_main_freeze.py') 2>&1 | Out-String; $rc = $LASTEXITCODE; if ($rc -eq 0) { $out = & $py.Source (Join-Path $Root 'tests\test_ready_writer_gate.py') 2>&1 | Out-String; $rc = $LASTEXITCODE } }
     finally { $ErrorActionPreference = $prev }
     Assert-Equal $rc 0 "ready main-freeze unit tests failed: $out"
 }

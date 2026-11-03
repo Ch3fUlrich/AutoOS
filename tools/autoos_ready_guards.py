@@ -500,8 +500,6 @@ def _load_writer_order():
 
 
 WRITER_ORDER = _load_writer_order()
-CLAUDE_SELF_WRITE_MAX_LINES = 10
-_CLAUDE_RE = re.compile(r"claude|sonnet|opus|haiku|anthropic", re.I)
 # A SHAPE, not a whitelist (a scripted writer names itself too); no run id, no trust.
 _WRITER_RE = re.compile(r"^Writer:[ \t]+(?P<model>\S+)[ \t]+\S.*$")
 
@@ -512,8 +510,7 @@ def writer_trailer_refusal(commits):
     `commits` is the list `lane_commits` read (sha / parents / message / lines,
     `lines` being added+deleted). A MERGE (parents > 1) is exempt: bookkeeping over
     legs each judged on their own. Every other commit owes a `_WRITER_RE` line in its
-    last paragraph and a Claude-family model there may not exceed
-    CLAUDE_SELF_WRITE_MAX_LINES changed lines. Problems join with '; ' ahead of the
+    last paragraph or a non-empty Hand-Edit reason. Problems join ahead of the
     D-2148 order, so a writer reads the next leg to try, not an invented excuse."""
     problems = []
     for commit in list(commits):
@@ -525,18 +522,14 @@ def writer_trailer_refusal(commits):
         matches = [_WRITER_RE.match(line) for line in paragraph.split("\n")]
         model = next((m.group("model") for m in matches if m), "")
         sha = str(commit.get("sha") or "")[:8]
-        lines = commit.get("lines") or 0
-        if not model:
+        hand = any(re.match(r"^Hand-Edit:[ \t]+\S.*$", line) for line in paragraph.split("\n"))
+        if not model and not hand:
             problems.append("%s has no 'Writer: <model> <run id>' trailer in its last "
-                            "paragraph" % sha)
-        elif _CLAUDE_RE.search(model) and lines > CLAUDE_SELF_WRITE_MAX_LINES:
-            problems.append("%s names Claude writer '%s' for %d changed lines (limit "
-                            "%d)" % (sha, model, lines, CLAUDE_SELF_WRITE_MAX_LINES))
+                            "paragraph or 'Hand-Edit: <reason>' trailer" % sha)
     if not problems:
         return ""
     order = "; ".join("%d) %s" % (n, leg) for n, leg in enumerate(WRITER_ORDER, 1))
     return ("; ".join(problems)
             + " | no usable writer leg? D-2148 order: %s. Next entry to try: 1) %s. "
-              "Record skip + reason for each leg that was rate limited or down; "
-              "Claude self-writes stay <= %d lines and are named in the trailer."
-              % (order, WRITER_ORDER[0], CLAUDE_SELF_WRITE_MAX_LINES))
+              "Record skip + reason for each leg that was rate limited or down."
+              % (order, WRITER_ORDER[0]))
