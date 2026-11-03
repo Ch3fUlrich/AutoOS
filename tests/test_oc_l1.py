@@ -113,20 +113,14 @@ class RenderGoldenTest(unittest.TestCase):
             # 2) model pin: <provider>/<modelID>; the models map is keyed by the gateway model ids
             self.assertEqual(rendered["model"], "omniroute/placeholderprovider/PlaceholderModel")
             models = prov["models"]
-            self.assertEqual(
-                set(models),
-                {"placeholderprovider/PlaceholderModel", "placeholderprovider/PlaceholderFallback"},
-            )
+            self.assertEqual(set(models), {"placeholderprovider/PlaceholderModel", "placeholderprovider/PlaceholderFallback"})
             self.assertEqual(models["placeholderprovider/PlaceholderModel"]["name"], "placeholder-direct-model")
             self.assertEqual(models["placeholderprovider/PlaceholderModel"]["limit"], {"context": 131072, "output": 128000})
 
             # 3) mcp: a FLAT map name -> entry, enabled only for the lane's list (lean rule)
             servers = rendered["mcp"]
             self.assertNotIn("servers", servers)
-            self.assertEqual(
-                set(servers),
-                {"serena", "graphify", "playwright", "context7", "omnigraph", "autoos-agent"},
-            )
+            self.assertEqual(set(servers), {"serena", "graphify", "playwright", "context7", "omnigraph", "autoos-agent"})
             self.assertTrue(servers["autoos-agent"]["enabled"])
             self.assertTrue(servers["autoos-agent"]["command"])
             for name in ("serena", "graphify", "playwright", "context7", "omnigraph"):
@@ -137,14 +131,10 @@ class RenderGoldenTest(unittest.TestCase):
                 self.assertNotIn(old_key, rendered)
 
             # 5) instructions list as configured
-            self.assertEqual(
-                rendered["instructions"], ["AGENTS.md", str(tmp / "proj" / "handoff.md")]
-            )
+            self.assertEqual(rendered["instructions"], ["AGENTS.md", str(tmp / "proj" / "handoff.md")])
 
             # 6) plugins: the configured directories
-            self.assertEqual(
-                rendered["plugins"], [str(tmp / "plugins" / "placeholder-guard.js")]
-            )
+            self.assertEqual(rendered["plugins"], [str(tmp / "plugins" / "placeholder-guard.js")])
 
 
 class PortDerivationTest(unittest.TestCase):
@@ -179,15 +169,18 @@ class PortDerivationTest(unittest.TestCase):
 
 
 class PortFreeTest(unittest.TestCase):
-    """Probe collisions before spawning, not by waiting for child health."""
+    """A derived port is a guess; two lane names can guess the same one.
+    Start must bind-test BEFORE spawning, not wait for child health."""
     def _listen(self, port):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        srv.bind(("127.0.0.1", port)); srv.listen(1)
+        srv.bind(("127.0.0.1", port))
+        srv.listen(1)
         return srv
 
     def test_a_live_listener_is_not_free_and_a_closed_one_is(self):
-        srv = self._listen(0); port = srv.getsockname()[1]
+        srv = self._listen(0)
+        port = srv.getsockname()[1]
         try:
             self.assertFalse(oc_l1.port_is_free(port))
         finally:
@@ -212,11 +205,15 @@ class PortFreeTest(unittest.TestCase):
             oc_l1.next_free_port(oc_l1.PORT_MIN, probe=lambda p, host="127.0.0.1": False)
 
     def test_the_real_probe_answers_for_a_port_in_the_lane_range(self):
+        """Production takes this branch: next_free_port uses the real probe."""
         held = held_port = None
         for p in range(oc_l1.PORT_MIN, oc_l1.PORT_MAX):
             if oc_l1.port_is_free(p):
-                held = self._listen(p); held_port = p; break
-        if held is None: self.skipTest("no free port in the lane range on this host")
+                held = self._listen(p)
+                held_port = p
+                break
+        if held is None:
+            self.skipTest("no free port in the lane range on this host")
         try:
             self.assertFalse(oc_l1.port_is_free(held_port))
             chosen = oc_l1.next_free_port(held_port)
@@ -227,12 +224,14 @@ class PortFreeTest(unittest.TestCase):
             held.close()
 
     def test_probe_chooses_the_platform_socket_option(self):
+        from types import SimpleNamespace
         from unittest.mock import Mock, patch
         for platform in ("nt", "posix"):
             with self.subTest(platform=platform):
-                fake = Mock(); exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", 4)
+                fake = Mock()
+                exclusive = object()
                 with patch.object(socket, "SO_EXCLUSIVEADDRUSE", exclusive, create=True), \
-                     patch.object(oc_l1.os, "name", platform), \
+                     patch.object(oc_l1, "os", SimpleNamespace(name=platform)), \
                      patch.object(socket, "socket", return_value=fake):
                     self.assertTrue(oc_l1.port_is_free(47200))
                     option = socket.SO_EXCLUSIVEADDRUSE if platform == "nt" else socket.SO_REUSEADDR
