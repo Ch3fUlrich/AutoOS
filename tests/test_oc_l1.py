@@ -113,20 +113,14 @@ class RenderGoldenTest(unittest.TestCase):
             # 2) model pin: <provider>/<modelID>; the models map is keyed by the gateway model ids
             self.assertEqual(rendered["model"], "omniroute/placeholderprovider/PlaceholderModel")
             models = prov["models"]
-            self.assertEqual(
-                set(models),
-                {"placeholderprovider/PlaceholderModel", "placeholderprovider/PlaceholderFallback"},
-            )
+            self.assertEqual(set(models), {"placeholderprovider/PlaceholderModel", "placeholderprovider/PlaceholderFallback"})
             self.assertEqual(models["placeholderprovider/PlaceholderModel"]["name"], "placeholder-direct-model")
             self.assertEqual(models["placeholderprovider/PlaceholderModel"]["limit"], {"context": 131072, "output": 128000})
 
             # 3) mcp: a FLAT map name -> entry, enabled only for the lane's list (lean rule)
             servers = rendered["mcp"]
             self.assertNotIn("servers", servers)
-            self.assertEqual(
-                set(servers),
-                {"serena", "graphify", "playwright", "context7", "omnigraph", "autoos-agent"},
-            )
+            self.assertEqual(set(servers), {"serena", "graphify", "playwright", "context7", "omnigraph", "autoos-agent"})
             self.assertTrue(servers["autoos-agent"]["enabled"])
             self.assertTrue(servers["autoos-agent"]["command"])
             for name in ("serena", "graphify", "playwright", "context7", "omnigraph"):
@@ -137,14 +131,10 @@ class RenderGoldenTest(unittest.TestCase):
                 self.assertNotIn(old_key, rendered)
 
             # 5) instructions list as configured
-            self.assertEqual(
-                rendered["instructions"], ["AGENTS.md", str(tmp / "proj" / "handoff.md")]
-            )
+            self.assertEqual(rendered["instructions"], ["AGENTS.md", str(tmp / "proj" / "handoff.md")])
 
             # 6) plugins: the configured directories
-            self.assertEqual(
-                rendered["plugins"], [str(tmp / "plugins" / "placeholder-guard.js")]
-            )
+            self.assertEqual(rendered["plugins"], [str(tmp / "plugins" / "placeholder-guard.js")])
 
 
 class PortDerivationTest(unittest.TestCase):
@@ -179,10 +169,8 @@ class PortDerivationTest(unittest.TestCase):
 
 
 class PortFreeTest(unittest.TestCase):
-    """Fix 6: a derived port is a guess, and two lane names can guess the same
-    one. `start` must find that out by binding it BEFORE spawning, not by
-    watching the health poll time out on a port somebody else holds."""
-
+    """A derived port is a guess; two lane names can guess the same one.
+    Start must bind-test BEFORE spawning, not wait for child health."""
     def _listen(self, port):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -201,28 +189,23 @@ class PortFreeTest(unittest.TestCase):
 
     def test_the_walk_starts_at_the_given_port_and_stops_at_the_first_free(self):
         seen = []
-
         def probe(p, host="127.0.0.1"):
             seen.append(p)
             return p == 47203
-
         self.assertEqual(oc_l1.next_free_port(47201, probe=probe), 47203)
         self.assertEqual(seen, [47201, 47202, 47203])
 
     def test_the_walk_wraps_the_range(self):
         def probe(p, host="127.0.0.1"):
             return p == oc_l1.PORT_MIN
-        self.assertEqual(oc_l1.next_free_port(oc_l1.PORT_MAX - 1, probe=probe),
-                         oc_l1.PORT_MIN)
+        self.assertEqual(oc_l1.next_free_port(oc_l1.PORT_MAX - 1, probe=probe), oc_l1.PORT_MIN)
 
     def test_an_exhausted_range_is_refused_not_guessed(self):
         with self.assertRaises(oc_l1.LaneError):
-            oc_l1.next_free_port(oc_l1.PORT_MIN,
-                                 probe=lambda p, host="127.0.0.1": False)
+            oc_l1.next_free_port(oc_l1.PORT_MIN, probe=lambda p, host="127.0.0.1": False)
 
     def test_the_real_probe_answers_for_a_port_in_the_lane_range(self):
-        # production takes this branch: a port of the range genuinely held by a
-        # listener must read as taken, and the walk must land on one that is not.
+        """Production takes this branch: next_free_port uses the real probe."""
         held = held_port = None
         for p in range(oc_l1.PORT_MIN, oc_l1.PORT_MAX):
             if oc_l1.port_is_free(p):
@@ -239,6 +222,22 @@ class PortFreeTest(unittest.TestCase):
             self.assertTrue(oc_l1.port_is_free(chosen))
         finally:
             held.close()
+
+    def test_probe_chooses_the_platform_socket_option(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        for platform in ("nt", "posix"):
+            with self.subTest(platform=platform):
+                fake = Mock()
+                exclusive = object()
+                with patch.object(socket, "SO_EXCLUSIVEADDRUSE", exclusive, create=True), \
+                     patch.object(oc_l1, "os", SimpleNamespace(name=platform)), \
+                     patch.object(socket, "socket", return_value=fake):
+                    self.assertTrue(oc_l1.port_is_free(47200))
+                    option = socket.SO_EXCLUSIVEADDRUSE if platform == "nt" else socket.SO_REUSEADDR
+                    fake.setsockopt.assert_called_once_with(socket.SOL_SOCKET, option, 1)
+                fake.bind.assert_called_once_with(("127.0.0.1", 47200))
+                fake.close.assert_called_once_with()
 
 
 class ChildEnvValidationTest(unittest.TestCase):
