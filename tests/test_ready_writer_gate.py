@@ -8,7 +8,9 @@ import test_autoos_spawner as fixtures
 
 class ReadyFixtures(unittest.TestCase):
     locals().update({name: value for name, value in vars(fixtures.ReadyCommandTests).items()
-                     if not name.startswith("test_") and name not in ("__dict__", "__weakref__")})
+                     if not name.startswith("test_") and name not in (
+                         "__dict__", "__weakref__", "__module__", "__doc__", "__qualname__",
+                         "_class_cleanups")})
 
 
 class WriterGateTests(ReadyFixtures):
@@ -32,6 +34,13 @@ class WriterGateTests(ReadyFixtures):
         self.assertTrue(line)
 
     def test_same_family(self):
+        # Rule 3 is defence-in-depth: through `ready` the review floor already demands
+        # two distinct counted families, so it is pinned here at `refusal()` itself.
+        hand = [self.commit(message="x\n\nHand-Edit: fold")]
+        for families, refused in ((("anthropic",), True), (("openai",), False)):
+            report = {"cross_family": {"seats": [{"family": f} for f in families]}}
+            self.assertEqual(bool(self.agent.writer_gate.refusal(
+                hand, self.registry, report, self.agent.ready_guards)), refused, families)
         commits = [self.commit(message="x\n\nWriter: claude-sonnet-5-5 run-1")]
         for families in (("anthropic",), ("openai",), (), (None,)):
             report = {"cross_family": {"seats": [{"family": f} for f in families]}}
@@ -40,15 +49,6 @@ class WriterGateTests(ReadyFixtures):
             self.assertEqual(bool(result), families != ("openai",), result)
         self.assertIn("no counted seat", self.agent.writer_gate.refusal(
             commits, self.registry, {"cross_family": {}}, self.agent.ready_guards))
-
-    def test_same_family_cli(self):
-        repo, sha = self.make_repo()
-        inbox = self.make_inbox("")
-        self.stub_lane_commits([self.commit(message="x\n\nWriter: claude-sonnet-5-5 run-1")])
-        record = [line.replace("omniroute/muse", "sonnet").replace("gem-flash", "sonnet") for line in self.READY_RECORD]
-        rc, out, err = self.ready(self.write_record(*record), repo, sha, inbox)
-        self.assertEqual(rc, 1, out + err)
-        self.assertEqual(self.read_inbox(inbox), "")
 
     def test_hand_edit(self):
         rc, out, _ = self.drive("x\n\nHand-Edit: fold")

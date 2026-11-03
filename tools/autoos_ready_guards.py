@@ -503,9 +503,13 @@ WRITER_ORDER = _load_writer_order()
 # A SHAPE, not a whitelist (a scripted writer names itself too); no run id, no trust.
 WRITER_RE = re.compile(r"^Writer:[ \t]+(?P<model>\S+)[ \t]+\S.*$")
 HAND_EDIT_RE = re.compile(r"^Hand-Edit:[ \t]+\S.*$")
+
+
 def last_paragraph(message):
     """Return the final trailer paragraph, excluding body prose."""
     return re.split(r"\n[ \t]*\n", (message or "").rstrip())[-1]
+
+
 def writer_trailer_refusal(commits):
     """One refusal string for a lane's commits, '' when every one clears.
 
