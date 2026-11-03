@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 from pathlib import Path
 
@@ -80,6 +81,7 @@ class StopTest(unittest.TestCase):
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         self.state_file.write_text(json.dumps({
             "name": "l1test", "session_id": "ses_x", "port": 47251, "pid": proc.pid,
+            "started_utc": datetime.fromtimestamp(time.time() + 4, timezone.utc).isoformat(),
             "argv": argv, "start_time": oc_l1_serve.proc_starttime(proc.pid) or 0}), encoding="utf-8")
         return proc, kid
 
@@ -157,6 +159,14 @@ class StopTest(unittest.TestCase):
         self.assertFalse(result["stopped"])
         self.assertFalse(result["orphan"])
 
+    def test_readable_pidless_dict_after_unreadable_guard_is_removed(self):
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file.write_text('{}', encoding="utf-8")
+        rc, out, err = self.stop()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("killed pid: none", out)
+        self.assertFalse(self.state_file.exists())
+
     @unittest.skipUnless(os.name == "nt", "Windows kernel32")
     def test_nt_alive_direct(self):
         import ctypes
@@ -184,6 +194,10 @@ class StopTest(unittest.TestCase):
         for recorded, seconds, readable, refused in (
                 ('2026-01-01T00:00:00Z', 10, True, True),
                 ('2026-01-01T00:00:00Z', 1, True, False),
+                ('2026-01-01T00:00:00Z', -10, True, False),
+                ('2026-01-01T00:00:00Z', -40, True, False),
+                ('2026-01-01T00:00:00Z', 2, True, False),
+                ('2026-01-01T00:00:00', 2, True, False),
                 (None, 10, True, False),
                 ('2026-01-01T00:00:00Z', 10, False, False)):
             with self.subTest(recorded=recorded, seconds=seconds, readable=readable):
@@ -208,6 +222,13 @@ class StopTest(unittest.TestCase):
                               result["detail"])
                 if recorded:
                     kernel.CloseHandle.assert_called_once()
+                    self.assertEqual(kernel.OpenProcess.restype, ctypes.c_void_p)
+                    self.assertEqual(kernel.CloseHandle.argtypes, [ctypes.c_void_p])
+                if refused:
+                    self.assertIn("2026-01-01T00:00:10Z", result["detail"])
+                    self.assertIn("2026-01-01T00:00:00Z", result["detail"])
+                    self.assertIn("delete the state file", result["detail"])
+                    self.assertNotIn("lane's command", result["detail"])
 
     def test_stop_is_a_listed_subcommand(self):
         self.assertIn("stop", oc_l1.build_parser().format_help().split("{")[1].split("}")[0])
