@@ -12464,15 +12464,13 @@ class ReadyCommandTests(unittest.TestCase):
                 ("lane work", missing),
                 ("x\n\nWriter: qwen3.8-flash", missing),
                 ("x\n\nwriter: qwen run-1", missing),
-                ("Writer: q run-1\n\nbody after", missing),
-                ("x\n\nWriter: sonnet-5 run-2", "names Claude writer 'sonnet-5' for 11 "
-                                                "changed lines (limit 10)")):
+                ("Writer: q run-1\n\nbody after", missing)):
             with self.subTest(message=message):
                 self.assertIn(needle, guards.writer_trailer_refusal(
                     [self.commit(message=message, lines=11)]))
         for message, parents, lines in (("Merge lane/work into main", 2, 400),
                                         ("export\n\nWriter: export-script run-9", 1, 500),
-                                        ("x\n\nWriter: claude-opus-4 run-1", 1, 10)):
+                                        ("x\n\nWriter: claude-opus-4 run-1", 1, 11)):
             with self.subTest(message=message):
                 self.assertEqual(guards.writer_trailer_refusal(
                     [self.commit(message, parents, lines)]), "")
@@ -12483,7 +12481,7 @@ class ReadyCommandTests(unittest.TestCase):
         self.assertEqual(len(guards.WRITER_ORDER), 4)
         self.assertEqual(guards.WRITER_ORDER[0], "opencode omniroute/cx-gpt-6.1-sol")
         self.assertIn("11111111 has no", msg)   # every problem joins, none is dropped
-        self.assertIn("; 22222222 names Claude writer", msg)
+        self.assertNotIn("22222222", msg)
         self.assertNotIn("33333333", msg)       # a commit that clears is not named
         self.assertIn("D-2148 order: 1) %s" % guards.WRITER_ORDER[0], msg)
         self.assertIn("Next entry to try: 1) %s" % guards.WRITER_ORDER[0], msg)

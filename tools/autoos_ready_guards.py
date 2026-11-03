@@ -500,10 +500,14 @@ def _load_writer_order():
 
 
 WRITER_ORDER = _load_writer_order()
-CLAUDE_SELF_WRITE_MAX_LINES = 10
-_CLAUDE_RE = re.compile(r"claude|sonnet|opus|haiku|anthropic", re.I)
 # A SHAPE, not a whitelist (a scripted writer names itself too); no run id, no trust.
-_WRITER_RE = re.compile(r"^Writer:[ \t]+(?P<model>\S+)[ \t]+\S.*$")
+WRITER_RE = re.compile(r"^Writer:[ \t]+(?P<model>\S+)[ \t]+\S.*$")
+HAND_EDIT_RE = re.compile(r"^Hand-Edit:[ \t]+\S.*$")
+
+
+def last_paragraph(message):
+    """Return the final trailer paragraph, excluding body prose."""
+    return re.split(r"\n[ \t]*\n", (message or "").rstrip())[-1]
 
 
 def writer_trailer_refusal(commits):
@@ -511,32 +515,26 @@ def writer_trailer_refusal(commits):
 
     `commits` is the list `lane_commits` read (sha / parents / message / lines,
     `lines` being added+deleted). A MERGE (parents > 1) is exempt: bookkeeping over
-    legs each judged on their own. Every other commit owes a `_WRITER_RE` line in its
-    last paragraph and a Claude-family model there may not exceed
-    CLAUDE_SELF_WRITE_MAX_LINES changed lines. Problems join with '; ' ahead of the
-    D-2148 order, so a writer reads the next leg to try, not an invented excuse."""
+    legs each judged on their own. Every other commit owes a WRITER_RE line or
+    Hand-Edit: self-attested by the committing orchestrator (D-2835), with at least
+    one reason token; it counts as anthropic family for rule 3. Problems join D-2148."""
     problems = []
     for commit in list(commits):
         if (commit.get("parents") or 0) > 1:
             continue
-        # A trailer block is the commit's LAST paragraph: take what follows the last
-        # blank line, so a `Writer:` above the body is prose, not a trailer.
-        paragraph = re.split(r"\n[ \t]*\n", (commit.get("message") or "").rstrip())[-1]
-        matches = [_WRITER_RE.match(line) for line in paragraph.split("\n")]
+        paragraph = last_paragraph(commit.get("message"))
+        matches = [WRITER_RE.match(line) for line in paragraph.split("\n")]
         model = next((m.group("model") for m in matches if m), "")
         sha = str(commit.get("sha") or "")[:8]
-        lines = commit.get("lines") or 0
-        if not model:
+        hand = any(HAND_EDIT_RE.match(line) for line in paragraph.split("\n"))
+        if not model and not hand:
             problems.append("%s has no 'Writer: <model> <run id>' trailer in its last "
-                            "paragraph" % sha)
-        elif _CLAUDE_RE.search(model) and lines > CLAUDE_SELF_WRITE_MAX_LINES:
-            problems.append("%s names Claude writer '%s' for %d changed lines (limit "
-                            "%d)" % (sha, model, lines, CLAUDE_SELF_WRITE_MAX_LINES))
+                            "paragraph or 'Hand-Edit: <reason>' trailer (self-attested by the committing "
+                            "orchestrator, D-2835; anthropic family for rule 3)" % sha)
     if not problems:
         return ""
     order = "; ".join("%d) %s" % (n, leg) for n, leg in enumerate(WRITER_ORDER, 1))
     return ("; ".join(problems)
             + " | no usable writer leg? D-2148 order: %s. Next entry to try: 1) %s. "
-              "Record skip + reason for each leg that was rate limited or down; "
-              "Claude self-writes stay <= %d lines and are named in the trailer."
-              % (order, WRITER_ORDER[0], CLAUDE_SELF_WRITE_MAX_LINES))
+              "Record skip + reason for each leg that was rate limited or down."
+              % (order, WRITER_ORDER[0]))

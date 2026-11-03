@@ -320,6 +320,7 @@ import autoos_risk as risk  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import prepush as prepush_mod  # noqa: E402  (D-110: a ready line needs a green gate)
 import autoos_ready_guards as ready_guards  # noqa: E402  (AO-WRITER-GUARDS P4b: the ready gate)
+import autoos_writer_gate as writer_gate  # noqa: E402
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
@@ -7530,34 +7531,9 @@ def cap_exception_ok(ref, sha, env=None):
     not state is a refusal here, with `cap` None, exactly like an unbound sha.
 
     Everything else `ready` checks still runs; this relaxes only the FILES cap."""
-    env = os.environ if env is None else env
-    try:
-        gate = go_gate()
-    except Exception as exc:
-        return False, "cannot load the routing gate: %s" % exc, None, None
-    if (not isinstance(ref, str) or not ref.startswith("D-")
-            or not gate.REF_RE.match(ref)):
-        return False, "%r is not a decision id of the shape D-<n>" % (ref,), None, None
-    if not isinstance(sha, str) or not _FULL_SHA_RE.fullmatch(sha):
-        return False, "%r is not a full 40-hex commit id (--sha)" % (sha,), None, None
-    ok, reason, commit, all_rows = _routing_committed_log(env)
+    ok, reason, commit, row = writer_gate.bound_row(go_gate, _FULL_SHA_RE, _routing_committed_log, CAP_EXCEPTION_LOG, CAP_EXCEPTION_BY, ref, sha, env)
     if not ok:
         return False, reason, None, None
-    rows = [row for row in all_rows if row[0] == ref]
-    if not rows:
-        return False, ("%s names no row in %s on origin/main -- a prose mention, and a "
-                       "table line whose first cell is not exactly that id, are not rows"
-                      % (ref, CAP_EXCEPTION_LOG)), None, None
-    if len(rows) > 1:
-        return False, ("%s names %d rows; one row binds one sha" % (ref, len(rows))), None, None
-    row = rows[0]
-    if len(row) < 4 or row[3] != CAP_EXCEPTION_BY:
-        return False, ("row's by cell is %r, not %r"
-                       % (row[3] if len(row) > 3 else "", CAP_EXCEPTION_BY)), None, None
-    row_text = " | ".join(row)
-    if not gate._exact_id(sha).search(row_text):
-        return False, ("row %s does not name the full --sha %s; one row binds one sha"
-                       % (ref, sha)), None, None
     cap, cap_error = cap_exception_row_cap(row)
     if cap_error is not None:
         return False, ("row %s: %s" % (ref, cap_error)), None, None
@@ -7853,8 +7829,8 @@ def cmd_ready(args) -> int:
 
     Ahead of that block sits GATE-WRITER-TRAILER: `lane_commits` and
     `writer_trailer_refusal` refuse a commit whose last paragraph names no
-    `Writer: <model> <run id>` (merges exempt) or names a Claude writer over its line
-    cap, spelling out the D-2148 order.
+    `Writer: <model> <run id>` or `Hand-Edit: <reason>` (merges exempt), then require
+    a counted seat independent of each writer family; --writer-waiver binds to routing.
 
     P12b (D-1116): that same diff decides the lane's CLASS for the review gate too —
     `required_r_level` rides into `review_status` as `r_level`, and an R3 (HIGH:
@@ -7868,6 +7844,9 @@ def cmd_ready(args) -> int:
     included. The cap is `CAP_EXCEPTION_MAX_FILES` unless the bound row's DECISION cell
     carries a valid `files=<N> atomic: <reason>` (AO-READY-CAP-COUNT), and the ready line
     always says which: ` cap=<N>`."""
+    waiver_ok, writer_field = writer_gate.waiver(args, go_gate, _FULL_SHA_RE, _routing_committed_log, CAP_EXCEPTION_LOG, CAP_EXCEPTION_BY)
+    if not waiver_ok:
+        return 1
     cap_ref = (getattr(args, "cap_exception", "") or "").strip()
     cap_field = ""
     cap_max_files = None
@@ -7943,9 +7922,9 @@ def cmd_ready(args) -> int:
     if commits_error:
         print("ready: cannot read lane commits: %s" % commits_error, file=sys.stderr)
         return 2
-    trailer_refusal = ready_guards.writer_trailer_refusal(commits)
+    trailer_refusal = "" if writer_field else writer_gate.refusal(commits, registry, report, ready_guards)
     if trailer_refusal:
-        print("ready: not appended -- writer-trailer: %s" % trailer_refusal)
+        print("ready: not appended -- %s" % trailer_refusal)
         return 1
     ci_field = ""
     # AO-WRITER-GUARDS P4b (writer-ops.md §4-5, helpers in
@@ -7957,7 +7936,7 @@ def cmd_ready(args) -> int:
     # it", and a writer that cannot be judged must not be allowed. A range the
     # reader refuses (P4b-fixes D2: `--base` not a strict ancestor of `--sha`, or
     # an empty diff) is the lane failing it -- exit 1, never exit 0.
-    guards_fields = cap_field
+    guards_fields = cap_field + writer_field
     brief_arg = getattr(args, "brief", None)
     report_arg = getattr(args, "report", None)
     if diff_refusal is not None:
@@ -16303,6 +16282,7 @@ def _parser_ready(sub):
                               "CHECK 1-6 evidence must be present and PASS, else the lane is "
                               "refused naming what is missing, failed or input_required "
                               "(report-checks)")
+    ready_p.add_argument("--writer-waiver", metavar="D-NNN", help="routing-bound writer gates waiver")
     ready_p.add_argument("--cap-exception", dest="cap_exception", metavar="D-NNN",
                          default="",
                          help="relax ONLY the brief's FILES cap, to %d counted entries by "

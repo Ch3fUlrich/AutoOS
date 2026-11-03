@@ -242,6 +242,26 @@
       "reasoning": true,
       "tool_calls": "unproven"
     },
+    "claude-sonnet-5-5": {
+      "$comment": "AUTHORS (AO-READY-WRITER-TRAILER-D3465) 2026-11-03: the writer spelling a console-anthropic / agy Sonnet run signs (`Writer: claude-sonnet-5-5 <run>`, D-3465), so the ready gate's writer-family rule can place it; `console-anthropic/claude-sonnet-5-5` resolves here after the last '/'. Author-only: no provider names it, no leg serves it, nothing routes to it. Window/ladder/output/$0 mirror claude-opus-5-5.",
+      "context_advertised": 1000000,
+      "context_usable": {
+        "source": "default",
+        "tokens": 500000
+      },
+      "effort_ladder": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "family": "anthropic",
+      "id": "claude-sonnet-5-5",
+      "output_max": 32768,
+      "price_in": 0.0,
+      "price_out": 0.0,
+      "reasoning": true,
+      "tool_calls": "unproven"
+    },
     "claude-opus-5-5": {
       "$comment": "AUTHORS (S1) 2026-09-28: the L1/L2 orchestrator model this host actually runs, spelled as its own client reports it. Before it was registered, `ready` refused every record it wrote ('author claude-opus-5-5 is not a model, leg, route or reviewer the registry knows') and lanes borrowed claude-opus-4-6 - a false statement about who wrote the diff. Author-only: no provider names it, no leg serves it, nothing routes to it. Window is the 1M class policy.handoff_caps.claude-opus-1m states for 'opus'; ladder/output/$0 marginal are the Claude family's conservative defaults (docs/models.md 'Claude family ... $0 marginal (seat-metered)').",
       "context_advertised": 1000000,
