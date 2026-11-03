@@ -320,7 +320,7 @@ import autoos_risk as risk  # noqa: E402
 import autoos_routing as routing  # noqa: E402
 import prepush as prepush_mod  # noqa: E402  (D-110: a ready line needs a green gate)
 import autoos_ready_guards as ready_guards  # noqa: E402  (AO-WRITER-GUARDS P4b: the ready gate)
-import autoos_writer_gate as writer_gate
+import autoos_writer_gate as writer_gate  # noqa: E402
 import autoos_tokenrate as tokenrate_mod  # noqa: E402
 import autoos_track as track  # noqa: E402
 import autoos_usage as usage_mod  # noqa: E402
@@ -7531,7 +7531,7 @@ def cap_exception_ok(ref, sha, env=None):
     not state is a refusal here, with `cap` None, exactly like an unbound sha.
 
     Everything else `ready` checks still runs; this relaxes only the FILES cap."""
-    ok, reason, commit, row = writer_gate.bound_row(globals(), ref, sha, env)
+    ok, reason, commit, row = writer_gate.bound_row(go_gate, _FULL_SHA_RE, _routing_committed_log, CAP_EXCEPTION_LOG, CAP_EXCEPTION_BY, ref, sha, env)
     if not ok:
         return False, reason, None, None
     cap, cap_error = cap_exception_row_cap(row)
@@ -7844,7 +7844,7 @@ def cmd_ready(args) -> int:
     included. The cap is `CAP_EXCEPTION_MAX_FILES` unless the bound row's DECISION cell
     carries a valid `files=<N> atomic: <reason>` (AO-READY-CAP-COUNT), and the ready line
     always says which: ` cap=<N>`."""
-    waiver_ok, writer_field = writer_gate.waiver(globals(), args)
+    waiver_ok, writer_field = writer_gate.waiver(args, go_gate, _FULL_SHA_RE, _routing_committed_log, CAP_EXCEPTION_LOG, CAP_EXCEPTION_BY)
     if not waiver_ok:
         return 1
     cap_ref = (getattr(args, "cap_exception", "") or "").strip()

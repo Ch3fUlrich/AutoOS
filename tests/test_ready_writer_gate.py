@@ -6,50 +6,53 @@ from unittest import mock
 import test_autoos_spawner as fixtures
 
 
-class WriterGateTests(fixtures.ReadyCommandTests):
+class ReadyFixtures(unittest.TestCase):
+    locals().update({name: value for name, value in vars(fixtures.ReadyCommandTests).items()
+                     if not name.startswith("test_") and name not in ("__dict__", "__weakref__")})
+
+
+class WriterGateTests(ReadyFixtures):
     def setUp(self):
         super().setUp()
         self.registry["models"]["claude-sonnet-5-5"] = {"family": "anthropic"}
         with open(self.registry_path, "w", encoding="utf-8") as stream:
             json.dump(self.registry, stream)
 
-    def drive(self, message, families=("openai",), parents=1):
+    def drive(self, message, parents=1):
         repo, sha = self.make_repo()
         inbox = self.make_inbox("")
         self.stub_lane_commits([self.commit(message=message, lines=900, parents=parents)])
-        original = self.agent.review_status
-
-        def report(*args, **kwargs):
-            result = original(*args, **kwargs)
-            result["cross_family"]["seats"] = [
-                {"family": family, "ran": "tests", "reviewer": "fixture", "verdict": "PASS"}
-                for family in families]
-            return result
-
-        with mock.patch.object(self.agent, "review_status", report):
-            rc, out, err = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
+        rc, out, err = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox)
         return rc, out + err, self.read_inbox(inbox)
 
     def test_claude_independent_seat(self):
-        for family in ("openai", "qwen"):
-            rc, out, line = self.drive("x\n\nWriter: claude-sonnet-5-5 run-1", (family,))
-            self.assertEqual(rc, 0, out)
-            self.assertIn("ready: appended", out)
-            self.assertTrue(line)
+        rc, out, line = self.drive("x\n\nWriter: claude-sonnet-5-5 run-1")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ready: appended", out)
+        self.assertTrue(line)
 
     def test_same_family(self):
-        rc, out, line = self.drive("x\n\nWriter: claude-sonnet-5-5 run-1", ("anthropic",))
-        self.assertEqual(rc, 1, out)
-        self.assertIn("writer-family: writer claude-sonnet-5-5 (anthropic) has no counted seat of another family", out)
-        self.assertEqual(line, "")
+        commits = [self.commit(message="x\n\nWriter: claude-sonnet-5-5 run-1")]
+        for families in (("anthropic",), ("openai",), (), (None,)):
+            report = {"cross_family": {"seats": [{"family": f} for f in families]}}
+            result = self.agent.writer_gate.refusal(commits, self.registry, report,
+                                                    self.agent.ready_guards)
+            self.assertEqual(bool(result), families != ("openai",), result)
+        self.assertIn("no counted seat", self.agent.writer_gate.refusal(
+            commits, self.registry, {"cross_family": {}}, self.agent.ready_guards))
+
+    def test_same_family_cli(self):
+        repo, sha = self.make_repo()
+        inbox = self.make_inbox("")
+        self.stub_lane_commits([self.commit(message="x\n\nWriter: claude-sonnet-5-5 run-1")])
+        record = [line.replace("omniroute/muse", "sonnet").replace("gem-flash", "sonnet") for line in self.READY_RECORD]
+        rc, out, err = self.ready(self.write_record(*record), repo, sha, inbox)
+        self.assertEqual(rc, 1, out + err)
+        self.assertEqual(self.read_inbox(inbox), "")
 
     def test_hand_edit(self):
-        rc, out, _ = self.drive("x\n\nHand-Edit: fold a line")
+        rc, out, _ = self.drive("x\n\nHand-Edit: fold")
         self.assertEqual(rc, 0, out)
-        rc, out, line = self.drive("x\n\nHand-Edit: fold a line", ("anthropic",))
-        self.assertEqual(rc, 1, out)
-        self.assertIn("(anthropic) has no counted seat", out)
-        self.assertEqual(line, "")
 
     def test_unknown(self):
         rc, out, line = self.drive("x\n\nWriter: imaginary-model run-1")
@@ -67,27 +70,41 @@ class WriterGateTests(fixtures.ReadyCommandTests):
         self.assertEqual(rc, 0, out)
 
 
-class WriterWaiverTests(fixtures.ReadyCommandTests):
+class WriterWaiverTests(ReadyFixtures):
     git = fixtures.ReadyCapExceptionTests.git
     routing_repo = fixtures.ReadyCapExceptionTests.routing_repo
     TABLE = fixtures.ReadyCapExceptionTests.TABLE
-    row = fixtures.ReadyCapExceptionTests.row
+    def row(self, sha, **kwargs):
+        return fixtures.ReadyCapExceptionTests.row(self, sha, extra="writer-waiver", **kwargs)
     REF = "D-7"
 
     def test_bound_and_dry_run(self):
-        for dry in (False, True):
+        for message, dry in (("no attribution", False), ("no attribution", True),
+                             ("x\n\nWriter: imaginary-model run-1", False)):
             repo, sha = self.make_repo()
             routing = self.routing_repo(self.TABLE + self.row(sha))
             commit = self.git(routing, "rev-parse", "origin/main")
             inbox = self.make_inbox("")
-            self.stub_lane_commits([self.commit(message="no attribution")])
+            self.stub_lane_commits([self.commit(message=message)])
             extra = ["--writer-waiver", self.REF] + (["--dry-run"] if dry else [])
             with mock.patch.dict(os.environ, {"AUTOOS_ROUTING_DIR": routing}):
                 rc, out, err = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox, extra)
             self.assertEqual(rc, 0, out + err)
-            self.assertIn("writer-waiver D-7 accepted (routing %s): waived" % commit, out)
+            self.assertIn("note: writer-waiver D-7 bound (routing %s); waives "
+                          "writer-trailer and writer-family if the lane reaches them" % commit, out)
             self.assertIn(" writer-waiver=D-7 routing=" + commit, out)
             self.assertEqual(bool(self.read_inbox(inbox)), not dry)
+
+    def test_decision_token_required(self):
+        repo, sha = self.make_repo()
+        routing = self.routing_repo(self.TABLE + fixtures.ReadyCapExceptionTests.row(self, sha))
+        inbox = self.make_inbox("")
+        with mock.patch.dict(os.environ, {"AUTOOS_ROUTING_DIR": routing}):
+            rc, out, err = self.ready(self.write_record(*self.READY_RECORD), repo, sha, inbox,
+                                      ["--writer-waiver", self.REF])
+        self.assertEqual(rc, 1, out + err)
+        self.assertIn("row D-7 does not name writer-waiver in its decision cell", out)
+        self.assertEqual(self.read_inbox(inbox), "")
 
     def test_unbound(self):
         repo, sha = self.make_repo()
@@ -123,13 +140,6 @@ class RealRegistryWriterFamilyTests(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(author_family(model, registry)[0], family)
 
-
-# Inherit helper methods, not a second copy of the original suite's tests.
-for cls in (WriterGateTests, WriterWaiverTests):
-    for name in dir(fixtures.ReadyCommandTests):
-        if name.startswith("test_") and name not in cls.__dict__:
-            setattr(cls, name, None)
-del cls
 
 if __name__ == "__main__":
     unittest.main()
