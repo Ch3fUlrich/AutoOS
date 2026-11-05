@@ -6,13 +6,14 @@ from pathlib import Path
 import subprocess
 import sys
 
-import pytest
+import tempfile
+import unittest
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools/hooks/context_guard.py"
 
 
-@pytest.fixture
-def ready(tmp_path):
+def make_ready_fixture(tmp_path):
     handoff = tmp_path / "handoff.md"
     handoff.write_bytes(b"handoff\r\n")
     card = handoff.with_suffix(".card.md")
@@ -21,8 +22,12 @@ def ready(tmp_path):
     checker.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\n"
                        "assert len(sys.argv) == 2\nPath(sys.argv[1]).read_bytes()\n")
     checker.chmod(0o755)
-    env = {"PATH": str(tmp_path), "HOME": str(tmp_path),
+    env = {**{k: os.environ[k] for k in ("SystemRoot", "PATHEXT") if k in os.environ},
+           "PATH": str(tmp_path), "HOME": str(tmp_path),
            "XDG_STATE_HOME": str(tmp_path / "state"), "CLAUDE_CODE_SESSION_ID": "session-1"}
+    if os.name == "nt":
+        wrapper = tmp_path / "handoff-check.cmd"
+        wrapper.write_text(f'@"{sys.executable}" "{checker}" %*\n')
     marker = tmp_path / "state/autoos/ctx-guard/session-1.ready.json"
 
     def run(*args):
@@ -46,7 +51,6 @@ def test_complete_marker(ready):
     assert list(marker.parent.iterdir()) == [marker]
 
 
-@pytest.mark.parametrize("failure", ["invalid", "missing", "unexecutable", "card", "handoff"])
 def test_refuses_without_checked_pair(ready, failure):
     handoff, card, checker, _, marker, run = ready
     if failure == "invalid":
@@ -54,7 +58,11 @@ def test_refuses_without_checked_pair(ready, failure):
             f.write("print('missing heading Goal')\nsys.exit(1)\n")
     elif failure == "missing":
         checker.unlink()
+        if os.name == "nt":
+            checker.with_suffix(".cmd").unlink()
     elif failure == "unexecutable":
+        if os.name == "nt":
+            raise unittest.SkipTest("Windows has no executable permission bits")
         checker.chmod(0o644)
     else:
         (card if failure == "card" else handoff).unlink()
@@ -68,7 +76,6 @@ def test_refuses_without_checked_pair(ready, failure):
         assert "handoff-check" in p.stderr
 
 
-@pytest.mark.parametrize("which", [0, 1])
 def test_changed_pair_refused(ready, which):
     handoff, card, checker, _, marker, run = ready
     with checker.open("a") as f:
@@ -78,13 +85,13 @@ def test_changed_pair_refused(ready, which):
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("reason", ["cap", "router", "operator", "planned", "bogus"])
 def test_reason(ready, reason):
     handoff, _, _, _, marker, run = ready
     p = run("ready", str(handoff), "--reason", reason)
     if reason == "bogus":
         assert p.returncode != 0
         assert not marker.exists()
+        assert "reason" in p.stderr
     else:
         assert p.returncode == 0, p.stderr
         assert json.loads(marker.read_text())["reason"] == reason
@@ -102,18 +109,20 @@ def test_checker_override(ready):
     handoff, _, checker, env, _, run = ready
     renamed = checker.with_name("custom-check")
     checker.rename(renamed)
+    if os.name == "nt":
+        wrapper = renamed.with_suffix(".cmd")
+        wrapper.write_text(f'@"{sys.executable}" "{renamed}" %*\n')
+        renamed = wrapper
     env["AUTOOS_HANDOFF_CHECK"] = str(renamed)
     assert run("ready", str(handoff)).returncode == 0
 
 
-def test_atomic_marker_replace(ready, monkeypatch):
+def test_atomic_marker_replace(ready):
     import importlib.util
     handoff, _, _, env, marker, _ = ready
     spec = importlib.util.spec_from_file_location("guard_ready_atomic", SCRIPT)
     guard = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard)
-    for key, value in env.items():
-        monkeypatch.setenv(key, value)
     real_replace = guard.os.replace
     observed = []
 
@@ -124,6 +133,96 @@ def test_atomic_marker_replace(ready, monkeypatch):
         observed.append(dst)
         real_replace(src, dst)
 
-    monkeypatch.setattr(guard.os, "replace", replace)
-    assert guard.cmd_ready([str(handoff)]) == 0
+    with patch.dict(os.environ, env, clear=True), patch.object(guard.os, "replace", replace):
+        assert guard.cmd_ready([str(handoff)]) == 0
     assert observed == [str(marker)]
+
+
+def test_real_pair(ready):
+    handoff, card, checker, _, _, run = ready
+    with checker.open("a") as f:
+        f.write(f"assert Path(sys.argv[1]) == Path({str(card)!r})\n"
+                "assert Path(sys.argv[1]).with_suffix('').with_suffix('.md').read_bytes()\n")
+    assert run("ready", str(handoff)).returncode == 0
+
+
+def test_guarded_errors(ready):
+    handoff, card, checker, _, _, run = ready
+    for path in ("", "/"):
+        p = run("ready", path)
+        assert p.returncode == 2 and "Traceback" not in p.stderr
+    card.unlink()
+    assert "card" in run("ready", str(handoff)).stderr
+    card.write_bytes(b"card")
+    checker.unlink()
+    if os.name == "nt":
+        checker.with_suffix(".cmd").unlink()
+    assert "handoff-check not found" in run("ready", str(handoff)).stderr
+
+
+def test_post_replace_and_cwd(ready):
+    import importlib.util
+    handoff, card, _, env, marker, _ = ready
+    spec = importlib.util.spec_from_file_location("guard_race", SCRIPT)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    original = guard._write_json
+    def moved(path, data):
+        original(path, data)
+        card.write_bytes(b"moved")
+    with patch.dict(os.environ, env, clear=True):
+        with patch.object(guard, "_write_json", moved):
+            assert guard.cmd_ready([str(handoff)]) == 2
+            assert not marker.exists()
+        with patch.object(guard.os, "getcwd", side_effect=FileNotFoundError("deleted cwd")):
+            assert guard.cmd_ready([str(handoff)]) == 2
+
+
+def test_checker_resolution(ready):
+    import importlib.util
+    handoff, card, checker, env, _, _ = ready
+    spec = importlib.util.spec_from_file_location("guard_resolution", SCRIPT)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    resolved = checker.with_suffix(".cmd") if os.name == "nt" else checker
+    with patch.dict(os.environ, env, clear=True), patch.object(
+            guard.shutil, "which", return_value=str(resolved)) as which:
+        assert guard.cmd_ready([str(handoff)]) == 0
+        which.assert_called_once_with("handoff-check", path=env["PATH"])
+
+
+def test_deleted_cwd(ready):
+    import importlib.util
+    handoff, _, _, env, marker, _ = ready
+    spec = importlib.util.spec_from_file_location("guard_cwd", SCRIPT)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    with patch.dict(os.environ, env, clear=True), patch.object(
+            guard.os, "getcwd", side_effect=FileNotFoundError("deleted cwd")):
+        assert guard.cmd_ready([str(handoff)]) == 2
+        assert not marker.exists()
+
+
+# The repository runners deliberately have no pytest dependency.
+class ReadyContracts(unittest.TestCase):
+    pass
+
+
+def _case(fn, *args):
+    def run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fn(make_ready_fixture(Path(directory)), *args)
+    return run
+
+
+for _name, _fn in list(globals().items()):
+    if _name.startswith("test_"):
+        _values = {"test_refuses_without_checked_pair": ["invalid", "missing", "unexecutable", "card", "handoff"],
+                   "test_changed_pair_refused": [0, 1],
+                   "test_reason": ["cap", "router", "operator", "planned", "bogus"]}.get(_name)
+        for _index, _args in enumerate([()] if _values is None else [(v,) for v in _values]):
+            setattr(ReadyContracts, f"{_name}_{_index}", _case(_fn, *_args))
+        del globals()[_name]
+
+if __name__ == "__main__":
+    unittest.main()

@@ -34,6 +34,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import subprocess
 import tempfile
@@ -280,52 +281,60 @@ def run_hook() -> int:
 def cmd_ready(args) -> int:
     """`ready <handoff-path> [--reason cap|router|operator|planned]`.
 
-    Validate an immutable card snapshot with PATH's handoff-check (or executable
+    Validate the real card with PATH's handoff-check (or executable
     AUTOOS_HANDOFF_CHECK override), without --log or live-state discovery.
     Identity, launch time, usage and agents are null when not observed here.
     """
     reason = args[2] if len(args) == 3 and args[1] == "--reason" else "cap"
-    if (len(args) not in (1, 3) or (len(args) == 3 and args[1] != "--reason")
-            or reason not in ("cap", "router", "operator", "planned")):
+    if len(args) not in (1, 3) or (len(args) == 3 and args[1] != "--reason"):
         print("context_guard: ready needs <handoff-path>", file=sys.stderr)
+        return 2
+    if reason not in ("cap", "router", "operator", "planned"):
+        print("context_guard: invalid ready reason: %s" % reason, file=sys.stderr)
         return 2
     session_id = os.environ.get("CLAUDE_CODE_SESSION_ID")
     if not safe_id(session_id):
         print("context_guard: ready needs a valid CLAUDE_CODE_SESSION_ID", file=sys.stderr)
         return 2
-    handoff = Path(args[0])
-    card = handoff.with_suffix(".card.md")
-    checker = os.environ.get("AUTOOS_HANDOFF_CHECK") or "handoff-check"
     try:
+        handoff = Path(args[0])
+        card = handoff.with_suffix(".card.md")
+        for label, path in (("handoff", handoff), ("card", card)):
+            if not path.is_file():
+                raise OSError("%s file missing: %s" % (label, path))
         raw_handoff, raw_card = handoff.read_bytes(), card.read_bytes()
-        # The checker and hashes consume the same immutable bytes, not two
-        # independent reads of a card that a session may be editing.
-        with tempfile.TemporaryDirectory(prefix="ctx-ready-") as temp:
-            snapshot = Path(temp) / card.name
-            snapshot.write_bytes(raw_card)
-            result = subprocess.run([checker, str(snapshot)], capture_output=True,
-                                    text=True, timeout=10)
-            if result.returncode:
-                print("context_guard: handoff-check refused ready (exit %s):\n%s%s"
-                      % (result.returncode, result.stdout, result.stderr), file=sys.stderr)
-                return 2
-            if snapshot.read_bytes() != raw_card:
-                raise OSError("handoff-check changed the card snapshot")
+        command = os.environ.get("AUTOOS_HANDOFF_CHECK") or "handoff-check"
+        checker = shutil.which(command, path=os.environ.get("PATH", ""))
+        if checker is None:
+            raise OSError("handoff-check not found on PATH: %s" % command)
+        result = subprocess.run([checker, str(card)], capture_output=True,
+                                text=True, timeout=10)
+        if result.returncode:
+            print("context_guard: handoff-check refused ready (exit %s):\n%s%s"
+                  % (result.returncode, result.stdout, result.stderr), file=sys.stderr)
+            return 2
         if handoff.read_bytes() != raw_handoff or card.read_bytes() != raw_card:
             raise OSError("handoff or card changed during ready; rerun ready")
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        print("context_guard: ready handoff-check/pair failed: %s" % exc, file=sys.stderr)
+        print("context_guard: ready validation failed: %s" % exc, file=sys.stderr)
         return 2
-    marker = {"v": 2, "session_id": session_id, "handoff": args[0],
+    try:
+        marker = {"v": 2, "session_id": session_id, "handoff": args[0],
               "card": str(card), "handoff_sha256": hashlib.sha256(raw_handoff).hexdigest(),
               "card_sha256": hashlib.sha256(raw_card).hexdigest(),
               "session_name": None, "role": None, "launched_at": None,
               "ctx_tokens": None, "reason": reason, "agents": None,
               "ts": time.time(), "cwd": os.getcwd()}
-    try:
         directory = state_dir()
         directory.mkdir(parents=True, exist_ok=True)
-        _write_json(directory / ("%s.ready.json" % session_id), marker)
+        destination = directory / ("%s.ready.json" % session_id)
+        _write_json(destination, marker)
+        try:
+            if handoff.read_bytes() != raw_handoff or card.read_bytes() != raw_card:
+                raise OSError("handoff or card changed during marker write; rerun ready")
+        except OSError:
+            destination.unlink(missing_ok=True)
+            raise
     except OSError as exc:
         print("context_guard: cannot write ready marker: %s" % exc, file=sys.stderr)
         return 2
