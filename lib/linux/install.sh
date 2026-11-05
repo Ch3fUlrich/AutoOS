@@ -598,6 +598,7 @@ install_component() {
 
 install_script() {
     case "$1" in
+        github-actions-runner) install_github_actions_runner ;;
         oh-my-zsh)       install_oh_my_zsh ;;
         zsh-plugins)     install_zsh_plugins ;;
         powerlevel10k)   install_powerlevel10k ;;
@@ -6912,4 +6913,224 @@ setup_zcode_gateway_env() {
         ui_muted "added ${add_keys[$i]} to $env_file"
     done
     return 0
+}
+
+# ─── build-server profile ────────────────────────────────────────────────────
+# postInstall steps for turning a headless box into a CI/agent-routing node.
+
+# install_data_disk_mount: format the secondary disk ext4 and mount at /mnt/data.
+# Destructive (wipes the disk), so it only acts on an explicit confirmation and
+# skips outright if something is already mounted there.
+install_data_disk_mount() {
+    local dev="${AUTOOS_DATA_DISK:-/dev/sda}" mnt="${AUTOOS_DATA_MOUNT:-/mnt/data}" label="data"
+    if findmnt "$mnt" >/dev/null 2>&1; then
+        ui_muted "$mnt is already mounted - skipping"
+        return 0
+    fi
+    if [[ ! -b "$dev" ]]; then
+        ui_warn "$dev not present - skipping data disk mount"
+        return 0
+    fi
+    if [[ "$(findmnt -no SOURCE / 2>/dev/null)" == "$dev"* ]]; then
+        ui_err "$dev holds the running root filesystem - refusing"
+        return 1
+    fi
+    if [[ -n "$(lsblk -ln -o MOUNTPOINT "$dev" 2>/dev/null | tr -d '[:space:]')" ]]; then
+        ui_err "a partition of $dev is already mounted elsewhere - refusing"
+        return 1
+    fi
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would ERASE $dev, create one ext4 partition, and mount it at $mnt"
+        return 0
+    fi
+    ui_warn "This will ERASE all data on $dev and create one ext4 partition mounted at $mnt."
+    local answer=""
+    read -r -p "Type 'yes' to format ${dev}: " answer
+    if [[ "$answer" != "yes" ]]; then
+        ui_muted "disk formatting skipped"
+        return 0
+    fi
+    $AUTOOS_SUDO umount "${dev}"?* 2>/dev/null || true
+    $AUTOOS_SUDO wipefs -a "$dev"
+    $AUTOOS_SUDO parted -s "$dev" mklabel gpt
+    $AUTOOS_SUDO parted -s "$dev" mkpart primary ext4 0% 100%
+    $AUTOOS_SUDO partprobe "$dev"
+    $AUTOOS_SUDO udevadm settle
+    $AUTOOS_SUDO mkfs.ext4 -F -L "$label" "${dev}1"
+    local uuid; uuid="$($AUTOOS_SUDO blkid -s UUID -o value "${dev}1")"
+    [[ -n "$uuid" ]] || { ui_err "could not read UUID of ${dev}1"; return 1; }
+    $AUTOOS_SUDO mkdir -p "$mnt"
+    if ! grep -q "UUID=$uuid" /etc/fstab 2>/dev/null; then
+        $AUTOOS_SUDO cp /etc/fstab "/etc/fstab.bak.$(date +%s)"
+        printf 'UUID=%s %s ext4 defaults,nofail,x-systemd.device-timeout=10s 0 2\n' "$uuid" "$mnt" |
+            $AUTOOS_SUDO tee -a /etc/fstab >/dev/null
+    fi
+    $AUTOOS_SUDO systemctl daemon-reload
+    $AUTOOS_SUDO mount "$mnt"
+    $AUTOOS_SUDO chown "$SYS_USER:$SYS_USER" "$mnt"
+    ui_ok "mounted $dev at $mnt (UUID=$uuid)"
+}
+
+# install_tty_desktop_kmscon: Nerd-Font kmscon on tty1-6, GNOME off by default,
+# start-gnome/stop-gnome to toggle it on demand. Boots to multi-user.target.
+install_tty_desktop_kmscon() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install kmscon on tty1-6, disable gdm autostart, and add start-gnome/stop-gnome"
+        return 0
+    fi
+    if ! has_cmd kmscon; then
+        $AUTOOS_SUDO apt-get install -y kmscon || { ui_warn "kmscon unavailable - leaving the default getty console"; return 0; }
+    fi
+    local font_src="$SYS_HOME/.local/share/fonts/JetBrainsMonoNF" font_dst="/usr/local/share/fonts/JetBrainsMonoNF"
+    if [[ -d "$font_src" ]]; then
+        $AUTOOS_SUDO install -d -m 0755 "$font_dst"
+        find "$font_src" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*.otf' \) -print0 |
+            xargs -0 -I{} $AUTOOS_SUDO install -m 0644 {} "$font_dst/"
+        $AUTOOS_SUDO fc-cache -f "$font_dst" >/dev/null
+    fi
+    $AUTOOS_SUDO install -d -m 0755 /etc/kmscon
+    cat <<'KMSCON_CONF' | $AUTOOS_SUDO tee /etc/kmscon/kmscon.conf >/dev/null
+font-engine=pango
+font-name=JetBrainsMono Nerd Font Mono
+font-size=12
+font-dpi=96
+term=xterm-256color
+palette=soft-black
+sb-size=10000
+dpms-timeout=0
+KMSCON_CONF
+    $AUTOOS_SUDO rm -f /etc/systemd/system/autovt@.service /etc/systemd/system/autovt@tty*.service
+    local n
+    for n in 1 2 3 4 5 6; do
+        $AUTOOS_SUDO systemctl enable "kmsconvt@tty$n.service" >/dev/null 2>&1 || true
+        $AUTOOS_SUDO systemctl disable "getty@tty$n.service" >/dev/null 2>&1 || true
+    done
+    $AUTOOS_SUDO systemctl daemon-reload
+    $AUTOOS_SUDO systemctl disable gdm.service >/dev/null 2>&1 || true
+    $AUTOOS_SUDO systemctl set-default multi-user.target
+
+    $AUTOOS_SUDO install -m 0755 /dev/stdin /usr/local/bin/start-gnome <<'START_GNOME'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then exec sudo -- "$0" "$@"; fi
+systemctl is-active --quiet gdm.service && { echo "GNOME already running."; exit 0; }
+systemd-run --quiet --collect --on-active=1 --unit="start-gnome-$$-$(date +%s)" /bin/sh -c '
+    for n in 1 2 3 4 5 6; do systemctl stop "kmsconvt@tty$n.service" "getty@tty$n.service" 2>/dev/null || true; done
+    systemctl start gdm.service'
+echo "GDM start requested."
+START_GNOME
+
+    $AUTOOS_SUDO install -m 0755 /dev/stdin /usr/local/bin/stop-gnome <<'STOP_GNOME'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ ${EUID:-$(id -u)} -ne 0 ]]; then exec sudo -- "$0" "$@"; fi
+start_kmscons() {
+    local n
+    for n in 1 2 3 4 5 6; do
+        systemctl is-enabled --quiet "kmsconvt@tty$n.service" && systemctl start "kmsconvt@tty$n.service" 2>/dev/null ||
+            systemctl start "getty@tty$n.service" 2>/dev/null || true
+    done
+}
+systemctl is-active --quiet gdm.service || { start_kmscons; exit 0; }
+systemd-run --quiet --collect --on-active=1 --unit="stop-gnome-$$-$(date +%s)" /bin/sh -c '
+    systemctl stop gdm.service
+    for n in 1 2 3 4 5 6; do
+        systemctl is-enabled --quiet "kmsconvt@tty$n.service" && systemctl start "kmsconvt@tty$n.service" 2>/dev/null ||
+            systemctl start "getty@tty$n.service" 2>/dev/null || true
+    done'
+echo "GDM stop requested."
+STOP_GNOME
+    ui_ok "kmscon console on tty1-6; GNOME stays off until 'start-gnome' is run"
+}
+
+# install_ssh_tailscale_access: enable openssh-server, disable Tailscale's own
+# SSH so there is exactly one auth path, open the firewall if ufw is active.
+install_ssh_tailscale_access() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would enable openssh-server, disable 'tailscale ssh', and allow 22/tcp through ufw"
+        return 0
+    fi
+    has_cmd tailscale && $AUTOOS_SUDO tailscale set --ssh=false 2>/dev/null || true
+    $AUTOOS_SUDO apt-get install -y openssh-server
+    if ! ss -tlnH 2>/dev/null | grep -qE '[:.]22[[:space:]]'; then
+        if systemctl list-unit-files ssh.socket >/dev/null 2>&1; then
+            $AUTOOS_SUDO systemctl enable --now ssh.socket
+        else
+            $AUTOOS_SUDO systemctl enable --now ssh
+        fi
+    fi
+    if ufw status 2>/dev/null | grep -q '^Status: active'; then
+        $AUTOOS_SUDO ufw allow 22/tcp
+        $AUTOOS_SUDO ufw allow in on tailscale0
+    fi
+    ui_ok "sshd enabled; Tailscale SSH disabled"
+}
+
+# install_github_actions_runner: register this box as a self-hosted Actions
+# runner. Needs GH_RUNNER_REPO=owner/repo (or GH_RUNNER_ORG=org); gh must be
+# authenticated. Optional GH_RUNNER_LABELS, default "self-hosted,<hostname>".
+install_github_actions_runner() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would register a self-hosted GitHub Actions runner (needs GH_RUNNER_REPO or GH_RUNNER_ORG)"
+        return 0
+    fi
+    local repo="${GH_RUNNER_REPO:-}" org="${GH_RUNNER_ORG:-}"
+    if [[ -z "$repo" && -z "$org" ]]; then
+        ui_err "set GH_RUNNER_REPO=owner/repo (or GH_RUNNER_ORG=org) before installing this component"
+        return 1
+    fi
+    if ! has_cmd gh; then ui_err "gh is required - add it to this run first"; return 1; fi
+    local dir="$SYS_HOME/actions-runner"
+    if [[ -d "$dir/.runner" ]]; then
+        ui_muted "a runner is already configured in $dir - skipping"
+        return 0
+    fi
+    mkdir -p "$dir" && cd "$dir"
+    local os="linux" arch
+    case "$(uname -m)" in x86_64) arch="x64" ;; aarch64|arm64) arch="arm64" ;; *) ui_err "unsupported arch $(uname -m)"; return 1 ;; esac
+    local ver; ver="$(gh api repos/actions/runner/releases/latest --jq .tag_name | sed 's/^v//')"
+    [[ -n "$ver" ]] || { ui_err "could not resolve the latest runner version"; return 1; }
+    local tarball="actions-runner-${os}-${arch}-${ver}.tar.gz"
+    [[ -f "$tarball" ]] || curl -fsSL -o "$tarball" \
+        "https://github.com/actions/runner/releases/download/v${ver}/${tarball}"
+    tar xzf "$tarball"
+    local api_path token
+    if [[ -n "$repo" ]]; then api_path="repos/${repo}/actions/runners/registration-token"
+    else api_path="orgs/${org}/actions/runners/registration-token"; fi
+    token="$(gh api -X POST "$api_path" --jq .token)"
+    [[ -n "$token" ]] || { ui_err "could not obtain a runner registration token - check gh auth and repo/org access"; return 1; }
+    local url="https://github.com/${repo:-$org}"
+    local labels="${GH_RUNNER_LABELS:-self-hosted,$(hostname -s)}"
+    ./config.sh --unattended --url "$url" --token "$token" \
+        --name "$(hostname -s)" --labels "$labels" --work _work
+    $AUTOOS_SUDO ./svc.sh install "$SYS_USER"
+    $AUTOOS_SUDO ./svc.sh start
+    ui_ok "registered and started a self-hosted runner for ${repo:-$org} (labels: $labels)"
+}
+
+# install_plangraph_omniroute_node: clone plangraph, install it in its own
+# venv, and scaffold the spawner's benchmark catalog directory so this box can
+# be a routing target. Does not write any gateway URL or API key - those are
+# the operator's secrets and belong in the environment, not the catalog.
+install_plangraph_omniroute_node() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would set up plangraph + its spawner catalog under ~/code/repos/plangraph"
+        return 0
+    fi
+    local repo_dir="$SYS_HOME/code/repos/plangraph"
+    mkdir -p "$(dirname "$repo_dir")"
+    if [[ -d "$repo_dir/.git" ]]; then
+        ui_muted "plangraph already cloned at $repo_dir"
+    else
+        git clone https://github.com/Ch3fUlrich/plangraph.git "$repo_dir"
+    fi
+    if [[ ! -x "$repo_dir/.venv/bin/python3" ]]; then
+        python3 -m venv "$repo_dir/.venv"
+    fi
+    "$repo_dir/.venv/bin/pip" install -q --upgrade pip
+    "$repo_dir/.venv/bin/pip" install -q -e "$repo_dir" pytest 2>/dev/null ||
+        "$repo_dir/.venv/bin/pip" install -q pytest
+    mkdir -p "$SYS_HOME/.cache/plangraph"
+    ui_ok "plangraph ready at $repo_dir"
+    ui_info "Set PLANGRAPH_GATEWAY_URL (and this host's provider credentials) in your shell env to let OmniRoute route work here - AutoOS does not invent or store those secrets."
 }

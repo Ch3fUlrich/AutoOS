@@ -6,11 +6,11 @@
     "ai-coding": "Coding and AI tooling plus the shell, no desktop packages.",
     "light": "Small board (Raspberry Pi 5 and similar) — Claude Code, Tailscale and Herdr only.",
     "server": "Headless server — shell, networking and containers, no GUI.",
-    "rescue": "Disaster-recovery toolkit — disk, filesystem, hardware and Windows repair.",
+    "rescue": "Disaster-recovery toolkit and emergency AI recovery environment.",
     "local-ai": "Local AI inference with Ollama — no API key and no network, but models are 1.4-4.7 GB.",
     "custom": "Start with nothing ticked and choose by hand.",
     "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing.",
-    "rescue": "Disaster-recovery toolkit and emergency AI recovery environment."
+    "build-server": "Headless build/CI/agent-routing node — disk, console, SSH+Tailscale, Docker, a self-hosted GitHub Actions runner, Bitwarden CLI and the plangraph OmniRoute spawner node."
   },
   "categories": [
     {
@@ -1355,7 +1355,9 @@
           "package": "smartmontools",
           "verify": "smartctl --version",
           "homepage": "https://www.smartmontools.org/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "nvme-cli",
@@ -1365,7 +1367,9 @@
           "package": "nvme-cli",
           "verify": "nvme version",
           "homepage": "https://github.com/linux-nvme/nvme-cli",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "hdparm",
@@ -1375,7 +1379,9 @@
           "package": "hdparm",
           "verify": "hdparm -V",
           "homepage": "https://sourceforge.net/projects/hdparm/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "pciutils",
@@ -1385,7 +1391,9 @@
           "package": "pciutils",
           "verify": "lspci --version",
           "homepage": "https://mj.ucw.cz/sw/pciutils/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "usbutils",
@@ -1395,7 +1403,9 @@
           "package": "usbutils",
           "verify": "lsusb --version",
           "homepage": "https://github.com/gregkh/usbutils",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "lshw",
@@ -1405,7 +1415,9 @@
           "package": "lshw",
           "verify": "lshw -version",
           "homepage": "https://ezix.org/project/wiki/HardwareLiSter",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "dmidecode",
@@ -1415,7 +1427,9 @@
           "package": "dmidecode",
           "verify": "dmidecode --version",
           "homepage": "https://www.nongnu.org/dmidecode/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "inxi",
@@ -1425,7 +1439,9 @@
           "package": "inxi",
           "verify": "inxi -V",
           "homepage": "https://github.com/smxi/inxi",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "lm-sensors",
@@ -1435,7 +1451,9 @@
           "package": "lm-sensors",
           "verify": "sensors -v",
           "homepage": "https://github.com/lm-sensors/lm-sensors",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "memtester",
@@ -1444,7 +1462,9 @@
           "provider": "apt",
           "package": "memtester",
           "homepage": "https://pyropus.ca/software/memtester/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "stress-ng",
@@ -1455,7 +1475,9 @@
           "verify": "stress-ng --version",
           "homepage": "https://github.com/ColinIanKing/stress-ng",
           "notes": "Not in the original rescue list — added so a rescue stick can also load-test suspect hardware.",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "f3",
@@ -1466,7 +1488,9 @@
           "verify": "f3write --version",
           "homepage": "https://fight-flash-fraud.readthedocs.io/en/latest/",
           "notes": "Not in the original rescue list — added because fake-capacity USB sticks are exactly what a rescue kit should catch.",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "gdisk",
@@ -1476,7 +1500,9 @@
           "package": "gdisk",
           "verify": "sgdisk --version",
           "homepage": "https://www.rodsbooks.com/gdisk/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "parted",
@@ -1486,7 +1512,9 @@
           "package": "parted",
           "verify": "parted --version",
           "homepage": "https://www.gnu.org/software/parted/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "testdisk",
@@ -1495,7 +1523,9 @@
           "provider": "apt",
           "package": "testdisk",
           "homepage": "https://www.cgsecurity.org/wiki/TestDisk",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "ddrescue",
@@ -1505,7 +1535,9 @@
           "package": "gddrescue",
           "verify": "ddrescue --version",
           "homepage": "https://www.gnu.org/software/ddrescue/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "e2fsprogs",
@@ -1515,7 +1547,9 @@
           "package": "e2fsprogs",
           "verify": "e2fsck -V",
           "homepage": "https://e2fsprogs.sourceforge.net/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "btrfs-progs",
@@ -1525,7 +1559,9 @@
           "package": "btrfs-progs",
           "verify": "btrfs --version",
           "homepage": "https://btrfs.readthedocs.io/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "xfsprogs",
@@ -1535,7 +1571,9 @@
           "package": "xfsprogs",
           "verify": "mkfs.xfs -V",
           "homepage": "https://xfs.wiki.kernel.org/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "ntfs-3g",
@@ -1545,7 +1583,9 @@
           "package": "ntfs-3g",
           "verify": "ntfs-3g --version",
           "homepage": "https://github.com/tuxera/ntfs-3g",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "dosfstools",
@@ -1554,7 +1594,9 @@
           "provider": "apt",
           "package": "dosfstools",
           "homepage": "https://github.com/dosfstools/dosfstools",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "exfatprogs",
@@ -1564,7 +1606,9 @@
           "package": "exfatprogs",
           "verify": "mkfs.exfat --version",
           "homepage": "https://github.com/exfatprogs/exfatprogs",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "lvm2",
@@ -1574,7 +1618,9 @@
           "package": "lvm2",
           "verify": "vgs --version",
           "homepage": "https://sourceware.org/lvm2/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "mdadm",
@@ -1584,7 +1630,9 @@
           "package": "mdadm",
           "verify": "mdadm --version",
           "homepage": "https://raid.wiki.kernel.org/index.php/Mdadm",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "cryptsetup",
@@ -1594,7 +1642,9 @@
           "package": "cryptsetup",
           "verify": "cryptsetup --version",
           "homepage": "https://gitlab.com/cryptsetup/cryptsetup",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "dislocker",
@@ -1602,10 +1652,14 @@
           "description": "Mount BitLocker-encrypted Windows volumes",
           "provider": "apt",
           "package": "dislocker",
-          "arch": ["x64"],
+          "arch": [
+            "x64"
+          ],
           "homepage": "https://github.com/Aorimn/dislocker",
           "notes": "Debian-family only; no Fedora path yet.",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "chntpw",
@@ -1613,10 +1667,14 @@
           "description": "Reset lost Windows account passwords offline",
           "provider": "apt",
           "package": "chntpw",
-          "arch": ["x64"],
+          "arch": [
+            "x64"
+          ],
           "homepage": "https://pogostick.net/~pnh/ntpasswd/",
           "notes": "Debian-family only; no Fedora path yet.",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "efibootmgr",
@@ -1626,7 +1684,9 @@
           "package": "efibootmgr",
           "verify": "efibootmgr --version",
           "homepage": "https://github.com/rhboot/efibootmgr",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "arch-install-scripts",
@@ -1635,7 +1695,9 @@
           "provider": "apt",
           "package": "arch-install-scripts",
           "homepage": "https://gitlab.archlinux.org/archlinux/arch-install-scripts",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "clonezilla",
@@ -1644,7 +1706,9 @@
           "provider": "apt",
           "package": "clonezilla",
           "homepage": "https://clonezilla.org/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "gparted",
@@ -1654,7 +1718,9 @@
           "package": "gparted",
           "verify": "gparted --version",
           "homepage": "https://gparted.org/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "nmap",
@@ -1664,7 +1730,9 @@
           "package": "nmap",
           "verify": "nmap --version",
           "homepage": "https://nmap.org/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "tcpdump",
@@ -1674,7 +1742,9 @@
           "package": "tcpdump",
           "verify": "tcpdump --version",
           "homepage": "https://www.tcpdump.org/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "iperf3",
@@ -1684,7 +1754,9 @@
           "package": "iperf3",
           "verify": "iperf3 --version",
           "homepage": "https://github.com/esnet/iperf",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "ethtool",
@@ -1694,7 +1766,9 @@
           "package": "ethtool",
           "verify": "ethtool --version",
           "homepage": "https://www.kernel.org/pub/software/network/ethtool/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "borgbackup",
@@ -1704,7 +1778,9 @@
           "package": "borgbackup",
           "verify": "borg --version",
           "homepage": "https://www.borgbackup.org/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
         },
         {
           "id": "restic",
@@ -1714,7 +1790,98 @@
           "package": "restic",
           "verify": "restic version",
           "homepage": "https://restic.net/",
-          "profiles": ["rescue"]
+          "profiles": [
+            "rescue"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "build-server",
+      "name": "Build server",
+      "description": "Turns a headless box into a CI/agent-routing node for the build-server profile.",
+      "components": [
+        {
+          "id": "data-disk-mount",
+          "name": "Data disk mount",
+          "description": "Formats the secondary disk ext4, mounts at /mnt/data",
+          "provider": "custom",
+          "postInstall": "install_data_disk_mount",
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "findmnt /mnt/data",
+          "homepage": "",
+          "package": "data-disk-mount"
+        },
+        {
+          "id": "tty-desktop-kmscon",
+          "name": "Nerd-Font TTY console",
+          "description": "kmscon on tty1-6 with a Nerd Font; GNOME off by default",
+          "provider": "custom",
+          "postInstall": "install_tty_desktop_kmscon",
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "command -v start-gnome && command -v stop-gnome",
+          "homepage": "",
+          "package": "tty-desktop-kmscon"
+        },
+        {
+          "id": "ssh-tailscale-access",
+          "name": "SSH over Tailscale",
+          "description": "openssh-server on, Tailscale's own SSH off",
+          "provider": "custom",
+          "postInstall": "install_ssh_tailscale_access",
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "systemctl is-active ssh.socket || systemctl is-active ssh",
+          "homepage": "",
+          "package": "ssh-tailscale-access"
+        },
+        {
+          "id": "bitwarden-cli",
+          "name": "Bitwarden CLI",
+          "description": "bw - credential access for scripted/headless setup",
+          "provider": "snap",
+          "package": "bw",
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "bw --version",
+          "homepage": "https://bitwarden.com/help/cli/"
+        },
+        {
+          "id": "github-actions-runner",
+          "name": "GitHub Actions self-hosted runner",
+          "description": "Registers this box as a self-hosted Actions runner",
+          "provider": "script",
+          "package": "github-actions-runner",
+          "requires": [
+            "gh"
+          ],
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "systemctl is-active actions.runner.* 2>/dev/null | grep -q active",
+          "homepage": "https://docs.github.com/en/actions/hosting-your-own-runners"
+        },
+        {
+          "id": "plangraph-omniroute-node",
+          "name": "Plangraph OmniRoute node",
+          "description": "Sets up plangraph + its spawner catalog on this box",
+          "provider": "custom",
+          "postInstall": "install_plangraph_omniroute_node",
+          "requires": [
+            "python3"
+          ],
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "test -f ~/code/repos/plangraph/.venv/bin/python3",
+          "homepage": "https://github.com/Ch3fUlrich/plangraph",
+          "package": "plangraph-omniroute-node"
         }
       ]
     }
