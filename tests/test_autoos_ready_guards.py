@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Tests for tools/autoos_ready_guards.py (AO-WRITER-GUARDS P4a).
-
 Hermetic (D-852): no runner, no subprocess, no git, no network — diff paths are
 arguments, the tool lookup is injected (a directory name comes from this checkout's
 own path, only ever stat'ed), the brief is a real render."""
@@ -11,12 +10,10 @@ import sys
 import unittest
 from pathlib import Path
 from unittest import mock
-
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import autoos_brief as brief  # noqa: E402
 import autoos_ready_guards as g  # noqa: E402
-
 PATHS = ["tools/a.py", "tools/b.yml", "tests/test_a.py"]
 SIX = [1, 2, 3, 4, 5, 6]
 ALL_OK = [(n, "PASS") for n in SIX]
@@ -29,25 +26,17 @@ THREE = ["tools/a.py", "tools/b.py", "tests/test_c.py"]
 CHANGELOG_IMPOSTORS = ["docs/CHANGELOG.md", "CHANGELOG.md.bak", "changelog.md",
                        "CHANGELOG.MD", "./docs/CHANGELOG.md", "CHANGELOG"]
 CAP_TEXT = ">3 files not counting CHANGELOG.md"
-
-
 def rendered(paths=PATHS):
     return brief.render_brief("ops", "R2", {
         "task_id": "AO-1", "one_line": "fix mail", "paths": list(paths),
         "goal": "once-only mail", "invariants": "idempotent", "entity": "host",
         "keys_file": "keys.yml", "reference_playbook": "ref.yml", "state_path": paths[0],
         "indent": "2", "files": paths[0], "playbooks": paths[1], "test_files": paths[2]})
-
-
 def files_line(paths):
     return ("# AO-1\nFILES (only these; <= 3 files, <= 200 lines changed): "
             + ", ".join(paths) + ". Do not touch other lines/files.\nGOAL: y.\n")
-
-
 def report(rows):
     return "REPORT:\n" + "\n".join("CHECK %d: %s tail output" % r for r in rows)
-
-
 # Not a plain relative path: a fence violation *and* an unparsable FILES entry.
 BAD = ["", "/etc/shadow", "../tools/a.py", "tools/../a.py", "tools//a.py", "/tools/a.py",
        "tools/", "tools/a.py.", "tools/CON.py", "tools/NUL.py", "a\\b.py", "C:/a.py",
@@ -191,8 +180,6 @@ TAB_FENCE_CLOSE = [
 # A tab-indented OPENER is likewise not a fence line: nothing is swallowed.
 TAB_FENCE_OPEN = ["\t```\nCHECK 1: PASS real tail\n",
                   "  \t```\nCHECK 1: PASS real tail\n"]
-
-
 class ReadyFollowupTests(unittest.TestCase):
     def test_smaller_line_caps_and_pr_123(self):
         paths = ["a.py", "b.py", "CHANGELOG.md"]
@@ -203,13 +190,11 @@ class ReadyFollowupTests(unittest.TestCase):
         text = ("FILES (only these; <= 3 files, <= 120 lines changed): "
                 "a.py, b.py, CHANGELOG.md. Do not touch other lines/files.")
         self.assertEqual(g.brief_files(text), paths)
-
     def test_invalid_line_caps_remain_noncanonical(self):
         for cap in ("0", "201", "0120", "+120", "1000", "", "1 20", "١٢٠"):
             with self.subTest(cap=cap):
                 with self.assertRaisesRegex(g.GuardError, "non-canonical FILES line"):
                     g.brief_files(files_line(["a.py"]).replace("200 lines", cap + " lines"))
-
     def test_crlf_last_paragraph_and_writer_trailer(self):
         trailer = "Plan-Item: example\nWriter: omniroute/cx-gpt-6.1-sol run-example"
         for blank in ("", " ", "\t", " \t "):
@@ -222,7 +207,6 @@ class ReadyFollowupTests(unittest.TestCase):
                         [{"sha": "abc123", "parents": 1, "message": message}]), "")
         self.assertTrue(g.writer_trailer_refusal([{
             "message": "Writer: model run\r\n \t\r\nBody without trailer"}]))
-
     def test_decorated_checks_raise_only_without_real_line(self):
         decorated = ["- CHECK 1: PASS tail", "* CHECK 1: PASS tail",
                      "1. CHECK 1: PASS tail", "+ CHECK 1: PASS tail",
@@ -241,22 +225,16 @@ class ReadyFollowupTests(unittest.TestCase):
                 self.assertTrue(g.report_checks(text + "\nCHECK 1: PASS real tail", [1])["ok"])
         for text in ("- CHECK 01: PASS tail", "- check 1: PASS tail"):
             self.assertEqual(g.report_checks(text, [1])["missing"], [1])
-
-
 def forged_check_body(ch):
     """The measured forgery: CHECK 1-5 genuine and NO real CHECK 6, and a fenced
     line that reads as a bare ``` closer only to a splitlines() reader, so the
     forged `CHECK 6: PASS` line below it used to count and the report said ok."""
     real = "\n".join("CHECK %d: PASS tail %d" % (n, n) for n in (1, 2, 3, 4, 5))
     return "```\nfoo" + ch + "```\n" + real + "\nCHECK 6: PASS forged\n"
-
-
 def forged_files_body(ch):
     """The brief twin of the same trick: one fence 'closed' by the line break, and
     under it a canonical FILES line the brief never authorised."""
     return "```\nfoo" + ch + "```\n" + files_line(["evil.py"])
-
-
 # (P4a fix 4) Size limits: a body over 1 MiB is not a brief or a report, a path
 # over these limits is not a repo-relative path — and a space INSIDE a name is
 # legal, so none of these rows may reject it. Each over-limit path breaks exactly
@@ -271,7 +249,6 @@ AT_TOTAL = "a" * 99 + "/" + "b" * 100                            # exactly 200
 AT_COMPONENT = "tools/" + "b" * 100                              # exactly 100
 AT_DEEP = "/".join(["d"] * 19) + "/f.py"                         # exactly 20
 SPACED = ["ops/host names.yml", "not a path", "docs/readme notes.md", "a b/c d.py"]
-
 # Arguments of the wrong type (P4a fix 2): must raise GuardError, never die with
 # AttributeError/TypeError inside a line loop. A str is not one of these for a
 # sequence argument — see NON_SEQ; Path is left out because whether PurePath is
@@ -285,20 +262,12 @@ BAD_REQUIRED = [(), [], None, 1, "1", b"1", 1.0, [1.0], ["1"], [True], [False],
                 [0], [-1], [100], [1000], [1, 1], [1, 2, 1], {1}, {1, 2},
                 range(1, 3), (1, 99, 99), (0, 1), (None,), ((1,),)]
 GOOD_REQUIRED = [(1,), [1], (1, 2, 3), [99], (1, 99), tuple(SIX)]
-
-
 def quoted_all(text):
     return "".join("> " + ln + "\n" for ln in text.splitlines())
-
-
 def indent_files(text, mark="  "):
     return text.replace("\nFILES", "\n" + mark + "FILES")
-
-
 def crlf_files(text):
     return text.replace("other lines/files.\n", "other lines/files.\r\n")
-
-
 # (3) FILES-looking lines are never used silently: indented, CR-terminated,
 # quoted, or inside a fence — and a second canonical line anywhere.
 FILES_FORGEROWS = [
@@ -320,8 +289,6 @@ FILES_FORGEROWS = [
     "  ```\n" + files_line(["a.py"]),
     files_line(["a.py"]) + "```\nFILES (only these; x): y.py\n```\n",
     files_line(["a.py"]) + "~~~\n~~~\nFILES (only these; x): y.py\n"]
-
-
 class ReadyGuardsTests(unittest.TestCase):
     def test_brief_files_reads_the_rendered_ops_brief(self):
         self.assertTrue(issubclass(g.GuardError, ValueError))
@@ -329,7 +296,6 @@ class ReadyGuardsTests(unittest.TestCase):
         # './' is the one normalisation; the case of a FILES entry is kept, so
         # the fence can still refuse 'Tools/A.PY' when the brief says 'tools/a.py'.
         self.assertEqual(g.brief_files(files_line(["./Tools/A.PY"])), ["Tools/A.PY"])
-
     def test_brief_files_ignores_fenced_output_it_never_counts(self):
         # Non-FILES content inside a fence is ignored; a closed fence does not
         # hide the real canonical line, before or after it.
@@ -342,13 +308,11 @@ class ReadyGuardsTests(unittest.TestCase):
         for dup in (["a.py", "A.PY"], ["./a.py", "a.py"], ["a.py", "a.py"]):
             with self.assertRaises(g.GuardError):
                 g.brief_files(files_line(dup))
-
     def test_brief_files_refuses_non_canonical_files_lines(self):
         for text in FILES_FORGEROWS:
             with self.subTest(text=text[:32]):
                 with self.assertRaises(g.GuardError):
                     g.brief_files(text)
-
     def test_brief_files_refuses_forged_briefs(self):
         texts = (BAD_TEXTS + [files_line(r) for r in LIST_ROWS]
                  + [files_line(["a.py"]) * 2, files_line(["a.py"]) + files_line(["b.py"])]
@@ -356,7 +320,6 @@ class ReadyGuardsTests(unittest.TestCase):
         for text in texts:
             with self.assertRaises(g.GuardError):
                 g.brief_files(text)
-
     def test_files_cap_exempts_only_the_exact_changelog_entry(self):
         # (P10) The cap counts FILES entries other than the repo-root 'CHANGELOG.md'
         # (after _files_item/exact_path normalisation, case-exact), so a lane that
@@ -371,7 +334,6 @@ class ReadyGuardsTests(unittest.TestCase):
         # normalised name: './CHANGELOG.md' comes back as 'CHANGELOG.md'.
         self.assertEqual(g.brief_files(files_line(THREE + ["./CHANGELOG.md"])),
                          THREE + ["CHANGELOG.md"])
-
     def test_files_cap_refuses_a_fourth_counted_file(self):
         for paths in (THREE + ["tools/d.py"],                     # 4, none exempt
                      THREE + [CHANGELOG, "docs/x.md"],            # 5 with CHANGELOG
@@ -380,7 +342,6 @@ class ReadyGuardsTests(unittest.TestCase):
             with self.subTest(paths=paths):
                 with self.assertRaises(g.GuardError):
                     g.brief_files(files_line(paths))
-
     def test_files_cap_refusal_names_the_cap_and_the_exemption(self):
         for paths in (THREE + ["tools/d.py"], THREE + [CHANGELOG, "docs/x.md"]):
             with self.subTest(paths=paths):
@@ -388,7 +349,6 @@ class ReadyGuardsTests(unittest.TestCase):
                     g.brief_files(files_line(paths))
                 self.assertIn(CAP_TEXT, str(cm.exception))
                 self.assertIn(CHANGELOG, str(cm.exception))
-
     def test_changelog_look_alikes_count_as_ordinary_files(self):
         # Case, a directory prefix and a suffix are all a DIFFERENT file on Linux:
         # none of them is exempt, so 3 ordinary files + one of these is a 4th
@@ -398,14 +358,12 @@ class ReadyGuardsTests(unittest.TestCase):
                 with self.assertRaises(g.GuardError) as cm:
                     g.brief_files(files_line(THREE + [impostor]))
                 self.assertIn(CAP_TEXT, str(cm.exception))
-
     def test_duplicate_changelog_entries_are_refused(self):
         for dup in ([CHANGELOG, CHANGELOG], ["./CHANGELOG.md", "CHANGELOG.md"],
                     ["CHANGELOG.md", "changelog.md"]):
             with self.subTest(dup=dup):
                 with self.assertRaises(g.GuardError):
                     g.brief_files(files_line(THREE[:1] + dup))
-
     def test_changelog_exempt_entry_still_passes_the_scope_fence(self):
         # The returned paths keep the exemption name, so a lane that wrote the
         # changelog is not a scope violation.
@@ -413,17 +371,14 @@ class ReadyGuardsTests(unittest.TestCase):
         self.assertEqual(g.scope_fence(THREE + [CHANGELOG], allowed), [])
         self.assertEqual(g.scope_fence(["docs/CHANGELOG.md"], allowed),
                          ["docs/CHANGELOG.md"])
-
     def test_scope_fence_flags_every_unlisted_path(self):
         for path in BAD + OUT:
             with self.subTest(path=path):
                 self.assertEqual(g.scope_fence([path], ["tools/a.py"]), [path])
-
     def test_scope_fence_table_and_brief_scope_round_trip(self):
         self.assertEqual([(d, a, g.scope_fence(d, a)) for d, a, _ in FENCE],
                          [(d, a, w) for d, a, w in FENCE])
         self.assertEqual(g.scope_fence(PATHS, g.brief_files(rendered())), [])
-
     def test_scope_fence_is_case_sensitive_and_collapses_only_dot_slash(self):
         for diff, allowed, want in CASE_FENCE:
             with self.subTest(diff=diff, allowed=allowed):
@@ -432,7 +387,6 @@ class ReadyGuardsTests(unittest.TestCase):
         # they are two files, and the fence is the only thing standing between.
         self.assertEqual(g.scope_fence(["Tools/A.PY"], g.brief_files(rendered())),
                          ["Tools/A.PY"])
-
     def test_scope_fence_non_str_inputs_fail_closed(self):
         self.assertEqual(g.scope_fence([None, 5, b"x"], ["tools/a.py"]),
                          ["None", "5", "b'x'"])
@@ -443,13 +397,11 @@ class ReadyGuardsTests(unittest.TestCase):
             with self.subTest(allowed=allowed):
                 with self.assertRaises(g.GuardError):
                     g.scope_fence(["tools/a.py"], allowed)
-
     def test_report_checks_table(self):
         got = [tuple(g.report_checks(t, required=r)[k]
                     for k in ("ok", "missing", "failed", "input_required"))
                for t, r, _ in CHECKS]
         self.assertEqual(got, [w for _, _, w in CHECKS])
-
     def test_report_checks_column_zero_and_evidence_tail(self):
         for text in NOT_COUNTED:
             with self.subTest(text=text[:24]):
@@ -462,7 +414,6 @@ class ReadyGuardsTests(unittest.TestCase):
                 self.assertEqual((out["ok"], out["missing"], out["failed"]),
                                  (False, [], [1]))
         self.assertEqual(g.report_checks("CHECK 1: PASS tail\n", required=[1])["ok"], True)
-
     def test_report_checks_conflicts_and_single_fail(self):
         for rows in CONFLICTS:
             out = g.report_checks(report(rows), required=[1])
@@ -470,7 +421,6 @@ class ReadyGuardsTests(unittest.TestCase):
         for n in SIX:
             rows = [(m, "PASS" if m != n else "FAIL") for m in SIX]
             self.assertEqual(g.report_checks(report(rows))["failed"], [n])
-
     def test_report_checks_unparsable_verdicts_fail_closed(self):
         for text in NOISE:
             out = g.report_checks(text, required=[1])

@@ -4,7 +4,6 @@ decision helper for whether the guards are required at all. Every input arrives 
 argument (diff paths, injected `which`); HERMETIC (D-852): no command, nothing
 installed, no writes — the only disk touch is the default `shutil.which` a caller may
 inject away, and the `isdir` read on whatever that lookup returned.
-
 FILES cap (P10, AO-GUARD-LEGACY-BRIEF + FILES-cap rule): the canonical template's
 "<= 3 files" counts the entries a lane may EDIT, and a lane's `CHANGELOG.md` line is
 history rather than an edited source file, so the cap counts every FILES entry EXCEPT
@@ -22,18 +21,17 @@ import re
 import shutil
 import sys
 import unicodedata
-
 from autoos_blank import is_invisible_char as _is_invisible_char
 from autoos_writer_rule import R_LEVELS, required_r_level
-
 # Windows device stems, mirrored from tools/autoos_brief.py (private there).
 _RESERVED = frozenset({"CON", "PRN", "AUX", "NUL"}
                       | {"%s%d" % (p, i) for p in ("COM", "LPT") for i in range(1, 10)})
 # ops.md's FILES line: the canonical prefix is matched at column 0 EXACTLY, RE is the
-# rendered template's exact wording. Anything FILES-shaped but not this is a violation.
+# rendered template's exact wording except a smaller line cap (ASCII 1..200,
+# no leading zero). Anything FILES-shaped but not this is a violation.
 _CANON_PREFIX = "FILES (only these;"
 _FILES_LOOK = re.compile(r"^[ \t]*FILES\b")
-_FILES_RE = re.compile(r"^FILES \(only these; <= 3 files, <= 200 lines changed\):"
+_FILES_RE = re.compile(r"^FILES \(only these; <= 3 files, <= (?P<cap>[1-9][0-9]{0,2}) lines changed\):"
                        r"[ ]*(?P<paths>.*?)\.[ ]Do not touch other lines/files\.[ ]*$")
 # Markdown's own fence rule, shared by BOTH readers (see _Fences): at most 3
 # leading SPACES, then 3+ of the same ` or ~; `tail` is what follows on the line.
@@ -84,12 +82,8 @@ CHANGELOG_ENTRY = "CHANGELOG.md"
 INSTALL_HELP = ("pipx install yamllint ansible-core ansible-lint pre-commit\n"
                 "gitleaks: the vendor release binary on PATH "
                 "(https://github.com/gitleaks/gitleaks/releases)")
-
-
 class GuardError(ValueError):
     """The brief, the report shape, or a caller argument is not usable."""
-
-
 def _invisible_char(text):
     """The first character of `text` no brief or report may carry: any character
     `tools/autoos_blank.is_invisible_char` refuses — every Zs/Zl/Zp/Cc/Cf member and
@@ -104,8 +98,6 @@ def _invisible_char(text):
         if _is_invisible_char(ch):
             return ch
     return None
-
-
 def _guard_text(name, text):
     """A brief/report body must be a usable str (P4a fix 2: a wrong type raises,
     it never reaches a line loop and dies with AttributeError/TypeError), must fit
@@ -125,8 +117,6 @@ def _guard_text(name, text):
                          "'\\n'-separated lines of spelled ASCII, never as "
                          "splitlines() output" % (name, repr(bad), ord(bad),
                                                   unicodedata.category(bad)))
-
-
 def _lines(text):
     """The body's physical lines: split on '\\n' ONLY, never str.splitlines(),
     which also breaks on the characters _invisible_char refuses (that guard is
@@ -140,8 +130,6 @@ def _lines(text):
             yield raw[:-1], True
         else:
             yield raw, False
-
-
 def _guard_seq(name, paths):
     """A sequence of path arguments, fail closed (P4a fix 2): a non-iterable has
     no entries to check, and a bare str/bytes IS iterable — walking it yields
@@ -308,8 +296,9 @@ def brief_files(brief_text, max_files=MAX_FILES):
         # normalise away: the ending ('files.\r') is a non-unix line break in a
         # brief, and an interior one ('a.py\r. Do') would reach the item split
         # below as a control character _files_item refuses.
+        match = _FILES_RE.match(line)
         if (cr or "\r" in line or not line.startswith(_CANON_PREFIX)
-                or not _FILES_RE.match(line)):
+                or not match or int(match.group("cap")) > 200):
             raise GuardError("non-canonical FILES line: %r" % line[:120])
         canonical.append(line)
     if len(canonical) != 1:
@@ -384,8 +373,11 @@ def _guard_required(required):
 def report_checks(report_text, required=(1, 2, 3, 4, 5, 6)):
     """{ok, missing, failed, input_required} over the report's CHECK lines.
     A CHECK line counts only at column 0: indented, '>'-quoted or list-marked
-    lines are quoted output and never count, and neither does a zero-padded or
-    non-ASCII digit ('CHECK 03', 'check 3', 'CHECK ١'). Lines are the physical
+    lines never count. Missing required ids with unfenced list-marked (up to three
+    leading spaces) or column-0 bold CHECK lines raise with the required shape;
+    a real column-0 line suppresses that diagnostic for its id. Quoted, fenced,
+    and four-space-indented copies remain plain missing. Zero-padded, lowercase or
+    non-ASCII forms never count ('CHECK 03', 'check 3', 'CHECK ١'). Lines are the physical
     '\\n'-separated ones (see _lines), never splitlines() output: a body that
     carries an invisible/control/format character — any Zs/Zl/Zp/Cc/Cf character
     outside ' \\t\\n\\r' ('foo\\x0c```' used to hand the fence reader a bare ```
@@ -405,16 +397,26 @@ def report_checks(report_text, required=(1, 2, 3, 4, 5, 6)):
     _guard_text("report_text", report_text)
     req = _guard_required(required)
     seen = {}
+    decorated = set()
+    decoration = re.compile(r"^(?: {0,3}(?:[-*+]|1[.)])[ \t]+(?:\*\*|__)?|\*\*|__)"
+                            r"CHECK[ \t]+([1-9][0-9]*)(?![0-9])\b")
     fences = _Fences()
     for line, _ in _lines(report_text):
         if fences.feed(line):
             continue
+        marked = decoration.match(line)
+        if marked:
+            decorated.add(int(marked.group(1)))
         m = _CHECK_RE.match(line)
         if not m or int(m.group("n")) not in req:
             continue
         v = _VERDICT_RE.match(m.group("rest"))
         seen.setdefault(int(m.group("n")), set()).add(v.group(1) if v else "FAIL")
     missing = sorted(set(req) - set(seen))
+    for n in missing:
+        if n in decorated:
+            raise GuardError("CHECK %d requires CHECK %d: PASS at column 0 with no "
+                             "list marker, bold or indentation" % (n, n))
     failed = sorted(n for n, vs in seen.items() if len(vs) > 1 or "FAIL" in vs)
     need = sorted(n for n in seen if seen[n] == {"INPUT_REQUIRED"})
     return {"ok": not (missing or failed or need), "missing": missing,
@@ -507,7 +509,7 @@ HAND_EDIT_RE = re.compile(r"^Hand-Edit:[ \t]+\S.*$")
 
 def last_paragraph(message):
     """Return the final trailer paragraph, excluding body prose."""
-    return re.split(r"\n[ \t]*\n", (message or "").rstrip())[-1]
+    return re.split(r"\n[ \t]*\n", (message or "").replace("\r\n", "\n").rstrip())[-1]
 
 
 def writer_trailer_refusal(commits):
