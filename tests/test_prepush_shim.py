@@ -66,8 +66,9 @@ class ShimTests(GateFixture):
         self.assertNotEqual(text, old)
         self.assertIn("autoos-prepush-gate v3", text)
         self.assertIn("|| exit $?", text)
-        gate_line = next(line for line in text.splitlines() if "--hook-stdin" in line)
-        self.assertNotIn("|| exit 1", gate_line)
+        gate_lines = [line for line in text.splitlines() if "--hook-stdin" in line]
+        self.assertEqual(len(gate_lines), 1)
+        self.assertNotIn("|| exit 1", gate_lines[0])
         self.assertFalse((self.hooks / "pre-push.autoos-chained").exists())
 
     def test_check_reports_v2_hook_without_writing(self):
@@ -76,10 +77,14 @@ class ShimTests(GateFixture):
         old = hook.read_bytes().replace(b"gate v3", b"gate v2")
         old = old.replace(b"--hook-stdin || exit $?", b"--hook-stdin || exit 1")
         hook.write_bytes(old)
+        self.assertIn(b"gate v2", hook.read_bytes())
+        listing = sorted(path.name for path in self.hooks.iterdir())
         install_prepush_hook = runpy.run_path(str(TRUST))["install_prepush_hook"]
         report = install_prepush_hook(self.repo, check=True)
         self.assertIn(str(hook), report)
+        self.assertNotIn("already installed", report)
         self.assertEqual(hook.read_bytes(), old)
+        self.assertEqual(sorted(path.name for path in self.hooks.iterdir()), listing)
 
     def test_either_missing_gate_module_installs_nothing(self):
         for name in ("prepush.py", "prepush_hook.py"):
