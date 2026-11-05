@@ -1942,6 +1942,19 @@
           ],
           "verify": "gitleaks version",
           "homepage": "https://github.com/gitleaks/gitleaks"
+        },
+        {
+          "id": "rustup",
+          "name": "Rust toolchain",
+          "description": "rustup with stable Rust, rustfmt, clippy and Windows cross target",
+          "provider": "apt",
+          "package": "rustup",
+          "postInstall": "install_rust_toolchain",
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "cargo --version",
+          "homepage": "https://www.rust-lang.org/tools/install"
         }
       ]
     }

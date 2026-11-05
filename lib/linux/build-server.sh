@@ -396,3 +396,5 @@ install_gitleaks() {
     rm -rf "$tmp"
     ui_ok "gitleaks v${ver} installed to ~/.local/bin/gitleaks"
 }
+# shellcheck source=lib/linux/build-server-rust.sh
+. "${AUTOOS_ROOT}/lib/linux/build-server-rust.sh"
