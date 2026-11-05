@@ -370,7 +370,7 @@ def configure_omnigraph_env(worktree: Path, repo: Path, check: bool = False) -> 
 #: installer was clever.
 HOOK_NAME = "pre-push"
 HOOK_MARKER = "autoos-prepush-gate"
-HOOK_VERSION = 2  # v1 passed no ref lines; a shim of another version is upgraded
+HOOK_VERSION = 3  # v3 preserves gate status; another shim version is upgraded
 CHAINED_NAME = "pre-push.autoos-chained"
 GATE_TOOL = Path("tools") / "prepush.py"
 
@@ -449,7 +449,7 @@ def hook_text() -> str:
         "fi\n"
         'if [ -x /usr/bin/python3 ]; then py=/usr/bin/python3; else py=python3; fi\n'
         'refs=$(cat)\n'
-        'printf "%%s\\n" "$refs" | "$py" "$gate" --hook-stdin || exit 1\n'
+        'printf "%%s\\n" "$refs" | "$py" "$gate" --hook-stdin || exit $?\n'
         'chained="$(dirname "$0")/%s"\n'
         '[ -x "$chained" ] && { printf "%%s\\n" "$refs" | "$chained" "$@"; exit $?; }\n'
         "exit 0\n" % (HOOK_MARKER, HOOK_VERSION, CHAINED_NAME)
@@ -475,13 +475,13 @@ def install_prepush_hook(worktree: Path, check: bool = False) -> str:
       (rule D-111), so it is callable on its own with ``--hook-only`` and a
       repository with no Claude trust entry still gets its gate.
 
-    A repository without ``tools/prepush.py`` gets no hook and a line saying so. That
+    A repository missing either gate module gets no hook and a line saying so. That
     check comes *first*: the git helper is the gate's own (NB6), a module the
     repository may not have.
     """
-    gate = worktree / GATE_TOOL
-    if not gate.is_file():
-        return (f"pre-push gate: no {GATE_TOOL.as_posix()} in {worktree} -- "
+    missing = next((p for p in (GATE_TOOL, GATE_TOOL.with_name("prepush_hook.py")) if not (worktree / p).is_file()), None)
+    if missing is not None:
+        return (f"pre-push gate: no {missing.as_posix()} in {worktree} -- "
                 f"nothing installed (the repository has no gate to install)")
     hooks = hooks_dir(worktree)
     if hooks is None:
