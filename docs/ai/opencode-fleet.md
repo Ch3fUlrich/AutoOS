@@ -342,11 +342,12 @@ State lives under `$AUTOOS_OCL2_STATE_DIR` (default `<tmpdir>/autoos-oc-l2/`), o
 `~/.config/autoos/oc-l1.json`, so the `autoos-oc-l1` watcher never restarts an L2 lane**: recovery is `l2_start` again, which is
 also why a `start` on a lane that is already live is refused rather than silently restarted.
 
-`stop` (`oc_l2.py stop`; `oc_l1.py stop --name <lane>` shares the kill, `tools/oc_l1_stop.py`: `taskkill /F /T` on Windows) kills the recorded PID's process group (the child is its own session leader, so everything `opencode serve` forked dies
-with it) and removes the state file only after proving the PID gone — a zombie answers `kill(pid, 0)`, so death is read from
-`/proc/<pid>/stat` (R-coord-10: an orphan `serve` holding the port would make the next start's health poll answer for the wrong
-server). A PID whose argv holds no token that IS the lane's binary is never killed; the stop reports `stopped=false, orphan=true`
-and keeps the state file. A second `oc_l1.py stop` says `not running` (exit 0, nothing killed); an unknown lane is exit 2.
+`stop` (`oc_l2.py stop`; `python3 tools/oc_l1.py stop --name <lane>`, optionally `--config <path>`) shares `tools/oc_l1_stop.py` and uses the configured state file.
+POSIX checks the recorded argv tail and kernel start time, refusing missing identity data or a mismatch; it sends SIGTERM then SIGKILL to the process group when the PID is its leader, otherwise only to the PID.
+Windows uses `taskkill /F /T`, refusing a creation time later than `started_utc` plus two seconds when both times are available; missing/unavailable times retain legacy behavior. State is removed only after the PID is proved gone (including POSIX zombie detection).
+Unreadable/non-dict state, identity refusal, a surviving PID or failure to remove state means exit 2 for `oc_l1.py stop`; state is preserved on refusal. Read the diagnostic, fix the problem and retry; do not claim a restart or blindly delete state. Delete stale state only after verifying the PID is not the lane. Config errors (including an unknown lane) also exit 2: check the lane/config.
+Readable pidless state is removed by L1 stop (L2 leaves it). No state means `not running` (exit 0, nothing killed), so a second successful L1 stop is harmless.
+For watched L1 lanes, the watcher starts the lane within about 2 minutes after a successful stop; verify with `status`. L2 lanes still require `l2_start` again.
 
 A manual live check (real binary, real gateway, the host password env — the value never leaves the environment):
 
@@ -397,4 +398,3 @@ never blank out the gateway `baseURL`.
   own 0600 unit/config, never in a tracked file.
 
 The relay above uses its own `X-Fleet-Sig` format; the separate, versioned fleet-bus v2 wire contract (signing, canonical form, cursors, signed reads, validation, test vectors) is specified in plangraph's [`docs/FLEET-BUS.md`](https://github.com/Ch3fUlrich/plangraph/blob/main/docs/FLEET-BUS.md), implemented by plangraph `src/plangraph/fleet_bus/contract.py`.
-
