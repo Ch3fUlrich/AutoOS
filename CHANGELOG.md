@@ -1,5 +1,7 @@
 # Changelog
 
+- AO-SPAWNER-TESTS-HERMETIC (2026-11-05, D-3940): keyless CLI fixtures disable checkout/main-checkout key-file sources with removal-only AUTOOS_NO_KEY_FILES=1 and pin gateway/host selection; production defaults unchanged. Explicit fake Zen roots retain file lookup. Fake-file fail-first regression is called from the existing spawner suite through a small helper to respect the size baseline; no assertions weakened.
+
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 1 (2026-11-05, D-3883, #123): ready accepts canonical smaller 1..200 line caps, reads CRLF trailer paragraphs like LF, and diagnoses missing required CHECK lines decorated as lists or bold without counting quoted or fenced output. Decoration diagnostics are verdict-neutral and never hide real FAIL or INPUT_REQUIRED checks. Split hermetic fail-first regressions pin these guards and CRLF writer attribution.
 - AO-OC-STOP-REVIEW-LOWS slice 4 (2026-11-05): handoff and fleet docs use identity-checked lane stop and explain refusal recovery; shim tests cover v3 upgrade contents, portable shell lookup and byte-preserving v2 dry runs.
 - AO-OC-STOP-REVIEW-LOWS slice 3 (2026-11-05): v3 pre-push shims preserve the gate's exit status through the POSIX pipeline; installation requires both gate modules. Fail-first tests cover installed-shim exits 0/1/2, upgrades, missing modules, and identity-write scans with variable file paths and single-dash flags.

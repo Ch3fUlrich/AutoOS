@@ -219,16 +219,12 @@ def r_leg_is_claude(leg):
 
 
 def clean_env(**extra):
-    # An ambient AUTOOS_SESSION_TAG is the lane's own tag: a spawn run from a
-    # lane session takes it instead of deriving one from ROOT, so every
-    # session-tag test that does not name a tag passed on whatever the calling
-    # shell happened to export (measured 2026-09-28 in a lane sandbox: two
-    # SessionTagTests fail only there). The same reasoning as the key strip -
-    # the suite must pass on a machine that is mid-handoff. A test that wants a
-    # tag sets one: clean_env(AUTOOS_SESSION_TAG="lane/one").
+    # Host files cannot supply credentials; keyed cases supply their own env key.
     dropped = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_SESSION_TAG")
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k not in dropped}
+    env.update(AUTOOS_NO_KEY_FILES="1", AUTOOS_HOST_NAME="test-only",
+               AUTOOS_OMNIROUTE_URL="https://gateway.example.invalid")
     if _CLIENT_BIN is not None:
         env["PATH"] = _CLIENT_BIN + os.pathsep + env.get("PATH", os.defpath)
     env.update(extra)
@@ -8089,19 +8085,8 @@ class FreePreferredHeadTests(unittest.TestCase):
                           "DEFAULT_FREE_MODEL stays the keyless fallback (D-1923)")
 
     def test_keyless_plan_ignores_a_reachable_fake_key_file(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            config = Path(tmp, "configuration")
-            config.mkdir()
-            (config / "api-keys.yml").write_text(
-                "omniroute_server: test-only-fake\nomniroute: test-only-fake\n",
-                encoding="utf-8")
-            agent = _runner_agent()
-            key_files = agent.key_files
-            with mock.patch.object(agent, "key_files", lambda root: key_files(tmp)):
-                r = self._dry(key=False)
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertIn("--model %s" % agent.DEFAULT_FREE_MODEL, r.stdout)
-            self.assertNotIn("AUTOOS_OMNIROUTE_KEY", self._env_line(r))
+        from _spawner_hermetic import keyless_plan_ignores_fake_file
+        keyless_plan_ignores_fake_file(self, _runner_agent())
 
     def test_a_plain_free_run_without_a_key_hands_the_child_no_credential(self):
         r = self._dry(key=False)
@@ -30362,6 +30347,8 @@ class ZenKeySpawnTests(unittest.TestCase):
 
     def _dry(self, *argv, root=None):
         env = clean_env(AUTOOS_STATE_DIR=self.state)
+        if root is not None:  # This root contains only this test's fake Zen key.
+            env.pop("AUTOOS_NO_KEY_FILES", None)
         for name in ("AUTOOS_TASK_DIR", "OPENCODE_API_KEY"):
             env.pop(name, None)
         return run_agent("run", "--client", "opencode", *argv, "--dry-run",
