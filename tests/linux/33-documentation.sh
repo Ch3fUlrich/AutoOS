@@ -1205,7 +1205,7 @@ if it "oc_l1 launcher: start (unit tests)"; then
 fi
 
 if it "oc_l1 launcher: status + token-usage recycle + stop + env names (unit tests)"; then
-    out="$(python3 tests/test_oc_l1_status.py 2>&1 && python3 tests/test_oc_l1_recycle.py 2>&1 && python3 tests/test_oc_l1_recycle_config.py 2>&1 && python3 tests/test_oc_l1_recycle_measure.py 2>&1 && python3 tests/test_oc_l1_recycle_poll.py 2>&1 && python3 tests/test_oc_l1_recycle_order.py 2>&1 && python3 tests/test_oc_l1_stop.py 2>&1 && python3 tests/test_oc_l1_env.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    out="$(python3 tests/test_oc_l1_status.py 2>&1 && python3 tests/test_oc_l1_recycle.py 2>&1 && python3 tests/test_oc_l1_recycle_config.py 2>&1 && python3 tests/test_oc_l1_recycle_measure.py 2>&1 && python3 tests/test_oc_l1_recycle_poll.py 2>&1 && python3 tests/test_oc_l1_recycle_order.py 2>&1 && python3 tests/test_oc_l1_stop.py 2>&1 && python3 tests/test_oc_l1_env.py 2>&1 && python3 tests/test_agent_mcp_oc_restart.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "oc_l1 launcher: bash-guard canary (unit tests)"; then

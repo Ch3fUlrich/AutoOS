@@ -5619,7 +5619,7 @@ Test-Case 'oc_l1 launcher: status + token-usage recycle + stop + env names (unit
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $out = ''; $rc = 0; foreach ($t in 'tests\test_oc_l1_status.py','tests\test_oc_l1_recycle.py','tests\test_oc_l1_recycle_config.py','tests\test_oc_l1_recycle_measure.py','tests\test_oc_l1_recycle_poll.py','tests\test_oc_l1_recycle_order.py','tests\test_oc_l1_stop.py','tests\test_oc_l1_env.py') { $out += & $py.Source (Join-Path $Root $t) 2>&1 | Out-String; if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE; break } } }
+    try { $out = ''; $rc = 0; foreach ($t in 'tests\test_oc_l1_status.py','tests\test_oc_l1_recycle.py','tests\test_oc_l1_recycle_config.py','tests\test_oc_l1_recycle_measure.py','tests\test_oc_l1_recycle_poll.py','tests\test_oc_l1_recycle_order.py','tests\test_oc_l1_stop.py','tests\test_oc_l1_env.py','tests\test_agent_mcp_oc_restart.py') { $out += & $py.Source (Join-Path $Root $t) 2>&1 | Out-String; if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE; break } } }
     finally { $ErrorActionPreference = $prev }
     Assert-Equal $rc 0 "oc_l1 status + recycle unit tests failed: $out"
 }
