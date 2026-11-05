@@ -8086,7 +8086,22 @@ class FreePreferredHeadTests(unittest.TestCase):
         self.assertIn("--model %s" % self.agent.DEFAULT_FREE_MODEL, r.stdout)
         self.assertEqual(self.agent.DEFAULT_FREE_MODEL,
                          "opencode/muse-spark-1.3-contributor-free",
-                         "DEFAULT_FREE_MODEL stays the keyless fallback (D-1923)")
+                          "DEFAULT_FREE_MODEL stays the keyless fallback (D-1923)")
+
+    def test_keyless_plan_ignores_a_reachable_fake_key_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp, "configuration")
+            config.mkdir()
+            (config / "api-keys.yml").write_text(
+                "omniroute_server: test-only-fake\nomniroute: test-only-fake\n",
+                encoding="utf-8")
+            agent = _runner_agent()
+            key_files = agent.key_files
+            with mock.patch.object(agent, "key_files", lambda root: key_files(tmp)):
+                r = self._dry(key=False)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("--model %s" % agent.DEFAULT_FREE_MODEL, r.stdout)
+            self.assertNotIn("AUTOOS_OMNIROUTE_KEY", self._env_line(r))
 
     def test_a_plain_free_run_without_a_key_hands_the_child_no_credential(self):
         r = self._dry(key=False)
