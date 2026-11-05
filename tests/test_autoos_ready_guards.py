@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "tools"), str(ROOT / "tests")]
 import autoos_brief as brief  # noqa: E402
 import autoos_ready_guards as g  # noqa: E402
-from autoos_ready_followups import ReadyFollowupTests  # noqa: E402,F401
+from autoos_ready_followups import ReadyFollowupTests  # noqa: E402,F401  # tests/autoos_ready_followups.py
 
 PATHS = ["tools/a.py", "tools/b.yml", "tests/test_a.py"]
 SIX = [1, 2, 3, 4, 5, 6]
