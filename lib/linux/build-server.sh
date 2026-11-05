@@ -5,73 +5,6 @@
 # ui_*, has_cmd, run, AUTOOS_SUDO, AUTOOS_DRY_RUN, SYS_USER, SYS_HOME are already
 # in scope (install.sh is sourced after lib/linux/detect.sh + ui.sh, see setup.sh).
 
-# install_data_disk_mount: format the secondary disk ext4 and mount at /mnt/data.
-# Destructive (wipes the disk), so it only acts on an explicit confirmation and
-# skips outright if something is already mounted there.
-install_data_disk_mount() {
-    local dev="${AUTOOS_DATA_DISK:-}" mnt="${AUTOOS_DATA_MOUNT:-/mnt/data}" label="data"
-    if findmnt "$mnt" >/dev/null 2>&1; then
-        ui_muted "$mnt is already mounted - skipping"
-        return 0
-    fi
-    if [[ -z "$dev" ]]; then
-        ui_err "set AUTOOS_DATA_DISK=/dev/sdX before installing this component - there is no default device"
-        return 1
-    fi
-    if [[ ! -b "$dev" ]]; then
-        ui_err "$dev not present - refusing"
-        return 1
-    fi
-    if [[ "$(findmnt -no SOURCE / 2>/dev/null)" == "$dev"* ]]; then
-        ui_err "$dev holds the running root filesystem - refusing"
-        return 1
-    fi
-    if [[ -n "$(lsblk -ln -o MOUNTPOINT "$dev" 2>/dev/null | tr -d '[:space:]')" ]]; then
-        ui_err "a partition of $dev is already mounted elsewhere - refusing"
-        return 1
-    fi
-    # Refusal is absolute, including when an obsolete wipe flag is supplied.
-    local existing_fs=""
-    existing_fs="$($AUTOOS_SUDO blkid -o value -s TYPE "$dev" 2>/dev/null)" || true
-    if [[ -z "$existing_fs" ]]; then
-        existing_fs="$($AUTOOS_SUDO blkid -o value -s PTTYPE "$dev" 2>/dev/null)" || true
-    fi
-    if [[ -n "$existing_fs" ]]; then
-        ui_err "$dev already holds a filesystem/partition table ($existing_fs) - refusing"
-        return 1
-    fi
-    if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would ERASE $dev, create one ext4 partition, and mount it at $mnt"
-        return 0
-    fi
-    ui_warn "This will ERASE all data on $dev and create one ext4 partition mounted at $mnt."
-    local answer=""
-    read -r -p "Type the device name (${dev}) to confirm: " answer
-    if [[ "$answer" != "$dev" ]]; then
-        ui_muted "disk formatting skipped - typed name did not match ${dev}"
-        return 0
-    fi
-    $AUTOOS_SUDO umount "${dev}"?* 2>/dev/null || true
-    $AUTOOS_SUDO wipefs -a "$dev"
-    $AUTOOS_SUDO parted -s "$dev" mklabel gpt
-    $AUTOOS_SUDO parted -s "$dev" mkpart primary ext4 0% 100%
-    $AUTOOS_SUDO partprobe "$dev"
-    $AUTOOS_SUDO udevadm settle
-    $AUTOOS_SUDO mkfs.ext4 -F -L "$label" "${dev}1"
-    local uuid; uuid="$($AUTOOS_SUDO blkid -s UUID -o value "${dev}1")"
-    [[ -n "$uuid" ]] || { ui_err "could not read UUID of ${dev}1"; return 1; }
-    $AUTOOS_SUDO mkdir -p "$mnt"
-    if ! grep -q "UUID=$uuid" /etc/fstab 2>/dev/null; then
-        $AUTOOS_SUDO cp /etc/fstab "/etc/fstab.bak.$(date +%s)"
-        printf 'UUID=%s %s ext4 defaults,nofail,x-systemd.device-timeout=10s 0 2\n' "$uuid" "$mnt" |
-            $AUTOOS_SUDO tee -a /etc/fstab >/dev/null
-    fi
-    $AUTOOS_SUDO systemctl daemon-reload
-    $AUTOOS_SUDO mount "$mnt"
-    $AUTOOS_SUDO chown "$SYS_USER:$SYS_USER" "$mnt"
-    ui_ok "mounted $dev at $mnt (UUID=$uuid)"
-}
-
 # install_tty_desktop_kmscon: Nerd-Font kmscon on tty1-6, GNOME off by default,
 # start-gnome/stop-gnome to toggle it on demand. Boots to multi-user.target.
 install_tty_desktop_kmscon() {
@@ -84,13 +17,13 @@ install_tty_desktop_kmscon() {
     fi
     local font_src="$SYS_HOME/.local/share/fonts/JetBrainsMonoNF" font_dst="/usr/local/share/fonts/JetBrainsMonoNF"
     if [[ -d "$font_src" ]]; then
-        $AUTOOS_SUDO install -d -m 0755 "$font_dst"
+        $AUTOOS_SUDO install -d -m 0755 "$font_dst" || { ui_err "required installation step failed"; return 1; }
         find "$font_src" -maxdepth 1 -type f \( -name '*.ttf' -o -name '*.otf' \) -print0 |
-            xargs -0 -I{} $AUTOOS_SUDO install -m 0644 {} "$font_dst/"
-        $AUTOOS_SUDO fc-cache -f "$font_dst" >/dev/null
+            xargs -0 -I{} $AUTOOS_SUDO install -m 0644 {} "$font_dst/" || { ui_err "font installation failed"; return 1; }
+        $AUTOOS_SUDO fc-cache -f "$font_dst" >/dev/null || { ui_err "required installation step failed"; return 1; }
     fi
-    $AUTOOS_SUDO install -d -m 0755 /etc/kmscon
-    cat <<'KMSCON_CONF' | $AUTOOS_SUDO tee /etc/kmscon/kmscon.conf >/dev/null
+    $AUTOOS_SUDO install -d -m 0755 /etc/kmscon || { ui_err "required installation step failed"; return 1; }
+    cat <<'KMSCON_CONF' | $AUTOOS_SUDO tee /etc/kmscon/kmscon.conf >/dev/null || { ui_err "console configuration failed"; return 1; }
 font-engine=pango
 font-name=JetBrainsMono Nerd Font Mono
 font-size=12
@@ -100,17 +33,17 @@ palette=soft-black
 sb-size=10000
 dpms-timeout=0
 KMSCON_CONF
-    $AUTOOS_SUDO rm -f /etc/systemd/system/autovt@.service /etc/systemd/system/autovt@tty*.service
+    $AUTOOS_SUDO rm -f /etc/systemd/system/autovt@.service /etc/systemd/system/autovt@tty*.service || { ui_err "required installation step failed"; return 1; }
     local n
     for n in 1 2 3 4 5 6; do
         $AUTOOS_SUDO systemctl enable "kmsconvt@tty$n.service" >/dev/null 2>&1 || true
         $AUTOOS_SUDO systemctl disable "getty@tty$n.service" >/dev/null 2>&1 || true
     done
-    $AUTOOS_SUDO systemctl daemon-reload
+    $AUTOOS_SUDO systemctl daemon-reload || { ui_err "required installation step failed"; return 1; }
     $AUTOOS_SUDO systemctl disable gdm.service >/dev/null 2>&1 || true
-    $AUTOOS_SUDO systemctl set-default multi-user.target
+    $AUTOOS_SUDO systemctl set-default multi-user.target || { ui_err "required installation step failed"; return 1; }
 
-    $AUTOOS_SUDO install -m 0755 /dev/stdin /usr/local/bin/start-gnome <<'START_GNOME'
+    $AUTOOS_SUDO install -m 0755 /dev/stdin /usr/local/bin/start-gnome <<'START_GNOME' || { ui_err "console configuration failed"; return 1; }
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then exec sudo -- "$0" "$@"; fi
@@ -121,7 +54,7 @@ systemd-run --quiet --collect --on-active=1 --unit="start-gnome-$$-$(date +%s)" 
 echo "GDM start requested."
 START_GNOME
 
-    $AUTOOS_SUDO install -m 0755 /dev/stdin /usr/local/bin/stop-gnome <<'STOP_GNOME'
+    $AUTOOS_SUDO install -m 0755 /dev/stdin /usr/local/bin/stop-gnome <<'STOP_GNOME' || { ui_err "console configuration failed"; return 1; }
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then exec sudo -- "$0" "$@"; fi
@@ -151,18 +84,20 @@ install_ssh_tailscale_access() {
         ui_muted "would enable openssh-server, disable 'tailscale ssh', and allow 22/tcp through ufw"
         return 0
     fi
-    has_cmd tailscale && $AUTOOS_SUDO tailscale set --ssh=false 2>/dev/null || true
-    $AUTOOS_SUDO apt-get install -y openssh-server
+    if has_cmd tailscale; then
+        $AUTOOS_SUDO tailscale set --ssh=false || { ui_err "Tailscale SSH disable failed"; return 1; }
+    fi
+    $AUTOOS_SUDO apt-get install -y openssh-server || { ui_err "required installation step failed"; return 1; }
     if ! ss -tlnH 2>/dev/null | grep -qE '[:.]22[[:space:]]'; then
-        if systemctl list-unit-files ssh.socket >/dev/null 2>&1; then
-            $AUTOOS_SUDO systemctl enable --now ssh.socket
+        if systemctl list-unit-files --no-legend ssh.socket | grep -q ssh.socket; then
+            $AUTOOS_SUDO systemctl enable --now ssh.socket || { ui_err "required installation step failed"; return 1; }
         else
-            $AUTOOS_SUDO systemctl enable --now ssh
+            $AUTOOS_SUDO systemctl enable --now ssh || { ui_err "required installation step failed"; return 1; }
         fi
     fi
     if ufw status 2>/dev/null | grep -q '^Status: active'; then
-        $AUTOOS_SUDO ufw allow 22/tcp
-        $AUTOOS_SUDO ufw allow in on tailscale0
+        $AUTOOS_SUDO ufw allow 22/tcp || { ui_err "required installation step failed"; return 1; }
+        $AUTOOS_SUDO ufw allow in on tailscale0 || { ui_err "required installation step failed"; return 1; }
     fi
     ui_ok "sshd enabled; Tailscale SSH disabled"
 }
@@ -179,7 +114,7 @@ _GH_RUNNER_VERSION="2.338.2"
 _GH_RUNNER_SHA256_X64="baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"
 _GH_RUNNER_SHA256_ARM64="670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945"
 
-install_github_actions_runner() {
+install_github_actions_runner() (
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would register a self-hosted GitHub Actions runner for a private repo (needs GH_RUNNER_REPO)"
         return 0
@@ -208,7 +143,7 @@ install_github_actions_runner() {
         ui_muted "a runner is already configured in $dir - skipping"
         return 0
     fi
-    mkdir -p "$dir" && cd "$dir" || return 1
+    mkdir -p "$dir" && cd "$dir" || { ui_err "required installation step failed"; return 1; }
     local os="linux" arch sha256
     case "$(uname -m)" in
         x86_64)  arch="x64";   sha256="$_GH_RUNNER_SHA256_X64" ;;
@@ -221,14 +156,14 @@ install_github_actions_runner() {
         curl -fsSL -o "$tarball" \
             "https://github.com/actions/runner/releases/download/v${ver}/${tarball}" || { ui_err "runner download failed"; return 1; }
     fi
-    local got; got="$(sha256sum "$tarball" | awk '{print $1}')"
+    local got; got="$(sha256sum "$tarball" | awk '{print $1}')" || { ui_err "required lookup failed"; return 1; }
     if [[ "$got" != "$sha256" ]]; then
         ui_err "checksum mismatch for ${tarball}: expected ${sha256}, got ${got} - refusing to extract"
         rm -f "$tarball"
         return 1
     fi
     tar xzf "$tarball" || { ui_err "runner extraction failed"; return 1; }
-    local token; token="$(gh api -X POST "repos/${repo}/actions/runners/registration-token" --jq .token)"
+    local token; token="$(gh api -X POST "repos/${repo}/actions/runners/registration-token" --jq .token)" || { ui_err "required lookup failed"; return 1; }
     [[ -n "$token" ]] || { ui_err "could not obtain a runner registration token - check gh auth and repo access"; return 1; }
     local url="https://github.com/${repo}"
     local labels="${GH_RUNNER_LABELS:-self-hosted,$(hostname -s)}"
@@ -237,35 +172,41 @@ install_github_actions_runner() {
     $AUTOOS_SUDO ./svc.sh install "$SYS_USER" || { ui_err "runner service installation failed"; return 1; }
     $AUTOOS_SUDO ./svc.sh start || { ui_err "runner service start failed"; return 1; }
     ui_ok "registered and started a self-hosted runner for ${repo} (labels: $labels)"
-}
+)
 
 # install_plangraph_omniroute_node: clone plangraph, install it in its own
 # venv, and scaffold the spawner's benchmark catalog directory so this box can
 # be a routing target. Does not write any gateway URL or API key - those are
 # the operator's secrets and belong in the environment, not the catalog.
+_PLANGRAPH_SHA="ee033fa6aaec984b7732235eb2fd2970cb81f4f3"
 install_plangraph_omniroute_node() {
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would set up plangraph + its spawner catalog under ~/code/repos/plangraph"
         return 0
     fi
     local repo_dir="$SYS_HOME/code/repos/plangraph"
-    mkdir -p "$(dirname "$repo_dir")"
+    local lock="${AUTOOS_PLANGRAPH_REQUIREMENTS_LOCK:-}"
+    [[ -f "$lock" ]] || { ui_err "set AUTOOS_PLANGRAPH_REQUIREMENTS_LOCK to a reviewed hash-locked requirements file"; return 1; }
+    mkdir -p "$(dirname "$repo_dir")" || { ui_err "required installation step failed"; return 1; }
     if [[ -d "$repo_dir/.git" ]]; then
         ui_muted "plangraph already cloned at $repo_dir"
     else
-        git clone https://github.com/Ch3fUlrich/plangraph.git "$repo_dir"
+        git clone https://github.com/Ch3fUlrich/plangraph.git "$repo_dir" || { ui_err "required installation step failed"; return 1; }
+        git -C "$repo_dir" checkout --detach "$_PLANGRAPH_SHA" || { ui_err "plangraph checkout failed"; return 1; }
+    fi
+    local head; head="$(git -C "$repo_dir" rev-parse HEAD)" || { ui_err "plangraph revision read failed"; return 1; }
+    [[ "$head" == "$_PLANGRAPH_SHA" ]] || { ui_err "plangraph revision differs from pin"; return 1; }
+    if [[ -f "$repo_dir/.autoos-ready" ]]; then
+        ui_muted "plangraph already configured"; return 0
     fi
     if [[ ! -x "$repo_dir/.venv/bin/python3" ]]; then
-        python3 -m venv "$repo_dir/.venv"
+        python3 -m venv "$repo_dir/.venv" || { ui_err "required installation step failed"; return 1; }
     fi
-    "$repo_dir/.venv/bin/pip" install -q --upgrade pip
     # plangraph ships no setup.py/pyproject.toml - it runs via PYTHONPATH=src
     # (see its README), so there is nothing here to `pip install -e`.
-    "$repo_dir/.venv/bin/pip" install -q pytest
-    if [[ -f "$repo_dir/requirements-ci.txt" ]]; then
-        "$repo_dir/.venv/bin/pip" install -q -r "$repo_dir/requirements-ci.txt"
-    fi
-    mkdir -p "$SYS_HOME/.cache/plangraph"
+    "$repo_dir/.venv/bin/pip" install -q --require-hashes -r "$lock" || { ui_err "plangraph dependency installation failed"; return 1; }
+    mkdir -p "$SYS_HOME/.cache/plangraph" || { ui_err "required installation step failed"; return 1; }
+    touch "$repo_dir/.autoos-ready" || { ui_err "plangraph completion marker failed"; return 1; }
     ui_ok "plangraph ready at $repo_dir (run with PYTHONPATH=src, e.g. PYTHONPATH=src ${repo_dir}/.venv/bin/python3 -m pytest tests -q)"
     ui_info "Set PLANGRAPH_GATEWAY_URL (and this host's provider credentials) in your shell env to let OmniRoute route work here - AutoOS does not invent or store those secrets."
 }
@@ -285,9 +226,9 @@ install_omniroute_gateway_selfhost() {
     if [[ -d "$dir/.git" ]]; then
         ui_muted "OmniRoute fork already cloned at $dir"
     else
-        git clone --branch "$_OMNIROUTE_FORK_BRANCH" "$_OMNIROUTE_FORK_REPO" "$dir" || return 1
+        git clone --branch "$_OMNIROUTE_FORK_BRANCH" "$_OMNIROUTE_FORK_REPO" "$dir" || { ui_err "required installation step failed"; return 1; }
     fi
-    local head; head="$(git -C "$dir" rev-parse HEAD)" || return 1
+    local head; head="$(git -C "$dir" rev-parse HEAD)" || { ui_err "required installation step failed"; return 1; }
     if [[ "$head" != "$_OMNIROUTE_FORK_SHA" ]]; then
         ui_err "OmniRoute checkout differs from the pinned revision - refusing to build"
         return 1
@@ -343,15 +284,15 @@ install_omniroute_client_config() {
         ui_muted "${env_file} already has a key - leaving it untouched"
         return 0
     fi
+    [[ ! -e "$env_file" && ! -L "$env_file" ]] || { ui_err "existing client configuration has no key - refusing"; return 1; }
     local key="${OMNIROUTE_API_KEY:-}"
     [[ -n "$base_url" ]] || { ui_err "set OMNIROUTE_BASE_URL before installing this component"; return 1; }
     if [[ -z "$key" ]]; then
         ui_err "set OMNIROUTE_API_KEY in your shell (not in a file this tool reads from disk) before installing this component - AutoOS will not prompt for or invent a gateway key"
         return 1
     fi
-    mkdir -p "$(dirname "$env_file")" || return 1
-    [[ ! -e "$env_file" ]] || chmod 0600 "$env_file" || return 1
-    ( umask 077
+    mkdir -p "$(dirname "$env_file")" || { ui_err "required installation step failed"; return 1; }
+    ( umask 077; set -o noclobber
       cat > "$env_file" <<EOF_ENV
 OMNIROUTE_BASE_URL=${base_url}
 AUTOOS_OMNIROUTE_KEY=${key}
@@ -379,11 +320,11 @@ install_gitleaks() {
     esac
     local ver="$_GITLEAKS_VERSION"
     if [[ -x "$SYS_HOME/.local/bin/gitleaks" ]] && [[ "$("$SYS_HOME/.local/bin/gitleaks" version)" == "$ver" ]]; then return 0; fi
-    local tmp; tmp="$(mktemp -d)"
+    local tmp; tmp="$(mktemp -d)" || { ui_err "required lookup failed"; return 1; }
     local tarball="gitleaks_${ver}_linux_${arch}.tar.gz"
     curl -fsSL -o "$tmp/$tarball" \
         "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/${tarball}" || { ui_err "gitleaks download failed"; rm -rf "$tmp"; return 1; }
-    local got; got="$(sha256sum "$tmp/$tarball" | awk '{print $1}')"
+    local got; got="$(sha256sum "$tmp/$tarball" | awk '{print $1}')" || { ui_err "required lookup failed"; return 1; }
     if [[ "$got" != "$sha256" ]]; then
         ui_err "checksum mismatch for ${tarball}: expected ${sha256}, got ${got} - refusing to extract"
         rm -rf "$tmp"
@@ -396,3 +337,5 @@ install_gitleaks() {
 }
 # shellcheck source=lib/linux/build-server-rust.sh
 . "${AUTOOS_ROOT}/lib/linux/build-server-rust.sh"
+# shellcheck source=lib/linux/build-server-disk.sh
+. "${AUTOOS_ROOT}/lib/linux/build-server-disk.sh"

@@ -21,6 +21,6 @@ install_rust_toolchain() {
         ui_err "rustup not found on PATH - the apt package may not have landed; skipping toolchain setup"
         return 1
     fi
-    run rustup toolchain install stable --component rustfmt clippy --target x86_64-pc-windows-gnu
+    run rustup toolchain install stable --component rustfmt clippy --target x86_64-pc-windows-gnu || { ui_err "Rust toolchain installation failed"; return 1; }
     ui_ok "Rust stable toolchain ready (rustfmt, clippy, x86_64-pc-windows-gnu target)"
 }
