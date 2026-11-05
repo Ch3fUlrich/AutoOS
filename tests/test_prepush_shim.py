@@ -37,8 +37,8 @@ class ShimTests(GateFixture):
     def test_the_shim_hands_git_stdin_to_the_gate_and_to_the_chained_hook(self):
         self.install()
         text = (self.hooks / "pre-push").read_text(encoding="utf-8")
-        self.assertIn("autoos-prepush-gate v2", text)
-        self.assertRegex(text, r'\| "\$py" "\$gate" --hook-stdin \|\| exit 1')
+        self.assertIn("autoos-prepush-gate v3", text)
+        self.assertRegex(text, r'\| "\$py" "\$gate" --hook-stdin \|\| exit \$\?')
         self.assertRegex(text, r'\| "\$chained" "\$@"')
         self.assertNotIn("exec", text.replace("# ", ""), "the chained hook lost its stdin")
 
@@ -47,11 +47,46 @@ class ShimTests(GateFixture):
         (self.hooks / "pre-push").write_text(self.V1, encoding="utf-8", newline="\n")
         out = self.install()
         self.assertIn("upgraded", out)
-        self.assertIn("unversioned -> v2", out)
+        self.assertIn("unversioned -> v3", out)
         self.assertNotIn("v1", out)
         self.assertIn("--hook-stdin", (self.hooks / "pre-push").read_text(encoding="utf-8"))
         self.assertFalse((self.hooks / "pre-push.autoos-chained").exists())
         self.assertIn("skipped", self.install())
+
+    def test_v2_is_replaced_on_reinstall_without_chaining(self):
+        self.install()
+        hook = self.hooks / "pre-push"
+        old = hook.read_text(encoding="utf-8").replace("gate v3", "gate v2")
+        old = old.replace('--hook-stdin || exit $?', '--hook-stdin || exit 1')
+        hook.write_text(old, encoding="utf-8", newline="\n")
+        self.assertIn("v2 -> v3", self.install())
+        self.assertNotEqual(hook.read_text(encoding="utf-8"), old)
+        self.assertFalse((self.hooks / "pre-push.autoos-chained").exists())
+
+    def test_either_missing_gate_module_installs_nothing(self):
+        for name in ("prepush.py", "prepush_hook.py"):
+            with self.subTest(name=name):
+                path = self.repo / "tools" / name
+                saved = path.read_bytes()
+                path.unlink()
+                try:
+                    self.assertIn("no tools/" + name, self.install())
+                    self.assertFalse((self.hooks / "pre-push").exists())
+                finally:
+                    path.write_bytes(saved)
+        self.assertIn("gate: installed", self.install())
+
+    def test_installed_shim_preserves_gate_exit_codes(self):
+        self.install()
+        zero = "0" * 40
+        for text, expected in (("malformed ref\n", 2),
+                               ("refs/heads/other %s refs/heads/other %s\n" % (self.x, zero), 1),
+                               ("refs/heads/lane %s refs/heads/lane %s\n" % (self.y, zero), 0)):
+            with self.subTest(expected=expected):
+                proc = subprocess.run(["sh", str(self.hooks / "pre-push")],
+                                      cwd=self.repo, input=text, capture_output=True,
+                                      text=True, env=self.base_env())
+                self.assertEqual(proc.returncode, expected, proc.stdout + proc.stderr)
 
     @unittest.skipIf(os.name == "nt", "the shim is an sh script; git runs it through a POSIX sh")
     def test_a_real_push_is_gated_per_sha_and_the_chained_hook_still_gets_the_refs(self):

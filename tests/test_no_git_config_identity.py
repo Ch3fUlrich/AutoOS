@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class _Scan:
-    NAME = re.compile(r"""config["'\s,]+(?:["']?--[\w-]+["']?[\s,]+)*["']?user\.(?:name|email)""")
+    NAME = re.compile(r"""config["'\s,]+(?:["']?(?:--file|-f)["']?[\s,]+(?:"[^"\n]+"|'[^'\n]+'|[^\s,"']+)[\s,]+|["']?--?[\w-]+["']?[\s,]+)*["']?user\.(?:name|email)""")
     READ = re.compile(r"--(?:get|get-all|unset|unset-all|list|get-regexp)\b")
 
 
@@ -36,8 +36,9 @@ def writes_identity(text):
 class StaticIdentityGuardTests(unittest.TestCase):
     """No test writes a git identity with `git config` (AO-PREPUSH-HOOK-GITENV-2).
 
-    Limit, one line: a string scan - it sees literal spellings (argv list, shell
-    or PowerShell command), not a key built from parts or a file written by hand.
+    String scan: literal keys in argv lists, shell or PowerShell commands, including
+    single-dash flags and one literal/variable path token after --file/-f. Not a
+    parser: computed keys, complex path expressions and hand-written files are unseen.
     """
 
     SUFFIXES = (".py", ".sh", ".ps1", ".psm1", ".bash")
@@ -45,7 +46,11 @@ class StaticIdentityGuardTests(unittest.TestCase):
     def test_the_scan_sees_the_spellings_it_claims_to(self):
         for text in ('git config user.name "x"', 'self._git(["config", "user.email", "a"])',
                      'git -C $r config --local user.name x', 'run_git("config", "user.name", 1)',
-                     'g(\n    "config",\n    "user.email", "x")'):
+                     'g(\n    "config",\n    "user.email", "x")',
+                     'subprocess.run(["git","config","--file",p,"user.email","a"])',
+                     'git config --file $path user.name x',
+                     'git config -f "$path" user.email x',
+                     'git config -z user.name x'):
             self.assertTrue(writes_identity(text), text)
         for text in ('git -c user.name=t -c user.email=a commit', 'GIT_AUTHOR_NAME="t"',
                      'git config --get user.name', 'git config --unset user.email',
