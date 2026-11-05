@@ -43,6 +43,8 @@ _FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(?P<tail>.*)$")
 _QUOTE_ONE = re.compile(r"^ {0,3}> ?")
 # Column 0, ASCII digits only (no 'CHECK 03', no '١'), no leading list marker.
 _CHECK_RE = re.compile(r"^CHECK[ \t]+(?P<n>[1-9][0-9]*)[ \t]*:[ \t]*(?P<rest>.*)$")
+_DECORATION_RE = re.compile(r"^(?: {0,3}(?:[-*+]|[0-9]{1,9}[.)])[ \t]+(?:\*\*|__)?|\*\*|__)"
+                            r"CHECK[ \t]+([1-9][0-9]*)(?![0-9])\b")
 # The characters a body may NEVER carry: every Unicode category Zs/Zl/Zp/Cc/Cf
 # member (whitespace separators, line/paragraph breaks, controls and invisible
 # format characters — U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000,
@@ -374,7 +376,7 @@ def report_checks(report_text, required=(1, 2, 3, 4, 5, 6)):
     """{ok, missing, failed, input_required} over the report's CHECK lines.
     A CHECK line counts only at column 0: indented, '>'-quoted or list-marked
     lines never count. Missing required ids with unfenced list-marked (up to three
-    leading spaces) or column-0 bold CHECK lines raise with the required shape;
+    leading spaces) or column-0 bold CHECK lines raise only without real refusals;
     a real column-0 line suppresses that diagnostic for its id. Quoted, fenced,
     and four-space-indented copies remain plain missing. Zero-padded, lowercase or
     non-ASCII forms never count ('CHECK 03', 'check 3', 'CHECK ١'). Lines are the physical
@@ -398,13 +400,11 @@ def report_checks(report_text, required=(1, 2, 3, 4, 5, 6)):
     req = _guard_required(required)
     seen = {}
     decorated = set()
-    decoration = re.compile(r"^(?: {0,3}(?:[-*+]|[0-9]{1,9}[.)])[ \t]+(?:\*\*|__)?|\*\*|__)"
-                            r"CHECK[ \t]+([1-9][0-9]*)(?![0-9])\b")
     fences = _Fences()
     for line, _ in _lines(report_text):
         if fences.feed(line):
             continue
-        marked = decoration.match(line)
+        marked = _DECORATION_RE.match(line)
         if marked:
             decorated.add(int(marked.group(1)))
         m = _CHECK_RE.match(line)
@@ -413,12 +413,12 @@ def report_checks(report_text, required=(1, 2, 3, 4, 5, 6)):
         v = _VERDICT_RE.match(m.group("rest"))
         seen.setdefault(int(m.group("n")), set()).add(v.group(1) if v else "FAIL")
     missing = sorted(set(req) - set(seen))
-    for n in missing:
-        if n in decorated:
-            raise GuardError("CHECK %d requires CHECK %d: PASS at column 0 with no "
-                             "list marker, bold or indentation" % (n, n))
     failed = sorted(n for n, vs in seen.items() if len(vs) > 1 or "FAIL" in vs)
     need = sorted(n for n in seen if seen[n] == {"INPUT_REQUIRED"})
+    for n in missing:
+        if n in decorated and not (failed or need):
+            raise GuardError("CHECK %d requires CHECK %d: <PASS|FAIL|INPUT_REQUIRED> "
+                             "at column 0 with no list marker, bold or indentation" % (n, n))
     return {"ok": not (missing or failed or need), "missing": missing,
             "failed": failed, "input_required": need}
 
