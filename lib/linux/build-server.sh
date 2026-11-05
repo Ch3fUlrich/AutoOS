@@ -217,7 +217,7 @@ install_github_actions_runner() {
         ui_muted "a runner is already configured in $dir - skipping"
         return 0
     fi
-    mkdir -p "$dir" && cd "$dir"
+    mkdir -p "$dir" && cd "$dir" || return 1
     local os="linux" arch sha256
     case "$(uname -m)" in
         x86_64)  arch="x64";   sha256="$_GH_RUNNER_SHA256_X64" ;;
