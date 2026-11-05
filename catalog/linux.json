@@ -342,7 +342,8 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "server"
+            "server",
+            "build-server"
           ],
           "homepage": "https://docs.anthropic.com/en/docs/claude-code",
           "launcher": "none"
