@@ -45,7 +45,11 @@ class StaticIdentityGuardTests(unittest.TestCase):
     def test_the_scan_sees_the_spellings_it_claims_to(self):
         for text in ('git config user.name "x"', 'self._git(["config", "user.email", "a"])',
                      'git -C $r config --local user.name x', 'run_git("config", "user.name", 1)',
-                     'g(\n    "config",\n    "user.email", "x")'):
+                     'g(\n    "config",\n    "user.email", "x")',
+                     'subprocess.run(["git","config","--file",p,"user.email","a"])',
+                     'git config --file $path user.name x',
+                     'git config -f "$path" user.email x',
+                     'git config -z user.name x'):
             self.assertTrue(writes_identity(text), text)
         for text in ('git -c user.name=t -c user.email=a commit', 'GIT_AUTHOR_NAME="t"',
                      'git config --get user.name', 'git config --unset user.email',
