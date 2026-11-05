@@ -311,10 +311,13 @@ class ReadyAndStatus(GuardCase):
                               env=self.env(**env), timeout=20, cwd=str(self.tmp))
 
     def test_ready_writes_marker(self):
-        p = self.run_cmd("ready", "/h/handoff.md", CLAUDE_CODE_SESSION_ID=SID)
+        from test_context_guard_ready_v2 import ready
+        handoff, _, _, env, _, _ = ready.__wrapped__(self.tmp)
+        env["CLAUDE_CODE_SESSION_ID"] = SID
+        p = self.run_cmd("ready", str(handoff), **env)
         self.assertEqual(p.returncode, 0, p.stderr)
         m = json.loads(self.state_file(f"{SID}.ready.json").read_text())
-        self.assertEqual((m["session_id"], m["handoff"], m["cwd"]), (SID, "/h/handoff.md", str(self.tmp)))
+        self.assertEqual((m["session_id"], m["handoff"], m["cwd"]), (SID, str(handoff), str(self.tmp)))
         self.assertIn("ts", m)
 
     def test_ready_without_session_id_fails_loudly(self):
@@ -337,7 +340,10 @@ class ReadyAndStatus(GuardCase):
     def test_status_one_line_per_state_file(self):
         self.write(usage_line(read=301000))
         self.hook()
-        self.run_cmd("ready", "/h/handoff.md", CLAUDE_CODE_SESSION_ID=SID)
+        from test_context_guard_ready_v2 import ready
+        handoff, _, _, env, _, _ = ready.__wrapped__(self.tmp)
+        env["CLAUDE_CODE_SESSION_ID"] = SID
+        self.run_cmd("ready", str(handoff), **env)
         p = self.run_cmd("status")
         self.assertEqual(p.returncode, 0)
         lines = p.stdout.strip().splitlines()
@@ -346,7 +352,7 @@ class ReadyAndStatus(GuardCase):
         self.assertIn(SID, joined)
         self.assertIn("hard", joined)
         self.assertIn("ready", joined)
-        self.assertIn("/h/handoff.md", joined)
+        self.assertIn(str(handoff), joined)
 
     def test_status_empty_is_silent_exit_0(self):
         p = self.run_cmd("status")
