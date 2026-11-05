@@ -599,6 +599,7 @@ install_component() {
 install_script() {
     case "$1" in
         github-actions-runner) install_github_actions_runner ;;
+        gitleaks)        install_gitleaks ;;
         oh-my-zsh)       install_oh_my_zsh ;;
         zsh-plugins)     install_zsh_plugins ;;
         powerlevel10k)   install_powerlevel10k ;;
@@ -7271,4 +7272,41 @@ EOF_ENV
     )
     chmod 0600 "$env_file"
     ui_ok "wrote ${env_file} (mode 0600) - source it before spawner launches, e.g. 'set -a; . ${env_file}; set +a'"
+}
+
+# install_gitleaks: pinned version + verified SHA-256, same rule as the
+# GitHub Actions runner above - this repo's own CI gates expect gitleaks on
+# PATH, and "whatever /releases/latest is today" is not something this public
+# repo should commit anyone to running unchecked.
+_GITLEAKS_VERSION="8.30.1"
+_GITLEAKS_SHA256_X64="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+_GITLEAKS_SHA256_ARM64="e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
+
+install_gitleaks() {
+    if (( AUTOOS_DRY_RUN )); then
+        ui_muted "would install gitleaks v${_GITLEAKS_VERSION} to ~/.local/bin, verified by SHA-256"
+        return 0
+    fi
+    local arch sha256
+    case "$(uname -m)" in
+        x86_64) arch="x64"; sha256="$_GITLEAKS_SHA256_X64" ;;
+        aarch64|arm64) arch="arm64"; sha256="$_GITLEAKS_SHA256_ARM64" ;;
+        *) ui_err "unsupported arch $(uname -m)"; return 1 ;;
+    esac
+    local ver="$_GITLEAKS_VERSION"
+    local tmp; tmp="$(mktemp -d)"
+    local tarball="gitleaks_${ver}_linux_${arch}.tar.gz"
+    curl -fsSL -o "$tmp/$tarball" \
+        "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/${tarball}"
+    local got; got="$(sha256sum "$tmp/$tarball" | awk '{print $1}')"
+    if [[ "$got" != "$sha256" ]]; then
+        ui_err "checksum mismatch for ${tarball}: expected ${sha256}, got ${got} - refusing to extract"
+        rm -rf "$tmp"
+        return 1
+    fi
+    tar xzf "$tmp/$tarball" -C "$tmp" gitleaks
+    install -d -m 0755 "$SYS_HOME/.local/bin"
+    install -m 0755 "$tmp/gitleaks" "$SYS_HOME/.local/bin/gitleaks"
+    rm -rf "$tmp"
+    ui_ok "gitleaks v${ver} installed to ~/.local/bin/gitleaks"
 }

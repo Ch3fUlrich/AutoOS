@@ -1911,6 +1911,36 @@
           "verify": "test -f ~/.config/autoos/ai-stack/opencode.env",
           "homepage": "https://github.com/Ch3fUlrich/plangraph/blob/main/docs/SPAWNER.md",
           "package": "omniroute-client-config"
+        },
+        {
+          "id": "python-command",
+          "name": "python command",
+          "description": "python-is-python3: a `python` on PATH, not just python3",
+          "provider": "apt",
+          "package": "python-is-python3",
+          "requires": [
+            "python3"
+          ],
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "python --version",
+          "homepage": "https://packages.ubuntu.com/python-is-python3"
+        },
+        {
+          "id": "gitleaks",
+          "name": "gitleaks",
+          "description": "Secret scanner the public repo's gates expect",
+          "provider": "script",
+          "package": "gitleaks",
+          "requires": [
+            "download-tools"
+          ],
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "gitleaks version",
+          "homepage": "https://github.com/gitleaks/gitleaks"
         }
       ]
     }
