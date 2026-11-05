@@ -30,16 +30,14 @@ install_data_disk_mount() {
         ui_err "a partition of $dev is already mounted elsewhere - refusing"
         return 1
     fi
-    # blkid exits 2 with no output when a device holds no recognisable
-    # filesystem/label/partition table - that is the only case this proceeds
-    # without an explicit wipe flag.
+    # Refusal is absolute, including when an obsolete wipe flag is supplied.
     local existing_fs=""
     existing_fs="$($AUTOOS_SUDO blkid -o value -s TYPE "$dev" 2>/dev/null)" || true
     if [[ -z "$existing_fs" ]]; then
         existing_fs="$($AUTOOS_SUDO blkid -o value -s PTTYPE "$dev" 2>/dev/null)" || true
     fi
-    if [[ -n "$existing_fs" && "${AUTOOS_DATA_DISK_WIPE:-0}" != "1" ]]; then
-        ui_err "$dev already holds a filesystem/partition table ($existing_fs) - set AUTOOS_DATA_DISK_WIPE=1 to erase it anyway"
+    if [[ -n "$existing_fs" ]]; then
+        ui_err "$dev already holds a filesystem/partition table ($existing_fs) - refusing"
         return 1
     fi
     if (( AUTOOS_DRY_RUN )); then
@@ -176,10 +174,7 @@ install_ssh_tailscale_access() {
 # must never land on hardware someone actually uses). gh must be authenticated.
 # Optional GH_RUNNER_LABELS, default "self-hosted,<hostname>".
 #
-# The runner tarball is pinned to a known version and verified by SHA-256
-# rather than "whatever /releases/latest returns today" - this repo is public
-# and ships no vendor binaries, so the one thing it can safely commit to is a
-# hash to check a download against.
+# Verify pinned downloads before extraction.
 _GH_RUNNER_VERSION="2.338.2"
 _GH_RUNNER_SHA256_X64="baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40"
 _GH_RUNNER_SHA256_ARM64="670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945"
@@ -199,17 +194,17 @@ install_github_actions_runner() {
         return 1
     fi
     if ! has_cmd gh; then ui_err "gh is required - add it to this run first"; return 1; fi
-    local visibility; visibility="$(gh api "repos/${repo}" --jq .visibility 2>/dev/null)"
+    local visibility; visibility="$(gh api "repos/${repo}" --jq .visibility 2>/dev/null)" || visibility=""
     if [[ -z "$visibility" ]]; then
         ui_err "could not read visibility of ${repo} - check gh auth and the repo name"
         return 1
     fi
-    if [[ "$visibility" != "PRIVATE" ]]; then
+    if [[ "${visibility,,}" != "private" ]]; then
         ui_err "${repo} is ${visibility,,}, not private - refusing to attach a runner (forked/public-repo workflows must not run on this hardware)"
         return 1
     fi
     local dir="$SYS_HOME/actions-runner"
-    if [[ -d "$dir/.runner" ]]; then
+    if [[ -f "$dir/.runner" ]]; then
         ui_muted "a runner is already configured in $dir - skipping"
         return 0
     fi
@@ -224,7 +219,7 @@ install_github_actions_runner() {
     local tarball="actions-runner-${os}-${arch}-${ver}.tar.gz"
     if [[ ! -f "$tarball" ]]; then
         curl -fsSL -o "$tarball" \
-            "https://github.com/actions/runner/releases/download/v${ver}/${tarball}"
+            "https://github.com/actions/runner/releases/download/v${ver}/${tarball}" || { ui_err "runner download failed"; return 1; }
     fi
     local got; got="$(sha256sum "$tarball" | awk '{print $1}')"
     if [[ "$got" != "$sha256" ]]; then
@@ -232,15 +227,15 @@ install_github_actions_runner() {
         rm -f "$tarball"
         return 1
     fi
-    tar xzf "$tarball"
+    tar xzf "$tarball" || { ui_err "runner extraction failed"; return 1; }
     local token; token="$(gh api -X POST "repos/${repo}/actions/runners/registration-token" --jq .token)"
     [[ -n "$token" ]] || { ui_err "could not obtain a runner registration token - check gh auth and repo access"; return 1; }
     local url="https://github.com/${repo}"
     local labels="${GH_RUNNER_LABELS:-self-hosted,$(hostname -s)}"
     ./config.sh --unattended --url "$url" --token "$token" \
-        --name "$(hostname -s)" --labels "$labels" --work _work
-    $AUTOOS_SUDO ./svc.sh install "$SYS_USER"
-    $AUTOOS_SUDO ./svc.sh start
+        --name "$(hostname -s)" --labels "$labels" --work _work || { ui_err "runner registration failed"; return 1; }
+    $AUTOOS_SUDO ./svc.sh install "$SYS_USER" || { ui_err "runner service installation failed"; return 1; }
+    $AUTOOS_SUDO ./svc.sh start || { ui_err "runner service start failed"; return 1; }
     ui_ok "registered and started a self-hosted runner for ${repo} (labels: $labels)"
 }
 
@@ -275,13 +270,7 @@ install_plangraph_omniroute_node() {
     ui_info "Set PLANGRAPH_GATEWAY_URL (and this host's provider credentials) in your shell env to let OmniRoute route work here - AutoOS does not invent or store those secrets."
 }
 
-# install_omniroute_gateway_selfhost: builds a loopback-only OmniRoute gateway
-# from the operator's own fork (pinned branch+commit, never "latest"), as a
-# fallback if the central gateway is unreachable. Not the primary route -
-# install_omniroute_client_config / OMNIROUTE_BASE_URL still points at the
-# central gateway by default. REQUIRE_API_KEY and APP_BIND_HOST are left at
-# their secure-by-default values (false / 127.0.0.1) - this never becomes a
-# second gateway reachable off this box.
+# Pinned, authenticated fallback; enforce loopback independently of fork defaults.
 _OMNIROUTE_FORK_REPO="https://github.com/Ch3fUlrich/OmniRoute.git"
 _OMNIROUTE_FORK_BRANCH="autoos/v3.8.53"
 _OMNIROUTE_FORK_SHA="ff1ad94196f20448b5e2e3a926a81470272ad9b0"
@@ -296,46 +285,56 @@ install_omniroute_gateway_selfhost() {
     if [[ -d "$dir/.git" ]]; then
         ui_muted "OmniRoute fork already cloned at $dir"
     else
-        git clone --branch "$_OMNIROUTE_FORK_BRANCH" "$_OMNIROUTE_FORK_REPO" "$dir"
+        git clone --branch "$_OMNIROUTE_FORK_BRANCH" "$_OMNIROUTE_FORK_REPO" "$dir" || return 1
     fi
-    local head; head="$(git -C "$dir" rev-parse HEAD)"
+    local head; head="$(git -C "$dir" rev-parse HEAD)" || return 1
     if [[ "$head" != "$_OMNIROUTE_FORK_SHA" ]]; then
-        ui_warn "OmniRoute checkout at $dir is at ${head} - pinned sha is ${_OMNIROUTE_FORK_SHA}; leaving it as-is (not force-resetting a checkout that may have local changes)"
+        ui_err "OmniRoute checkout differs from the pinned revision - refusing to build"
+        return 1
     fi
     if [[ ! -f "$dir/.env" ]]; then
-        cp "$dir/.env.example" "$dir/.env"
-        local jwt_secret api_key_secret initial_password
-        jwt_secret="$(openssl rand -base64 48)"
-        api_key_secret="$(openssl rand -hex 32)"
-        initial_password="$(openssl rand -base64 24)"
-        python3 - "$dir/.env" "$jwt_secret" "$api_key_secret" "$initial_password" <<'PY'
-import re, sys
-path, jwt, apikey, pw = sys.argv[1:5]
-with open(path) as f:
-    text = f.read()
-text = re.sub(r'(?m)^JWT_SECRET=.*$', f'JWT_SECRET={jwt}', text)
-text = re.sub(r'(?m)^API_KEY_SECRET=.*$', f'API_KEY_SECRET={apikey}', text)
-text = re.sub(r'(?m)^INITIAL_PASSWORD=.*$', f'INITIAL_PASSWORD={pw}', text)
-with open(path, 'w') as f:
-    f.write(text)
+        python3 - "$dir" <<'PY'
+import os, pathlib, re, secrets, sys
+directory = pathlib.Path(sys.argv[1])
+text = (directory / '.env.example').read_text()
+values = {key: secrets.token_urlsafe(48) for key in
+          ('JWT_SECRET', 'API_KEY_SECRET', 'INITIAL_PASSWORD')}
+values.update(APP_BIND_HOST='127.0.0.1', REQUIRE_API_KEY='true')
+for key, value in values.items():
+    text = re.sub(rf'(?m)^{key}=.*\n?', '', text) + f'{key}={value}\n'
+fd = os.open(directory / '.env', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, 'w') as stream:
+    stream.write(text)
 PY
-        chmod 0600 "$dir/.env"
+        [[ $? == 0 ]] || { ui_err "could not create gateway secrets"; return 1; }
         ui_info "Generated JWT_SECRET/API_KEY_SECRET/INITIAL_PASSWORD into ${dir}/.env (mode 0600) - the dashboard password is in that file, AutoOS does not print secrets to its own log."
     else
         ui_muted "$dir/.env already exists - leaving it untouched"
     fi
-    ( cd "$dir" && $AUTOOS_SUDO docker compose --profile base up -d --build )
+    # A standalone compose document avoids merge rules retaining unsafe publishes.
+    ( cd "$dir" && APP_BIND_HOST=127.0.0.1 REQUIRE_API_KEY=true \
+      $AUTOOS_SUDO docker compose -f - up -d --build <<'COMPOSE'
+services:
+  omniroute:
+    build: {context: ., target: runner-base}
+    container_name: omniroute
+    restart: unless-stopped
+    env_file: .env
+    environment: {APP_BIND_HOST: 127.0.0.1, REQUIRE_API_KEY: "true", DATA_DIR: /app/data}
+    volumes: ["./data:/app/data"]
+    ports:
+      - "127.0.0.1:${DASHBOARD_PORT:-20128}:${DASHBOARD_PORT:-20128}"
+      - "127.0.0.1:${API_PORT:-20129}:${API_PORT:-20129}"
+      - "127.0.0.1:${LIVE_WS_PORT:-20132}:${LIVE_WS_PORT:-20132}"
+COMPOSE
+    ) || { ui_err "gateway compose failed"; return 1; }
     ui_ok "OmniRoute fallback gateway up on 127.0.0.1 (loopback only) - point OMNIROUTE_BASE_URL at it manually if the central gateway is down"
 }
 
-# install_omniroute_client_config: points this host's plangraph spawner at the
-# central OmniRoute gateway, matching the pattern already used on other hosts
-# (e.g. coding-vm's ~/.config/autoos/ai-stack/opencode.env). Needs
-# OMNIROUTE_API_KEY set in the environment before this runs - AutoOS does not
-# prompt for secrets over a non-interactive run, and never invents one.
+# Noninteractive client configuration; existing keys always win.
 install_omniroute_client_config() {
     local env_file="$SYS_HOME/.config/autoos/ai-stack/opencode.env"
-    local base_url="${OMNIROUTE_BASE_URL:-https://omniroute.ohje.ooguy.com/v1}"
+    local base_url="${OMNIROUTE_BASE_URL:-}"
     if (( AUTOOS_DRY_RUN )); then
         ui_muted "would write ${env_file} (mode 0600) with OMNIROUTE_BASE_URL and AUTOOS_OMNIROUTE_KEY"
         return 0
@@ -345,25 +344,24 @@ install_omniroute_client_config() {
         return 0
     fi
     local key="${OMNIROUTE_API_KEY:-}"
+    [[ -n "$base_url" ]] || { ui_err "set OMNIROUTE_BASE_URL before installing this component"; return 1; }
     if [[ -z "$key" ]]; then
         ui_err "set OMNIROUTE_API_KEY in your shell (not in a file this tool reads from disk) before installing this component - AutoOS will not prompt for or invent a gateway key"
         return 1
     fi
-    mkdir -p "$(dirname "$env_file")"
+    mkdir -p "$(dirname "$env_file")" || return 1
+    [[ ! -e "$env_file" ]] || chmod 0600 "$env_file" || return 1
     ( umask 077
       cat > "$env_file" <<EOF_ENV
 OMNIROUTE_BASE_URL=${base_url}
 AUTOOS_OMNIROUTE_KEY=${key}
 EOF_ENV
-    )
-    chmod 0600 "$env_file"
+    ) || { ui_err "client configuration write failed"; return 1; }
     ui_ok "wrote ${env_file} (mode 0600) - source it before spawner launches, e.g. 'set -a; . ${env_file}; set +a'"
 }
 
 # install_gitleaks: pinned version + verified SHA-256, same rule as the
-# GitHub Actions runner above - this repo's own CI gates expect gitleaks on
-# PATH, and "whatever /releases/latest is today" is not something this public
-# repo should commit anyone to running unchecked.
+# GitHub Actions runner above.
 _GITLEAKS_VERSION="8.30.1"
 _GITLEAKS_SHA256_X64="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
 _GITLEAKS_SHA256_ARM64="e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080"
@@ -380,19 +378,19 @@ install_gitleaks() {
         *) ui_err "unsupported arch $(uname -m)"; return 1 ;;
     esac
     local ver="$_GITLEAKS_VERSION"
+    if [[ -x "$SYS_HOME/.local/bin/gitleaks" ]] && [[ "$("$SYS_HOME/.local/bin/gitleaks" version)" == "$ver" ]]; then return 0; fi
     local tmp; tmp="$(mktemp -d)"
     local tarball="gitleaks_${ver}_linux_${arch}.tar.gz"
     curl -fsSL -o "$tmp/$tarball" \
-        "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/${tarball}"
+        "https://github.com/gitleaks/gitleaks/releases/download/v${ver}/${tarball}" || { ui_err "gitleaks download failed"; rm -rf "$tmp"; return 1; }
     local got; got="$(sha256sum "$tmp/$tarball" | awk '{print $1}')"
     if [[ "$got" != "$sha256" ]]; then
         ui_err "checksum mismatch for ${tarball}: expected ${sha256}, got ${got} - refusing to extract"
         rm -rf "$tmp"
         return 1
     fi
-    tar xzf "$tmp/$tarball" -C "$tmp" gitleaks
-    install -d -m 0755 "$SYS_HOME/.local/bin"
-    install -m 0755 "$tmp/gitleaks" "$SYS_HOME/.local/bin/gitleaks"
+    tar xzf "$tmp/$tarball" -C "$tmp" gitleaks && install -d -m 0755 "$SYS_HOME/.local/bin" &&
+        install -m 0755 "$tmp/gitleaks" "$SYS_HOME/.local/bin/gitleaks" || { ui_err "gitleaks installation failed"; rm -rf "$tmp"; return 1; }
     rm -rf "$tmp"
     ui_ok "gitleaks v${ver} installed to ~/.local/bin/gitleaks"
 }
