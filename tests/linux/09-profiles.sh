@@ -5,6 +5,10 @@
 # ─── Profiles ───────────────────────────────────────────────────────────────
 describe "profiles"
 
+if it "build-server safety regression contracts"; then
+    if python3 tests/test_build_server.py; then pass; else fail "build-server safety"; fi
+fi
+
 if it "light profile is the Pi set"; then
     got="$(catalog_profile_defaults light)"
     assert_contains "$got" "claude-code"
@@ -166,4 +170,3 @@ bad=[c['id'] for g in cat['categories'] for c in g['components']
 print(' '.join(bad))")"
     [[ -z "$out" ]] && pass || fail "model entries with no size in the description: $out"
 fi
-
