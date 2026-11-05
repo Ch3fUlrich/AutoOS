@@ -1855,7 +1855,7 @@
         {
           "id": "github-actions-runner",
           "name": "GitHub Actions self-hosted runner",
-          "description": "Registers this box as a self-hosted Actions runner",
+          "description": "Registers a self-hosted Actions runner (private repo only)",
           "provider": "script",
           "package": "github-actions-runner",
           "requires": [
@@ -1882,6 +1882,35 @@
           "verify": "test -f ~/code/repos/plangraph/.venv/bin/python3",
           "homepage": "https://github.com/Ch3fUlrich/plangraph",
           "package": "plangraph-omniroute-node"
+        },
+        {
+          "id": "omniroute-gateway-selfhost",
+          "name": "OmniRoute gateway (local fallback)",
+          "description": "Loopback OmniRoute built from the fork, fallback only",
+          "provider": "custom",
+          "postInstall": "install_omniroute_gateway_selfhost",
+          "requires": [
+            "docker"
+          ],
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "docker ps --filter name=^omniroute$ --format '{{.Names}}' | grep -q omniroute",
+          "homepage": "https://github.com/Ch3fUlrich/OmniRoute",
+          "package": "omniroute-gateway-selfhost"
+        },
+        {
+          "id": "omniroute-client-config",
+          "name": "OmniRoute client config",
+          "description": "Points this host at the central OmniRoute gateway",
+          "provider": "custom",
+          "postInstall": "install_omniroute_client_config",
+          "profiles": [
+            "build-server"
+          ],
+          "verify": "test -f ~/.config/autoos/ai-stack/opencode.env",
+          "homepage": "https://github.com/Ch3fUlrich/plangraph/blob/main/docs/SPAWNER.md",
+          "package": "omniroute-client-config"
         }
       ]
     }
