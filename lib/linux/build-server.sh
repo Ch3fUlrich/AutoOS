@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# build-server profile: postInstall steps for turning a headless box into a
-# CI/agent-routing node. Split out of install.sh (lib/linux/install.sh grew
-# past its size-ratchet baseline, which may shrink but never grow - same
-# pattern as lib/linux/cost-gate.sh: the body lives here, install.sh keeps a
-# thin wrapper that sources this file and calls the real function).
-#
-# The ui_* helpers, has_cmd, run, AUTOOS_SUDO, AUTOOS_DRY_RUN, SYS_USER and
-# SYS_HOME are already in scope when this is sourced, because install.sh is
-# sourced after lib/linux/detect.sh and lib/linux/ui.sh (see setup.sh).
+# build-server profile: postInstall steps for a headless CI/agent-routing node.
+# Split out of install.sh (its size-ratchet baseline may only shrink); like
+# lib/linux/cost-gate.sh, install.sh keeps thin wrappers that source this file.
+# ui_*, has_cmd, run, AUTOOS_SUDO, AUTOOS_DRY_RUN, SYS_USER, SYS_HOME are already
+# in scope (install.sh is sourced after lib/linux/detect.sh + ui.sh, see setup.sh).
 
 # install_data_disk_mount: format the secondary disk ext4 and mount at /mnt/data.
 # Destructive (wipes the disk), so it only acts on an explicit confirmation and
