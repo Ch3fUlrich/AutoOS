@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Hermetic ready-guard followup regressions: no runner, git or network."""
 
+import importlib.util
 import sys
 import unittest
 from pathlib import Path
@@ -87,6 +88,16 @@ class ReadyFollowupTests(unittest.TestCase):
                    "Plan-Item: example\r\nWriter: trailer/model run-trailer\r\n")
         self.assertEqual(list(writer_gate.writers([{"parents": 1, "message": message}], g)),
                          [("trailer/model", False)])
+
+    def test_a_change_here_runs_the_wired_module(self):
+        spec = importlib.util.spec_from_file_location(
+            "affected_tests_for_followups", ROOT / "tools" / "affected-tests.py")
+        affected = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = affected
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(affected)
+        picked = affected.map_changed_files(["tests/autoos_ready_followups.py"], ROOT)["pytest"]
+        self.assertIn("tests/test_autoos_ready_guards.py", picked)
 
 
 if __name__ == "__main__":
