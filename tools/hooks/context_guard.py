@@ -37,7 +37,6 @@ import re
 import shutil
 import sys
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
@@ -285,6 +284,13 @@ def cmd_ready(args) -> int:
     AUTOOS_HANDOFF_CHECK override), without --log or live-state discovery.
     Identity, launch time, usage and agents are null when not observed here.
     """
+    if not args or args[0].startswith("--"):
+        print("context_guard: ready needs <handoff-path>", file=sys.stderr)
+        return 2
+    if len(args) >= 2 and args[1] == "--reason" and (
+            len(args) == 2 or args[2].startswith("--")):
+        print("context_guard: --reason needs a value", file=sys.stderr)
+        return 2
     reason = args[2] if len(args) == 3 and args[1] == "--reason" else "cap"
     if len(args) not in (1, 3) or (len(args) == 3 and args[1] != "--reason"):
         print("context_guard: ready needs <handoff-path>", file=sys.stderr)

@@ -32,7 +32,8 @@ def make_ready_fixture(tmp_path):
 
     def run(*args):
         return subprocess.run([sys.executable, str(SCRIPT), *args], env=env,
-                              cwd=tmp_path, capture_output=True, text=True, timeout=10)
+                              cwd=tmp_path, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=10)
     return handoff, card, checker, env, marker, run
 
 
@@ -103,6 +104,35 @@ def test_hook_ignores_broken_checker(ready):
     p = run()
     assert (p.returncode, p.stdout, p.stderr) == (0, "", "")
     assert not marker.exists()
+
+
+def test_fixture_closes_stdin(ready):
+    *_, run = ready
+    # Pin the subprocess contract even when the test runner has a blocking TTY.
+    with patch.object(subprocess, "run") as child:
+        run()
+    assert child.call_args.kwargs.get("stdin") == subprocess.DEVNULL
+
+
+def test_no_unused_tempfile_import(ready):
+    import ast
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    assert not any(isinstance(node, ast.Import) and
+                   any(alias.name == "tempfile" for alias in node.names)
+                   for node in ast.walk(tree))
+
+
+def test_ready_argument_errors(ready):
+    handoff, _, _, _, marker, run = ready
+    for args, diagnostic in (
+            (("--reason",), "ready needs <handoff-path>"),
+            (("--unknown",), "ready needs <handoff-path>"),
+            ((str(handoff), "--reason"), "--reason needs a value"),
+            ((str(handoff), "--reason", "--other"), "--reason needs a value")):
+        p = run("ready", *args)
+        assert p.returncode == 2
+        assert diagnostic in p.stderr, p.stderr
+        assert not marker.exists()
 
 
 def test_checker_override(ready):
