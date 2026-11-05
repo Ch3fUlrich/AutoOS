@@ -398,7 +398,7 @@ def report_checks(report_text, required=(1, 2, 3, 4, 5, 6)):
     req = _guard_required(required)
     seen = {}
     decorated = set()
-    decoration = re.compile(r"^(?: {0,3}(?:[-*+]|1[.)])[ \t]+(?:\*\*|__)?|\*\*|__)"
+    decoration = re.compile(r"^(?: {0,3}(?:[-*+]|[0-9]{1,9}[.)])[ \t]+(?:\*\*|__)?|\*\*|__)"
                             r"CHECK[ \t]+([1-9][0-9]*)(?![0-9])\b")
     fences = _Fences()
     for line, _ in _lines(report_text):

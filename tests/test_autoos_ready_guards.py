@@ -210,9 +210,9 @@ class ReadyFollowupTests(unittest.TestCase):
     def test_decorated_checks_raise_only_without_real_line(self):
         decorated = ["- CHECK 1: PASS tail", "* CHECK 1: PASS tail",
                      "1. CHECK 1: PASS tail", "+ CHECK 1: PASS tail",
-                     "1) CHECK 1: PASS tail", "   - __CHECK 1: PASS__",
-                     "- **CHECK 1: PASS**", "**CHECK 1: PASS**",
-                     "__CHECK 1: PASS__"]
+                     "1) CHECK 1: PASS tail", "2. CHECK 1: PASS tail",
+                     "12) CHECK 1: PASS tail", "   - __CHECK 1: PASS__",
+                     "- **CHECK 1: PASS**", "**CHECK 1: PASS**", "__CHECK 1: PASS__"]
         for text in decorated:
             with self.subTest(text=text):
                 with self.assertRaises(g.GuardError) as caught:
