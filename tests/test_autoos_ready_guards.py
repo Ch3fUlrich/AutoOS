@@ -100,8 +100,8 @@ CHECKS = [(report(ALL_OK), SIX, (True, [], [], [])),
           ("check 1: PASS tail\n", [1], (False, [1], [], []))]
 # (5) CHECK lines count at column 0 with an ASCII number and an evidence tail.
 NOT_COUNTED = ["  CHECK 1: PASS tail\n", "   CHECK 1: PASS tail\n", "\tCHECK 1: PASS tail\n",
-               "> CHECK 1: PASS tail\n", ">CHECK 1: PASS tail\n", "- CHECK 1: PASS tail\n",
-               "* CHECK 1: PASS tail\n", "1. CHECK 1: PASS tail\n", "CHECK 01: PASS tail\n",
+               "> CHECK 1: PASS tail\n", ">CHECK 1: PASS tail\n",
+               "CHECK 01: PASS tail\n",
                "CHECK 001: PASS tail\n", "check 1: PASS tail\n", "CHECK \u0661: PASS tail\n",
                "checklist 1: PASS tail\n"]
 NO_TAIL = ["CHECK 1: PASS\n", "CHECK 1: PASS   \n", "CHECK 1: FAIL\n",
@@ -191,6 +191,56 @@ TAB_FENCE_CLOSE = [
 # A tab-indented OPENER is likewise not a fence line: nothing is swallowed.
 TAB_FENCE_OPEN = ["\t```\nCHECK 1: PASS real tail\n",
                   "  \t```\nCHECK 1: PASS real tail\n"]
+
+
+class ReadyFollowupTests(unittest.TestCase):
+    def test_smaller_line_caps_and_pr_123(self):
+        paths = ["a.py", "b.py", "CHANGELOG.md"]
+        for cap in ("1", "120", "200"):
+            with self.subTest(cap=cap):
+                text = files_line(paths).replace("200 lines", cap + " lines")
+                self.assertEqual(g.brief_files(text), paths)
+        text = ("FILES (only these; <= 3 files, <= 120 lines changed): "
+                "a.py, b.py, CHANGELOG.md. Do not touch other lines/files.")
+        self.assertEqual(g.brief_files(text), paths)
+
+    def test_invalid_line_caps_remain_noncanonical(self):
+        for cap in ("0", "201", "0120", "+120", "1000", "", "1 20", "١٢٠"):
+            with self.subTest(cap=cap):
+                with self.assertRaisesRegex(g.GuardError, "non-canonical FILES line"):
+                    g.brief_files(files_line(["a.py"]).replace("200 lines", cap + " lines"))
+
+    def test_crlf_last_paragraph_and_writer_trailer(self):
+        trailer = "Plan-Item: example\nWriter: omniroute/cx-gpt-6.1-sol run-example"
+        for blank in ("", " ", "\t", " \t "):
+            for ending in ("", "\r\n"):
+                with self.subTest(blank=blank, ending=ending):
+                    message = ("Body\r\n" + blank + "\r\n"
+                               + trailer.replace("\n", "\r\n") + ending)
+                    self.assertEqual(g.last_paragraph(message), trailer)
+                    self.assertEqual(g.writer_trailer_refusal(
+                        [{"sha": "abc123", "parents": 1, "message": message}]), "")
+        self.assertTrue(g.writer_trailer_refusal([{
+            "message": "Writer: model run\r\n \t\r\nBody without trailer"}]))
+
+    def test_decorated_checks_raise_only_without_real_line(self):
+        decorated = ["- CHECK 1: PASS tail", "* CHECK 1: PASS tail",
+                     "1. CHECK 1: PASS tail", "+ CHECK 1: PASS tail",
+                     "1) CHECK 1: PASS tail", "   - __CHECK 1: PASS__",
+                     "- **CHECK 1: PASS**", "**CHECK 1: PASS**",
+                     "__CHECK 1: PASS__"]
+        for text in decorated:
+            with self.subTest(text=text):
+                with self.assertRaises(g.GuardError) as caught:
+                    g.report_checks(text, [1])
+                self.assertIn("CHECK 1: PASS", str(caught.exception))
+                self.assertIn("at column 0 with no list marker, bold or indentation",
+                              str(caught.exception))
+                for quoted in ("```\n" + text + "\n```", "> " + text, "    " + text):
+                    self.assertEqual(g.report_checks(quoted, [1])["missing"], [1])
+                self.assertTrue(g.report_checks(text + "\nCHECK 1: PASS real tail", [1])["ok"])
+        for text in ("- CHECK 01: PASS tail", "- check 1: PASS tail"):
+            self.assertEqual(g.report_checks(text, [1])["missing"], [1])
 
 
 def forged_check_body(ch):
