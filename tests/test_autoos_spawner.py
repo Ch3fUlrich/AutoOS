@@ -192,6 +192,7 @@ def pinned_env(**extra):
     fixtures itself; this is the one place that says what they are (AO-ADMISSION-2).
     """
     env = dict(_host_env_pins())
+    env["AUTOOS_NO_KEY_FILES"] = "1"
     env["PATH"] = _CLIENT_BIN + os.pathsep + os.defpath
     env.update(extra)
     return env
@@ -219,7 +220,6 @@ def r_leg_is_claude(leg):
 
 
 def clean_env(**extra):
-    # Host files cannot supply credentials; keyed cases supply their own env key.
     dropped = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_SESSION_TAG")
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k not in dropped}
@@ -30348,7 +30348,7 @@ class ZenKeySpawnTests(unittest.TestCase):
     def _dry(self, *argv, root=None):
         env = clean_env(AUTOOS_STATE_DIR=self.state)
         if root is not None:  # This root contains only this test's fake Zen key.
-            env.pop("AUTOOS_NO_KEY_FILES", None)
+            env["AUTOOS_NO_KEY_FILES"] = "main"
         for name in ("AUTOOS_TASK_DIR", "OPENCODE_API_KEY"):
             env.pop(name, None)
         return run_agent("run", "--client", "opencode", *argv, "--dry-run",
