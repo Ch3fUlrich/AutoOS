@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class _Scan:
-    NAME = re.compile(r"""config["'\s,]+(?:["']?--[\w-]+["']?[\s,]+)*["']?user\.(?:name|email)""")
+    NAME = re.compile(r"""config["'\s,]+(?:["']?(?:--file|-f)["']?[\s,]+(?:"[^"\n]+"|'[^'\n]+'|[^\s,"']+)[\s,]+|["']?--?[\w-]+["']?[\s,]+)*["']?user\.(?:name|email)""")
     READ = re.compile(r"--(?:get|get-all|unset|unset-all|list|get-regexp)\b")
 
 
@@ -36,8 +36,9 @@ def writes_identity(text):
 class StaticIdentityGuardTests(unittest.TestCase):
     """No test writes a git identity with `git config` (AO-PREPUSH-HOOK-GITENV-2).
 
-    Limit, one line: a string scan - it sees literal spellings (argv list, shell
-    or PowerShell command), not a key built from parts or a file written by hand.
+    String scan: literal keys in argv lists, shell or PowerShell commands, including
+    single-dash flags and one literal/variable path token after --file/-f. Not a
+    parser: computed keys, complex path expressions and hand-written files are unseen.
     """
 
     SUFFIXES = (".py", ".sh", ".ps1", ".psm1", ".bash")
