@@ -7128,9 +7128,13 @@ install_plangraph_omniroute_node() {
         python3 -m venv "$repo_dir/.venv"
     fi
     "$repo_dir/.venv/bin/pip" install -q --upgrade pip
-    "$repo_dir/.venv/bin/pip" install -q -e "$repo_dir" pytest 2>/dev/null ||
-        "$repo_dir/.venv/bin/pip" install -q pytest
+    # plangraph ships no setup.py/pyproject.toml - it runs via PYTHONPATH=src
+    # (see its README), so there is nothing here to `pip install -e`.
+    "$repo_dir/.venv/bin/pip" install -q pytest
+    if [[ -f "$repo_dir/requirements-ci.txt" ]]; then
+        "$repo_dir/.venv/bin/pip" install -q -r "$repo_dir/requirements-ci.txt"
+    fi
     mkdir -p "$SYS_HOME/.cache/plangraph"
-    ui_ok "plangraph ready at $repo_dir"
+    ui_ok "plangraph ready at $repo_dir (run with PYTHONPATH=src, e.g. PYTHONPATH=src ${repo_dir}/.venv/bin/python3 -m pytest tests -q)"
     ui_info "Set PLANGRAPH_GATEWAY_URL (and this host's provider credentials) in your shell env to let OmniRoute route work here - AutoOS does not invent or store those secrets."
 }
