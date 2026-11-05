@@ -1811,7 +1811,7 @@
             "build-server"
           ],
           "verify": "findmnt /mnt/data",
-          "homepage": "",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS/blob/main/lib/linux/build-server.sh",
           "package": "data-disk-mount"
         },
         {
@@ -1824,7 +1824,7 @@
             "build-server"
           ],
           "verify": "command -v start-gnome && command -v stop-gnome",
-          "homepage": "",
+          "homepage": "https://www.freedesktop.org/wiki/Software/kmscon/",
           "package": "tty-desktop-kmscon"
         },
         {
@@ -1837,7 +1837,7 @@
             "build-server"
           ],
           "verify": "systemctl is-active ssh.socket || systemctl is-active ssh",
-          "homepage": "",
+          "homepage": "https://tailscale.com/kb/1193/tailscale-ssh",
           "package": "ssh-tailscale-access"
         },
         {
@@ -1856,7 +1856,7 @@
           "id": "github-actions-runner",
           "name": "GitHub Actions self-hosted runner",
           "description": "Registers a self-hosted Actions runner (private repo only)",
-          "provider": "script",
+          "provider": "custom",
           "package": "github-actions-runner",
           "requires": [
             "gh"
@@ -1931,7 +1931,7 @@
           "id": "gitleaks",
           "name": "gitleaks",
           "description": "Secret scanner the public repo's gates expect",
-          "provider": "script",
+          "provider": "custom",
           "package": "gitleaks",
           "requires": [
             "download-tools"

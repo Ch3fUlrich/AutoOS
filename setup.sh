@@ -27,15 +27,15 @@ LIB="$AUTOOS_ROOT/lib/linux"
 . "$LIB/download.sh"
 # shellcheck source=lib/linux/usb.sh
 . "$LIB/usb.sh"
+# shellcheck source=lib/linux/build-server.sh
+. "$LIB/build-server.sh"
 
 # Resolved properly after detect_system; this is only the fallback for the
 # catalog-only modes that run before detection.
 CATALOG="$AUTOOS_ROOT/catalog/linux.json"
-PROFILE=""; ONLY=""; ASSUME_YES=0; DO_SERVE=0; PORT=8777; BIND="127.0.0.1"
-CLAUDE_SESSIONS=""
+PROFILE=""; ONLY=""; ASSUME_YES=0; DO_SERVE=0; PORT=8777; BIND="127.0.0.1"; CLAUDE_SESSIONS=""
 LIST_ONLY=0; CHECK_ONLY=0; DO_UNDO=0; FROM_STATE=""
-STATE_PATH="$AUTOOS_ROOT/.autoos-state.json"
-STATE_PROFILE=""; STATE_SELECTED=""
+STATE_PATH="$AUTOOS_ROOT/.autoos-state.json"; STATE_PROFILE=""; STATE_SELECTED=""
 # Task 6 (installer-USB planner): --create-usb and its companions.
 DO_CREATE_USB=0; USB_IMAGE=""; USB_KIND="installer"; USB_ENGINE=""; USB_DEVICE=""
 USB_WIPE=0; LIST_USB=0; LIST_ENGINES=0
