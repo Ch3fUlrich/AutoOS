@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests"))
 
 import oc_l1_serve  # noqa: E402
+import oc_l1_canary
 from _oc_l1_fakes import (  # noqa: E402
     FAKE_SESSION_ID,
     PW_ENV,
@@ -25,6 +27,20 @@ from _oc_l1_fakes import (  # noqa: E402
     make_lane,
     write_cfg,
 )
+
+
+class CanarySessionErrorTest(unittest.TestCase):
+    def test_session_error_is_diagnosed_without_echoing_provider_secrets(self):
+        replies = [(200, {"id": "ses_probe"}), (200, {}),
+                   (200, {"outcome": {"type": "error"},
+                          "error": {"name": "ProviderError", "message": "secret"}})]
+        replies = [(status, {"data": data}) for status, data in replies]
+        with patch.object(oc_l1_canary, "_request", side_effect=replies):
+            result = oc_l1_canary.run_canary(47200, "fake-password", {
+                "name": "probe", "model": {"provider": "omniroute", "modelID": "fake"}})
+        self.assertFalse(result["denied"])
+        self.assertEqual(result["detail"], "canary session failed; inspect session error via HTTP API")
+        self.assertNotIn("secret", json.dumps(result))
 
 
 class StatusTest(unittest.TestCase):

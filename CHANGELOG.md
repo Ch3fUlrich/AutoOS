@@ -1,5 +1,7 @@
 # Changelog
 
+- OC-L1-SOL-TEST: diagnose canary session errors without echoing provider payloads or secrets; retain the existing fail-closed guard and OpenCode 2.0.12 rendering. Live OpenCode 2.2.5 start passed before this diagnostic change, so the earlier no-reply failure was not reproduced.
+
 - OC-L1-SOL-TEST (D-4240, D-4314): optional handoff-check gates hard-limit recycle fail-closed with persistent prompt suppression; add the default-effort Sol lane example; compaction fields `prune` and `tail_turns` are retained for OpenCode 2.0.12, ignored by 2.2.5.
 
 - AO-OCL1-PW-FILE (D-2270, D-4241): lane tools prefer an owner-only password file via AUTOOS_OCL1_PW_FILE, fail closed on file errors, and retain env-only fallback when unset.
