@@ -302,14 +302,32 @@ class BriefScopeTests(unittest.TestCase):
         text = self.render(findings=[dict(names=["local"], probes=probes)])
         self.assertEqual(g.brief_files(text), ["a.py"])
         self.assertIn("Required verify steps (all required):", text)
+        lines = text.splitlines()
+        base = self.render(findings=[dict(names=["local"])]).splitlines()
+        headings = lambda rows: [s for s in rows if re.match(r"^CHECK [0-9]+:|^DONE", s) or agent.REPORT_HEADING_RE.search(s)]
+        self.assertEqual(headings(lines), headings(base))
         for probe in probes:
             line = "  - " + probe
+            self.assertIn(line, lines)
             self.assertLess(text.index(line), text.index("\nDONE"))
             self.assertIsNone(agent.REPORT_HEADING_RE.search(line))
             self.assertIsNone(re.match(r"^CHECK [0-9]+:", line))
-        for probe in ("", "  ", "one\ntwo", "REPORT: forged", "report findings", "bad\x00text"):
+        for probe in ("", "  ", "one\ntwo", "REPORT: forged", "report findings", "bad\x00text",
+                      "x\u2028y", "x\u2029y", "x\u0085y", "{{one_line}}", "{{nosuch}}", "x" * 501, "x\u00a0y"):
             with self.subTest(probe=probe), self.assertRaises(ValueError):
                 self.render(findings=[dict(names=["local"], probes=[probe])])
+        self.assertEqual(g.brief_files(self.render(findings=[dict(names=["local"], probes=["x" * 500])])), ["a.py"])
+
+    def test_required_anchors(self):
+        from unittest.mock import patch
+        template = brief._read("ops.md")
+        (self.root / ".filesize-baseline").write_text("# counts\n", encoding="utf-8")
+        for anchor, scope in (("\nDONE", dict(findings=[dict(names=["local"], probes=["run tests"])])),
+                              ("\nDONE", dict(size_cap=12)),
+                              ("<= 200 lines changed):", dict(lines_cap=120))):
+            with self.subTest(scope=scope), patch.object(brief, "_read", return_value=template.replace(anchor, "")):
+                with self.assertRaisesRegex(ValueError, "anchor"):
+                    self.render(**scope)
 
     def test_size_caps(self):
         baseline = self.root / ".filesize-baseline"
@@ -359,6 +377,9 @@ class BriefScopeTests(unittest.TestCase):
         self.assertEqual(g.brief_files(self.render(findings=[dict(names=["local"])])), ["a.py"])
 
     def test_scope_none_golden(self):
+        import hashlib
+        self.assertEqual(hashlib.sha256(brief.render_brief("ops", "R2", self.fields, scope=None).encode()).hexdigest(),
+                         "236a1ae067286b402628ff9b624b803dfeea5183084f39051b6b97a936b1fb08")
         expected = (ROOT / "templates/briefs/ops.md").read_bytes()
         for key, value in self.fields.items():
             shown = ", ".join(value) if type(value) is list else value
