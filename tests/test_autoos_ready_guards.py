@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Tests for tools/autoos_ready_guards.py (AO-WRITER-GUARDS P4a).
 
-Hermetic (D-852): no runner, no subprocess, no git, no network — diff paths are
-arguments, the tool lookup is injected (a directory name comes from this checkout's
-own path, only ever stat'ed), the brief is a real render."""
+Hermetic (D-852): no runner or network; imported BriefScopeTests uses temporary git
+repositories via subprocess. Diff paths are arguments, the tool lookup is injected
+(this checkout's directory is only stat'ed), and the brief is a real render."""
 import inspect
 import io
 import shutil
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "tools"), str(ROOT / "tests")]
 import autoos_brief as brief  # noqa: E402
 import autoos_ready_guards as g  # noqa: E402
-from autoos_ready_followups import ReadyFollowupTests  # noqa: E402,F401  # tests/autoos_ready_followups.py
+from autoos_ready_followups import ReadyFollowupTests, BriefScopeTests  # noqa: E402,F401  # tests/autoos_ready_followups.py tools/autoos_brief_scope.py tools/autoos_brief.py
 
 PATHS = ["tools/a.py", "tools/b.yml", "tests/test_a.py"]
 SIX = [1, 2, 3, 4, 5, 6]

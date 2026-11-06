@@ -193,14 +193,14 @@ class ReadyFollowupTests(unittest.TestCase):
         sys.modules[spec.name] = affected
         self.addCleanup(sys.modules.pop, spec.name, None)
         spec.loader.exec_module(affected)
-        picked = affected.map_changed_files(["tests/autoos_ready_followups.py"], ROOT)["pytest"]
-        self.assertIn("tests/test_autoos_ready_guards.py", picked)
-
-    def test_brief_scope_bridge(self):
-        result = unittest.TestResult()
-        unittest.defaultTestLoader.loadTestsFromTestCase(BriefScopeTests).run(result)
-        self.assertEqual(result.testsRun, 7)
-        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+        for path in ("tests/autoos_ready_followups.py", "tools/autoos_brief_scope.py", "tools/autoos_brief.py"):
+            picked = affected.map_changed_files([path], ROOT)["pytest"]
+            self.assertIn("tests/test_autoos_ready_guards.py", picked)
+        spec = importlib.util.spec_from_file_location(
+            "guards_for_exposure", ROOT / "tests" / "test_autoos_ready_guards.py")
+        guards = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guards)
+        self.assertIs(guards.BriefScopeTests, BriefScopeTests)
 
 
 class BriefScopeTests(unittest.TestCase):
@@ -232,6 +232,47 @@ class BriefScopeTests(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
         subprocess.run(["git", "add", "--", path], cwd=self.root, env=env,
                        check=True, capture_output=True)
+
+    def test_shell_definition_tails(self):
+        self.index("extra.sh", b"helper\n")
+        with self.assertRaisesRegex(ValueError, "helper"):
+            self.render(findings=[dict(names=["helper"])])
+        for line in ("    helper()", "helper() is called by the lane."):
+            self.index("extra.py", (line + "\n").encode())
+            with self.subTest(line=line), self.assertRaisesRegex(ValueError, "helper"):
+                self.render(findings=[dict(names=["helper"])])
+        for path, line in (("extra.py", "helper() { :; }"),
+                           ("extra.py", "function helper { :; }"),
+                           ("extra.py", "function helper() { :; }"),
+                           ("extra.sh", "helper()\n{ :; }"),
+                           ("extra.bash", "helper()\n{ :; }"),
+                           ("extra.sh", "function helper\n{ :; }"),
+                           ("extra.bash", "function helper()\n{ :; }")):
+            for old in ("extra.py", "extra.sh", "extra.bash"):
+                self.index(old, b"# empty\n")
+            self.index(path, (line + "\n").encode())
+            with self.subTest(path=path, line=line):
+                self.assertIn(path, g.brief_files(self.render(findings=[dict(names=["helper"])])))
+
+    def test_rust_qualified_functions(self):
+        for prefix in ('const', 'extern', 'extern "C"', 'pub const', 'pub extern "C"'):
+            self.index("extra.rs", (prefix + " fn qualified() {}\n").encode())
+            with self.subTest(prefix=prefix):
+                self.assertIn("extra.rs", g.brief_files(
+                    self.render(findings=[dict(names=["qualified"])])))
+
+    def test_changelog_exemption_and_fourth_counted_file(self):
+        self.fields["paths"] = ["CHANGELOG.md", "a.py"]
+        self.assertEqual(g.brief_files(self.render(findings=[dict(names=["Shared"])])),
+                         ["CHANGELOG.md", "a.py", "b.rs", "types.py"])
+        self.fields["paths"].append("c.sh")
+        with self.assertRaisesRegex(ValueError, "types.py.*Shared"):
+            self.render(findings=[dict(names=["Shared"])])
+
+    def test_bytes_and_newline_only_records(self):
+        self.index("extra.py", b"\x0cdef encoded(): pass # \xe9\n")
+        self.assertIn("extra.py", g.brief_files(
+            self.render(findings=[dict(names=["encoded"])])))
 
     def test_case_exact_rulings_and_findings(self):
         self.fields["paths"] = ["A.py"]
@@ -279,7 +320,6 @@ class BriefScopeTests(unittest.TestCase):
                       {"rulings": [dict(names=[], extra=True)]}):
             with self.subTest(scope=scope), self.assertRaises(ValueError):
                 brief.render_brief("ops", "R2", self.fields, scope=scope)
-
 
 
 if __name__ == "__main__":
