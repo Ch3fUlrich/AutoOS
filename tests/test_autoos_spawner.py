@@ -44,6 +44,7 @@ import prepush as prepush_tool  # noqa: E402  (tools/prepush.py; the D-110 gate 
 import autoos_writer_ledger as writer_ledger  # noqa: E402  (AO-LEDGER-WRITE P6)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _host_state as host_state  # noqa: E402  (tests/_host_state.py: the host reads)
+from _spawner_hermetic import fake_key_environment
 
 
 def load_agent(path=None):
@@ -4671,9 +4672,7 @@ class RawTailClassificationTests(unittest.TestCase):
 class KeyFileTests(unittest.TestCase):
     """A lane worktree has no git-ignored api-keys.yml (measured 2026-09-25: exit 3,
     and linking it in was refused); the spawner falls back to the main checkout."""
-    def setUp(self):
-        patch = mock.patch.dict(os.environ); patch.start(); self.addCleanup(patch.stop)
-        os.environ.pop("AUTOOS_NO_KEY_FILES", None)
+    setUp = fake_key_environment
     def test_a_worktree_reads_the_main_checkouts_key_file(self):
         agent = load_agent()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4685,16 +4684,18 @@ class KeyFileTests(unittest.TestCase):
             subprocess.run(git + ["-C", main, "worktree", "add", "-q", wt], check=True)
             os.makedirs(os.path.join(main, "configuration"))
             with open(os.path.join(main, "configuration", "api-keys.yml"), "w", encoding="utf-8") as fh:
-                fh.write("omniroute: sk-test-not-a-key\n")
+                fh.write("omniroute_server: sk-test-not-a-key\n")
             with mock.patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("AUTOOS_OMNIROUTE_KEY", None)
                 self.assertEqual(agent.client_key(wt), "sk-test-not-a-key")
                 self.assertEqual(agent.client_key(main), "sk-test-not-a-key")
+
     def test_no_key_file_anywhere_is_none(self):
         agent = load_agent()
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AUTOOS_OMNIROUTE_KEY", None)
             self.assertIsNone(agent.client_key(tmp))
+
 
 class CardV2Tests(unittest.TestCase):
     """Task card v2 (spec docs/plans/2026-09-25-routing-v2-spec.md §4).
@@ -30205,9 +30206,7 @@ def zen_cli_root():
 
 class ZenKeyFileTests(unittest.TestCase):
     """(f) zen_key(): the `zen` field read by name, and what is not a key."""
-    def setUp(self):
-        patch = mock.patch.dict(os.environ); patch.start(); self.addCleanup(patch.stop)
-        os.environ.pop("AUTOOS_NO_KEY_FILES", None)
+    setUp = fake_key_environment
     @classmethod
     def setUpClass(cls):
         cls.agent = load_agent()
@@ -30277,6 +30276,7 @@ class ZenKeyPlanTests(unittest.TestCase):
         cls.agent = load_agent()
 
     def setUp(self):
+        fake_key_environment(self)
         self.root = zen_root("zen: %s\n" % FAKE_ZEN)
         self.addCleanup(shutil.rmtree, self.root, True)
 

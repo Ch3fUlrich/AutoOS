@@ -5,6 +5,17 @@ import tempfile
 from unittest import mock
 
 
+def fake_key_environment(case):
+    """Fence in-process fake key lookups and restore the caller's environment."""
+    patch = mock.patch.dict(os.environ, {
+        "AUTOOS_OMNIROUTE_URL": "https://gateway.example.invalid",
+        "AUTOOS_HOST_NAME": "test-only",
+    })
+    patch.start()
+    case.addCleanup(patch.stop)
+    os.environ.pop("AUTOOS_NO_KEY_FILES", None)
+
+
 def keyless_plan_ignores_fake_file(case, agent):
     with tempfile.TemporaryDirectory() as tmp:
         config = Path(tmp, "configuration")
