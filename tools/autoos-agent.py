@@ -5156,11 +5156,15 @@ def outside_fence(data_dir: str, task_dir: str | None = None) -> list:
 
 
 def key_files(root: str) -> list:
-    """This checkout's api-keys.yml, then the main checkout's.
+    """Checkout then main keys; NO_KEY_FILES=1 removes both, main removes main.
 
     The file is git-ignored, so a lane worktree has none (measured 2026-09-25:
     exit 3 "No OmniRoute client key", and linking it in was refused).
     """
+    if os.environ.get("AUTOOS_NO_KEY_FILES") == "1":
+        return []  # Removal-only: hermetic callers retain explicit env keys.
+    if os.environ.get("AUTOOS_NO_KEY_FILES") == "main":
+        return [os.path.join(root, "configuration", "api-keys.yml")]
     roots = [root]
     r = subprocess.run(["git", "-C", root, "rev-parse", "--path-format=absolute",
                         "--git-common-dir"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
