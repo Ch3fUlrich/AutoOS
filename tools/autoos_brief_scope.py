@@ -3,16 +3,26 @@
 Definition-shaped lines in documentation or fixtures count: shape, not language.
 """
 import os
+import importlib.util
 import re
 import subprocess
 from pathlib import Path
+
+
+def load_sibling(name):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + ".py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _definitions(root, name):
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
     try:
         result = subprocess.run(
-            ["git", "-c", "core.quotePath=false", "grep", "--cached", "--no-color", "-z",
+            ["git", "-c", "core.quotePath=false", "-c", "grep.lineNumber=false",
+             "-c", "grep.column=false", "-c", "grep.fullName=true",
+             "grep", "--cached", "--no-color", "-z",
              "-F", "-e", name, "--", "."], cwd=root, env=env,
             capture_output=True)
     except (OSError, UnicodeError) as exc:
@@ -46,13 +56,26 @@ def _definitions(root, name):
 def expand_scope(scope, paths, validate_paths):
     """Return finding-expanded paths; rulings must stay in the original paths."""
     if type(scope) is not dict or any(
-            k not in {"root", "findings", "rulings"} for k in scope):
+            k not in {"root", "findings", "rulings", "size_cap", "lines_cap"} for k in scope):
         raise ValueError("scope must be a dict with known keys")
     if "root" in scope and (type(scope["root"]) is not str
                             or not Path(scope["root"]).is_dir()):
         raise ValueError("scope root must be a repository directory string")
-    if any(k in scope for k in ("findings", "rulings")) and "root" not in scope:
-        raise ValueError("scope root required for findings or rulings")
+    if any(k in scope for k in ("findings", "rulings", "size_cap")) and "root" not in scope:
+        raise ValueError("scope root required for findings, rulings or size_cap")
+    for key in ("size_cap", "lines_cap"):
+        if key in scope and (type(scope[key]) is not int or (
+                key == "lines_cap" and not 1 <= scope[key] <= 200)):
+            raise ValueError("%s must be an integer%s" % (key, " 1..200" if key == "lines_cap" else ""))
+    if "root" in scope:
+        env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+        try:
+            top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=scope["root"],
+                                 env=env, capture_output=True, text=True, check=True)
+            if Path(top.stdout.strip()).resolve() != Path(scope["root"]).resolve():
+                raise ValueError("scope root must be repository top level")
+        except (OSError, UnicodeError, subprocess.CalledProcessError) as exc:
+            raise ValueError("scope root must be repository top level") from exc
     groups = {}
     for kind in ("findings", "rulings"):
         entries = scope.get(kind, [])
@@ -89,4 +112,20 @@ def expand_scope(scope, paths, validate_paths):
                         if path != "CHANGELOG.md" and sum(p != "CHANGELOG.md" for p in expanded) >= 3:
                             raise ValueError("finding file %s for %s exceeds max 3" % (path, name))
                         expanded.append(path)
+    if "size_cap" in scope:
+        root, cap = Path(scope["root"]), scope["size_cap"]
+        try:
+            counts, errors = load_sibling("check-file-size").parse_baseline(
+                (root / ".filesize-baseline").read_text(encoding="utf-8"), ".filesize-baseline")
+            if errors:
+                raise ValueError("; ".join(errors))
+            for path in expanded:
+                baseline = counts.get(path)
+                if baseline is None:
+                    file = root / path
+                    baseline = len(file.read_bytes().decode("utf-8", errors="replace").splitlines()) if file.exists() else 0
+                if baseline > cap:
+                    raise ValueError("%s baseline/current lines %d exceeds size cap %d" % (path, baseline, cap))
+        except (OSError, UnicodeError) as exc:
+            raise ValueError("cannot read size baseline or in-scope file") from exc
     return expanded

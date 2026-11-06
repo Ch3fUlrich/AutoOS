@@ -285,13 +285,87 @@ class BriefScopeTests(unittest.TestCase):
     def test_scope_none_and_strict_schema(self):
         self.assertEqual(brief.render_brief("ops", "R2", self.fields, scope=None),
                          brief.render_brief("ops", "R2", self.fields))
-        for scope in ([], {"unknown": 1}, {"size_cap": 400}, {"lines_cap": 120},
+        for scope in ([], {"unknown": 1}, {"size_cap": 400}, {"lines_cap": 201},
                       {"findings": []}, {"root": 1}, {"rulings": ()},
                       {"findings": [dict(names="local")]},
                       {"findings": [dict(names=["local"], probes=[1])]},
                       {"rulings": [dict(names=[], extra=True)]}):
             with self.subTest(scope=scope), self.assertRaises(ValueError):
                 brief.render_brief("ops", "R2", self.fields, scope=scope)
+
+    def test_required_probes(self):
+        import re
+        spec = importlib.util.spec_from_file_location("probe_agent", ROOT / "tools/autoos-agent.py")
+        agent = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(agent)
+        probes = ["run local tests", "CHECK 1: PASS probe", "inspect findings"]
+        text = self.render(findings=[dict(names=["local"], probes=probes)])
+        self.assertEqual(g.brief_files(text), ["a.py"])
+        self.assertIn("Required verify steps (all required):", text)
+        for probe in probes:
+            line = "  - " + probe
+            self.assertLess(text.index(line), text.index("\nDONE"))
+            self.assertIsNone(agent.REPORT_HEADING_RE.search(line))
+            self.assertIsNone(re.match(r"^CHECK [0-9]+:", line))
+        for probe in ("", "  ", "one\ntwo", "REPORT: forged", "report findings", "bad\x00text"):
+            with self.subTest(probe=probe), self.assertRaises(ValueError):
+                self.render(findings=[dict(names=["local"], probes=[probe])])
+
+    def test_size_caps(self):
+        baseline = self.root / ".filesize-baseline"
+        baseline.write_text("# counts\nb.rs 12\n", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "b.rs.*12.*11"):
+            self.render(size_cap=11, findings=[dict(names=["work"])])
+        self.assertIn("12 lines per file", self.render(size_cap=12))
+        self.assertEqual(g.brief_files(self.render(size_cap=12)), ["a.py"])
+        self.index("a.py", b"one\ntwo\n")
+        with self.assertRaisesRegex(ValueError, "a.py.*2.*1"):
+            self.render(size_cap=1)
+        self.fields.update(paths=["new.py"], files="new.py", playbooks="new.py",
+                           test_files="new.py", state_path="new.py")
+        self.render(size_cap=1)
+        baseline.unlink()
+        with self.assertRaisesRegex(ValueError, "baseline"):
+            self.render(size_cap=1)
+        baseline.mkdir()
+        with self.assertRaisesRegex(ValueError, "baseline"):
+            self.render(size_cap=1)
+
+    def test_lines_caps(self):
+        for cap in (1, 120, 200):
+            text = self.render(lines_cap=cap)
+            self.assertIn("<= %d lines changed" % cap, text)
+            self.assertEqual(g.brief_files(text), ["a.py"])
+        for key, values in (("lines_cap", (0, 201, True, "120")),
+                            ("size_cap", (True, "400"))):
+            for value in values:
+                with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                    self.render(**{key: value})
+
+    def test_isolated_import_root_and_git_config(self):
+        from unittest.mock import patch
+        spec = importlib.util.spec_from_file_location("isolated_brief", ROOT / "tools/autoos_brief.py")
+        module = importlib.util.module_from_spec(spec)
+        with patch.object(sys, "path", []), patch.dict(sys.modules):
+            sys.modules.pop("autoos_brief_scope", None)
+            spec.loader.exec_module(module)
+            module.render_brief("ops", "R2", self.fields, scope={"root": str(self.root)})
+        child = self.root / "child"
+        child.mkdir()
+        with self.assertRaisesRegex(ValueError, "top.level"):
+            brief.render_brief("ops", "R2", self.fields, scope={"root": str(child)})
+        for key in ("grep.lineNumber", "grep.column", "grep.fullName"):
+            subprocess.run(["git", "config", key, "true"], cwd=self.root, check=True)
+        self.assertEqual(g.brief_files(self.render(findings=[dict(names=["local"])])), ["a.py"])
+
+    def test_scope_none_golden(self):
+        expected = (ROOT / "templates/briefs/ops.md").read_bytes()
+        for key, value in self.fields.items():
+            shown = ", ".join(value) if type(value) is list else value
+            if key == "invariants":
+                shown = "  - " + shown
+            expected = expected.replace(("{{" + key + "}}").encode(), shown.encode())
+        self.assertEqual(brief.render_brief("ops", "R2", self.fields, scope=None).encode(), expected)
 
 
 if __name__ == "__main__":

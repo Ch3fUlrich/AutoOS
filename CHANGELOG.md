@@ -1,5 +1,6 @@
 # Changelog
 
+- AO-READY-FILES-BRIEF-FOLLOWUP slice 4 (2026-11-06, D-3883, #123): require finding probes, refuse contradictory per-file size caps, render canonical smaller FILES caps, and harden isolated imports, repository roots and git grep configuration; gate unchanged.
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 3 lane 2 (2026-11-06, D-4001, D-4006): wires the scope regressions into the guards suite and adds shell tails, qualified Rust functions, CHANGELOG exemption and non-UTF-8 content; the temporary bridge test goes; gate unchanged.
 - AO-OC-STOP-REVIEW-LOWS slice 6 (2026-11-06): clarify watcher cleanup, supervision suspension and post-fix restart, plus platform-specific already-down stop identity requirements.
 - AO-SPAWNER-TESTS-HERMETIC lane B (2026-11-06, D-3995): gateway pre-check tests restore the environment after clearing the ambient URL override; explicit override coverage stays. Replaces part of #129.

@@ -303,8 +303,28 @@ def render_brief(task_type, r_level, fields, scope=None):
                     "state_path entry %r not in paths"
                     % (single_norm["state_path"],))
     if scope is not None:
-        from autoos_brief_scope import expand_scope
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "autoos_brief_scope", Path(__file__).with_name("autoos_brief_scope.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        expand_scope = module.expand_scope
         path_norm["paths"] = expand_scope(scope, path_norm["paths"], _validate_paths)
+        probes = [p for entry in scope.get("findings", []) for p in entry.get("probes", [])]
+        for probe in probes:
+            if not probe.strip():
+                raise ValueError("probe must be non-empty")
+            _check_controls("probe", probe)
+            _reject_keyword_lines("probe", probe)
+            if re.match(r"(?i)^\s*(?:[#>*-]+\s*)?(?:\*\*)?REPORT(?:\*\*)?(?![\w.])", probe):
+                raise ValueError("probe must not form a report heading")
+        if probes:
+            section = "Required verify steps (all required):\n" + "".join("  - " + p + "\n" for p in probes)
+            text = text.replace("\nDONE", "\n" + section + "DONE", 1)
+        if "size_cap" in scope:
+            text = text.replace("\nDONE", "\nAbsolute size cap: %d lines per file.\nDONE" % scope["size_cap"], 1)
+        if "lines_cap" in scope:
+            text = text.replace("<= 200 lines changed):", "<= %d lines changed):" % scope["lines_cap"], 1)
     # Plain substring replacement only, single pass so a value holding
     # "{{x}}" is never re-expanded; no f-string eval, no format().
     shown = {}
