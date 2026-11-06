@@ -26,7 +26,7 @@ systemctl --user is-active oc-l0-watch oc-pilot-watch oc-throttle-l0 oc-throttle
 tail -n 5 ~/fleet/oc-pilot/watch.log ~/fleet/oc-l0/watch.log
 ```
 
-A dead session is restarted by its watcher within about 2 minutes. To force a restart: kill the recorded pid (`state` file under `~/fleet/<lane>/state/`), delete that state file, the watcher then starts the lane (it has no state). Never kill by process name. To change a lane's model edit `~/.config/autoos/oc-l1.json` (`model.key`, `model.modelID`: `gemini/gemini-3.8-flash` or `ovh/gpt-oss-120b`), then restart the lane the same way. After `systemctl --user restart <watcher>` the sessions keep running. A restarted session reads `inbox/progress.json` (names its current task file) and that file only.
+A dead session is restarted by its watcher within about 2 minutes. To force a restart: run `python3 tools/oc_l1.py stop --name <lane>`, the identity-checked stop using the configured state file; after a successful stop the watcher starts the lane within about 2 minutes. With the watcher inactive, nothing restarts the lane: run `start` explicitly. Exit 2 means the stop did not complete: read the printed diagnostic for problems such as an identity refusal, a surviving PID, or a state-removal failure (after which the watcher can bring the lane back). Fix the reported problem, then retry; for a config error check the lane name and `~/.config/autoos/oc-l1.json`. Do not bypass an identity refusal or delete state blindly; delete stale state only after verifying the recorded PID is not the lane. Never kill by process name. To change a lane's model edit `~/.config/autoos/oc-l1.json` (`model.key`, `model.modelID`: `gemini/gemini-3.8-flash` or `ovh/gpt-oss-120b`), then restart the lane the same way. After `systemctl --user restart <watcher>` the sessions keep running. A restarted session reads `inbox/progress.json` (names its current task file) and that file only.
 
 Where things are: L1 clone `~/code/AutoOS-worktrees/oc-pilot/AutoOS` (mailboxes in `.oc-pilot/outbox` and `.oc-pilot/inbox`, card `.oc-pilot/CARD.md`), L0 clone `~/code/AutoOS-worktrees/oc-l0/AutoOS` plus its routing clone `~/code/AutoOS-worktrees/oc-l0/routing` (bash only). If the stack is lost, rebuild from `docs/ai/oc-runtime-sources/README.md`.
 
@@ -70,9 +70,9 @@ Docs: `docs/ai/opencode-fleet.md`, section `oc_l1.py launcher`.
 
 Exit codes of `start`: `0` ok. `2` config or password error. `4` server not healthy. `5` canary not denied = `UNATTENDED-REFUSED`.
 
-If `start` exits 5: do not run unattended. The pilot session got no prompt. Fix the guard plugin, delete the state file, start again. Supervise until the canary says `denied=yes`.
+If `start` exits 5: do not run unattended. The pilot session got no prompt, but the server is still running with its state file unless the watcher has retried `start` and cleaned up after its failure; `stop` answering `not running` is expected in that case. Stop the lane's watcher first (`systemctl --user stop oc-pilot-watch` or `oc-l0-watch`); this suspends supervision for its lanes. Then run the identity-checked `python3 tools/oc_l1.py stop --name <lane>` and follow the stop diagnostic guidance above. After a successful stop, fix the guard plugin, then run `start` again; otherwise the watcher can restart the lane before the fix, and `start` reuses the live session without applying it. Restart the watcher only after the fix and supervised confirmation that the canary says `denied=yes`.
 
-If `status` says `silent`: wait 10 minutes. Still silent: kill the recorded PID from the state file only, then `start` again from the handoff card.
+If `status` says `silent`: wait 10 minutes. Still silent: run `python3 tools/oc_l1.py stop --name <lane>`; on success the watcher starts the lane within about 2 minutes. If stop exits 2, follow the stop diagnostic guidance above; do not claim a restart. Verify with `status`.
 
 ## 4. The lane queue (do them in this order, one at a time)
 

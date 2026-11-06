@@ -13,9 +13,10 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path[:0] = [str(ROOT / "tools"), str(ROOT / "tests")]
 import autoos_brief as brief  # noqa: E402
 import autoos_ready_guards as g  # noqa: E402
+from autoos_ready_followups import ReadyFollowupTests  # noqa: E402,F401  # tests/autoos_ready_followups.py
 
 PATHS = ["tools/a.py", "tools/b.yml", "tests/test_a.py"]
 SIX = [1, 2, 3, 4, 5, 6]
@@ -100,8 +101,7 @@ CHECKS = [(report(ALL_OK), SIX, (True, [], [], [])),
           ("check 1: PASS tail\n", [1], (False, [1], [], []))]
 # (5) CHECK lines count at column 0 with an ASCII number and an evidence tail.
 NOT_COUNTED = ["  CHECK 1: PASS tail\n", "   CHECK 1: PASS tail\n", "\tCHECK 1: PASS tail\n",
-               "> CHECK 1: PASS tail\n", ">CHECK 1: PASS tail\n", "- CHECK 1: PASS tail\n",
-               "* CHECK 1: PASS tail\n", "1. CHECK 1: PASS tail\n", "CHECK 01: PASS tail\n",
+               "> CHECK 1: PASS tail\n", ">CHECK 1: PASS tail\n", "CHECK 01: PASS tail\n",
                "CHECK 001: PASS tail\n", "check 1: PASS tail\n", "CHECK \u0661: PASS tail\n",
                "checklist 1: PASS tail\n"]
 NO_TAIL = ["CHECK 1: PASS\n", "CHECK 1: PASS   \n", "CHECK 1: FAIL\n",
