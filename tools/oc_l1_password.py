@@ -16,7 +16,7 @@ def read_lane_password(password_env):
                 import subprocess
                 script = (
                     "$ErrorActionPreference='Stop'; "
-                    "$a=Get-Acl -LiteralPath $env:AUTOOS_OCL1_PW_FILE; "
+                    "$a=Get-Acl -LiteralPath $args[0]; "
                     "$o=$a.GetOwner([System.Security.Principal.SecurityIdentifier]); "
                     "$r=$a.GetAccessRules($true,$true,"
                     "[System.Security.Principal.SecurityIdentifier]); "
@@ -25,7 +25,7 @@ def read_lane_password(password_env):
                     "$e.IdentityReference -ne $o) {exit 1}}; exit 0"
                 )
                 result = subprocess.run(
-                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, path],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
                 if result.returncode:
                     raise ValueError
