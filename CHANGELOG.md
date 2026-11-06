@@ -1,5 +1,6 @@
 # Changelog
 
+- AO-READY-FILES-BRIEF-FOLLOWUP slice 4 prep (2026-11-06): move report followups into a wired mixin to leave room for brief-scope tests; gate unchanged.
 - AO-OC-STOP-REVIEW-LOWS (2026-11-06, D-4069): fence lone-PID signals and the group-error fallback in the group-leader stop test.
 - AO-OC-STOP-REVIEW-LOWS slice 7 (2026-11-06): report only pre-signal live PIDs on stop, pin already-gone cleanup and live reporting, and clarify per-lane watcher supervision.
 - AO-READY-CHECK-FAIL-BLOCKS (2026-11-06, D-4020): ready refuses failed or input-required report checks on code lanes; missing checks remain optional and ops requirements stay unchanged.
