@@ -92,9 +92,9 @@ PROVIDER_NAME = "workstation gateway"
 MODEL_LIMIT = {"context": 131072, "output": DEFAULT_MAX_TOKENS}
 PERMISSIONS = {"bash": "allow", "edit": "allow", "read": "allow",
                "autoos-agent_*": "allow"}
-# Shared 2.0.12 / 2.2.5 shape: 2.2.5 silently drops prune and tail_turns.
+# Keep the 2.0.12 input mitigation; 2.2.5 ignores the legacy fields.
 # Keep the tool-output clamp; do not promise a tail policy the binary ignores.
-COMPACTION = {"auto": True}
+COMPACTION = {"auto": True, "prune": True, "tail_turns": 4}
 TOOL_OUTPUT = {"max_lines": 400, "max_bytes": 16384}
 
 

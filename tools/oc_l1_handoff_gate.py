@@ -34,7 +34,9 @@ def reason(lane, password):
                                     stdout=output, stderr=output)
             output.seek(0)
             text = _clean(output.read(65536).decode("utf-8", "replace"), password)
-        if card.is_symlink() or card.stat() != before:
+        after = card.stat()
+        if card.is_symlink() or (after.st_ino, after.st_size, after.st_mtime_ns) != (
+                before.st_ino, before.st_size, before.st_mtime_ns):
             return card, "card changed during check"
         if result.returncode == 0:
             return card, ""

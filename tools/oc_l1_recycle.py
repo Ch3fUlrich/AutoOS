@@ -303,7 +303,7 @@ def _check(lane, state, sid, port, password, thr, warn, http, serve):
 
     announced = read_state(sid)
     try:
-        if lane.get("handoff_check") and level == "hard":
+        if lane.get("handoff_check"):
             from oc_l1_handoff_gate import blocked
             failure = blocked(lane, state, sid, port, password, http)
             if failure:

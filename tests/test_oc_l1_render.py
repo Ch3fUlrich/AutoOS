@@ -44,10 +44,22 @@ class RenderShapeTest(unittest.TestCase):
         self.assertEqual(cfg["$schema"], "https://opencode.ai/config.json")
 
     def test_compaction_uses_shared_version_shape(self):
-        # 2.2.5 normalizes away prune/tail_turns; auto works on both versions.
+        # 2.0.12 needs the mitigation; 2.2.5 ignores the legacy fields.
         cfg, _ = render(self.tmp)
-        self.assertEqual(cfg["compaction"], {"auto": True})
+        self.assertEqual(cfg["compaction"], {"auto": True, "prune": True, "tail_turns": 4})
         self.assertEqual(cfg["tool_output"], {"max_lines": 400, "max_bytes": 16384})
+
+    def test_sol_example_validates_and_renders_without_effort(self):
+        import oc_l1
+        from oc_l1_render import render as render_lane
+        example = json.loads((ROOT / "configuration/oc-l1.example.json").read_text())["l1-sol-example"]
+        lane = oc_l1.validate_lane(example, "l1-sol-example")
+        self.assertEqual(lane["model"]["modelID"], "cx/gpt-6.1-sol")
+        self.assertNotIn("reasoning_effort", json.dumps(example))
+        lane["scratch_dir"] = str(self.tmp / "sol")
+        cfg = json.loads(render_lane(lane, ROOT / "opencode.jsonc").read_text())
+        self.assertEqual(cfg["model"], "omniroute/cx/gpt-6.1-sol")
+        self.assertNotIn("options", cfg["provider"]["omniroute"]["models"]["cx/gpt-6.1-sol"])
 
     def test_model_limit_follows_the_lane_when_pinned(self):
         # Lane c (2026-10-05): a 1M leg rendered at a hardcoded 131072 is the

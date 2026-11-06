@@ -29,6 +29,33 @@ class GateTest(RecycleBase):
         self.assertEqual(self.check()[1]["action"], "restarted")
         self.assertEqual(len(creates(self.srv)), 1)
 
+    def test_both_levels_run_the_gate_before_any_action(self):
+        for tokens in (280000, 310000):
+            for body in ("raise SystemExit(1)", None):
+                with self.subTest(tokens=tokens, body=body):
+                    self.write_state()
+                    self.srv.requests = []
+                    self.fill(tokens)
+                    if body is None:
+                        self.checker.unlink()
+                    else:
+                        self.stub(body)
+                    self.assertEqual(self.check()[1]["action"], "handoff_check_failed")
+                    self.assertEqual(creates(self.srv), [])
+
+    def test_checker_read_atime_is_not_a_card_change(self):
+        import os
+        self.stub("import os, pathlib, sys; p = pathlib.Path(sys.argv[1]); "
+                  "print(p.read_text()); s = p.stat(); "
+                  "os.utime(p, ns=(s.st_atime_ns + 1000000000, s.st_mtime_ns))")
+        before = self.card.stat()
+        os.utime(self.card, ns=(1, before.st_mtime_ns))
+        self.assertEqual(self.check()[1]["action"], "restarted")
+
+    def test_checker_content_change_is_rejected(self):
+        self.stub("import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('changed')")
+        self.assertEqual(self.check()[1]["action"], "handoff_check_failed")
+
     def test_failures_persist_and_recover(self):
         for kind in ("rc1", "rc2", "missing", "permission", "card", "symlink", "timeout", "exception"):
             with self.subTest(kind=kind):
