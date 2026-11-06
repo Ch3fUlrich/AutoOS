@@ -1,7 +1,7 @@
 # OmniRoute and Qoder (empty gateway home)
 
 D-4214 restores a writable, initially empty gateway home at `omniroute-home`,
-mounted at `/home/node` with the root filesystem still read-only. The old
+mounted as the home directory of the image's `node` user with the root filesystem still read-only. The old
 `qoder-home` directory is not reused. The compose image built from this repo
 still has no `qodercli` layer; a fork image carrying it uses the new home.
 Seat routing is unchanged (D-4250), including the host's `qodercli` ACP client
