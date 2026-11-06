@@ -423,7 +423,7 @@ the image cannot replace this: it fails to start (`tsx` is not in the image).
 is one `KEY=value` per line and docker's format has no escape for it, so the
 rest of the value would become a key of its own. Such a key is skipped with a
 warning that names the key, never the value. The data directory, its
-`omniroute/` and `opencode-home/` are mode `700`.
+`omniroute/`, `omniroute-home/` and `opencode-home/` are mode `700`.
 
 #### Rotating the opencode password
 
@@ -489,15 +489,9 @@ Why a local layer at all: the upstream image is V2 (`opencode --version` ->
 not commit), no `bash`, no `node`/`npx`, no `uv`. `opencode.Dockerfile` adds
 exactly those plus `curl` for the healthcheck (image 225 MB -> 382 MB).
 
-### OmniRoute and Qoder (withdrawn gateway layer)
+### OmniRoute and Qoder (empty gateway home)
 
-D-2641 withdrew the gateway-side Qoder PAT login and removed the container-side
-`qodercli` binary, `CLI_QODER_BIN=/usr/local/bin/qodercli`, and the writable
-`qoder-home` mount. Qoder is now supported exclusively via the host's `qodercli`
-ACP client (`clients.qoder`, `gateway_mode: none`). The OmniRoute gateway
-container no longer carries a `qodercli` layer, does not mount a writable
-home directory, and runs with the standard read-only root filesystem and
-the image default `HOME` of its `node` user.
+See [OmniRoute and Qoder (empty gateway home)](omniroute-gateway-home.md).
 
 ### OmniRoute with ZCode (GLM)
 

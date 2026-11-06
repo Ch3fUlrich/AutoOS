@@ -85,6 +85,8 @@ services:
       # OmniRoute's own state: storage.sqlite, and .env with the
       # STORAGE_ENCRYPTION_KEY the provider credentials are encrypted with.
       - ${AUTOOS_STACK_DATA:?run ai-stack.sh init}/omniroute:/app/data
+      # Writable, persistent HOME for tools the gateway spawns; rootfs is read-only.
+      - ${AUTOOS_STACK_DATA:?run ai-stack.sh init}/omniroute-home:/home/node
     ports:
       - "${AUTOOS_STACK_BIND:-0.0.0.0}:20128:20128"
     mem_limit: ${OMNIROUTE_MEM_LIMIT:-2560m}

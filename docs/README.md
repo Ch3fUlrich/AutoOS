@@ -31,6 +31,7 @@ Start here. Each page is short and answers one question.
 | [Task board](tasks.md) | Which tracks are Running / Queued / Done right now? |
 | [OpenHands Agent Canvas](openhands.md) | How do I install, configure and start the OpenHands web UI? |
 | [Web services](web-services.md) | Which web UIs and APIs run on the coding host, how is each one guarded, and what does the proxy need? |
+| [OmniRoute gateway home](omniroute-gateway-home.md) | How does the empty gateway home persist, and what do migration and rollback do with it? |
 | [OpenHands runbook](openhands-runbook.md) | How do I continue this work from inside OpenHands? |
 | [Handoff](handoff.md) | Done vs open tasks for the next agent |
 | [Fleet status hook](fleet-status-hook.md) | Child DONE/BLOCKED lines reach the parent session via a Stop hook and inbox |

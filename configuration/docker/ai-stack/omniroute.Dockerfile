@@ -6,9 +6,9 @@
 # with ERR_MODULE_NOT_FOUND. The version is the one /app/package-lock.json pins -
 # bump it with the FROM digest.
 #
-# D-2641 removed the earlier global `qodercli` layer and the writable HOME it
-# needed (compose.yml): the gateway-side Qoder PAT login is withdrawn, Qoder
-# runs through the host's qodercli ACP client only. Nothing else is added to
+# D-2641 removed the earlier global `qodercli` layer; it stays withdrawn here.
+# D-4214 restores an empty writable HOME in compose.yml for spawned tools;
+# seat routing is unchanged (D-4250). Nothing else is added to
 # the upstream image. No vendor binary is kept in git: npm fetches at build
 # time (AGENTS.md rule 2), and npm 12 in the base blocks install scripts by
 # default, so nothing from a package runs at build either.
