@@ -2,15 +2,12 @@
 <#
 .SYNOPSIS
     AutoOS Windows test suite.
-
 .DESCRIPTION
     Zero dependencies on purpose: the whole point of this repo is to run on a
     machine where nothing is installed yet, so the tests must not need Pester.
-
     No test installs anything. Providers are asserted on the PLANNED command,
     never on system state, and PATH tests run against a scratch copy rather
     than the real environment.
-
 .EXAMPLE
     pwsh tests\run-tests.ps1
 .EXAMPLE
@@ -21,13 +18,10 @@
 #>
 [CmdletBinding()]
 param([string]$Filter = '')
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-
 $Root = Split-Path -Parent $PSScriptRoot
 $Lib  = Join-Path $Root 'lib\windows'
-
 Import-Module (Join-Path $Lib 'AutoOS.Ui.psm1')      -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Detect.psm1')  -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Catalog.psm1') -Force -DisableNameChecking
@@ -36,16 +30,13 @@ Import-Module (Join-Path $Lib 'AutoOS.Download.psm1') -Force -DisableNameCheckin
 Import-Module (Join-Path $Lib 'AutoOS.Serve.psm1')   -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.State.psm1')   -Force -DisableNameChecking
 Import-Module (Join-Path $Lib 'AutoOS.Usb.psm1')     -Force -DisableNameChecking
-
 $script:Pass = 0
 $script:Fail = 0
 $script:Skip = 0
 $script:Current = ''
 $script:Failures = @()
-
 $useColor = -not [Console]::IsOutputRedirected
 function C { param($t, $code) if ($useColor) { "$([char]27)[${code}m$t$([char]27)[0m" } else { $t } }
-
 function Describe-Group { param([string]$Name) Write-Host ''; Write-Host (C "-- $Name" '2;38;5;245') }
 
 function Test-Case {
@@ -5604,6 +5595,15 @@ Test-Case 'oc_l1 launcher: config and render (unit tests)' {
     try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l1.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
     finally { $ErrorActionPreference = $prev }
     Assert-Equal $rc 0 "test_oc_l1 unit tests failed: $out"
+}
+
+Test-Case 'context_guard hook and ready-v2 contracts (unit tests)' {
+    $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $py) { Skip 'no python on PATH'; return }
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = ''; $rc = 0; foreach ($t in 'tests\test_context_guard.py','tests\test_context_guard_ready_v2.py') { $out += & $py.Source (Join-Path $Root $t) 2>&1 | Out-String; if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE; break } } }
+    finally { $ErrorActionPreference = $prev }
+    Assert-Equal $rc 0 "context_guard unit tests failed: $out"
 }
 
 Test-Case 'oc_l1 launcher: start (unit tests)' {
