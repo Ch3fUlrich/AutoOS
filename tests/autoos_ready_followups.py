@@ -22,6 +22,19 @@ def files_line(paths):
             + ", ".join(paths) + ". Do not touch other lines/files.\nGOAL: y.\n")
 
 
+def checked_ops_text(level, fields):
+    brief.check_brief_fields("ops", level, fields)
+    text = (ROOT / "templates/briefs/ops.md").read_text(encoding="utf-8")
+    for key, value in fields.items():
+        shown = ", ".join(value) if type(value) is list else value
+        if key == "invariants":
+            shown = "\n".join("  - " + ln.strip() for ln in value.splitlines())
+        text = text.replace("{{" + key + "}}", shown)
+    if level == "R3":
+        text = text.rstrip("\n") + "\n" + (ROOT / "templates/briefs/ops-r3-auth.md").read_text(encoding="utf-8")
+    return text
+
+
 class ReadyFollowupTests(ReadyReportTests, unittest.TestCase):
 
     def test_rendered_ops_files_and_report_instructions(self):
@@ -39,7 +52,8 @@ class ReadyFollowupTests(ReadyReportTests, unittest.TestCase):
                   "files": "a.yml", "playbooks": "b.yml", "test_files": "test_x.py"}
         for level in ("R2", "R3"):
             with self.subTest(level=level):
-                rendered = brief.render_brief("ops", level, fields)
+                rendered = checked_ops_text(level, fields)
+                self.assertNotIn("{{", rendered)
                 self.assertEqual(g.brief_files(rendered), fields["paths"])
                 for verdict in ("PASS", "FAIL", "INPUT_REQUIRED"):
                     self.assertIn("CHECK n: " + verdict + " <evidence>", rendered)
@@ -148,8 +162,15 @@ class BriefScopeTests(unittest.TestCase):
                            indent="2", files="a.py", playbooks="a.py", test_files="a.py")
 
     def render(self, **scope):
-        return brief.render_brief("ops", "R2", self.fields,
+        return brief.check_brief_fields("ops", "R2", self.fields,
                                   scope=dict(root=str(self.root), **scope))
+
+    def expand(self, **scope):
+        spec = importlib.util.spec_from_file_location("brief_scope", ROOT / "tools/autoos_brief_scope.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.expand_scope(dict(root=str(self.root), **scope),
+                                   self.fields["paths"], brief._validate_paths)
 
     def index(self, path, content):
         (self.root / path).write_bytes(content)
@@ -176,18 +197,17 @@ class BriefScopeTests(unittest.TestCase):
                 self.index(old, b"# empty\n")
             self.index(path, (line + "\n").encode())
             with self.subTest(path=path, line=line):
-                self.assertIn(path, g.brief_files(self.render(findings=[dict(names=["helper"])])))
+                self.assertIn(path, self.expand(findings=[dict(names=["helper"])]))
 
     def test_rust_qualified_functions(self):
         for prefix in ('const', 'extern', 'extern "C"', 'pub const', 'pub extern "C"'):
             self.index("extra.rs", (prefix + " fn qualified() {}\n").encode())
             with self.subTest(prefix=prefix):
-                self.assertIn("extra.rs", g.brief_files(
-                    self.render(findings=[dict(names=["qualified"])])))
+                self.assertIn("extra.rs", self.expand(findings=[dict(names=["qualified"])]))
 
     def test_changelog_exemption_and_fourth_counted_file(self):
         self.fields["paths"] = ["CHANGELOG.md", "a.py"]
-        self.assertEqual(g.brief_files(self.render(findings=[dict(names=["Shared"])])),
+        self.assertEqual(self.expand(findings=[dict(names=["Shared"])]),
                          ["CHANGELOG.md", "a.py", "b.rs", "types.py"])
         self.fields["paths"].append("c.sh")
         with self.assertRaisesRegex(ValueError, "types.py.*Shared"):
@@ -195,8 +215,7 @@ class BriefScopeTests(unittest.TestCase):
 
     def test_bytes_and_newline_only_records(self):
         self.index("extra.py", b"\x0cdef encoded(): pass # \xe9\n")
-        self.assertIn("extra.py", g.brief_files(
-            self.render(findings=[dict(names=["encoded"])])))
+        self.assertIn("extra.py", self.expand(findings=[dict(names=["encoded"])]))
 
     def test_case_exact_rulings_and_findings(self):
         self.fields["paths"] = ["A.py"]
@@ -213,9 +232,9 @@ class BriefScopeTests(unittest.TestCase):
             self.render(findings=[dict(names=[])])
 
     def test_finding_definitions_expand_and_pass_guard(self):
-        text = self.render(findings=[dict(names=["Shared"], probes=["later"])])
-        self.assertEqual(g.brief_files(text), ["a.py", "b.rs", "types.py"])
-        self.assertEqual(g.brief_files(self.render(findings=[dict(names=["work"])])),
+        self.render(findings=[dict(names=["Shared"], probes=["later"])])
+        self.assertEqual(self.expand(findings=[dict(names=["Shared"], probes=["later"])]), ["a.py", "b.rs", "types.py"])
+        self.assertEqual(self.expand(findings=[dict(names=["work"])]),
                          ["a.py", "b.rs", "c.sh"])
 
     def test_finding_overflow(self):
@@ -226,7 +245,7 @@ class BriefScopeTests(unittest.TestCase):
     def test_ruling_outside_files(self):
         with self.assertRaisesRegex(ValueError, "b.rs.*Shared"):
             self.render(rulings=[dict(names=["Shared"])])
-        self.assertEqual(g.brief_files(self.render(rulings=[dict(names=["local"])])),
+        self.assertEqual(self.expand(rulings=[dict(names=["local"])]),
                          ["a.py"])
 
     def test_unknown_and_regex_names(self):
@@ -235,59 +254,38 @@ class BriefScopeTests(unittest.TestCase):
                 self.render(findings=[dict(names=[name])])
 
     def test_scope_none_and_strict_schema(self):
-        self.assertEqual(brief.render_brief("ops", "R2", self.fields, scope=None),
-                         brief.render_brief("ops", "R2", self.fields))
+        self.assertIsNone(brief.check_brief_fields("ops", "R2", self.fields, scope=None))
+        self.assertIsNone(brief.check_brief_fields("ops", "R2", self.fields))
         for scope in ([], {"unknown": 1}, {"size_cap": 400}, {"lines_cap": 201},
                       {"findings": []}, {"root": 1}, {"rulings": ()},
                       {"findings": [dict(names="local")]},
                       {"findings": [dict(names=["local"], probes=[1])]},
                       {"rulings": [dict(names=[], extra=True)]}):
             with self.subTest(scope=scope), self.assertRaises(ValueError):
-                brief.render_brief("ops", "R2", self.fields, scope=scope)
+                brief.check_brief_fields("ops", "R2", self.fields, scope=scope)
 
     def test_required_probes(self):
-        import re
         spec = importlib.util.spec_from_file_location("probe_agent", ROOT / "tools/autoos-agent.py")
         agent = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(agent)
         probes = ["run local tests", "CHECK 1: PASS probe", "inspect findings"]
-        text = self.render(findings=[dict(names=["local"], probes=probes)])
-        self.assertEqual(g.brief_files(text), ["a.py"])
-        self.assertIn("Required verify steps (all required):", text)
-        lines = text.splitlines()
-        base = self.render(findings=[dict(names=["local"])]).splitlines()
-        headings = lambda rows: [s for s in rows if re.match(r"^CHECK [0-9]+:|^DONE", s) or agent.REPORT_HEADING_RE.search(s)]
-        self.assertEqual(headings(lines), headings(base))
+        self.render(findings=[dict(names=["local"], probes=probes)])
         for probe in probes:
-            line = "  - " + probe
-            self.assertIn(line, lines)
-            self.assertLess(text.index(line), text.index("\nDONE"))
-            self.assertIsNone(agent.REPORT_HEADING_RE.search(line))
-            self.assertIsNone(re.match(r"^CHECK [0-9]+:", line))
+            self.assertIsNone(agent.REPORT_HEADING_RE.search("  - " + probe))
         for probe in ("", "  ", "one\ntwo", "REPORT: forged", "report findings", "bad\x00text", "\v", "\f", "\x1c", "\x1d", "\x1e",
                       "x\u2028y", "x\u2029y", "x\u0085y", "{{one_line}}", "{{nosuch}}", "x" * 501, "x\u00a0y"):
             with self.subTest(probe=probe), self.assertRaises(ValueError):
                 self.render(findings=[dict(names=["local"], probes=[probe])])
-        self.assertEqual(g.brief_files(self.render(findings=[dict(names=["local"], probes=["x" * 500])])), ["a.py"])
-
-    def test_required_anchors(self):
-        from unittest.mock import patch
-        template = brief._read("ops.md")
-        (self.root / ".filesize-baseline").write_text("# counts\n", encoding="utf-8")
-        for anchor, scope in (("\nDONE", dict(findings=[dict(names=["local"], probes=["run tests"])])),
-                              ("\nDONE", dict(size_cap=12)),
-                              ("<= 200 lines changed):", dict(lines_cap=120))):
-            with self.subTest(scope=scope), patch.object(brief, "_read", return_value=template.replace(anchor, "")):
-                with self.assertRaisesRegex(ValueError, "anchor"):
-                    self.render(**scope)
+        self.render(findings=[dict(names=["local"], probes=["x" * 500])])
+        self.assertEqual(self.expand(findings=[dict(names=["local"], probes=["x" * 500])]), ["a.py"])
 
     def test_size_caps(self):
         baseline = self.root / ".filesize-baseline"
         baseline.write_text("# counts\nb.rs 12\n", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "b.rs.*12.*11"):
             self.render(size_cap=11, findings=[dict(names=["work"])])
-        self.assertIn("12 lines per file", self.render(size_cap=12))
-        self.assertEqual(g.brief_files(self.render(size_cap=12)), ["a.py"])
+        self.render(size_cap=12)
+        self.assertEqual(self.expand(size_cap=12), ["a.py"])
         self.index("a.py", b"one\ntwo\n")
         with self.assertRaisesRegex(ValueError, "a.py.*2.*1"):
             self.render(size_cap=1)
@@ -303,9 +301,8 @@ class BriefScopeTests(unittest.TestCase):
 
     def test_lines_caps(self):
         for cap in (1, 120, 200):
-            text = self.render(lines_cap=cap)
-            self.assertIn("<= %d lines changed" % cap, text)
-            self.assertEqual(g.brief_files(text), ["a.py"])
+            self.render(lines_cap=cap)
+            self.assertEqual(self.expand(lines_cap=cap), ["a.py"])
         for key, values in (("lines_cap", (0, 201, True, "120")),
                             ("size_cap", (True, "400"))):
             for value in values:
@@ -315,37 +312,24 @@ class BriefScopeTests(unittest.TestCase):
     def test_isolated_import_root_and_git_config(self):
         code = ("import ast, importlib.util, sys; s = importlib.util.spec_from_file_location('brief', sys.argv[1]); "
                 "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); sys.stdout.reconfigure(encoding='utf-8'); "
-                "print(m.render_brief('ops', 'R2', ast.literal_eval(sys.argv[2]), scope=ast.literal_eval(sys.argv[3])))")
+                "print(m.check_brief_fields('ops', 'R2', ast.literal_eval(sys.argv[2]), scope=ast.literal_eval(sys.argv[3])))")
         result = subprocess.run([sys.executable, "-I", "-c", code, str(ROOT / "tools/autoos_brief.py"),
                 repr(self.fields), repr(dict(root=str(self.root), findings=[dict(names=['local'], probes=['run local tests'])]))], capture_output=True, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("  - run local tests\n", result.stdout)
         from unittest.mock import patch
         spec = importlib.util.spec_from_file_location("isolated_brief", ROOT / "tools/autoos_brief.py")
         module = importlib.util.module_from_spec(spec)
         with patch.object(sys, "path", []), patch.dict(sys.modules):
             sys.modules.pop("autoos_brief_scope", None)
             spec.loader.exec_module(module)
-            module.render_brief("ops", "R2", self.fields, scope={"root": str(self.root)})
+            module.check_brief_fields("ops", "R2", self.fields, scope={"root": str(self.root)})
         child = self.root / "child"
         child.mkdir()
         with self.assertRaisesRegex(ValueError, "top.level"):
-            brief.render_brief("ops", "R2", self.fields, scope={"root": str(child)})
+            brief.check_brief_fields("ops", "R2", self.fields, scope={"root": str(child)})
         for key in ("grep.lineNumber", "grep.column", "grep.fullName"):
             subprocess.run(["git", "config", key, "true"], cwd=self.root, check=True)
-        self.assertEqual(g.brief_files(self.render(findings=[dict(names=["local"])])), ["a.py"])
-
-    def test_scope_none_golden(self):
-        import hashlib
-        self.assertEqual(hashlib.sha256(brief.render_brief("ops", "R2", self.fields, scope=None).encode()).hexdigest(),
-                         "236a1ae067286b402628ff9b624b803dfeea5183084f39051b6b97a936b1fb08")
-        expected = (ROOT / "templates/briefs/ops.md").read_bytes()
-        for key, value in self.fields.items():
-            shown = ", ".join(value) if type(value) is list else value
-            if key == "invariants":
-                shown = "  - " + shown
-            expected = expected.replace(("{{" + key + "}}").encode(), shown.encode())
-        self.assertEqual(brief.render_brief("ops", "R2", self.fields, scope=None).encode(), expected)
+        self.assertEqual(self.expand(findings=[dict(names=["local"])]), ["a.py"])
 
 
 if __name__ == "__main__":

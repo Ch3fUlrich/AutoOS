@@ -1,4 +1,4 @@
-"""Ops brief template store (AO-WRITER-GUARDS P2)."""
+"""Ops brief template store and field validation (AO-WRITER-GUARDS P2)."""
 from __future__ import annotations
 
 import posixpath
@@ -211,8 +211,8 @@ def _validate_single_path(field, value, allow_absolute=False):
     return s
 
 
-def render_brief(task_type, r_level, fields, scope=None):
-    """Render the ops brief; R3 appends the auth clause (single pass)."""
+def check_brief_fields(task_type, r_level, fields, scope=None):
+    """Validate ops brief fields and optional scope; return None."""
     if type(r_level) is not str or r_level not in _RANK:
         raise ValueError("unknown r_level %r" % (r_level,))
     if type(task_type) is not str:
@@ -325,35 +325,3 @@ def render_brief(task_type, r_level, fields, scope=None):
             _reject_keyword_lines("probe", probe)
             if re.match(r"(?i)^\s*(?:[#>*-]+\s*)?(?:\*\*)?REPORT(?:\*\*)?(?![\w.])", probe):
                 raise ValueError("probe must not form a report heading")
-        if probes:
-            if "\nDONE" not in text:
-                raise ValueError("probe anchor '\\nDONE' missing")
-            section = "Required verify steps (all required):\n" + "".join("  - " + p + "\n" for p in probes)
-            text = text.replace("\nDONE", "\n" + section + "DONE", 1)
-        if "size_cap" in scope:
-            if "\nDONE" not in text:
-                raise ValueError("size_cap anchor '\\nDONE' missing")
-            text = text.replace("\nDONE", "\nAbsolute size cap: %d lines per file.\nDONE" % scope["size_cap"], 1)
-        if "lines_cap" in scope:
-            if "<= 200 lines changed):" not in text:
-                raise ValueError("lines_cap anchor '<= 200 lines changed):' missing")
-            text = text.replace("<= 200 lines changed):", "<= %d lines changed):" % scope["lines_cap"], 1)
-    # Plain substring replacement only, single pass so a value holding
-    # "{{x}}" is never re-expanded; no f-string eval, no format().
-    shown = {}
-    for k, v in fields.items():
-        if k in _PATH_FIELDS:
-            shown[k] = ", ".join(path_norm[k])
-        elif k in _SINGLE_PATH_FIELDS:
-            shown[k] = single_norm[k]
-        elif k == "invariants":
-            shown[k] = "\n".join("  - " + ln.strip() for ln in v.splitlines()) if ("\n" in v or "\r" in v) else "  - " + v.strip()
-            for ln in shown[k].splitlines():
-                if not ln.startswith("  - "):
-                    raise ValueError("invariants render missing bullet prefix")
-        else:
-            shown[k] = v
-    out = _PAT.sub(lambda m: shown[m.group(1)], text)
-    if r_level == "R3":
-        out = out.rstrip("\n") + "\n" + _read("ops-r3-auth.md")
-    return out
