@@ -1,5 +1,6 @@
 # Changelog
 
+- AO-OC-STOP-REVIEW-LOWS slice 7 (2026-11-06): report only pre-signal live PIDs on stop, pin already-gone cleanup and live reporting, and clarify per-lane watcher supervision.
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 3 lane 2 (2026-11-06, D-4001, D-4006): wires the scope regressions into the guards suite and adds shell tails, qualified Rust functions, CHANGELOG exemption and non-UTF-8 content; the temporary bridge test goes; gate unchanged.
 - AO-OC-STOP-REVIEW-LOWS slice 6 (2026-11-06): clarify watcher cleanup, supervision suspension and post-fix restart, plus platform-specific already-down stop identity requirements.
 - AO-SPAWNER-TESTS-HERMETIC lane B (2026-11-06, D-3995): gateway pre-check tests restore the environment after clearing the ambient URL override; explicit override coverage stays. Replaces part of #129.
