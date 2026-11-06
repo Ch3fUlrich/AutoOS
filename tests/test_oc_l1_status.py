@@ -30,6 +30,18 @@ from _oc_l1_fakes import (  # noqa: E402
 
 
 class CanarySessionErrorTest(unittest.TestCase):
+    def test_clean_session_without_text_or_tool_call_fails_canary(self):
+        replies = [(200, {"id": "ses_probe"}), (200, {}),
+                   (200, {"outcome": {"type": "succeeded"}}), (200, [])]
+        replies = [(status, {"data": data}) for status, data in replies]
+        with patch.object(oc_l1_canary, "_request", side_effect=replies):
+            result = oc_l1_canary.run_canary(47200, "fake-password", {
+                "name": "probe", "model": {"provider": "omniroute", "modelID": "fake"}})
+        self.assertFalse(result["denied"])
+        self.assertEqual(
+            result["detail"],
+            "no shell tool call in canary session; tools seen: none; assistant text: none")
+
     def test_session_error_is_diagnosed_without_echoing_provider_secrets(self):
         replies = [(200, {"id": "ses_probe"}), (200, {}),
                    (200, {"outcome": {"type": "error"},
