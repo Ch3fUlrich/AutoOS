@@ -1,5 +1,7 @@
 # Changelog
 
+- AO-SPAWNER-TESTS-HERMETIC review fixes (2026-11-06, D-3940): direct file-lookup tests clear the removal switch; the fake-file regression checks the seam even in subprocess mode. Both CLI environments pin host config to an impossible child of the test source file, bypassing XDG host lookup. Restored measured fallback rationale and session-tag pointer; production defaults unchanged.
+
 - AO-SPAWNER-TESTS-HERMETIC (2026-11-05, D-3940): keyless CLI fixtures disable checkout/main-checkout key-file sources with removal-only AUTOOS_NO_KEY_FILES=1 and pin gateway/host selection; production defaults unchanged. Explicit fake Zen roots retain file lookup. Fake-file fail-first regression is called from the existing spawner suite through a small helper to respect the size baseline; no assertions weakened.
 
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 1 (2026-11-05, D-3883, #123): ready accepts canonical smaller 1..200 line caps, reads CRLF trailer paragraphs like LF, and diagnoses missing required CHECK lines decorated as lists or bold without counting quoted or fenced output. Decoration diagnostics are verdict-neutral and never hide real FAIL or INPUT_REQUIRED checks. Split hermetic fail-first regressions pin these guards and CRLF writer attribution.

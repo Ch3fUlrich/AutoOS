@@ -192,7 +192,7 @@ def pinned_env(**extra):
     fixtures itself; this is the one place that says what they are (AO-ADMISSION-2).
     """
     env = dict(_host_env_pins())
-    env["AUTOOS_NO_KEY_FILES"] = "1"
+    env.update(AUTOOS_NO_KEY_FILES="1", AUTOOS_HOST_CONFIG=os.path.join(__file__, "missing-host.yml"))
     env["PATH"] = _CLIENT_BIN + os.pathsep + os.defpath
     env.update(extra)
     return env
@@ -220,10 +220,11 @@ def r_leg_is_claude(leg):
 
 
 def clean_env(**extra):
+    # why: see SessionTagTests.setUp
     dropped = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_SESSION_TAG")
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k not in dropped}
-    env.update(AUTOOS_NO_KEY_FILES="1", AUTOOS_HOST_NAME="test-only",
+    env.update(AUTOOS_NO_KEY_FILES="1", AUTOOS_HOST_NAME="test-only", AUTOOS_HOST_CONFIG=os.path.join(__file__, "missing-host.yml"),
                AUTOOS_OMNIROUTE_URL="https://gateway.example.invalid")
     if _CLIENT_BIN is not None:
         env["PATH"] = _CLIENT_BIN + os.pathsep + env.get("PATH", os.defpath)
@@ -4670,7 +4671,9 @@ class RawTailClassificationTests(unittest.TestCase):
 class KeyFileTests(unittest.TestCase):
     """A lane worktree has no git-ignored api-keys.yml (measured 2026-09-25: exit 3,
     and linking it in was refused); the spawner falls back to the main checkout."""
-
+    def setUp(self):
+        patch = mock.patch.dict(os.environ); patch.start(); self.addCleanup(patch.stop)
+        os.environ.pop("AUTOOS_NO_KEY_FILES", None)
     def test_a_worktree_reads_the_main_checkouts_key_file(self):
         agent = load_agent()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4687,13 +4690,11 @@ class KeyFileTests(unittest.TestCase):
                 os.environ.pop("AUTOOS_OMNIROUTE_KEY", None)
                 self.assertEqual(agent.client_key(wt), "sk-test-not-a-key")
                 self.assertEqual(agent.client_key(main), "sk-test-not-a-key")
-
     def test_no_key_file_anywhere_is_none(self):
         agent = load_agent()
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AUTOOS_OMNIROUTE_KEY", None)
             self.assertIsNone(agent.client_key(tmp))
-
 
 class CardV2Tests(unittest.TestCase):
     """Task card v2 (spec docs/plans/2026-09-25-routing-v2-spec.md §4).
@@ -8082,7 +8083,7 @@ class FreePreferredHeadTests(unittest.TestCase):
         self.assertIn("--model %s" % self.agent.DEFAULT_FREE_MODEL, r.stdout)
         self.assertEqual(self.agent.DEFAULT_FREE_MODEL,
                          "opencode/muse-spark-1.3-contributor-free",
-                          "DEFAULT_FREE_MODEL stays the keyless fallback (D-1923)")
+                         "DEFAULT_FREE_MODEL stays the keyless fallback (D-1923)")
 
     def test_keyless_plan_ignores_a_reachable_fake_key_file(self):
         from _spawner_hermetic import keyless_plan_ignores_fake_file
@@ -30204,23 +30205,22 @@ def zen_cli_root():
 
 class ZenKeyFileTests(unittest.TestCase):
     """(f) zen_key(): the `zen` field read by name, and what is not a key."""
-
+    def setUp(self):
+        patch = mock.patch.dict(os.environ); patch.start(); self.addCleanup(patch.stop)
+        os.environ.pop("AUTOOS_NO_KEY_FILES", None)
     @classmethod
     def setUpClass(cls):
         cls.agent = load_agent()
-
     def test_the_zen_field_is_read_by_name(self):
         root = zen_root("omniroute_server: not-the-zen-field\nzen: %s\n" % FAKE_ZEN)
         self.addCleanup(shutil.rmtree, root, True)
         self.assertEqual(FAKE_ZEN, self.agent.zen_key(root))
-
     def test_a_placeholder_or_an_empty_field_reads_as_no_key(self):
         for text in ("zen: REPLACE_WITH_ZEN_KEY\n", "zen:\n", None):
             with self.subTest(text=text):
                 root = zen_root(text)
                 self.addCleanup(shutil.rmtree, root, True)
                 self.assertIsNone(self.agent.zen_key(root))
-
     def test_reading_the_key_prints_nothing(self):
         root = zen_root("zen: %s\n" % FAKE_ZEN)
         self.addCleanup(shutil.rmtree, root, True)

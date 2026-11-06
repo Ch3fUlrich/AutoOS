@@ -1,5 +1,6 @@
 """Synthetic file-key regression, called by the spawner suite."""
 from pathlib import Path
+import os
 import tempfile
 from unittest import mock
 
@@ -12,6 +13,11 @@ def keyless_plan_ignores_fake_file(case, agent):
             "omniroute_server: test-only-fake\nomniroute: test-only-fake\n",
             encoding="utf-8")
         key_files = agent.key_files
+        with mock.patch.dict(os.environ, {"AUTOOS_NO_KEY_FILES": "1"}):
+            case.assertEqual(agent.key_files(tmp), [])
+        with mock.patch.dict(os.environ):
+            os.environ.pop("AUTOOS_NO_KEY_FILES", None)
+            case.assertEqual(agent.key_files(tmp), [str(config / "api-keys.yml")])
         with mock.patch.object(agent, "key_files", lambda root: key_files(tmp)):
             r = case._dry(key=False)
         case.assertEqual(r.returncode, 0, r.stdout + r.stderr)
