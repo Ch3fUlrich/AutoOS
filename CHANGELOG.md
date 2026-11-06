@@ -1,5 +1,11 @@
 # Changelog
 
+- LE-READY-S6 r3 (2026-11-05): close fixture subprocess stdin so no-argument hook tests cannot block on an inherited terminal; remove the duplicate-reported unused tempfile import; reject flag-shaped handoff paths and name missing --reason values. Three regression tests failed before their fixes. Pair validation, marker schema/hashes/atomic replacement and normal hook behavior are unchanged; legacy ready fixtures already use temporary pairs and fake checkers.
+
+- LE-READY-S6 r2 (2026-11-05): run ready-v2 contracts directly with stdlib unittest in Linux part 33 and the PowerShell mirror; legacy ReadyAndStatus fixtures are inline. Check the real card beside its handoff, resolve the checker with shutil.which, distinguish invalid reason/missing pair/missing command, guard deleted cwd, and remove the atomic marker if either file moves after replace. Red-first: 4 contract failures, 1 wiring failure and 2 legacy errors with site packages disabled; resolver and deleted-cwd regressions also fail against the original code. Removing pair comparisons makes the checker-mutation test fail (either comparison alone catches it). Green twice: 95 tests / 331 subtests; direct stdlib, wiring, both filtered harnesses, file-size gate and shell/PowerShell analysis pass. No live state or keeper writes.
+
+- LE-READY-S6 (2026-11-05): `context_guard ready <handoff> [--reason cap|router|operator|planned]` requires a readable handoff/card pair and passing `handoff-check` (PATH or `AUTOOS_HANDOFF_CHECK`, no `--log`). Validate a byte snapshot, reject concurrent edits, and atomically write a v2 marker with both hashes, explicit nulls for unobserved identity/usage/agents, and legacy fields retained. Normal hook and status paths are unchanged.
+
 - AO-OC-STOP-REVIEW-LOWS (2026-11-06, D-4069): fence lone-PID signals and the group-error fallback in the group-leader stop test.
 - AO-OC-STOP-REVIEW-LOWS slice 7 (2026-11-06): report only pre-signal live PIDs on stop, pin already-gone cleanup and live reporting, and clarify per-lane watcher supervision.
 - AO-READY-CHECK-FAIL-BLOCKS (2026-11-06, D-4020): ready refuses failed or input-required report checks on code lanes; missing checks remain optional and ops requirements stay unchanged.
