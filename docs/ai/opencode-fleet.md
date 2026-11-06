@@ -349,15 +349,15 @@ Unreadable/non-dict state, identity refusal, a surviving PID or failure to remov
 `oc_l2.py stop` exits 0 only when its result has `stopped=true`, otherwise 2 (including config errors). For an already-down lane, `stopped=true` also covers readable state with no positive PID recorded or a recorded PID proved gone after the platform's identity check; it need not mean a process was killed. On POSIX, a positive PID requires recorded argv and start time even if the PID is gone; legacy state missing either exits 2. Windows instead checks creation time against `started_utc` plus tolerance when available, retaining the legacy kill path when timing data is unavailable. Readable pidless state is removed by L1 stop (L2 leaves it); failure to remove required state is not stopped. No state means L1 reports `not running` (exit 0, nothing killed). For watched L1 lanes, a second successful stop is harmless only before the watcher restarts the lane.
 For watched L1 lanes, the watcher starts the lane within about 2 minutes after a successful stop; verify with `status`. L2 lanes still require `l2_start` again.
 
-A manual live check (real binary, real gateway, the host password env — the value never leaves the environment):
-
+A manual live check (real binary and gateway; provision the owner-only file from the host secret store first):
 ```bash
-AUTOOS_OCL1_PW='<from the host secret store>' AUTOOS_OPENCODE_BIN="$(command -v opencode)" \
+export AUTOOS_OCL1_PW_FILE="$XDG_RUNTIME_DIR/autoos-lane-password"
+AUTOOS_OPENCODE_BIN="$(command -v opencode)" \
 AUTOOS_L1_INBOX="$AUTOOS_RUN_DIR/inbox/l1.md" \
 python3 tools/oc_l2.py start --repo /path/to/project --phase p1 --brief /path/to/brief.md
 python3 tools/oc_l2.py status --lane l2-project-p1 && python3 tools/oc_l2.py stop --lane l2-project-p1
 ```
-
+Owner-only file required (`0600` on POSIX; Windows ACL allows only its owner); file wins, stripping one trailing newline. Missing, unreadable or loose files exit 2 without fallback. Unset `AUTOOS_OCL1_PW_FILE` for env-only authentication; values never enter argv or diagnostics.
 `start` answering `canary.denied=true` with `exit_code: 0` is the proof the lane may run unattended; `exit_code: 5` means the
 guard did not deny, the brief was never posted, and the lane must be stopped and fixed, not supervised anyway.
 

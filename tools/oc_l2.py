@@ -523,7 +523,7 @@ def probe_session(lane):
     sid, port = state.get("session_id"), state.get("port")
     if not isinstance(sid, str) or not sid or not port:
         return PROBE_GONE, None, "no-session-id"
-    password = os.environ.get(lane.get("password_env") or ENV_PW)
+    password = oc_l1.read_lane_password(lane.get("password_env") or ENV_PW)
     if not password:
         return PROBE_UNKNOWN, None, "password-env-unset: %s" \
             % (lane.get("password_env") or ENV_PW)
@@ -633,7 +633,7 @@ def note_activity(lane):
         if not isinstance(sid, str) or not sid or not port:
             return None
         items = _session_messages(
-            port, sid, os.environ.get(lane.get("password_env") or ENV_PW))
+            port, sid, oc_l1.read_lane_password(lane.get("password_env") or ENV_PW))
         if items is None:
             return None
         count, newest = _turn_activity(items)
@@ -855,7 +855,7 @@ def stalled(name):
     base = {"lane": name, "session_id": state.get("session_id"),
             "port": state.get("port")}
     items = _session_messages(state["port"], state["session_id"],
-                              os.environ.get(lane.get("password_env") or ENV_PW))
+                              oc_l1.read_lane_password(lane.get("password_env") or ENV_PW))
     if items is None:
         items = []
     _, newest = _turn_activity(items)
@@ -1091,7 +1091,7 @@ def cmd_resume(name):
         status, _ = _request(
             state["port"], "POST", "/api/session/%s/prompt" % state["session_id"],
             body={"text": _wake_text(info)},
-            password=os.environ.get(lane.get("password_env") or ENV_PW))
+            password=oc_l1.read_lane_password(lane.get("password_env") or ENV_PW))
     except ServerDown as e:
         # The connection itself failed mid-wake: that is `gone`, not `unknown`.
         return _restart_lane(name, lane,
@@ -1206,7 +1206,7 @@ def cmd_inbox(name, text):
     if info and out["stalled"]:
         out["stalled_reason"] = info.get("reason")
     _poll_activity(lane, out)
-    password = os.environ.get(lane.get("password_env") or ENV_PW)
+    password = oc_l1.read_lane_password(lane.get("password_env") or ENV_PW)
     try:
         status, _ = _request(state["port"], "POST",
                              "/api/session/%s/prompt" % state["session_id"],
@@ -1265,7 +1265,7 @@ def cmd_start(repo, phase, brief, combo=DEFAULT_COMBO, l1_inbox=None,
     if not brief_p.is_file():
         raise L2Error("brief not found: %s (the first prompt is its contents, so "
                       "it must exist before the lane starts)" % brief)
-    if not os.environ.get(password_env):
+    if not oc_l1.read_lane_password(password_env):
         raise L2Error("start refused: environment variable %s is not set - the "
                       "lane server password travels in it, by name only, and is "
                       "never invented here" % password_env)
@@ -1365,7 +1365,7 @@ def cmd_status(name):
         if live_state is not None:
             msgs = _session_messages(
                 live_state["port"], live_state["session_id"],
-                os.environ.get(lane.get("password_env") or ENV_PW))
+                oc_l1.read_lane_password(lane.get("password_env") or ENV_PW))
             _, newest = _turn_activity(msgs or [])
             if newest is not None and (time.time() - newest) <= _SILENT_WINDOW_S:
                 verdict, rc = "live", 0
