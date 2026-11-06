@@ -218,6 +218,11 @@ class GatewayUpPreCheckTests(unittest.TestCase):
 
     def setUp(self):
         self._gateway = agent.GATEWAY
+        # Assert this machine's candidates, not an ambient operator override.
+        environment = mock.patch.dict(os.environ)
+        environment.start()
+        self.addCleanup(environment.stop)
+        os.environ.pop("AUTOOS_OMNIROUTE_URL", None)
         # The pre-check walks the candidate list, so state the machine: here a
         # container, unless a test says host.
         container = mock.patch.object(agent, "in_container", return_value=True)
