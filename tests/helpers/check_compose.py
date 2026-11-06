@@ -135,8 +135,8 @@ def main(path):
     if not re.search(r'REQUIRE_API_KEY: "true"', om):
         bad.append("omniroute: REQUIRE_API_KEY must be pinned to true")
     # D-2641: the gateway-side Qoder PAT login is withdrawn, so with it the
-    # qodercli layer, the CLI_QODER_BIN it was named by, and the writable HOME
-    # (qodercli crashed at start without one, and the rootfs is read-only).
+    # qodercli layer and the CLI_QODER_BIN it was named by. The old qoder-home
+    # mount stays withdrawn; omniroute-home is the new empty home (D-4214).
     # The derived image itself stays: bcryptjs and the build-time vertex patch.
     if not re.search(r"^    build:\n      context: \.\n      dockerfile: omniroute\.Dockerfile$", om, re.M):
         bad.append("omniroute: must build omniroute.Dockerfile (the bcryptjs and vertex-patch layers)")
@@ -152,6 +152,8 @@ def main(path):
         bad.append("omniroute: the qoder-home mount is withdrawn (D-2641)")
     if not re.search(r"^      - \$\{AUTOOS_STACK_DATA:\?[^}]*\}/omniroute:/app/data$", om, re.M):
         bad.append("omniroute: the gateway data dir must stay mounted at /app/data")
+    if not re.search(r"^      - \$\{AUTOOS_STACK_DATA:\?run ai-stack.sh init\}/omniroute-home:/home/node$", om, re.M):
+        bad.append("omniroute: missing ${AUTOOS_STACK_DATA:?run ai-stack.sh init}/omniroute-home:/home/node mount")
     # The public URL (stack.env, never this file): passed through, empty when
     # unset - the gateway treats an empty value as absent. While it is set the
     # gateway's calls to itself stay on loopback (BASE_URL), or NEXT_PUBLIC_BASE_URL
