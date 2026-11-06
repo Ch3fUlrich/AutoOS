@@ -176,18 +176,18 @@ def _kill_posix(pid, out):
     # Anywhere else the process belongs to whoever started it - possibly
     # this very caller - and only the recorded PID may be signalled.
     group_leader = pgid(pid) == pid
+    alive = not pid_gone(pid)
     if group_leader:
         try:
             os.killpg(pid, signal.SIGTERM)
-            out["killed_pids"].append(pid)
         except (ProcessLookupError, PermissionError, OSError):
             oc_l1_serve._kill_pid(pid)
-            out["killed_pids"].append(pid)
     else:
         try:
             os.kill(pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+    if alive:
         out["killed_pids"].append(pid)
     if group_leader:
         # AO-L2-LAUNCH criterion b: the group is the whole tree, and a
@@ -257,8 +257,10 @@ def stop_lane(name, lane, state, port, remove_pidless_state=False):
             out.update(stopped=False, orphan=True, detail=why)
             return out
         # taskkill /F /T walks the tree itself (oc_l1's own kill path).
+        alive = not pid_gone(pid)
         oc_l1_serve._kill_pid(pid)
-        out["killed_pids"].append(pid)
+        if alive:
+            out["killed_pids"].append(pid)
     else:
         ok, why = identity_ok(pid, state)
         if not ok:

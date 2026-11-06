@@ -6,6 +6,8 @@
 
 - LE-READY-S6 (2026-11-05): `context_guard ready <handoff> [--reason cap|router|operator|planned]` requires a readable handoff/card pair and passing `handoff-check` (PATH or `AUTOOS_HANDOFF_CHECK`, no `--log`). Validate a byte snapshot, reject concurrent edits, and atomically write a v2 marker with both hashes, explicit nulls for unobserved identity/usage/agents, and legacy fields retained. Normal hook and status paths are unchanged.
 
+- AO-OC-STOP-REVIEW-LOWS slice 7 (2026-11-06): report only pre-signal live PIDs on stop, pin already-gone cleanup and live reporting, and clarify per-lane watcher supervision.
+- AO-READY-CHECK-FAIL-BLOCKS (2026-11-06, D-4020): ready refuses failed or input-required report checks on code lanes; missing checks remain optional and ops requirements stay unchanged.
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 3 lane 2 (2026-11-06, D-4001, D-4006): wires the scope regressions into the guards suite and adds shell tails, qualified Rust functions, CHANGELOG exemption and non-UTF-8 content; the temporary bridge test goes; gate unchanged.
 - AO-OC-STOP-REVIEW-LOWS slice 6 (2026-11-06): clarify watcher cleanup, supervision suspension and post-fix restart, plus platform-specific already-down stop identity requirements.
 - AO-SPAWNER-TESTS-HERMETIC lane B (2026-11-06, D-3995): gateway pre-check tests restore the environment after clearing the ambient URL override; explicit override coverage stays. Replaces part of #129.

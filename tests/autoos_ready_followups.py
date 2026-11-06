@@ -73,6 +73,34 @@ class ReadyFollowupTests(unittest.TestCase):
                 self.assertFalse(probe["ok"])
                 self.assertEqual(probe["missing"], [1])
 
+    def test_code_lane_report_verdicts(self):
+        from test_autoos_spawner import ReadyWriterGuardsTests
+        passing = "".join("CHECK %d: PASS evidence\n" % n for n in range(1, 7))
+        cases = [(passing.replace("CHECK 6: PASS", "CHECK 6: FAIL"), 1,
+                  "failed CHECK 6"),
+                 (passing.replace("CHECK 2: PASS", "CHECK 2: INPUT_REQUIRED"), 1,
+                  "input_required CHECK 2"),
+                 (passing, 0, "ready: appended"),
+                 ("CHECK 1: PASS evidence\nCHECK 2: PASS evidence\n", 0,
+                  "ready: appended"),
+                 (None, 0, "ready: appended"),
+                 ("```text\nCHECK 6: FAIL evidence\n```\n"
+                  "> CHECK 2: FAIL evidence\n", 0, "ready: appended")]
+        for report, expected, message in cases:
+            with self.subTest(report=report):
+                driver = ReadyWriterGuardsTests()
+                driver.setUp()
+                try:
+                    rc, out, err, inbox, calls = driver.ready(
+                        diff_paths=["tools/example.py"], report=report)
+                    self.assertEqual(rc, expected, out + err)
+                    self.assertIn(message, out + err)
+                    self.assertEqual(bool(inbox), expected == 0)
+                    self.assertNotIn(" ops=1", inbox)
+                    self.assertEqual(len(calls), 1)
+                finally:
+                    driver.doCleanups()
+
     def test_template_shaped_report_preserves_gate_refusals(self):
         report = "".join("CHECK %d: PASS evidence\n```text\noutput tail\n```\n" % n
                          for n in range(1, 7))
