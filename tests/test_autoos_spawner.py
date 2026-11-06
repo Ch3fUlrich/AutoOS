@@ -13480,7 +13480,7 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
     That repo is a REAL git repo in a throwaway dir — the way `FleetLedgerPathTests`
     proves the ledger home — whose `refs/remotes/origin/main` is pinned with
     `update-ref`, and `AUTOOS_ROUTING_DIR` names it. The row is read with
-    `git show <origin/main commit>:docs/decisions-log.md`, so an uncommitted edit and
+    `git show <origin/main commit>:router/docs/decisions-log.md`, so an uncommitted edit and
     a row that lives only on another branch buy nothing. The id shape, the routing
     dir and the word-bounded id rule all come from the routing gate module itself.
     """
@@ -13510,12 +13510,11 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
                               check=True, stdin=subprocess.DEVNULL).stdout.strip()
 
     def routing_repo(self, text):
-        """A temp git repo whose origin/main holds `text` as docs/decisions-log.md."""
+        """A temp git repo whose origin/main holds `text` as router/docs/decisions-log.md."""
         d = tempfile.mkdtemp(prefix="capex-routing-")
         self.addCleanup(shutil.rmtree, d, True)
-        os.makedirs(os.path.join(d, "docs"))
-        with io.open(os.path.join(d, "docs", "decisions-log.md"), "w",
-                     encoding="utf-8") as fh:
+        os.makedirs(os.path.join(d, "router", "docs"))
+        with io.open(os.path.join(d, "router", "docs", "decisions-log.md"), "w", encoding="utf-8") as fh:
             fh.write(text)
         self.git(d, "init", "-q")
         self.git(d, "add", "-A")
@@ -13525,7 +13524,7 @@ class ReadyCapExceptionTests(ReadyWriterGuardsTests):
         return d
 
     def write_routing_log(self, d, text):
-        with io.open(os.path.join(d, "docs", "decisions-log.md"), "w",
+        with io.open(os.path.join(d, "router", "docs", "decisions-log.md"), "w",
                      encoding="utf-8") as fh:
             fh.write(text)
 
@@ -14097,6 +14096,7 @@ class JudgeRanSeatTests(unittest.TestCase):
         d = tempfile.mkdtemp(prefix="judge-routing-")
         self.addCleanup(shutil.rmtree, d, True)
         os.makedirs(os.path.join(d, "docs", "judge-runs"))
+        os.makedirs(os.path.join(d, "router", "docs"))
         self.write_routing_log(d, log_text)
         for name, text in records:
             with io.open(os.path.join(d, "docs", "judge-runs", "%s.md" % name), "w",
@@ -14110,8 +14110,7 @@ class JudgeRanSeatTests(unittest.TestCase):
         return d
 
     def write_routing_log(self, d, text):
-        with io.open(os.path.join(d, "docs", "decisions-log.md"), "w",
-                     encoding="utf-8") as fh:
+        with io.open(os.path.join(d, "router", "docs", "decisions-log.md"), "w", encoding="utf-8") as fh:
             fh.write(text)
 
     def write_judge_record(self, d, name, text):
@@ -14239,6 +14238,7 @@ class JudgeRanSeatTests(unittest.TestCase):
         d = tempfile.mkdtemp(prefix="judge-routing-")
         self.addCleanup(shutil.rmtree, d, True)
         os.makedirs(os.path.join(d, "docs", "judge-runs"))
+        os.makedirs(os.path.join(d, "router", "docs"))
         self.write_routing_log(d, self.TABLE + self.row(self.SHA))
         with open(os.path.join(d, "docs", "judge-runs", "run-1.md"), "wb") as fh:
             fh.write(b"sha: \xff\xfe\x00garbage")
@@ -14485,8 +14485,8 @@ class ReadyJudgeRanTests(ReadyWriterGuardsTests):
         d = tempfile.mkdtemp(prefix="judge-routing-")
         self.addCleanup(shutil.rmtree, d, True)
         os.makedirs(os.path.join(d, "docs", "judge-runs"))
-        with io.open(os.path.join(d, "docs", "decisions-log.md"), "w",
-                     encoding="utf-8") as fh:
+        os.makedirs(os.path.join(d, "router", "docs"))
+        with io.open(os.path.join(d, "router", "docs", "decisions-log.md"), "w", encoding="utf-8") as fh:
             fh.write(log_text)
         for name, text in records:
             with io.open(os.path.join(d, "docs", "judge-runs", "%s.md" % name), "w",
