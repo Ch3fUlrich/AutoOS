@@ -175,8 +175,8 @@ def _kill_posix(pid, out):
     # group is the tree: whatever `opencode serve` forks dies with it.
     # Anywhere else the process belongs to whoever started it - possibly
     # this very caller - and only the recorded PID may be signalled.
-    alive = not pid_gone(pid)
     group_leader = pgid(pid) == pid
+    alive = not pid_gone(pid)
     if group_leader:
         try:
             os.killpg(pid, signal.SIGTERM)
