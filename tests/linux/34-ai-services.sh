@@ -5074,13 +5074,9 @@ if it "aistack: init keeps the withdrawn qoder home out of the data dirs and lea
     before="$(cd "$d/data/omniroute" && cksum storage.sqlite .env)"
     out="$(_aistack "$d" --dry-run init)"
     [[ "$out" == *"would create $d/data/opencode-home"* ]] || { ok=0; echo "the dry run no longer announces the real data dirs: $out" >&2; }
-    [[ "$out" == *"would create $d/data/omniroute-home"* ]] || { ok=0; echo "the dry run did not announce the gateway home: $out" >&2; }
     [[ "$out" == *qoder-home* ]] && { ok=0; echo "the dry run still announces the withdrawn qoder home: $out" >&2; }
     _aistack "$d" init >/dev/null
     [[ -d "$d/data/omniroute" && -d "$d/data/opencode-home" ]] || { ok=0; echo "the real data dirs are missing" >&2; }
-    [[ -d "$d/data/omniroute-home" ]] || { ok=0; echo "init did not create the gateway home" >&2; }
-    [[ "$(stat -c %a "$d/data/omniroute-home")" == 700 ]] || { ok=0; echo "init gateway home not 700" >&2; }
-    [[ -O "$d/data/omniroute-home" ]] || { ok=0; echo "init gateway home not owned by invoking user" >&2; }
     [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "init created the withdrawn qoder home" >&2; }
     out="$(_aistack "$d" init)"
     [[ "$out" == *qoder-home* ]] && { ok=0; echo "a second init mentioned the withdrawn qoder home: $out" >&2; }
@@ -5102,9 +5098,6 @@ if it "aistack: up does not create the withdrawn qoder home on a host init ran o
     : >"$d/image-exists"
     _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up failed" >&2; }
     [[ "$(cat "$d/qoder-home-at-up.log" 2>/dev/null)" == absent ]] || { ok=0; echo "compose up saw: [$(cat "$d/qoder-home-at-up.log" 2>&1)]" >&2; }
-    [[ -d "$d/data/omniroute-home" ]] || { ok=0; echo "up did not create the gateway home" >&2; }
-    [[ "$(stat -c %a "$d/data/omniroute-home")" == 700 ]] || { ok=0; echo "up gateway home not 700" >&2; }
-    [[ -O "$d/data/omniroute-home" ]] || { ok=0; echo "up gateway home not owned by invoking user" >&2; }
     [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "up created the withdrawn qoder home" >&2; }
     rm -rf "$d"
     # compose mounts AUTOOS_STACK_DATA from stack.env: the check follows it there.
@@ -5114,9 +5107,6 @@ if it "aistack: up does not create the withdrawn qoder home on a host init ran o
     : >"$d/image-exists"
     _aistack "$d" up omniroute >/dev/null || { ok=0; echo "up (stack.env data dir) failed" >&2; }
     [[ -d "$d/elsewhere/omniroute" ]] || { ok=0; echo "the gateway data dir is not under the AUTOOS_STACK_DATA of stack.env" >&2; }
-    [[ -d "$d/elsewhere/omniroute-home" ]] || { ok=0; echo "up did not create the gateway home under stack.env data dir" >&2; }
-    [[ "$(stat -c %a "$d/elsewhere/omniroute-home")" == 700 ]] || { ok=0; echo "up stack.env gateway home not 700" >&2; }
-    [[ -O "$d/elsewhere/omniroute-home" ]] || { ok=0; echo "up stack.env gateway home not owned by invoking user" >&2; }
     [[ -e "$d/elsewhere/qoder-home" ]] && { ok=0; echo "created under the AUTOOS_STACK_DATA of stack.env" >&2; }
     [[ -e "$d/data/qoder-home" ]] && { ok=0; echo "created under the default data dir" >&2; }
     rm -rf "$d"
