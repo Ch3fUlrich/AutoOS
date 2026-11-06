@@ -91,7 +91,7 @@ def env_is_credential_name(name):
     Used to keep credentials out of a lane child's environment. Only the name is
     ever examined - a value is not read here, and never is.
     """
-    upper = name.upper()
+    upper = "" if name == "AUTOOS_OCL1_PW_FILE" else name.upper()
     if upper.endswith(LANE_ENV_CREDENTIAL_SUFFIXES):
         return True
     return any(word in upper for word in LANE_ENV_CREDENTIAL_WORDS)
@@ -105,7 +105,7 @@ def env_is_allowed(name, password_env=None, child_env=()):
         # the lane server's own password: the child gets it under
         # OPENCODE_SERVER_PASSWORD and nowhere else
         return False
-    if name in LANE_ENV_ALLOW:
+    if name == "AUTOOS_OCL1_PW_FILE" or name in LANE_ENV_ALLOW:
         return True
     if env_is_credential_name(name):
         return False
@@ -115,7 +115,6 @@ def env_is_allowed(name, password_env=None, child_env=()):
     # appear in both cases across platforms and none of them is a secret
     return name.upper().startswith(LANE_ENV_ALLOW_PREFIXES)
 
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -123,6 +122,7 @@ from oc_l1_render import (ENV_KEY, ENV_URL, RENDERED_FILENAME, LaneError, _strip
                           render)
 from oc_l1_env import (LANE_ENV_ALLOW, LANE_ENV_ALLOW_PREFIXES, LANE_ENV_CREDENTIAL_SUFFIXES,  # noqa: E402,F401
                        LANE_ENV_CREDENTIAL_WORDS, LANE_ENV_WINDOWS)
+from oc_l1_password import read_lane_password  # noqa: E402,F401
 import oc_l1_recycle  # noqa: E402
 import oc_l1_recycle_poll  # noqa: E402
 

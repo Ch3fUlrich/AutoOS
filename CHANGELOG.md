@@ -1,6 +1,8 @@
 # Changelog
 
 - GW-QODER-RESTORE slice 1 (2026-11-06, D-4214, D-4250): restore an empty, private persistent gateway HOME at omniroute-home mounted at /home/node; init and up create it before compose. No reuse of the withdrawn home, image build or seat-routing change.
+- AO-OCL1-PW-FILE (D-2270, D-4241): lane tools prefer an owner-only password file via AUTOOS_OCL1_PW_FILE, fail closed on file errors, and retain env-only fallback when unset.
+
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 4 (2026-11-06, D-3883, #123): require finding probes, refuse contradictory per-file size caps, render canonical smaller FILES caps, and harden isolated imports, repository roots and git grep configuration; gate unchanged.
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 4 prep (2026-11-06): move report followups into a wired mixin to leave room for brief-scope tests; gate unchanged.
 - D-4121 (2026-11-06): the Stop hook kicks the context watchdog after the turn that ran `ready`: `fleet_report.kick_after_ready` (called after `safe_name`, before `resolve_name`, in its own try/except) writes `<ctx-guard>/<sid>.turn-ended.json` at most once per ready marker ts and then best-effort `systemctl --user start --no-block ctx-watchdog.service`. The stamp goes first, so a missing or failing systemctl keeps the stamp and the watchdog's own timer is the fallback; sessions without a launch record still get the kick, a garbled/non-numeric marker or a symlinked guard dir is a silent no-op, and the status-line path is unchanged. Guard dir: `$AUTOOS_CTX_STATE`, else `($XDG_STATE_HOME` or `~/.local/state)/autoos/ctx-guard`. Tests: 9 new in `tests/test_fleet_hook.py` (24 total) with a fake `systemctl` on PATH and a tmp `AUTOOS_CTX_STATE`.

@@ -154,7 +154,7 @@ _LANES_CONFIG = os.path.expanduser("~/.config/autoos/oc-l1.json")
 # test_every_non_plumbing_child_call_passes_an_env enforces everywhere else): only
 # what the launcher and its canary need.
 _OC_L1_ENV_KEYS = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ",
-                   "AUTOOS_OCL1_PW", "SESSION_GATEWAY_URL", "XDG_STATE_HOME", "AUTOOS_CTX_HANDOFF",
+                   "AUTOOS_OCL1_PW", "AUTOOS_OCL1_PW_FILE", "SESSION_GATEWAY_URL", "XDG_STATE_HOME", "AUTOOS_CTX_HANDOFF",
                    "AUTOOS_DAILY_GATE_FILE", "AUTOOS_HOST_NAME", "AUTOOS_CTX_HARD",
                    # the gateway PAIR: the rendered lane config references both as
                    # {env:...}; forward only the URL and a lane has no key for its model
