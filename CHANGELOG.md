@@ -1,5 +1,6 @@
 # Changelog
 
+- AO-OC-STOP-REVIEW-LOWS (2026-11-06, D-4069): fence lone-PID signals and the group-error fallback in the group-leader stop test.
 - AO-OC-STOP-REVIEW-LOWS slice 7 (2026-11-06): report only pre-signal live PIDs on stop, pin already-gone cleanup and live reporting, and clarify per-lane watcher supervision.
 - AO-READY-CHECK-FAIL-BLOCKS (2026-11-06, D-4020): ready refuses failed or input-required report checks on code lanes; missing checks remain optional and ops requirements stay unchanged.
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 3 lane 2 (2026-11-06, D-4001, D-4006): wires the scope regressions into the guards suite and adds shell tails, qualified Rust functions, CHANGELOG exemption and non-UTF-8 content; the temporary bridge test goes; gate unchanged.
