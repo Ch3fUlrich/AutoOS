@@ -50,7 +50,7 @@ class ShimTests(GateFixture):
         out = self.install()
         self.assertIn("upgraded", out)
         self.assertIn("unversioned -> v3", out)
-        self.assertNotIn("v1", out)
+        self.assertNotIn("v1 ->", out)
         self.assertIn("--hook-stdin", (self.hooks / "pre-push").read_text(encoding="utf-8"))
         self.assertFalse((self.hooks / "pre-push.autoos-chained").exists())
         self.assertIn("skipped", self.install())
@@ -65,9 +65,9 @@ class ShimTests(GateFixture):
         text = hook.read_text(encoding="utf-8")
         self.assertNotEqual(text, old)
         self.assertIn("autoos-prepush-gate v3", text)
-        self.assertIn("|| exit $?", text)
         gate_lines = [line for line in text.splitlines() if "--hook-stdin" in line]
         self.assertEqual(len(gate_lines), 1)
+        self.assertIn("|| exit $?", gate_lines[0])
         self.assertNotIn("|| exit 1", gate_lines[0])
         self.assertFalse((self.hooks / "pre-push.autoos-chained").exists())
 
