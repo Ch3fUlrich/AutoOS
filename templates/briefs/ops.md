@@ -14,6 +14,6 @@ DONE = all of; CHECK n reports DONE item n (do not paste this numbered list into
   6 git diff --stat within FILES
 Missing tool = STOP (input_required); use the uppercase INPUT_REQUIRED verdict on the CHECK line, never skip a check.
 REPORT: {expected_output, checks[1-6] with output tail, confidence, open questions}
-Report each check on its own line at column 0, literally `CHECK n: PASS <evidence>`, `CHECK n: FAIL <evidence>` or `CHECK n: INPUT_REQUIRED <evidence>`, with no list marker, bold or indentation.
-The CHECK line itself must carry non-empty evidence; give each check one verdict; a second line with a different verdict fails. A CHECK line inside a fence or a `>` quote is never counted.
+Put each check on its own line at column 0, using `CHECK n: PASS <evidence>`, `CHECK n: FAIL <evidence>` or `CHECK n: INPUT_REQUIRED <evidence>`, with no list marker, bold or indentation; replace n with the check number and <evidence> with the real output.
+The CHECK line itself must carry non-empty evidence; give each check one verdict; a second line with a different verdict fails. A CHECK line inside a fenced block opened with at most 3 leading spaces, or a line that itself starts with `>`, is never counted.
 Put the output tail in a fenced block under that line; the fenced tail does not count as that evidence. A bare verdict counts as FAIL; do not append a corrected duplicate CHECK line.

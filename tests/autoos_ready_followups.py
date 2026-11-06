@@ -21,6 +21,12 @@ def files_line(paths):
 class ReadyFollowupTests(unittest.TestCase):
 
     def test_rendered_ops_files_and_report_instructions(self):
+        spec = importlib.util.spec_from_file_location(
+            "agent_for_ready_followups", ROOT / "tools" / "autoos-agent.py")
+        agent = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = agent
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(agent)
         fields = {"task_id": "AO-1", "one_line": "fix mail",
                   "paths": ["a.yml", "b.yml", "test_x.py"],
                   "goal": "once-only mail", "invariants": "idempotent",
@@ -45,6 +51,12 @@ class ReadyFollowupTests(unittest.TestCase):
                 self.assertEqual(echoed["missing"], list(range(1, 7)))
                 for line in rendered.splitlines():
                     self.assertFalse(line.strip().startswith(("```", "~~~")))
+                    if not line.startswith("REPORT:"):
+                        self.assertIsNone(agent.REPORT_HEADING_RE.search(line), line)
+                self.assertIn("replace n with the check number and <evidence> "
+                              "with the real output", rendered)
+                self.assertIn("fenced block opened with at most 3 leading spaces", rendered)
+                self.assertIn("a line that itself starts with `>`", rendered)
                 placeholder = "CHECK n: PASS <evidence>"
                 self.assertIn(placeholder, rendered)
                 start = rendered.index(placeholder)
