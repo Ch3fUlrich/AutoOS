@@ -36,7 +36,20 @@ class ReadyFollowupTests(unittest.TestCase):
                 self.assertIn("each check on its own line at column 0", rendered)
                 self.assertIn("no list marker, bold or indentation", rendered)
                 self.assertIn("output tail in a fenced block under that line", rendered)
-                self.assertIn("bare verdict with no evidence does not count", rendered)
+                self.assertIn("bare verdict counts as FAIL", rendered)
+                self.assertIn("CHECK n reports DONE item n", rendered)
+                self.assertIn("each check appears exactly once", rendered)
+                sample = "CHECK 1: PASS 12 passed in 0.5s\n```text\n12 passed in 0.5s\n```\n"
+                self.assertIn(sample, rendered)
+                start = rendered.index(sample)
+                extracted = rendered[start:start + len(sample)]
+                report = "".join(extracted.replace("CHECK 1:", "CHECK %d:" % n, 1)
+                                 for n in range(1, 7))
+                self.assertTrue(g.report_checks(report)["ok"])
+                fences = g._Fences()
+                for line in rendered.splitlines():
+                    fences.feed(line)
+                self.assertFalse(fences.feed("after sample"))
 
     def test_template_shaped_report_preserves_gate_refusals(self):
         report = "".join("CHECK %d: PASS evidence\n```text\noutput tail\n```\n" % n
