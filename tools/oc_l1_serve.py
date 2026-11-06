@@ -464,7 +464,7 @@ def cmd_start(lane, args):
     """start --name X: see the module docstring. Returns the exit code."""
     name = lane["name"]
     port = lane["serve_port"]
-    password = os.environ.get(lane["password_env"])
+    password = oc_l1.read_lane_password(lane["password_env"])
     if not password:
         print(
             "oc_l1: error: start refused: environment variable %s is not "
@@ -698,7 +698,7 @@ def cmd_status(lane, args):
         return 2
     sid = state["session_id"]
     port = state.get("port") or lane["serve_port"]
-    password = os.environ.get(lane["password_env"])
+    password = oc_l1.read_lane_password(lane["password_env"])
     if not password:
         print("oc_l1: error: %s is not set; cannot authenticate the status "
               "check" % lane["password_env"], file=sys.stderr)

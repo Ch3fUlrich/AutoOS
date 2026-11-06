@@ -1201,7 +1201,7 @@ if it "oc_l1 launcher: config and render (unit tests)"; then
 fi
 
 if it "oc_l1 launcher: start (unit tests)"; then
-    out="$(python3 tests/test_oc_l1_serve.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    out="$(python3 tests/test_oc_l1_serve.py 2>&1 && python3 tests/test_oc_l1_password_file.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 if it "oc_l1 launcher: status + token-usage recycle + stop + env names (unit tests)"; then

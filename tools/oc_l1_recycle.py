@@ -217,6 +217,7 @@ def _repost(lane, port, password, sid, state, http, serve):
 def cmd_recycle(lane, args):
     """recycle --name X: see the module docstring. Returns the exit code."""
     import oc_l1_http as http  # lazy: oc_l1_http imports oc_l1, which imports this module
+    import oc_l1
     import oc_l1_serve as serve
 
     thr = thresholds(lane)
@@ -229,7 +230,7 @@ def cmd_recycle(lane, args):
     warn = ("ctx_hard %d >= the model window %d: opencode compacts first, so this limit is "
             "never reached; set ctx_handoff/ctx_hard below the window" % (hard_at, window)
             if hard_at >= window else "")
-    password = os.environ.get(lane["password_env"])
+    password = oc_l1.read_lane_password(lane["password_env"])
     if not password:
         return _out(EXIT_CONFIG, lane, "error", [warn], detail=(
             "environment variable %s is not set; cannot authenticate" % lane["password_env"]))
