@@ -28,7 +28,7 @@ def checked_ops_text(level, fields):
     for key, value in fields.items():
         shown = ", ".join(value) if type(value) is list else value
         if key == "invariants":
-            shown = "  - " + shown
+            shown = "\n".join("  - " + ln.strip() for ln in value.splitlines())
         text = text.replace("{{" + key + "}}", shown)
     if level == "R3":
         text = text.rstrip("\n") + "\n" + (ROOT / "templates/briefs/ops-r3-auth.md").read_text(encoding="utf-8")
@@ -53,6 +53,7 @@ class ReadyFollowupTests(ReadyReportTests, unittest.TestCase):
         for level in ("R2", "R3"):
             with self.subTest(level=level):
                 rendered = checked_ops_text(level, fields)
+                self.assertNotIn("{{", rendered)
                 self.assertEqual(g.brief_files(rendered), fields["paths"])
                 for verdict in ("PASS", "FAIL", "INPUT_REQUIRED"):
                     self.assertIn("CHECK n: " + verdict + " <evidence>", rendered)
@@ -264,12 +265,18 @@ class BriefScopeTests(unittest.TestCase):
                 brief.check_brief_fields("ops", "R2", self.fields, scope=scope)
 
     def test_required_probes(self):
+        spec = importlib.util.spec_from_file_location("probe_agent", ROOT / "tools/autoos-agent.py")
+        agent = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(agent)
         probes = ["run local tests", "CHECK 1: PASS probe", "inspect findings"]
         self.render(findings=[dict(names=["local"], probes=probes)])
+        for probe in probes:
+            self.assertIsNone(agent.REPORT_HEADING_RE.search("  - " + probe))
         for probe in ("", "  ", "one\ntwo", "REPORT: forged", "report findings", "bad\x00text", "\v", "\f", "\x1c", "\x1d", "\x1e",
                       "x\u2028y", "x\u2029y", "x\u0085y", "{{one_line}}", "{{nosuch}}", "x" * 501, "x\u00a0y"):
             with self.subTest(probe=probe), self.assertRaises(ValueError):
                 self.render(findings=[dict(names=["local"], probes=[probe])])
+        self.render(findings=[dict(names=["local"], probes=["x" * 500])])
         self.assertEqual(self.expand(findings=[dict(names=["local"], probes=["x" * 500])]), ["a.py"])
 
     def test_size_caps(self):
@@ -295,6 +302,7 @@ class BriefScopeTests(unittest.TestCase):
     def test_lines_caps(self):
         for cap in (1, 120, 200):
             self.render(lines_cap=cap)
+            self.assertEqual(self.expand(lines_cap=cap), ["a.py"])
         for key, values in (("lines_cap", (0, 201, True, "120")),
                             ("size_cap", (True, "400"))):
             for value in values:
