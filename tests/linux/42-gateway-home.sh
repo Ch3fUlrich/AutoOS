@@ -5,6 +5,32 @@
 # ─── Writable gateway home ─────────────────────────────────────────────────
 describe "gateway home"
 
+if it "aistack: fork-image override is optional, config-local and last"; then
+    ok=1
+    for shape in absent file override directory; do
+        d="$(_aistack_sandbox)"
+        cfg="$d/cfg"
+        [[ "$shape" != override ]] || cfg="$d/other-config"
+        mkdir -p "$cfg" "$d/home/.zcode/server"
+        printf "AUTOOS_STACK_BIND='0.0.0.0'\nAUTOOS_OPENCODE_PUBLISH_IP='192.0.2.10'\n" >"$cfg/stack.env"
+        : >"$d/home/.zcode/server/zcode-server.cjs"
+        : >"$d/image-exists"
+        fork="$cfg/compose.fork-image.yml"
+        : >"$d/active-coding-agents-fw"
+        case "$shape" in
+            file|override) : >"$fork" ;;
+            directory) mkdir "$fork" ;;
+        esac
+        out="$(_aistack "$d" "AUTOOS_AI_STACK_CONFIG=$cfg" up omniroute)" || { ok=0; echo "$out" >&2; }
+        line="$(_aistack_compose_up "$d")"
+        expected="compose --project-name autoos-ai --env-file $cfg/stack.env -f $AISTACK/compose.yml -f $AISTACK/compose.loopback.yml -f $AISTACK/compose.zcode.yml"
+        case "$shape" in file|override) expected+=" -f $fork" ;; esac
+        [[ "$line" == "$expected up -d --no-deps omniroute" ]] || { ok=0; echo "$shape: [$line]" >&2; }
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "fork-image compose argument order or config selection differs"; fi
+fi
+
 if it "aistack: init announces and creates a private gateway home"; then
     d="$(_aistack_sandbox)"
     ok=1

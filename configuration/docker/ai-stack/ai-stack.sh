@@ -498,6 +498,8 @@ zcode_decide() {
 dc() {
     zcode_decide
     local args=(--project-name autoos-ai --env-file "$STACK_ENV" -f "$HERE/compose.yml")
+    local envs=("AUTOOS_STACK_BIND=$(effective_bind)"
+        "AUTOOS_OPENCODE_PUBLISH_IP=$(effective_opencode_publish)")
     if [[ "$(effective_opencode_publish)" != 127.0.0.1 ]]; then
         args+=(-f "$HERE/compose.loopback.yml")
     fi
@@ -505,16 +507,12 @@ dc() {
         args+=(-f "$HERE/compose.zcode.yml")
         # Both variables are exported for this compose call only, so the
         # override's ${...} interpolation reads exactly what was validated.
-        AUTOOS_STACK_BIND="$(effective_bind)" \
-            AUTOOS_OPENCODE_PUBLISH_IP="$(effective_opencode_publish)" \
-            AUTOOS_ZCODE_DIR="$ZCODE_DIR" \
-            AUTOOS_ZCODE_MOUNT_MODE="$ZCODE_MODE" \
-            "$DOCKER" compose "${args[@]}" "$@"
-    else
-        AUTOOS_STACK_BIND="$(effective_bind)" \
-            AUTOOS_OPENCODE_PUBLISH_IP="$(effective_opencode_publish)" \
-            "$DOCKER" compose "${args[@]}" "$@"
+        envs+=("AUTOOS_ZCODE_DIR=$ZCODE_DIR" "AUTOOS_ZCODE_MOUNT_MODE=$ZCODE_MODE")
     fi
+    if [[ -f "$CONFIG_DIR/compose.fork-image.yml" ]]; then
+        args+=(-f "$CONFIG_DIR/compose.fork-image.yml")
+    fi
+    env "${envs[@]}" "$DOCKER" compose "${args[@]}" "$@"
 }
 
 container_running() {
