@@ -6,6 +6,7 @@
 
 - LE-READY-S6 (2026-11-05): `context_guard ready <handoff> [--reason cap|router|operator|planned]` requires a readable handoff/card pair and passing `handoff-check` (PATH or `AUTOOS_HANDOFF_CHECK`, no `--log`). Validate a byte snapshot, reject concurrent edits, and atomically write a v2 marker with both hashes, explicit nulls for unobserved identity/usage/agents, and legacy fields retained. Normal hook and status paths are unchanged.
 
+- AO-OC-STOP-REVIEW-LOWS (2026-11-06, D-4069): fence lone-PID signals and the group-error fallback in the group-leader stop test.
 - AO-OC-STOP-REVIEW-LOWS slice 7 (2026-11-06): report only pre-signal live PIDs on stop, pin already-gone cleanup and live reporting, and clarify per-lane watcher supervision.
 - AO-READY-CHECK-FAIL-BLOCKS (2026-11-06, D-4020): ready refuses failed or input-required report checks on code lanes; missing checks remain optional and ops requirements stay unchanged.
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 3 lane 2 (2026-11-06, D-4001, D-4006): wires the scope regressions into the guards suite and adds shell tails, qualified Rust functions, CHANGELOG exemption and non-UTF-8 content; the temporary bridge test goes; gate unchanged.

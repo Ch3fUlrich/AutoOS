@@ -147,12 +147,16 @@ class StopTest(unittest.TestCase):
                     mock.patch.object(oc_l1_stop, "pgid", return_value=42) as group, \
                     mock.patch.object(oc_l1_stop, "pid_gone", return_value=gone) as liveness, \
                     mock.patch.object(oc_l1_stop.os, "killpg") as killpg, \
+                    mock.patch.object(oc_l1_stop.os, "kill") as kill, \
+                    mock.patch.object(oc_l1_serve, "_kill_pid") as kill_pid, \
                     mock.patch.object(oc_l1_stop, "wait_gone", return_value=True):
                 reads.attach_mock(group, "pgid")
                 reads.attach_mock(liveness, "pid_gone")
                 result = {"killed_pids": []}
                 oc_l1_stop._kill_posix(42, result)
                 self.assertEqual(reads.mock_calls, [mock.call.pgid(42), mock.call.pid_gone(42)])
+                kill.assert_not_called()
+                kill_pid.assert_not_called()
                 killpg.assert_any_call(42, signal.SIGTERM)
                 self.assertEqual(result["killed_pids"], [] if gone else [42])
 
