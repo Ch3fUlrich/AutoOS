@@ -498,6 +498,8 @@ zcode_decide() {
 dc() {
     zcode_decide
     local args=(--project-name autoos-ai --env-file "$STACK_ENV" -f "$HERE/compose.yml")
+    local envs=("AUTOOS_STACK_BIND=$(effective_bind)"
+        "AUTOOS_OPENCODE_PUBLISH_IP=$(effective_opencode_publish)")
     if [[ "$(effective_opencode_publish)" != 127.0.0.1 ]]; then
         args+=(-f "$HERE/compose.loopback.yml")
     fi
@@ -505,16 +507,12 @@ dc() {
         args+=(-f "$HERE/compose.zcode.yml")
         # Both variables are exported for this compose call only, so the
         # override's ${...} interpolation reads exactly what was validated.
-        AUTOOS_STACK_BIND="$(effective_bind)" \
-            AUTOOS_OPENCODE_PUBLISH_IP="$(effective_opencode_publish)" \
-            AUTOOS_ZCODE_DIR="$ZCODE_DIR" \
-            AUTOOS_ZCODE_MOUNT_MODE="$ZCODE_MODE" \
-            "$DOCKER" compose "${args[@]}" "$@"
-    else
-        AUTOOS_STACK_BIND="$(effective_bind)" \
-            AUTOOS_OPENCODE_PUBLISH_IP="$(effective_opencode_publish)" \
-            "$DOCKER" compose "${args[@]}" "$@"
+        envs+=("AUTOOS_ZCODE_DIR=$ZCODE_DIR" "AUTOOS_ZCODE_MOUNT_MODE=$ZCODE_MODE")
     fi
+    if [[ -f "$CONFIG_DIR/compose.fork-image.yml" ]]; then
+        args+=(-f "$CONFIG_DIR/compose.fork-image.yml")
+    fi
+    env "${envs[@]}" "$DOCKER" compose "${args[@]}" "$@"
 }
 
 container_running() {
@@ -850,7 +848,7 @@ compose_service_field() {
             v = $0; sub(/^[[:space:]]*[A-Za-z_]+:[[:space:]]*/, "", v)
             print clean(v); exit
         }
-    ' "$HERE/compose.yml"
+    ' "${COMPOSE_SERVICE_FILE:-$HERE/compose.yml}"
 }
 
 # image_source_hash <dockerfile>: a locally built layer's identity - the
@@ -870,6 +868,8 @@ image_source_hash() {
 ensure_images() {
     local svc img dockerfile label want have what
     for svc in "$@"; do
+        [[ "$svc" == omniroute && -f "$CONFIG_DIR/compose.fork-image.yml" ]] &&
+            [[ -n "$(COMPOSE_SERVICE_FILE="$CONFIG_DIR/compose.fork-image.yml" compose_service_field "$svc" image)" ]] && continue
         img="$(compose_service_field "$svc" image)"
         dockerfile="$(compose_service_field "$svc" build dockerfile)"
         if [[ -n "$dockerfile" ]]; then
