@@ -1,5 +1,5 @@
 # Changelog
-- AO-OC-L2-STOP-TESTS-WIN (2026-11-07, D-3738, D-4471): kill remaining fake serve trees in resume teardown and test recycled-PID refusal on Windows, where identity is creation time only; retain POSIX identity assertions.
+- AO-OC-L2-STOP-TESTS-WIN (2026-11-07, D-3738, D-4471): kill remaining fake serve trees in resume teardown and test recycled-PID refusal on Windows, where identity is creation time only; retain POSIX identity assertions; mentions-the-word case is POSIX-only.
 
 - AO-STACK-UP-FORK-IMAGE (2026-11-06, D-4464): apply the optional host-local fork-image compose overlay last so stack commands retain the host's gateway digest; deduplicate compose env setup and test config selection and overlay order.
 - AO-BRIEF-RENDER-UNWIRED (2026-11-06, D-4464): remove the unused brief renderer, retain field/scope guards and re-point tests directly; drop rendered-output pins only.
