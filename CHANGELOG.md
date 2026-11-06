@@ -1,6 +1,7 @@
 # Changelog
 
 - AO-STACK-UP-FORK-IMAGE (2026-11-06, D-4464): apply the optional host-local fork-image compose overlay last so stack commands retain the host's gateway digest; deduplicate compose env setup and test config selection and overlay order.
+- AO-BRIEF-RENDER-UNWIRED (2026-11-06, D-4464): remove the unused brief renderer, retain field/scope guards and re-point tests directly; drop rendered-output pins only.
 - GW-QODER-RESTORE slice 1 (2026-11-06, D-4214, D-4250): restore an empty, private persistent gateway HOME at omniroute-home mounted at /home/node; init and up create it before compose. No reuse of the withdrawn home, image build or seat-routing change.
 - OC-L1-SOL-TEST (D-4240, D-4314): optional handoff-check gates hard-limit recycle fail-closed with persistent prompt suppression; add the default-effort Sol lane example; compaction fields `prune` and `tail_turns` are retained for OpenCode 2.0.12, ignored by 2.2.5.
 
