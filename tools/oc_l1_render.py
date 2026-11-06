@@ -32,8 +32,7 @@ repo-file shape):
     "external_directory" list of path globs is rendered as allow entries
     (lane c 2026-10-05: the outside-folder access moves from a hand-edited
     host overlay into the lane config).
-  * "compaction" / "tool_output": lane c (2026-10-05) pins prune-on
-    compaction with a small verbatim tail and an orchestrator-sized
+  * "compaction" / "tool_output": automatic compaction and an orchestrator-sized
     tool-output clamp - opencode's defaults (prune off, 2000 lines / 50 KB
     per tool result) are how an orchestrator's per-turn input grew to 794k
     tokens. An optional lane model.limit {"context","output"} overrides the
@@ -93,13 +92,8 @@ PROVIDER_NAME = "workstation gateway"
 MODEL_LIMIT = {"context": 131072, "output": DEFAULT_MAX_TOKENS}
 PERMISSIONS = {"bash": "allow", "edit": "allow", "read": "allow",
                "autoos-agent_*": "allow"}
-# Lane c (render keys, 2026-10-05): opencode prunes old tool outputs ONLY on
-# opt-in (compaction.prune default false) and truncates tool output at 2000
-# lines / 51200 bytes by default - the defaults are how an orchestrator
-# session's per-turn input grew to 794k tokens (measured 2026-10-05). The
-# lane render pins the tight shape instead: prune on, a small verbatim tail,
-# and an orchestrator-sized tool-output clamp (the full text still lands in
-# opencode's truncation directory; only the model-visible preview shrinks).
+# Keep the 2.0.12 input mitigation; 2.2.5 ignores the legacy fields.
+# Keep the tool-output clamp; do not promise a tail policy the binary ignores.
 COMPACTION = {"auto": True, "prune": True, "tail_turns": 4}
 TOOL_OUTPUT = {"max_lines": 400, "max_bytes": 16384}
 

@@ -186,7 +186,6 @@ no new assistant message or tool item for `silent_minutes`, default 10) or `dead
 failed or interrupted).
 
 ### recycle (token usage, AO-OC-CONTEXT-RECYCLE, D-2267)
-
 Claude sessions recycle through `tools/hooks/context_guard.py`; `python3 tools/oc_l1.py recycle --name <lane> [--config PATH]`
 (`tools/oc_l1_recycle.py`) is the same rule for OpenCode lanes. It checks ONE lane ONCE and acts — no loop inside, the caller
 schedules it: `start` prints `recycle-command: ...` (`oc_l2.py start` / MCP `oc_start` / `l2_start` return `recycle_command`),
@@ -217,8 +216,9 @@ One JSON object per check, `action` = `noop | waiting | announced | skipped | re
 (all but deferred / error), 2 config (thresholds, password env unset), 3 deferred, 4 server or session unreachable / no session recorded /
 HTTP step failed / handoff file missing, 6 usage present but unreadable. Checks of one lane never overlap (`<scratch_dir>/recycle.lock`; the second says `busy`).
 
+- **Optional card gate (`handoff_check`).** Set an absolute checker path: before restart run `<checker> <handoff stem>.card.md --log` beside the handoff, shell-free, timeout 15 seconds. Only exit 0 permits restart; missing/symlinked cards, missing/non-executable checkers, exceptions and timeouts retain the session even at hard limit (exit 4, `handoff_check_failed` in lane state and heartbeat.json). One repair prompt per distinct failure per session survives process restarts via state fingerprints; credential-scrubbed, control-filtered reasons are bounded to 20 prompt lines. Fixing the card permits a later eligible restart; merge/cooldown guards remain. No key means unchanged behavior. `l1-sol-example` pins default-effort `cx/gpt-6.1-sol`, thresholds 200000/230000.
+- **Schema compatibility.** The renderer retains `compaction.auto` for 2.0.12 and 2.2.5; `prune` and `tail_turns` are retained for 2.0.12, ignored by 2.2.5.
 ### Templates
-
 - `configuration/oc-l1/autoos-oc-l1.service`: systemd user unit that runs `start`; `autoos-oc-l1-recycle.service` + `.timer`: the `recycle` check.
 - `configuration/oc-l1/windows-task.md`: the Windows Scheduled Task equivalents, `start` and `recycle`.
 

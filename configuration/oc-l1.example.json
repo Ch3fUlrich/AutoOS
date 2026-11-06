@@ -15,6 +15,23 @@
     "Token recycle (D-2267, `oc_l1.py recycle`, all optional): 'ctx_handoff' / 'ctx_hard' are positive integers (tokens of context fill, handoff < hard); unset they fall back to AUTOOS_CTX_HANDOFF / AUTOOS_CTX_HARD, then 270000 / 300000. A lane on a 1M-window model sets both higher, and below its window - opencode compacts at the window.",
     "All paths (cwd, handoff, opencode_bin, scratch_dir, state_file, plugins, instructions, heartbeat_file) must be absolute paths on the host that runs the config - opencode_bin must point at the explicit npm opencode binary, never a PATH-lookup name, never the desktop 'service'."
   ],
+  "l1-sol-example": {
+    "name": "l1-sol-example",
+    "cwd": "/path/to/project",
+    "handoff": "/path/to/project/handoff.md",
+    "handoff_check": "/path/to/briefs/tools/handoff-check",
+    "model": {
+      "provider": "omniroute",
+      "key": "Sol default effort",
+      "modelID": "cx/gpt-6.1-sol"
+    },
+    "ctx_handoff": 200000,
+    "ctx_hard": 230000,
+    "password_env": "AUTOOS_OCL1_PLACEHOLDER_PW",
+    "plugins": ["/path/to/AutoOS/configuration/opencode/plugins/bash-guard"],
+    "opencode_bin": "/path/to/opencode-binary",
+    "scratch_dir": "/path/to/project/oc-l1-sol-scratch"
+  },
   "l1-pilot": {
     "name": "l1-pilot",
     "cwd": "/path/to/your/project",
