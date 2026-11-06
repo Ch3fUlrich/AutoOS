@@ -14,3 +14,5 @@ DONE = all of, pasted into REPORT:
   6 git diff --stat within FILES
 Missing tool = STOP and report input_required, never skip a check.
 REPORT: {expected_output, checks[1-6] with output tail, confidence, open questions}
+Report each check on its own line at column 0, literally `CHECK n: PASS <evidence>`, `CHECK n: FAIL <evidence>` or `CHECK n: INPUT_REQUIRED <evidence>`, with no list marker, bold or indentation.
+Put the output tail in a fenced block under that line; a bare verdict with no evidence does not count.
