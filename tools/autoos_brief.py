@@ -211,7 +211,7 @@ def _validate_single_path(field, value, allow_absolute=False):
     return s
 
 
-def render_brief(task_type, r_level, fields):
+def render_brief(task_type, r_level, fields, scope=None):
     """Render the ops brief; R3 appends the auth clause (single pass)."""
     if type(r_level) is not str or r_level not in _RANK:
         raise ValueError("unknown r_level %r" % (r_level,))
@@ -302,6 +302,9 @@ def render_brief(task_type, r_level, fields):
                 raise ValueError(
                     "state_path entry %r not in paths"
                     % (single_norm["state_path"],))
+    if scope is not None:
+        from autoos_brief_scope import expand_scope
+        path_norm["paths"] = expand_scope(scope, path_norm["paths"], _validate_paths)
     # Plain substring replacement only, single pass so a value holding
     # "{{x}}" is never re-expanded; no f-string eval, no format().
     shown = {}
