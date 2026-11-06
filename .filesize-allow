@@ -5,3 +5,4 @@
 # change and can never shrink, so a baseline entry for it would fail every
 # future entry that records itself. Ratcheting it is a structural no-op.
 CHANGELOG.md a ledger grows one line per merged change and never shrinks
+tests/test_fleet_hook.py 484 lines after D-4121 (operator order D-4150, 11-06); one Stop-hook contract, split owed by the next change here
