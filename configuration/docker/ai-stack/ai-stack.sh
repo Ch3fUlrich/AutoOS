@@ -848,7 +848,7 @@ compose_service_field() {
             v = $0; sub(/^[[:space:]]*[A-Za-z_]+:[[:space:]]*/, "", v)
             print clean(v); exit
         }
-    ' "$HERE/compose.yml"
+    ' "${COMPOSE_SERVICE_FILE:-$HERE/compose.yml}"
 }
 
 # image_source_hash <dockerfile>: a locally built layer's identity - the
@@ -868,7 +868,8 @@ image_source_hash() {
 ensure_images() {
     local svc img dockerfile label want have what
     for svc in "$@"; do
-        [[ "$svc" == omniroute && -f "$CONFIG_DIR/compose.fork-image.yml" ]] && continue
+        [[ "$svc" == omniroute && -f "$CONFIG_DIR/compose.fork-image.yml" ]] &&
+            [[ -n "$(COMPOSE_SERVICE_FILE="$CONFIG_DIR/compose.fork-image.yml" compose_service_field "$svc" image)" ]] && continue
         img="$(compose_service_field "$svc" image)"
         dockerfile="$(compose_service_field "$svc" build dockerfile)"
         if [[ -n "$dockerfile" ]]; then

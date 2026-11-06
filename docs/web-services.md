@@ -8,7 +8,7 @@ protection claims below are unverified, not security guarantees.
 `AUTOOS_OPENCODE_PUBLISH_IP` names one numeric unicast proxy-facing address;
 `ai-stack.sh` adds `compose.loopback.yml` when it differs from 127.0.0.1,
 retaining local probes. Use the manager rather than bare compose for this topology.
-A host-local `compose.fork-image.yml` in the config dir is applied last when present and stays untracked because it holds the host's digest.
+A host-local `compose.fork-image.yml` in the config dir is applied last when it is a regular file that sets the gateway image and stays untracked because it holds the host's digest.
 The credentialed health probe accepts every HTTP answer, including 401 and 5xx,
 so auth or database errors do not trigger autoheal cuts of in-flight work.
 Both Windows launchers and the shell wrapper honour `AUTOOS_OPENCODE_HOST`;
