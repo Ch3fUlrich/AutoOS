@@ -306,15 +306,29 @@ class TailRead(GuardCase):
 
 
 class ReadyAndStatus(GuardCase):
+    def ready_pair(self):
+        handoff = self.tmp / "handoff.md"
+        handoff.write_text("handoff")
+        handoff.with_suffix(".card.md").write_text("card")
+        checker = self.tmp / "handoff-check"
+        checker.write_text(f"#!{sys.executable}\nimport sys\nsys.exit(0)\n")
+        checker.chmod(0o755)
+        if os.name == "nt":
+            wrapper = checker.with_suffix(".cmd")
+            wrapper.write_text(f'@"{sys.executable}" "{checker}" %*\n')
+            checker = wrapper
+        return handoff, {"AUTOOS_HANDOFF_CHECK": str(checker), "CLAUDE_CODE_SESSION_ID": SID}
+
     def run_cmd(self, *args, **env):
         return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True,
                               env=self.env(**env), timeout=20, cwd=str(self.tmp))
 
     def test_ready_writes_marker(self):
-        p = self.run_cmd("ready", "/h/handoff.md", CLAUDE_CODE_SESSION_ID=SID)
+        handoff, env = self.ready_pair()
+        p = self.run_cmd("ready", str(handoff), **env)
         self.assertEqual(p.returncode, 0, p.stderr)
         m = json.loads(self.state_file(f"{SID}.ready.json").read_text())
-        self.assertEqual((m["session_id"], m["handoff"], m["cwd"]), (SID, "/h/handoff.md", str(self.tmp)))
+        self.assertEqual((m["session_id"], m["handoff"], m["cwd"]), (SID, str(handoff), str(self.tmp)))
         self.assertIn("ts", m)
 
     def test_ready_without_session_id_fails_loudly(self):
@@ -337,7 +351,8 @@ class ReadyAndStatus(GuardCase):
     def test_status_one_line_per_state_file(self):
         self.write(usage_line(read=301000))
         self.hook()
-        self.run_cmd("ready", "/h/handoff.md", CLAUDE_CODE_SESSION_ID=SID)
+        handoff, env = self.ready_pair()
+        self.run_cmd("ready", str(handoff), **env)
         p = self.run_cmd("status")
         self.assertEqual(p.returncode, 0)
         lines = p.stdout.strip().splitlines()
@@ -346,7 +361,7 @@ class ReadyAndStatus(GuardCase):
         self.assertIn(SID, joined)
         self.assertIn("hard", joined)
         self.assertIn("ready", joined)
-        self.assertIn("/h/handoff.md", joined)
+        self.assertIn(str(handoff), joined)
 
     def test_status_empty_is_silent_exit_0(self):
         p = self.run_cmd("status")

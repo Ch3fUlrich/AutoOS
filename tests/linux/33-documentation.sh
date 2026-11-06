@@ -982,7 +982,7 @@ fi
 # tools/hooks/context_guard.py (P1.1): the PostToolUse hook that tells a session to hand off at 270k and
 # stop at 300k - fixture transcripts and a throwaway XDG state dir, never the live ones.
 if it "context_guard hook: 270k handoff / 300k hard cap, ready marker, tail read (unit tests)"; then
-    out="$(python3 tests/test_context_guard.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
+    out="$(python3 tests/test_context_guard.py 2>&1 && python3 tests/test_context_guard_ready_v2.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
 # tools/hooks/fleet_report.py + fleet_inject.py: the Stop report filed into the parent's inbox and the PostToolUse/UserPromptSubmit injector that feeds it back - temp FLEET_* dirs only.

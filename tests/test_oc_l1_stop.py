@@ -100,7 +100,7 @@ class StopTest(unittest.TestCase):
         rc, out, err = self.stop()
         self.assertEqual(rc, 0, err)
         self.assertIn("stopped", out)
-        self.assertIn(str(proc.pid), out)
+        self.assertIn("killed pid: %d;" % proc.pid, out)
         self.assertTrue(self.gone(proc, kid), "the server or its child survived stop")
         self.assertFalse(self.state_file.exists())
 
@@ -114,6 +114,51 @@ class StopTest(unittest.TestCase):
         rc, out, err = self.stop()
         self.assertEqual((rc, killed), (0, []))
         self.assertIn("not running", out)
+
+    def test_a_recorded_gone_pid_reports_none_and_removes_state(self):
+        proc, kid = self.start_server()
+        proc.kill()
+        proc.wait()
+        rc, out, err = self.stop()
+        self.assertEqual(rc, 0, err)
+        self.assertIn("killed pid: none;", out)
+        self.assertFalse(self.state_file.exists())
+
+    @unittest.skipUnless(hasattr(os, "killpg") and hasattr(signal, "SIGKILL"), "POSIX signals")
+    @unittest.skipIf(os.name == "nt", "POSIX signals")
+    def test_posix_reports_only_pre_signal_live_pid(self):
+        for gone in (True, False):
+            with self.subTest(gone=gone), \
+                    mock.patch.object(oc_l1_stop, "pid_gone", return_value=gone), \
+                    mock.patch.object(oc_l1_stop, "pgid", return_value=None), \
+                    mock.patch.object(oc_l1_stop.os, "kill") as kill, \
+                    mock.patch.object(oc_l1_stop, "wait_gone", return_value=True):
+                result = {"killed_pids": []}
+                oc_l1_stop._kill_posix(42, result)
+                kill.assert_called_once_with(42, signal.SIGTERM)
+                self.assertEqual(result["killed_pids"], [] if gone else [42])
+
+    @unittest.skipUnless(hasattr(os, "killpg") and hasattr(signal, "SIGKILL"), "POSIX signals")
+    @unittest.skipIf(os.name == "nt", "POSIX signals")
+    def test_posix_group_leader_reports_only_pre_signal_live_pid(self):
+        for gone in (True, False):
+            reads = mock.Mock()
+            with self.subTest(gone=gone), \
+                    mock.patch.object(oc_l1_stop, "pgid", return_value=42) as group, \
+                    mock.patch.object(oc_l1_stop, "pid_gone", return_value=gone) as liveness, \
+                    mock.patch.object(oc_l1_stop.os, "killpg") as killpg, \
+                    mock.patch.object(oc_l1_stop.os, "kill") as kill, \
+                    mock.patch.object(oc_l1_serve, "_kill_pid") as kill_pid, \
+                    mock.patch.object(oc_l1_stop, "wait_gone", return_value=True):
+                reads.attach_mock(group, "pgid")
+                reads.attach_mock(liveness, "pid_gone")
+                result = {"killed_pids": []}
+                oc_l1_stop._kill_posix(42, result)
+                self.assertEqual(reads.mock_calls, [mock.call.pgid(42), mock.call.pid_gone(42)])
+                kill.assert_not_called()
+                kill_pid.assert_not_called()
+                killpg.assert_any_call(42, signal.SIGTERM)
+                self.assertEqual(result["killed_pids"], [] if gone else [42])
 
     def test_stop_with_no_state_file_ever_written_is_not_running(self):
         rc, out, _ = self.stop()

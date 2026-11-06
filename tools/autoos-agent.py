@@ -7993,11 +7993,12 @@ def cmd_ready(args) -> int:
             print("ready: not appended -- writer-guards: %s" % exc, file=sys.stderr)
             return 1
         guards_fields += " guards=ok"
-        if ops_required:
-            if not report_arg:
-                print("ready: not appended -- writer-guards: ops lane without "
-                      "--report; the REPORT is where the CHECK evidence lives")
-                return 1
+    if ops_required or report_arg:
+        if not report_arg:
+            print("ready: not appended -- writer-guards: ops lane without "
+                  "--report; the REPORT is where the CHECK evidence lives")
+            return 1
+        else:
             report_text, report_error = read_guards_text(report_arg)
             if report_error:
                 print("ready: cannot read --report %s: %s" % (report_arg, report_error),
@@ -8005,7 +8006,8 @@ def cmd_ready(args) -> int:
                 return 2
             try:
                 checks = ready_guards.report_checks(report_text)
-                if not checks["ok"]:
+                if (not checks["ok"] if ops_required else
+                        checks["failed"] or checks["input_required"]):
                     def named(ids):
                         return ", ".join(str(n) for n in ids) or "none"
                     print("ready: not appended -- writer-guards report-checks: "
@@ -8017,7 +8019,8 @@ def cmd_ready(args) -> int:
             except ready_guards.GuardError as exc:
                 print("ready: not appended -- writer-guards: %s" % exc, file=sys.stderr)
                 return 1
-            guards_fields += " ops=1"
+            if ops_required:
+                guards_fields += " ops=1"
     if getattr(args, "ci_run", None):
         conclusion, head_sha, ci_error = ci_run_status(args.ci_run)
         if ci_error:
