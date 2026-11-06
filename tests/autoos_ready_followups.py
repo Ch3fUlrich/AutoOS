@@ -8,6 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
+import autoos_brief as brief  # noqa: E402
 import autoos_ready_guards as g  # noqa: E402
 import autoos_writer_gate as writer_gate  # noqa: E402
 
@@ -18,6 +19,71 @@ def files_line(paths):
 
 
 class ReadyFollowupTests(unittest.TestCase):
+
+    def test_rendered_ops_files_and_report_instructions(self):
+        spec = importlib.util.spec_from_file_location(
+            "agent_for_ready_followups", ROOT / "tools" / "autoos-agent.py")
+        agent = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = agent
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(agent)
+        fields = {"task_id": "AO-1", "one_line": "fix mail",
+                  "paths": ["a.yml", "b.yml", "test_x.py"],
+                  "goal": "once-only mail", "invariants": "idempotent",
+                  "keys_file": "keys.yml", "reference_playbook": "ref.yml",
+                  "entity": "example", "state_path": "a.yml", "indent": "2",
+                  "files": "a.yml", "playbooks": "b.yml", "test_files": "test_x.py"}
+        for level in ("R2", "R3"):
+            with self.subTest(level=level):
+                rendered = brief.render_brief("ops", level, fields)
+                self.assertEqual(g.brief_files(rendered), fields["paths"])
+                for verdict in ("PASS", "FAIL", "INPUT_REQUIRED"):
+                    self.assertIn("CHECK n: " + verdict + " <evidence>", rendered)
+                self.assertIn("each check on its own line at column 0", rendered)
+                self.assertIn("no list marker, bold or indentation", rendered)
+                self.assertIn("output tail in a fenced block under that line", rendered)
+                self.assertIn("bare verdict counts as FAIL", rendered)
+                self.assertIn("CHECK n reports DONE item n", rendered)
+                self.assertIn("give each check one verdict", rendered)
+                self.assertIn("a second line with a different verdict fails", rendered)
+                echoed = g.report_checks(rendered)
+                self.assertFalse(echoed["ok"])
+                self.assertEqual(echoed["missing"], list(range(1, 7)))
+                for line in rendered.splitlines():
+                    self.assertFalse(line.strip().startswith(("```", "~~~")))
+                    if not line.startswith("REPORT:"):
+                        self.assertIsNone(agent.REPORT_HEADING_RE.search(line), line)
+                self.assertIn("replace n with the check number and <evidence> "
+                              "with the real output", rendered)
+                self.assertIn("fenced block opened with at most 3 leading spaces", rendered)
+                self.assertIn("a line that itself starts with `>`", rendered)
+                placeholder = "CHECK n: PASS <evidence>"
+                self.assertIn(placeholder, rendered)
+                start = rendered.index(placeholder)
+                extracted = rendered[start:start + len(placeholder)]
+                checks = [extracted.replace("CHECK n:", "CHECK %d:" % n)
+                          .replace("<evidence>", "real output")
+                          + "\n```text\noutput tail\n```\n" for n in range(1, 7)]
+                report = "".join(checks)
+                self.assertTrue(g.report_checks(report)["ok"])
+                probe = g.report_checks(rendered + "\n" + "".join(checks[1:]))
+                self.assertFalse(probe["ok"])
+                self.assertEqual(probe["missing"], [1])
+
+    def test_template_shaped_report_preserves_gate_refusals(self):
+        report = "".join("CHECK %d: PASS evidence\n```text\noutput tail\n```\n" % n
+                         for n in range(1, 7))
+        result = g.report_checks(report)
+        self.assertTrue(result["ok"])
+        self.assertEqual(g.report_checks(report.replace("\n", "\r\n")), result)
+        decorated = report.replace("CHECK 3: PASS evidence", "- **CHECK 3: PASS x**")
+        with self.assertRaisesRegex(
+                g.GuardError, "CHECK 3 requires CHECK 3: <PASS\\|FAIL\\|INPUT_REQUIRED> "
+                "at column 0 with no list marker, bold or indentation"):
+            g.report_checks(decorated)
+        bare = g.report_checks(report.replace("CHECK 3: PASS evidence", "CHECK 3: PASS"))
+        self.assertFalse(bare["ok"])
+        self.assertIn(3, bare["failed"])
 
     def test_smaller_line_caps_and_pr_123(self):
         paths = ["a.py", "b.py", "CHANGELOG.md"]
