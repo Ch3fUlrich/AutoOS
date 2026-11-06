@@ -122,6 +122,27 @@ class WriterWaiverTests(ReadyFixtures):
                 self.assertEqual(self.read_inbox(inbox), "")
 
 
+class CommittedLogLocationTests(WriterWaiverTests):
+    def test_log_locations(self):
+        sha = "a" * 40
+        routing = self.routing_repo(self.TABLE + self.row(sha))
+        env = {"AUTOOS_ROUTING_DIR": routing}
+        self.assertTrue(self.agent.cap_exception_ok(self.REF, sha, env)[0])
+        self.git(routing, "mv", "router/docs", "docs")
+        self.git(routing, "-c", "user.name=autoos-test", "-c", "user.email=" + self.agent.WORKER_EMAIL, "commit", "-qm", "old location")
+        self.git(routing, "update-ref", "refs/remotes/origin/main", "HEAD")
+        self.assertFalse(self.agent.cap_exception_ok(self.REF, sha, env)[0])
+        os.makedirs(os.path.join(routing, "router", "docs"))
+        with open(os.path.join(routing, "router", "docs", "decisions-log.md"), "w") as stream:
+            stream.write(self.TABLE + self.row(sha))
+        self.assertFalse(self.agent.cap_exception_ok(self.REF, sha, env)[0])
+    def test_default_directories(self):
+        with mock.patch.dict(os.environ, {"HOME": os.path.dirname(self.registry_path), "USERPROFILE": os.path.dirname(self.registry_path)}):
+            os.environ.pop("AUTOOS_ROUTING_DIR", None)
+            self.assertEqual(self.agent._routing_log_dir(os.environ), os.path.join(os.path.dirname(self.registry_path), "fleet", "plangraph-data"))
+            self.assertEqual(self.agent.go_gate().routing_dir(os.environ), os.path.join(os.path.dirname(self.registry_path), "code", "routing"))
+
+
 class RealRegistryWriterFamilyTests(unittest.TestCase):
     """The shipped catalog places every writer spelling the fleet signs (D-3465, D-3666; luna stays
     unregistered under the newest-only Codex policy, D-2144):
