@@ -33,11 +33,12 @@ CAP_TEXT = ">3 files not counting CHANGELOG.md"
 
 
 def rendered(paths=PATHS):
-    return brief.render_brief("ops", "R2", {
+    brief.check_brief_fields("ops", "R2", {
         "task_id": "AO-1", "one_line": "fix mail", "paths": list(paths),
         "goal": "once-only mail", "invariants": "idempotent", "entity": "host",
         "keys_file": "keys.yml", "reference_playbook": "ref.yml", "state_path": paths[0],
         "indent": "2", "files": paths[0], "playbooks": paths[1], "test_files": paths[2]})
+    return files_line(paths)
 
 
 def files_line(paths):
