@@ -38,18 +38,25 @@ class ReadyFollowupTests(unittest.TestCase):
                 self.assertIn("output tail in a fenced block under that line", rendered)
                 self.assertIn("bare verdict counts as FAIL", rendered)
                 self.assertIn("CHECK n reports DONE item n", rendered)
-                self.assertIn("each check appears exactly once", rendered)
-                sample = "CHECK 1: PASS 12 passed in 0.5s\n```text\n12 passed in 0.5s\n```\n"
-                self.assertIn(sample, rendered)
-                start = rendered.index(sample)
-                extracted = rendered[start:start + len(sample)]
-                report = "".join(extracted.replace("CHECK 1:", "CHECK %d:" % n, 1)
-                                 for n in range(1, 7))
-                self.assertTrue(g.report_checks(report)["ok"])
-                fences = g._Fences()
+                self.assertIn("give each check one verdict", rendered)
+                self.assertIn("a second line with a different verdict fails", rendered)
+                echoed = g.report_checks(rendered)
+                self.assertFalse(echoed["ok"])
+                self.assertEqual(echoed["missing"], list(range(1, 7)))
                 for line in rendered.splitlines():
-                    fences.feed(line)
-                self.assertFalse(fences.feed("after sample"))
+                    self.assertFalse(line.strip().startswith(("```", "~~~")))
+                placeholder = "CHECK n: PASS <evidence>"
+                self.assertIn(placeholder, rendered)
+                start = rendered.index(placeholder)
+                extracted = rendered[start:start + len(placeholder)]
+                checks = [extracted.replace("CHECK n:", "CHECK %d:" % n)
+                          .replace("<evidence>", "real output")
+                          + "\n```text\noutput tail\n```\n" for n in range(1, 7)]
+                report = "".join(checks)
+                self.assertTrue(g.report_checks(report)["ok"])
+                probe = g.report_checks(rendered + "\n" + "".join(checks[1:]))
+                self.assertFalse(probe["ok"])
+                self.assertEqual(probe["missing"], [1])
 
     def test_template_shaped_report_preserves_gate_refusals(self):
         report = "".join("CHECK %d: PASS evidence\n```text\noutput tail\n```\n" % n
