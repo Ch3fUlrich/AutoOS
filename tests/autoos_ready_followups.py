@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""Hermetic ready-guard followup regressions: no runner, git or network."""
+"""Hermetic followups: temporary indexed git repositories, no runner or network."""
 
 import importlib.util
+import os
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -164,6 +167,91 @@ class ReadyFollowupTests(unittest.TestCase):
         spec.loader.exec_module(affected)
         picked = affected.map_changed_files(["tests/autoos_ready_followups.py"], ROOT)["pytest"]
         self.assertIn("tests/test_autoos_ready_guards.py", picked)
+
+    def test_brief_scope_bridge(self):
+        result = unittest.TestResult()
+        unittest.defaultTestLoader.loadTestsFromTestCase(BriefScopeTests).run(result)
+        self.assertEqual(result.testsRun, 7)
+        self.assertTrue(result.wasSuccessful(), result.failures + result.errors)
+
+
+class BriefScopeTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+        for name, text in {"a.py": "def local(): pass\n",
+                           "b.rs": "pub struct Shared {}\nfn work() {}\n",
+                           "c.sh": "work() { :; }\n",
+                           "mention.py": "# Shared work\n",
+                           "types.py": "class Shared: pass\n"}.items():
+            (self.root / name).write_text(text, encoding="utf-8", newline="\n")
+        for args in (("init", "-q"), ("add", ".")):
+            subprocess.run(["git", *args], cwd=self.root, env=env, check=True,
+                           capture_output=True)
+        self.fields = dict(task_id="AO-1", one_line="fix scope", paths=["a.py"],
+                           goal="complete scope", invariants="safe", keys_file="keys.yml",
+                           reference_playbook="ref.yml", entity="example", state_path="a.py",
+                           indent="2", files="a.py", playbooks="a.py", test_files="a.py")
+
+    def render(self, **scope):
+        return brief.render_brief("ops", "R2", self.fields,
+                                  scope=dict(root=str(self.root), **scope))
+
+    def index(self, path, content):
+        (self.root / path).write_bytes(content)
+        env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+        subprocess.run(["git", "add", "--", path], cwd=self.root, env=env,
+                       check=True, capture_output=True)
+
+    def test_case_exact_rulings_and_findings(self):
+        self.fields["paths"] = ["A.py"]
+        with self.assertRaisesRegex(ValueError, "a.py.*local"):
+            self.render(rulings=[dict(names=["local"])])
+        with self.assertRaisesRegex(ValueError, "A.py.*a.py"):
+            self.render(findings=[dict(names=["local"])])
+
+    def test_comma_path_and_empty_names_refused(self):
+        self.index("comma,file.py", b"def comma(): pass\n")
+        with self.assertRaisesRegex(ValueError, "comma,file.py"):
+            self.render(findings=[dict(names=["comma"])])
+        with self.assertRaisesRegex(ValueError, "names"):
+            self.render(findings=[dict(names=[])])
+
+    def test_finding_definitions_expand_and_pass_guard(self):
+        text = self.render(findings=[dict(names=["Shared"], probes=["later"])])
+        self.assertEqual(g.brief_files(text), ["a.py", "b.rs", "types.py"])
+        self.assertEqual(g.brief_files(self.render(findings=[dict(names=["work"])])),
+                         ["a.py", "b.rs", "c.sh"])
+
+    def test_finding_overflow(self):
+        self.fields["paths"] = ["a.py", "c.sh", "mention.py"]
+        with self.assertRaisesRegex(ValueError, "b.rs.*Shared"):
+            self.render(findings=[dict(names=["Shared"])])
+
+    def test_ruling_outside_files(self):
+        with self.assertRaisesRegex(ValueError, "b.rs.*Shared"):
+            self.render(rulings=[dict(names=["Shared"])])
+        self.assertEqual(g.brief_files(self.render(rulings=[dict(names=["local"])])),
+                         ["a.py"])
+
+    def test_unknown_and_regex_names(self):
+        for name in ("missing", "Shar.*", "mention"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                self.render(findings=[dict(names=[name])])
+
+    def test_scope_none_and_strict_schema(self):
+        self.assertEqual(brief.render_brief("ops", "R2", self.fields, scope=None),
+                         brief.render_brief("ops", "R2", self.fields))
+        for scope in ([], {"unknown": 1}, {"size_cap": 400}, {"lines_cap": 120},
+                      {"findings": []}, {"root": 1}, {"rulings": ()},
+                      {"findings": [dict(names="local")]},
+                      {"findings": [dict(names=["local"], probes=[1])]},
+                      {"rulings": [dict(names=[], extra=True)]}):
+            with self.subTest(scope=scope), self.assertRaises(ValueError):
+                brief.render_brief("ops", "R2", self.fields, scope=scope)
+
 
 
 if __name__ == "__main__":
