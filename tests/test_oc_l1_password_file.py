@@ -4,6 +4,8 @@ import os
 import sys
 import contextlib
 import io
+import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -73,6 +75,37 @@ def test_path_is_forwarded_not_a_credential():
     assert isinstance(l2_keys, ast.BinOp) and l2_keys.left.id == "_OC_L1_ENV_KEYS"
 
 
+def tracked_paths():
+    # Spawner tests leave ignored sandbox clones: they are not repository source.
+    return [ROOT / os.fsdecode(p) for p in subprocess.check_output(
+        ['git', 'ls-files', '-z'], cwd=ROOT).split(b'\0') if p]
+
+
+def configured_password_names():
+    names = {"AUTOOS_OCL1_PW"}
+
+    def visit(value):
+        if isinstance(value, dict):
+            name = value.get("password_env")
+            if isinstance(name, str):
+                names.add(name)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for path in tracked_paths():
+        if path.suffix == '.json':
+            text = path.read_text()
+            if '"password_env"' in text:
+                visit(json.loads(text))
+    return names
+
+
+PASSWORD_NAMES = configured_password_names()
+
+
 def password_readers(tree):
     for node in ast.walk(tree):
         key = None
@@ -83,8 +116,9 @@ def password_readers(tree):
             key = node.args[0]
         if key is not None and (any((isinstance(n, ast.Name) and (
                 "password_env" in n.id or "ENV_PW" in n.id)) or (
-                isinstance(n, ast.Attribute) and n.attr == "password_env") for n in ast.walk(key))
-                or isinstance(key, ast.Constant) and key.value == "AUTOOS_OCL1_PW"):
+                isinstance(n, ast.Attribute) and n.attr == "password_env") or (
+                isinstance(n, ast.Constant) and isinstance(n.value, str) and
+                n.value in PASSWORD_NAMES | {"password_env", "ENV_PW"}) for n in ast.walk(key))):
             yield node.lineno
 
 
@@ -94,8 +128,8 @@ def test_scan_rejects_planted_reader(reader):
 
 def test_every_reader_uses_helper():
     expected = {"oc_l1_recycle.py": 1, "oc_l1_serve.py": 2, "oc_l2.py": 7}
-    for path in ROOT.rglob("*.py"):
-        if any(part.startswith(".") for part in path.relative_to(ROOT).parts):
+    for path in tracked_paths():
+        if path.suffix != '.py':
             continue
         tree = ast.parse(path.read_text())
         if path != ROOT / "tools/oc_l1_password.py":
@@ -170,6 +204,21 @@ class PasswordFileTests(unittest.TestCase):
         test_every_reader_uses_helper()
 
     def test_scan_rejects_planted_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'lane.json'
+            config.write_text('{"lane": {"password_env": "CUSTOM_LANE_AUTH"}}')
+            with patch(__name__ + '.tracked_paths', return_value=[config]):
+                names = configured_password_names()
+            with patch(__name__ + '.PASSWORD_NAMES', names):
+                for read in ('os.environ[KEY]', 'os.environ.get(KEY)', 'os.getenv(KEY)'):
+                    test_scan_rejects_planted_reader(read.replace('KEY', '"CUSTOM_LANE_AUTH"'))
+        assert not list(password_readers(ast.parse('os.getenv("AUTOOS_OCL1_PW_FILE")')))
+        for read in ('os.environ[KEY]', 'os.environ.get(KEY)', 'os.getenv(KEY)'):
+            for key in ('lane["password_env"]', 'mapping.get("password_env")',
+                        'mapping.get("ENV_PW")', 'mapping.get("password_env", ENV_PW)',
+                        '"AUTOOS_OCL1_PLACEHOLDER_PW"'):
+                with self.subTest(read=read, key=key):
+                    test_scan_rejects_planted_reader(read.replace('KEY', key))
         for reader in ('os.environ["AUTOOS_OCL1_PW"]', 'os.getenv("AUTOOS_OCL1_PW")',
                        'os.environ.get("AUTOOS_OCL1_PW")', 'os.environ[password_env]',
                        'os.getenv(ENV_PW)', 'os.environ.get(lane.password_env)'):
