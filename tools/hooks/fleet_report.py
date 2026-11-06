@@ -20,6 +20,15 @@ last turn id that was filed, so the same turn is never appended twice. The
 marker is written only after the append succeeded — a failed append retries on
 the next Stop instead of silently losing the line.
 
+After the name check and before the name is resolved, `kick_after_ready` gives
+the context watchdog one kick per `ready` turn: when the ctx-guard state still
+holds that turn's `<sid>.ready.json`, a `<sid>.turn-ended.json` stamp is
+written first, then one best-effort
+`systemctl --user start --no-block ctx-watchdog.service`. The kick runs in its
+own try/except — a session without a launch record is still kicked, a failing
+or missing systemctl only loses the kick (the watchdog's own timer is the
+fallback), and the status-line path never sees any of it.
+
 Fail-silent, like every hook here: bad stdin, a garbled transcript, an unsafe
 name, an unwritable state dir — exit 0 with no output, because a Stop hook must
 never break the agent that called it. Nothing from the environment and nothing
@@ -37,6 +46,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -264,6 +274,59 @@ def append_inbox(parent: str, record: dict) -> None:
         os.close(fd)
 
 
+def ctx_guard_dir() -> Path:
+    """The context-guard state dir: `$AUTOOS_CTX_STATE`, else
+    `($XDG_STATE_HOME or ~/.local/state)/autoos/ctx-guard` — the same
+    resolution as the router's ctx-watchdog guard_state.
+    """
+    override = os.environ.get("AUTOOS_CTX_STATE")
+    if override:
+        return Path(override)
+    xdg = os.environ.get("XDG_STATE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "state"
+    return base / "autoos" / "ctx-guard"
+
+
+def kick_after_ready(session_id: str) -> None:
+    """Kick `ctx-watchdog.service` once after the turn that ran `ready`.
+
+    A `<guard>/<sid>.ready.json` marker (written by `context_guard ready`) whose
+    numeric `ts` differs from the `ready_ts` of `<guard>/<sid>.turn-ended.json`
+    gets that stamp first — `{"ts", "ready_ts", "session_id"}` via
+    `atomic_write` — and only then `systemctl --user start --no-block
+    ctx-watchdog.service` (timeout 5, check=False, all streams on DEVNULL).
+    The stamp goes first, so a kick that fails (no systemctl, non-zero exit)
+    is silent and the stamp stays: the watchdog's own timer is the fallback.
+    The same ready ts is never kicked twice; a missing or garbled marker and a
+    symlinked guard dir are silent no-ops. A failed subprocess can still raise
+    (no systemctl, timeout); the call site wraps this in its own try/except,
+    because the kick must never change the status-line path.
+    """
+    guard = ctx_guard_dir()
+    if guard.is_symlink():
+        return
+    try:
+        marker = json.loads((guard / ("%s.ready.json" % session_id))
+                            .read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    ts = marker.get("ts") if isinstance(marker, dict) else None
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return
+    stamp_path = guard / ("%s.turn-ended.json" % session_id)
+    try:
+        stamp = json.loads(stamp_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        stamp = None
+    if isinstance(stamp, dict) and stamp.get("ready_ts") == ts:
+        return
+    atomic_write(stamp_path, json.dumps(
+        {"ts": time.time(), "ready_ts": ts, "session_id": session_id}).encode("utf-8"))
+    subprocess.run(["systemctl", "--user", "start", "--no-block", "ctx-watchdog.service"],
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=5, check=False)
+
+
 def run_hook() -> int:
     """The Stop path: stdin -> status line -> one inbox append + the seen marker.
 
@@ -280,6 +343,10 @@ def run_hook() -> int:
         transcript_path = payload.get("transcript_path")
         if not (safe_name(session_id) and isinstance(transcript_path, str)):
             return 0
+        try:
+            kick_after_ready(session_id)
+        except Exception:
+            pass  # best-effort kick: it must never change the status-line path
         name, parent = resolve_name(session_id)
         if not (safe_name(name) and safe_name(parent)):
             return 0

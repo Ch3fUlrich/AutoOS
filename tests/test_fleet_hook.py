@@ -13,7 +13,9 @@ Fixtures are shaped like a real transcript record — one JSON object per line,
 `{"type": "assistant", "uuid": ..., "message": {"content": [{"type": "text",
 "text": ...}]}}` — plus launch records `{"session_id", "name", "parent"}`.
 Everything runs in a TemporaryDirectory that FLEET_STATE_DIR and
-FLEET_LAUNCH_DIR point at; nothing reads the live machine. Run directly, never
+FLEET_LAUNCH_DIR point at; nothing reads the live machine. The ctx-watchdog
+kick after `ready` is covered by StopKicksWatchdog with a tmp
+AUTOOS_CTX_STATE and a fake systemctl on PATH. Run directly, never
 through unittest discover:
 
     python3 tests/test_fleet_hook.py
@@ -51,6 +53,8 @@ class FleetCase(unittest.TestCase):
         e["FLEET_STATE_DIR"] = str(self.state)
         e["FLEET_LAUNCH_DIR"] = str(self.launch)
         e["HOME"] = str(self.tmp)  # the default state/launch dirs must not hit the real home
+        # the watchdog kick must not read live ctx-guard state either
+        e["AUTOOS_CTX_STATE"] = str(self.tmp / "no-ctx-guard")
         e.update(extra)
         return e
 
@@ -337,6 +341,143 @@ class Hardening(FleetCase):
         p = self.stop()
         self.assertEqual((p.returncode, p.stdout), (0, ""))
         self.assertEqual(target.read_text(encoding="utf-8"), "untouched")
+
+
+class StopKicksWatchdog(FleetCase):
+    """The ctx-watchdog kick after a turn that ran `ready` (D-4121).
+
+    The guard dir is a tmp AUTOOS_CTX_STATE; systemctl is a PATH stub that
+    appends "$*" to $KICK_LOG (and exits $KICK_EXIT); every case runs the real
+    hook as a subprocess and must stay exit 0 with empty stdout.
+    """
+
+    STUB = '#!/bin/sh\nprintf "%s\\n" "$*" >> "$KICK_LOG"\nexit "${KICK_EXIT:-0}"\n'
+
+    def setUp(self):
+        super().setUp()
+        self.guard = self.tmp / "ctx-guard"
+        self.guard.mkdir()
+        self.bin = self.tmp / "bin"
+        self.bin.mkdir()
+        stub = self.bin / "systemctl"
+        stub.write_text(self.STUB, encoding="utf-8")
+        stub.chmod(0o755)
+        self.kicklog = self.tmp / "kicks.log"
+
+    def kick_env(self, **extra):
+        env = {"AUTOOS_CTX_STATE": str(self.guard), "KICK_LOG": str(self.kicklog),
+               "PATH": str(self.bin)}
+        env.update(extra)
+        return env
+
+    def stop_kick(self, **env):
+        return self.stop(**self.kick_env(**env))
+
+    def kicks(self):
+        try:
+            return [ln for ln in self.kicklog.read_text(encoding="utf-8").splitlines() if ln]
+        except OSError:
+            return []
+
+    def ready(self, ts=1234.5):
+        (self.guard / ("%s.ready.json" % SID)).write_text(
+            json.dumps({"v": 2, "session_id": SID, "ts": ts}), encoding="utf-8")
+
+    def stamp_path(self):
+        return self.guard / ("%s.turn-ended.json" % SID)
+
+    def stamp(self):
+        return json.loads(self.stamp_path().read_text(encoding="utf-8"))
+
+    def assert_silent(self, proc):
+        self.assertEqual((proc.returncode, proc.stdout), (0, ""))
+
+    def test_no_marker_means_no_stamp_and_no_kick(self):
+        self.assert_silent(self.stop_kick())
+        self.assertFalse(self.stamp_path().exists(), "no ready marker: no stamp")
+        self.assertEqual(self.kicks(), [], "no ready marker: no kick")
+
+    def test_ready_marker_stamps_then_kicks_exactly_once(self):
+        self.ready(ts=1234.5)
+        self.assert_silent(self.stop_kick())
+        stamp = self.stamp()
+        self.assertEqual(stamp["ready_ts"], 1234.5)
+        self.assertEqual(stamp["session_id"], SID)
+        self.assertIsInstance(stamp["ts"], float)
+        self.assertEqual(self.kicks(), ["--user start --no-block ctx-watchdog.service"],
+                         "exactly one kick, with the documented arguments")
+        self.assert_silent(self.stop_kick())  # second Stop on the same ready
+        self.assertEqual(self.kicks(), ["--user start --no-block ctx-watchdog.service"],
+                         "once per ready, not once per Stop")
+        self.assertEqual(self.stamp()["ready_ts"], 1234.5)
+
+    def test_new_ready_ts_gets_a_second_stamp_and_kick(self):
+        self.ready(ts=1.0)
+        self.assert_silent(self.stop_kick())
+        self.ready(ts=2.0)
+        self.assert_silent(self.stop_kick())
+        self.assertEqual(len(self.kicks()), 2, "a new ready ts is a new turn")
+        self.assertEqual(self.stamp()["ready_ts"], 2.0, "the stamp follows the newest marker")
+
+    def test_garbled_marker_or_nonnumeric_ts_is_silent(self):
+        for body in ("{not json", json.dumps(["ts"]), json.dumps({"ts": "soon"}),
+                     json.dumps({"ts": True}), json.dumps({"session_id": SID}),
+                     json.dumps({"ts": None})):
+            (self.guard / ("%s.ready.json" % SID)).write_text(body, encoding="utf-8")
+            self.assert_silent(self.stop_kick())
+            self.assertFalse(self.stamp_path().exists(), body)
+        self.assertEqual(self.kicks(), [])
+
+    def test_symlinked_state_dir_is_silent(self):
+        victim = self.tmp / "victim"
+        victim.mkdir()
+        (victim / ("%s.ready.json" % SID)).write_text(
+            json.dumps({"v": 2, "session_id": SID, "ts": 1234.5}), encoding="utf-8")
+        self.guard.rmdir()
+        self.guard.symlink_to(victim, target_is_directory=True)
+        self.assert_silent(self.stop_kick())
+        self.assertEqual([p.name for p in victim.iterdir()], ["%s.ready.json" % SID],
+                         "the stamp is never written through the symlink")
+        self.assertEqual(self.kicks(), [])
+
+    def test_unwritable_state_dir_is_silent(self):
+        self.ready(ts=1234.5)
+        self.stamp_path().mkdir()  # blocks the stamp: rename onto a dir fails
+        self.assert_silent(self.stop_kick())
+        self.assertTrue(self.stamp_path().is_dir(), "the blocking entry survives")
+        self.assertEqual(self.kicks(), [], "no stamp: no kick")
+
+    def test_missing_or_failing_systemctl_keeps_the_stamp(self):
+        empty_bin = self.tmp / "empty-bin"
+        empty_bin.mkdir()
+        self.ready(ts=1234.5)
+        self.assert_silent(self.stop_kick(PATH=str(empty_bin)))  # no systemctl at all
+        self.assertEqual(self.stamp()["ready_ts"], 1234.5, "the stamp survives a missing systemctl")
+        self.assertEqual(self.kicks(), [])
+        self.ready(ts=2.0)
+        self.assert_silent(self.stop_kick(KICK_EXIT="3"))  # systemctl present, non-zero exit
+        self.assertEqual(self.stamp()["ready_ts"], 2.0, "the stamp survives a failing systemctl")
+        self.assertEqual(len(self.kicks()), 1, "the failing kick was attempted once")
+
+    def test_session_outside_the_fleet_still_kicks(self):
+        self.ready(ts=1234.5)  # no launch record anywhere
+        self.write_transcript(self.assistant(["DONE x"]))
+        self.assert_silent(self.stop_kick())
+        self.assertEqual(len(self.kicks()), 1, "no launch record never blocks the kick")
+        self.assertEqual(self.stamp()["ready_ts"], 1234.5)
+        self.assertFalse(self.inbox().exists(), "nothing is filed outside the fleet")
+
+    def test_status_line_still_files_with_a_marker_present(self):
+        self.write_launch()
+        self.write_transcript(self.assistant(["DONE shipped"]))
+        self.ready(ts=1234.5)
+        self.assert_silent(self.stop_kick())
+        recs = self.inbox_records()
+        self.assertEqual(len(recs), 1, "the status-line append is untouched")
+        self.assertEqual(recs[0]["status"], "DONE")
+        self.assertEqual(recs[0]["line"], "DONE shipped")
+        self.assertEqual(len(self.kicks()), 1, "and the kick happens too")
+        self.assertEqual(self.stamp()["ready_ts"], 1234.5)
 
 
 if __name__ == "__main__":
