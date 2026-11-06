@@ -312,7 +312,7 @@ class BriefScopeTests(unittest.TestCase):
             self.assertLess(text.index(line), text.index("\nDONE"))
             self.assertIsNone(agent.REPORT_HEADING_RE.search(line))
             self.assertIsNone(re.match(r"^CHECK [0-9]+:", line))
-        for probe in ("", "  ", "one\ntwo", "REPORT: forged", "report findings", "bad\x00text",
+        for probe in ("", "  ", "one\ntwo", "REPORT: forged", "report findings", "bad\x00text", "\v", "\f", "\x1c", "\x1d", "\x1e",
                       "x\u2028y", "x\u2029y", "x\u0085y", "{{one_line}}", "{{nosuch}}", "x" * 501, "x\u00a0y"):
             with self.subTest(probe=probe), self.assertRaises(ValueError):
                 self.render(findings=[dict(names=["local"], probes=[probe])])
@@ -361,6 +361,13 @@ class BriefScopeTests(unittest.TestCase):
                     self.render(**{key: value})
 
     def test_isolated_import_root_and_git_config(self):
+        code = ("import ast, importlib.util, sys; s = importlib.util.spec_from_file_location('brief', sys.argv[1]); "
+                "m = importlib.util.module_from_spec(s); s.loader.exec_module(m); sys.stdout.reconfigure(encoding='utf-8'); "
+                "print(m.render_brief('ops', 'R2', ast.literal_eval(sys.argv[2]), scope=ast.literal_eval(sys.argv[3])))")
+        result = subprocess.run([sys.executable, "-I", "-c", code, str(ROOT / "tools/autoos_brief.py"),
+                repr(self.fields), repr(dict(root=str(self.root), findings=[dict(names=['local'], probes=['run local tests'])]))], capture_output=True, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("  - run local tests\n", result.stdout)
         from unittest.mock import patch
         spec = importlib.util.spec_from_file_location("isolated_brief", ROOT / "tools/autoos_brief.py")
         module = importlib.util.module_from_spec(spec)

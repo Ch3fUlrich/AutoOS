@@ -311,12 +311,13 @@ def render_brief(task_type, r_level, fields, scope=None):
         expand_scope = module.expand_scope
         path_norm["paths"] = expand_scope(scope, path_norm["paths"], _validate_paths)
         probes = [p for entry in scope.get("findings", []) for p in entry.get("probes", [])]
+        blank = module.load_sibling("autoos_blank")
         for probe in probes:
             if "{{" in probe:
                 raise ValueError("probe must not contain '{{'")
             if len(probe) > 500:
                 raise ValueError("probe exceeds 500 chars")
-            if module.load_sibling("autoos_ready_guards")._invisible_char(probe):
+            if any(ch != " " and blank.is_invisible_char(ch) for ch in probe):
                 raise ValueError("probe has invisible character")
             if not probe.strip():
                 raise ValueError("probe must be non-empty")
