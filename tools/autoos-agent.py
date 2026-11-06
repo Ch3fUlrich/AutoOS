@@ -7341,7 +7341,7 @@ def read_guards_text(path):
 # relaxation of the writer brief's FILES cap, for the lane built by several writer
 # segments that no single brief can describe. The id shape, the routing dir and the
 # word-bounded id rule belong to the routing gate module, never restated here.
-CAP_EXCEPTION_LOG = "docs/decisions-log.md"
+CAP_EXCEPTION_LOG = "router/docs/decisions-log.md"
 CAP_EXCEPTION_BY = "routing-00"
 CAP_EXCEPTION_MAX_FILES = 6
 # AO-READY-CAP-COUNT: the band a routing row may state for ITSELF with
@@ -7462,12 +7462,17 @@ def cap_exception_row_cap(cells):
     return cap, None
 
 
+def _routing_log_dir(env):
+    gate = go_gate()
+    return gate._env(env, gate.ROUTING_DIR_ENV) or os.path.join(gate._home(env), "fleet", "plangraph-data")
+
+
 def _routing_committed_log(env=None):
     """``(ok, reason, commit, rows)`` -- the routing decisions log as COMMITTED on origin/main.
 
-    The ONE read every committed-tree reader shares. The routing dir is the routing gate's own
-    answer (`_go_gate.routing_dir`: AUTOOS_ROUTING_DIR, else `$HOME/code/routing`), then
-    `rev-parse origin/main^{commit}` ONCE, then `git show <that commit>:docs/decisions-log.md`,
+    The ONE read every committed-tree reader shares. Directory: AUTOOS_ROUTING_DIR, else
+    `$HOME/fleet/plangraph-data`; then `rev-parse origin/main^{commit}` ONCE,
+    then `git show <that commit>:<CAP_EXCEPTION_LOG>`,
     so the commit handed back is the very tree the rows were read from and a caller can name it.
     No failure -- no gate, no repo, no origin/main, no log, bytes that are not UTF-8 -- falls
     back to a working copy: it refuses, with the reason worded for the reader that asked.
@@ -7479,10 +7484,9 @@ def _routing_committed_log(env=None):
     """
     env = os.environ if env is None else env
     try:
-        gate = go_gate()
+        dirpath = _routing_log_dir(env)
     except Exception as exc:
         return False, "cannot load the routing gate: %s" % exc, None, None
-    dirpath = gate.routing_dir(env)
     if not os.path.exists(os.path.join(dirpath, ".git")):
         return False, ("the routing repo %r is missing or is not a git checkout"
                        % (dirpath,)), None, None
@@ -7512,7 +7516,7 @@ def cap_exception_ok(ref, sha, env=None):
 
     The row is read from the COMMITTED tree and from nothing else, through the ONE shared
     reader `_routing_committed_log` (`rev-parse origin/main^{commit}` FIRST, then `git show
-    <that commit>:docs/decisions-log.md`), so the commit reported back is the very tree the
+    <that commit>:<CAP_EXCEPTION_LOG>`), so the commit reported back is the very tree the
     row was read from and the ready line can name it. No failure -- no repo, no origin/main,
     no log, an undecodable answer -- falls back to a working copy: it refuses.
 
@@ -7671,7 +7675,7 @@ def judge_run_ok(run_ref, lane_sha, env=None):
         return False, reason
     path = "%s/%s.md" % (JUDGE_RUN_LOG, run_ref)
     try:
-        dirpath = go_gate().routing_dir(env)
+        dirpath = _routing_log_dir(env)
     except Exception as exc:
         return False, "cannot load the routing gate: %s" % exc
     text, error = _routing_git_out(dirpath, "show", "%s:%s" % (commit, path))
