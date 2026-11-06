@@ -29,7 +29,7 @@
 #   ~/.config/autoos/ai-stack/stack.active   ownership marker: written only when a
 #                                            migrate completed (or a fresh host's
 #                                            first `up`), removed by rollback
-#   ~/.local/share/autoos/ai-stack/          omniroute/ data, opencode-home/
+#   ~/.local/share/autoos/ai-stack/          omniroute/ data, omniroute-home/, opencode-home/
 # init only ADDS missing keys (backup first); a value you edit stays yours.
 # up/migrate refuse a LAN publish address unless coding-agents-fw.service
 # runs or stack.env says AUTOOS_STACK_ALLOW_LAN=1, and an AUTOOS_OMNIROUTE_PUBLIC_URL
@@ -720,10 +720,10 @@ stack_data_dir() {
 # when compose starts is created by the docker daemon as root, and the
 # containers (host uid) could not write it. init calls this, and so does `up`:
 # an already initialised host gets a newly added mount that way (D-2641 kept
-# this generic; the withdrawn qoder-home mount is no longer one of them).
+# this generic; D-4214 adds an empty omniroute-home, never seeded or migrated).
 ensure_data_dirs() {
     local base="$1" d
-    for d in "$base" "$base/omniroute" "$base/opencode-home"; do
+    for d in "$base" "$base/omniroute" "$base/omniroute-home" "$base/opencode-home"; do
         if [[ -d "$d" ]]; then continue; fi
         if [[ $DRY -eq 1 ]]; then echo "  - would create $d"; continue; fi
         mkdir -p "$d"
@@ -745,7 +745,7 @@ cmd_init() {
         if [[ $DRY -eq 1 ]]; then echo "  - would create $d"; else mkdir -p "$d"; echo "  + created $d"; fi
     done
     # The gateway DB, opencode sessions and the MCP caches: the operator's only.
-    [[ $DRY -eq 1 ]] || chmod 700 "$DATA_DIR" "$DATA_DIR/omniroute" "$DATA_DIR/opencode-home"
+    [[ $DRY -eq 1 ]] || chmod 700 "$DATA_DIR" "$DATA_DIR/omniroute" "$DATA_DIR/omniroute-home" "$DATA_DIR/opencode-home"
 
     # OPENCODE_MEM_LIMIT is deliberately absent (2026-09-29): a 1536m cap
     # OOM-killed opencode serve and cut every in-flight run across the fleet.

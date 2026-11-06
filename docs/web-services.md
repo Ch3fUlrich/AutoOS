@@ -491,13 +491,12 @@ exactly those plus `curl` for the healthcheck (image 225 MB -> 382 MB).
 
 ### OmniRoute and Qoder (withdrawn gateway layer)
 
-D-2641 withdrew the gateway-side Qoder PAT login and removed the container-side
-`qodercli` binary, `CLI_QODER_BIN=/usr/local/bin/qodercli`, and the writable
-`qoder-home` mount. Qoder is now supported exclusively via the host's `qodercli`
-ACP client (`clients.qoder`, `gateway_mode: none`). The OmniRoute gateway
-container no longer carries a `qodercli` layer, does not mount a writable
-home directory, and runs with the standard read-only root filesystem and
-the image default `HOME` of its `node` user.
+D-4214 restores a writable, initially empty gateway home at `omniroute-home`,
+mounted at `/home/node` with the root filesystem still read-only. The old
+`qoder-home` directory is not reused. The compose image built from this repo
+still has no `qodercli` layer; a fork image carrying it uses the new home.
+Seat routing is unchanged (D-4250), including the host's `qodercli` ACP client
+(`clients.qoder`, `gateway_mode: none`).
 
 ### OmniRoute with ZCode (GLM)
 
