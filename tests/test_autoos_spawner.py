@@ -44,6 +44,7 @@ import prepush as prepush_tool  # noqa: E402  (tools/prepush.py; the D-110 gate 
 import autoos_writer_ledger as writer_ledger  # noqa: E402  (AO-LEDGER-WRITE P6)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _host_state as host_state  # noqa: E402  (tests/_host_state.py: the host reads)
+from _spawner_hermetic import fake_key_environment
 
 
 def load_agent(path=None):
@@ -192,6 +193,7 @@ def pinned_env(**extra):
     fixtures itself; this is the one place that says what they are (AO-ADMISSION-2).
     """
     env = dict(_host_env_pins())
+    env.update(AUTOOS_NO_KEY_FILES="1", AUTOOS_HOST_CONFIG=os.path.join(__file__, "missing-host.yml"))
     env["PATH"] = _CLIENT_BIN + os.pathsep + os.defpath
     env.update(extra)
     return env
@@ -219,16 +221,12 @@ def r_leg_is_claude(leg):
 
 
 def clean_env(**extra):
-    # An ambient AUTOOS_SESSION_TAG is the lane's own tag: a spawn run from a
-    # lane session takes it instead of deriving one from ROOT, so every
-    # session-tag test that does not name a tag passed on whatever the calling
-    # shell happened to export (measured 2026-09-28 in a lane sandbox: two
-    # SessionTagTests fail only there). The same reasoning as the key strip -
-    # the suite must pass on a machine that is mid-handoff. A test that wants a
-    # tag sets one: clean_env(AUTOOS_SESSION_TAG="lane/one").
+    # why: see SessionTagTests.setUp
     dropped = ("AUTOOS_OMNIROUTE_KEY", "AUTOOS_SESSION_TAG")
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("AUTOOS_AGENT_") and k not in dropped}
+    env.update(AUTOOS_NO_KEY_FILES="1", AUTOOS_HOST_NAME="test-only", AUTOOS_HOST_CONFIG=os.path.join(__file__, "missing-host.yml"),
+               AUTOOS_OMNIROUTE_URL="https://gateway.example.invalid")
     if _CLIENT_BIN is not None:
         env["PATH"] = _CLIENT_BIN + os.pathsep + env.get("PATH", os.defpath)
     env.update(extra)
@@ -4674,7 +4672,7 @@ class RawTailClassificationTests(unittest.TestCase):
 class KeyFileTests(unittest.TestCase):
     """A lane worktree has no git-ignored api-keys.yml (measured 2026-09-25: exit 3,
     and linking it in was refused); the spawner falls back to the main checkout."""
-
+    setUp = fake_key_environment
     def test_a_worktree_reads_the_main_checkouts_key_file(self):
         agent = load_agent()
         with tempfile.TemporaryDirectory() as tmp:
@@ -4686,7 +4684,7 @@ class KeyFileTests(unittest.TestCase):
             subprocess.run(git + ["-C", main, "worktree", "add", "-q", wt], check=True)
             os.makedirs(os.path.join(main, "configuration"))
             with open(os.path.join(main, "configuration", "api-keys.yml"), "w", encoding="utf-8") as fh:
-                fh.write("omniroute: sk-test-not-a-key\n")
+                fh.write("omniroute_server: sk-test-not-a-key\n")
             with mock.patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("AUTOOS_OMNIROUTE_KEY", None)
                 self.assertEqual(agent.client_key(wt), "sk-test-not-a-key")
@@ -8087,6 +8085,10 @@ class FreePreferredHeadTests(unittest.TestCase):
         self.assertEqual(self.agent.DEFAULT_FREE_MODEL,
                          "opencode/muse-spark-1.3-contributor-free",
                          "DEFAULT_FREE_MODEL stays the keyless fallback (D-1923)")
+
+    def test_keyless_plan_ignores_a_reachable_fake_key_file(self):
+        from _spawner_hermetic import keyless_plan_ignores_fake_file
+        keyless_plan_ignores_fake_file(self, _runner_agent())
 
     def test_a_plain_free_run_without_a_key_hands_the_child_no_credential(self):
         r = self._dry(key=False)
@@ -30204,23 +30206,20 @@ def zen_cli_root():
 
 class ZenKeyFileTests(unittest.TestCase):
     """(f) zen_key(): the `zen` field read by name, and what is not a key."""
-
+    setUp = fake_key_environment
     @classmethod
     def setUpClass(cls):
         cls.agent = load_agent()
-
     def test_the_zen_field_is_read_by_name(self):
         root = zen_root("omniroute_server: not-the-zen-field\nzen: %s\n" % FAKE_ZEN)
         self.addCleanup(shutil.rmtree, root, True)
         self.assertEqual(FAKE_ZEN, self.agent.zen_key(root))
-
     def test_a_placeholder_or_an_empty_field_reads_as_no_key(self):
         for text in ("zen: REPLACE_WITH_ZEN_KEY\n", "zen:\n", None):
             with self.subTest(text=text):
                 root = zen_root(text)
                 self.addCleanup(shutil.rmtree, root, True)
                 self.assertIsNone(self.agent.zen_key(root))
-
     def test_reading_the_key_prints_nothing(self):
         root = zen_root("zen: %s\n" % FAKE_ZEN)
         self.addCleanup(shutil.rmtree, root, True)
@@ -30277,6 +30276,7 @@ class ZenKeyPlanTests(unittest.TestCase):
         cls.agent = load_agent()
 
     def setUp(self):
+        fake_key_environment(self)
         self.root = zen_root("zen: %s\n" % FAKE_ZEN)
         self.addCleanup(shutil.rmtree, self.root, True)
 
@@ -30347,6 +30347,8 @@ class ZenKeySpawnTests(unittest.TestCase):
 
     def _dry(self, *argv, root=None):
         env = clean_env(AUTOOS_STATE_DIR=self.state)
+        if root is not None:  # This root contains only this test's fake Zen key.
+            env["AUTOOS_NO_KEY_FILES"] = "main"
         for name in ("AUTOOS_TASK_DIR", "OPENCODE_API_KEY"):
             env.pop(name, None)
         return run_agent("run", "--client", "opencode", *argv, "--dry-run",
