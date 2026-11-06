@@ -1,5 +1,6 @@
 # Changelog
 
+- AO-OC-STOP-REVIEW-LOWS slice 7 (2026-11-06): report only pre-signal live PIDs on stop, pin already-gone cleanup and live reporting, and clarify per-lane watcher supervision.
 - AO-OC-STOP-REVIEW-LOWS slice 6 (2026-11-06): clarify watcher cleanup, supervision suspension and post-fix restart, plus platform-specific already-down stop identity requirements.
 - AO-OC-STOP-REVIEW-LOWS slice 5 (2026-11-06): fix the shim upgrade assertion's random-path flake, pin status preservation to the gate line, and clarify watcher-first guard recovery, stop diagnostics and already-down lanes.
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 1 (2026-11-05, D-3883, #123): ready accepts canonical smaller 1..200 line caps, reads CRLF trailer paragraphs like LF, and diagnoses missing required CHECK lines decorated as lists or bold without counting quoted or fenced output. Decoration diagnostics are verdict-neutral and never hide real FAIL or INPUT_REQUIRED checks. Split hermetic fail-first regressions pin these guards and CRLF writer attribution.
