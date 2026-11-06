@@ -31,6 +31,31 @@ if it "aistack: fork-image override is optional, config-local and last"; then
     if (( ok )); then pass; else fail "fork-image compose argument order or config selection differs"; fi
 fi
 
+if it "aistack: fork-image skips only the regular-file gateway image build"; then
+    ok=1
+    for shape in file absent directory; do
+        d="$(_aistack_sandbox)"
+        mkdir -p "$d/cfg"
+        printf "AUTOOS_STACK_BIND='127.0.0.1'\n" >"$d/cfg/stack.env"
+        : >"$d/image-exists"
+        : >"$d/noimage-omniroute"
+        fork="$d/cfg/compose.fork-image.yml"
+        case "$shape" in file) : >"$fork" ;; directory) mkdir "$fork" ;; esac
+        out="$(_aistack "$d" up omniroute)" || { ok=0; echo "$out" >&2; }
+        if [[ "$shape" == file ]]; then
+            if grep -qE '^build .* -t autoos/omniroute:|^compose .* pull .*omniroute' "$d/docker.log"; then
+                ok=0; echo "overlay gateway image was built or pulled" >&2
+            fi
+            [[ "$out" != *"would "* ]] || { ok=0; echo "$out" >&2; }
+            [[ "$(_aistack_compose_up "$d")" == *" -f $fork up -d --no-deps omniroute" ]] || { ok=0; echo "overlay missing from up" >&2; }
+        else
+            grep -qE '^build --label org\.autoos\.omniroute\.source=[0-9a-f]{64} -t autoos/omniroute:' "$d/docker.log" || { ok=0; echo "$shape: gateway build missing" >&2; }
+        fi
+        rm -rf "$d"
+    done
+    if (( ok )); then pass; else fail "fork-image image preparation differs"; fi
+fi
+
 if it "aistack: init announces and creates a private gateway home"; then
     d="$(_aistack_sandbox)"
     ok=1

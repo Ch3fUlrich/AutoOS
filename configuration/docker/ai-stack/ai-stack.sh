@@ -868,6 +868,7 @@ image_source_hash() {
 ensure_images() {
     local svc img dockerfile label want have what
     for svc in "$@"; do
+        [[ "$svc" == omniroute && -f "$CONFIG_DIR/compose.fork-image.yml" ]] && continue
         img="$(compose_service_field "$svc" image)"
         dockerfile="$(compose_service_field "$svc" build dockerfile)"
         if [[ -n "$dockerfile" ]]; then
