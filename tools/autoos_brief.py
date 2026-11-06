@@ -1,4 +1,4 @@
-"""Ops brief template store (AO-WRITER-GUARDS P2)."""
+"""Ops brief template store and field validation (AO-WRITER-GUARDS P2)."""
 from __future__ import annotations
 
 import posixpath

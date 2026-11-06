@@ -3,7 +3,7 @@
 
 Hermetic (D-852): no runner or network; imported BriefScopeTests uses temporary git
 repositories via subprocess. Diff paths are arguments, the tool lookup is injected
-(this checkout's directory is only stat'ed), and the brief is a real render."""
+(this checkout's directory is only stat'ed), and the brief is the real template filled."""
 import inspect
 import io
 import shutil
@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path[:0] = [str(ROOT / "tools"), str(ROOT / "tests")]
 import autoos_brief as brief  # noqa: E402
 import autoos_ready_guards as g  # noqa: E402
-from autoos_ready_followups import ReadyFollowupTests, BriefScopeTests  # noqa: E402,F401  # tests/autoos_ready_followups.py tools/autoos_brief_scope.py tools/autoos_brief.py tests/autoos_ready_report_followups.py
+from autoos_ready_followups import ReadyFollowupTests, BriefScopeTests, checked_ops_text  # noqa: E402,F401  # tests/autoos_ready_followups.py tools/autoos_brief_scope.py tools/autoos_brief.py tests/autoos_ready_report_followups.py
 
 PATHS = ["tools/a.py", "tools/b.yml", "tests/test_a.py"]
 SIX = [1, 2, 3, 4, 5, 6]
@@ -33,12 +33,11 @@ CAP_TEXT = ">3 files not counting CHANGELOG.md"
 
 
 def rendered(paths=PATHS):
-    brief.check_brief_fields("ops", "R2", {
+    return checked_ops_text("R2", {
         "task_id": "AO-1", "one_line": "fix mail", "paths": list(paths),
         "goal": "once-only mail", "invariants": "idempotent", "entity": "host",
         "keys_file": "keys.yml", "reference_playbook": "ref.yml", "state_path": paths[0],
         "indent": "2", "files": paths[0], "playbooks": paths[1], "test_files": paths[2]})
-    return files_line(paths)
 
 
 def files_line(paths):

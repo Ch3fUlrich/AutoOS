@@ -22,6 +22,19 @@ def files_line(paths):
             + ", ".join(paths) + ". Do not touch other lines/files.\nGOAL: y.\n")
 
 
+def checked_ops_text(level, fields):
+    brief.check_brief_fields("ops", level, fields)
+    text = (ROOT / "templates/briefs/ops.md").read_text(encoding="utf-8")
+    for key, value in fields.items():
+        shown = ", ".join(value) if type(value) is list else value
+        if key == "invariants":
+            shown = "  - " + shown
+        text = text.replace("{{" + key + "}}", shown)
+    if level == "R3":
+        text = text.rstrip("\n") + "\n" + (ROOT / "templates/briefs/ops-r3-auth.md").read_text(encoding="utf-8")
+    return text
+
+
 class ReadyFollowupTests(ReadyReportTests, unittest.TestCase):
 
     def test_rendered_ops_files_and_report_instructions(self):
@@ -39,16 +52,17 @@ class ReadyFollowupTests(ReadyReportTests, unittest.TestCase):
                   "files": "a.yml", "playbooks": "b.yml", "test_files": "test_x.py"}
         for level in ("R2", "R3"):
             with self.subTest(level=level):
-                brief.check_brief_fields("ops", level, fields)
-                rendered = (ROOT / "templates/briefs/ops.md").read_text(encoding="utf-8")
-                for key, value in fields.items():
-                    shown = ", ".join(value) if type(value) is list else value
-                    if key == "invariants":
-                        shown = "  - " + shown
-                    rendered = rendered.replace("{{" + key + "}}", shown)
-                if level == "R3":
-                    rendered = rendered.rstrip("\n") + "\n" + (ROOT / "templates/briefs/ops-r3-auth.md").read_text(encoding="utf-8")
+                rendered = checked_ops_text(level, fields)
                 self.assertEqual(g.brief_files(rendered), fields["paths"])
+                for verdict in ("PASS", "FAIL", "INPUT_REQUIRED"):
+                    self.assertIn("CHECK n: " + verdict + " <evidence>", rendered)
+                self.assertIn("each check on its own line at column 0", rendered)
+                self.assertIn("no list marker, bold or indentation", rendered)
+                self.assertIn("output tail in a fenced block under that line", rendered)
+                self.assertIn("bare verdict counts as FAIL", rendered)
+                self.assertIn("CHECK n reports DONE item n", rendered)
+                self.assertIn("give each check one verdict", rendered)
+                self.assertIn("a second line with a different verdict fails", rendered)
                 echoed = g.report_checks(rendered)
                 self.assertFalse(echoed["ok"])
                 self.assertEqual(echoed["missing"], list(range(1, 7)))
@@ -56,7 +70,12 @@ class ReadyFollowupTests(ReadyReportTests, unittest.TestCase):
                     self.assertFalse(line.strip().startswith(("```", "~~~")))
                     if not line.startswith("REPORT:"):
                         self.assertIsNone(agent.REPORT_HEADING_RE.search(line), line)
+                self.assertIn("replace n with the check number and <evidence> "
+                              "with the real output", rendered)
+                self.assertIn("fenced block opened with at most 3 leading spaces", rendered)
+                self.assertIn("a line that itself starts with `>`", rendered)
                 placeholder = "CHECK n: PASS <evidence>"
+                self.assertIn(placeholder, rendered)
                 start = rendered.index(placeholder)
                 extracted = rendered[start:start + len(placeholder)]
                 checks = [extracted.replace("CHECK n:", "CHECK %d:" % n)
@@ -234,8 +253,8 @@ class BriefScopeTests(unittest.TestCase):
                 self.render(findings=[dict(names=[name])])
 
     def test_scope_none_and_strict_schema(self):
-        self.assertEqual(brief.check_brief_fields("ops", "R2", self.fields, scope=None),
-                         brief.check_brief_fields("ops", "R2", self.fields))
+        self.assertIsNone(brief.check_brief_fields("ops", "R2", self.fields, scope=None))
+        self.assertIsNone(brief.check_brief_fields("ops", "R2", self.fields))
         for scope in ([], {"unknown": 1}, {"size_cap": 400}, {"lines_cap": 201},
                       {"findings": []}, {"root": 1}, {"rulings": ()},
                       {"findings": [dict(names="local")]},
@@ -303,7 +322,6 @@ class BriefScopeTests(unittest.TestCase):
         for key in ("grep.lineNumber", "grep.column", "grep.fullName"):
             subprocess.run(["git", "config", key, "true"], cwd=self.root, check=True)
         self.assertEqual(self.expand(findings=[dict(names=["local"])]), ["a.py"])
-
 
 
 if __name__ == "__main__":
