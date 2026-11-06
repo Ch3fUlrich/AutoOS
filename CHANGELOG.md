@@ -1,5 +1,7 @@
 # Changelog
 
+- OC-L1-SOL-TEST (D-4240, D-4314): optional handoff-check gates hard-limit recycle fail-closed with persistent prompt suppression; add the default-effort Sol lane example and remove compaction fields ignored by OpenCode 2.2.5.
+
 - AO-OCL1-PW-FILE (D-2270, D-4241): lane tools prefer an owner-only password file via AUTOOS_OCL1_PW_FILE, fail closed on file errors, and retain env-only fallback when unset.
 
 - AO-READY-FILES-BRIEF-FOLLOWUP slice 4 (2026-11-06, D-3883, #123): require finding probes, refuse contradictory per-file size caps, render canonical smaller FILES caps, and harden isolated imports, repository roots and git grep configuration; gate unchanged.

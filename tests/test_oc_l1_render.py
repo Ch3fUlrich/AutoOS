@@ -43,13 +43,10 @@ class RenderShapeTest(unittest.TestCase):
                                     "compaction", "tool_output"})
         self.assertEqual(cfg["$schema"], "https://opencode.ai/config.json")
 
-    def test_compaction_prunes_with_a_small_tail(self):
-        # Lane c (2026-10-05): opencode's prune defaults to FALSE and the tool
-        # output default is 2000 lines / 50 KB - the defaults under which the
-        # L1 session's per-turn input grew to 794k tokens. The render pins the
-        # orchestrator shape.
+    def test_compaction_uses_shared_version_shape(self):
+        # 2.2.5 normalizes away prune/tail_turns; auto works on both versions.
         cfg, _ = render(self.tmp)
-        self.assertEqual(cfg["compaction"], {"auto": True, "prune": True, "tail_turns": 4})
+        self.assertEqual(cfg["compaction"], {"auto": True})
         self.assertEqual(cfg["tool_output"], {"max_lines": 400, "max_bytes": 16384})
 
     def test_model_limit_follows_the_lane_when_pinned(self):

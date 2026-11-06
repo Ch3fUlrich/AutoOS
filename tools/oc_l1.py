@@ -456,7 +456,7 @@ def validate_lane(lane, name):
         "permission": need_permission_overrides(),
         "guard_role": guard_role,
         "inbox_file": need_abs("inbox_file"),
-        "first_prompt_file": need_abs("first_prompt_file"),
+        "first_prompt_file": need_abs("first_prompt_file"), "handoff_check": need_abs("handoff_check"),
         # REJECT finding 2: the resolved lane is what `start` spawns from, so an
         # extra name or a layer mark that validation drops never reaches a child.
         "child_env": list(child_env),

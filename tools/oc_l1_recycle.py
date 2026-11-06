@@ -195,6 +195,13 @@ def _restart(lane, port, password, sid, state, http, serve):
     new_sid = serve._create_session(port, password, lane)
     st = dict(state, session_id=new_sid, prompted=False, recycled_from=sid,
               recycled_utc=_now_utc(), recycles=int(state.get("recycles") or 0) + 1)
+    if lane.get("handoff_check"):
+        for key in ("action", "handoff_check_failed", "handoff_check_seen"):
+            st.pop(key, None)
+        hb = lane.get("heartbeat_file") or str(Path(lane["scratch_dir"]) / "heartbeat.json")
+        beat = http._read_state(hb) or {}
+        beat.pop("handoff_check_failed", None)
+        http._write_state(hb, dict(beat, action="restarted", session_id=new_sid))
     http._write_state(lane["state_file"], st)
     try:
         _post_first(lane, port, password, new_sid, http, serve)
@@ -296,6 +303,12 @@ def _check(lane, state, sid, port, password, thr, warn, http, serve):
 
     announced = read_state(sid)
     try:
+        if lane.get("handoff_check") and level == "hard":
+            from oc_l1_handoff_gate import blocked
+            failure = blocked(lane, state, sid, port, password, http)
+            if failure:
+                return _out(EXIT_FAILED, lane, "handoff_check_failed", [warn], level=level,
+                            detail=failure, **info)
         if level == "handoff":
             if announced:
                 return _out(EXIT_OK, lane, "skipped", [warn], level=level, **info)
