@@ -136,6 +136,26 @@ class CommittedLogLocationTests(WriterWaiverTests):
         with open(os.path.join(routing, "router", "docs", "decisions-log.md"), "w") as stream:
             stream.write(self.TABLE + self.row(sha))
         self.assertFalse(self.agent.cap_exception_ok(self.REF, sha, env)[0])
+
+    def test_pinned_home_reader(self):
+        home = fixtures.tempfile.mkdtemp()
+        self.addCleanup(fixtures.shutil.rmtree, home, True)
+        default = os.path.join(home, "fleet", "plangraph-data")
+        for env in ({"HOME": home}, {"HOME": home, "AUTOOS_ROUTING_DIR": "  "}):
+            self.assertEqual(self.agent._routing_log_dir(env), default)
+        with mock.patch.dict(os.environ, {"HOME": home}, clear=True):
+            self.assertEqual(self.agent._routing_log_dir(None), default)
+
+    def test_default_home_committed_binding(self):
+        home = fixtures.tempfile.mkdtemp()
+        self.addCleanup(fixtures.shutil.rmtree, home, True)
+        default = os.path.join(home, "fleet", "plangraph-data")
+        routing = self.routing_repo(self.TABLE + self.row("a" * 40))
+        os.makedirs(os.path.dirname(default))
+        os.rename(routing, default)
+        self.addCleanup(fixtures.shutil.rmtree, default, True)
+        self.assertTrue(self.agent.cap_exception_ok(self.REF, "a" * 40, {"HOME": home})[0])
+
     def test_default_directories(self):
         with mock.patch.dict(os.environ, {"HOME": os.path.dirname(self.registry_path), "USERPROFILE": os.path.dirname(self.registry_path)}):
             os.environ.pop("AUTOOS_ROUTING_DIR", None)

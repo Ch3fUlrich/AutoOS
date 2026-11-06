@@ -7463,7 +7463,8 @@ def cap_exception_row_cap(cells):
 
 
 def _routing_log_dir(env):
-    return env.get("AUTOOS_ROUTING_DIR") or os.path.join(os.path.expanduser("~"), "fleet", "plangraph-data")
+    gate = go_gate()
+    return gate._env(env, gate.ROUTING_DIR_ENV) or os.path.join(gate._home(env), "fleet", "plangraph-data")
 
 
 def _routing_committed_log(env=None):
@@ -7483,10 +7484,9 @@ def _routing_committed_log(env=None):
     """
     env = os.environ if env is None else env
     try:
-        gate = go_gate()
+        dirpath = _routing_log_dir(env)
     except Exception as exc:
         return False, "cannot load the routing gate: %s" % exc, None, None
-    dirpath = _routing_log_dir(env)
     if not os.path.exists(os.path.join(dirpath, ".git")):
         return False, ("the routing repo %r is missing or is not a git checkout"
                        % (dirpath,)), None, None
@@ -7675,7 +7675,6 @@ def judge_run_ok(run_ref, lane_sha, env=None):
         return False, reason
     path = "%s/%s.md" % (JUDGE_RUN_LOG, run_ref)
     try:
-        go_gate()
         dirpath = _routing_log_dir(env)
     except Exception as exc:
         return False, "cannot load the routing gate: %s" % exc
