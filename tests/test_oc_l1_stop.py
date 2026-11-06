@@ -125,6 +125,7 @@ class StopTest(unittest.TestCase):
         self.assertFalse(self.state_file.exists())
 
     @unittest.skipUnless(hasattr(os, "killpg") and hasattr(signal, "SIGKILL"), "POSIX signals")
+    @unittest.skipIf(os.name == "nt", "POSIX signals")
     def test_posix_reports_only_pre_signal_live_pid(self):
         for gone in (True, False):
             with self.subTest(gone=gone), \
@@ -138,6 +139,7 @@ class StopTest(unittest.TestCase):
                 self.assertEqual(result["killed_pids"], [] if gone else [42])
 
     @unittest.skipUnless(hasattr(os, "killpg") and hasattr(signal, "SIGKILL"), "POSIX signals")
+    @unittest.skipIf(os.name == "nt", "POSIX signals")
     def test_posix_group_leader_reports_only_pre_signal_live_pid(self):
         for gone in (True, False):
             reads = mock.Mock()
