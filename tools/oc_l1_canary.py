@@ -280,7 +280,6 @@ def run_canary(base_url, auth, lane, now=None):
         result["detail"] = f"post prompt returned HTTP {status}"
         return result
 
-    # 3. Wait for turn to finish (polling GET /api/session/<id> outcome)
     timeout_s = float(lane.get("canary_timeout_s", 120))
     deadline = time.time() + timeout_s
     finished = False
@@ -295,6 +294,9 @@ def run_canary(base_url, auth, lane, now=None):
         if status == 200:
             sdata = _data(payload)
             if isinstance(sdata, dict) and sdata.get("outcome"):
+                if sdata.get("error"):
+                    result["detail"] = "canary session failed; inspect session error via HTTP API"
+                    return result
                 finished = True
                 break
         time.sleep(0.5)
@@ -303,7 +305,6 @@ def run_canary(base_url, auth, lane, now=None):
         result["detail"] = f"canary timed out after {timeout_s:.0f}s"
         return result
 
-    # 4. Read messages: GET /api/session/<id>/message?order=asc
     try:
         status, payload = _request(
             port, "GET", f"/api/session/{session_id}/message?order=asc",
