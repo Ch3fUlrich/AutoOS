@@ -77,7 +77,9 @@ jobs:
 
       # shellcheck/yamllint are also used inside the suite (static-analysis parts).
       - name: Install linters
-        run: sudo apt-get update -y && sudo apt-get install -y shellcheck yamllint
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y yamllint
+          bash tools/ci/install-shellcheck.sh
 
       # The suite must never reach the internet (AGENTS.md SS5: tests assert
       # on plans, never install). That rule used to be enforced only by each
@@ -119,7 +121,9 @@ jobs:
           fetch-depth: 0
 
       - name: Install linters
-        run: sudo apt-get update -y && sudo apt-get install -y shellcheck yamllint
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y yamllint
+          bash tools/ci/install-shellcheck.sh
 
       - name: Progress regression tests
         run: |

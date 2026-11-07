@@ -1,7 +1,7 @@
 # Workstation CI runner image (autoos:CI-WORKST-RUNNER): the official runner plus the tools
 # the AutoOS/plangraph Linux jobs expect from ubuntu-latest but the runner image lacks.
 # Versions are pinned and at least two weeks old when chosen (2026-10-16).
-# Image tag: workst-runner:2.338.0-4
+# Image tag: workst-runner:2.338.0-5
 FROM ghcr.io/actions/actions-runner:2.338.0
 USER root
 ARG PWSH_VERSION=7.6.6
@@ -9,9 +9,19 @@ ARG NODE_VERSION=v24.21.0
 # fonts-dejavu-core/fonts-liberation are the Cyrillic-capable TTFs the lab PDF tests need;
 # python3-venv/python3-dev/build-essential the python and C toolchain of the jobs.
 RUN apt-get update -y \
- && apt-get install -y --no-install-recommends iproute2 shellcheck yamllint jq unzip xz-utils make ca-certificates curl \
+ && apt-get install -y --no-install-recommends iproute2 yamllint jq unzip xz-utils make ca-certificates curl \
     libicu74 libssl3 fonts-dejavu-core fonts-liberation python3-venv python3-dev build-essential \
  && rm -rf /var/lib/apt/lists/*
+# ShellCheck (official release tarball, verified before extraction)
+ARG SHELLCHECK_VERSION=0.11.0
+ARG SHELLCHECK_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+RUN cd /tmp \
+ && curl -fsSL -o shellcheck.tar.xz "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz" \
+ && printf '%s  %s\n' "$SHELLCHECK_SHA256" shellcheck.tar.xz | sha256sum -c - \
+ && tar -xJf shellcheck.tar.xz \
+ && install -m 0755 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck \
+ && shellcheck --version \
+ && rm -rf "shellcheck-v${SHELLCHECK_VERSION}" shellcheck.tar.xz
 # PowerShell (official release tarball)
 RUN curl -fsSL -o /tmp/pwsh.tgz "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz" \
  && mkdir -p /opt/microsoft/powershell/7 && tar -xzf /tmp/pwsh.tgz -C /opt/microsoft/powershell/7 \

@@ -1,4 +1,5 @@
 # Changelog
+- AO-CI-SHELLCHECK-PIN: pin CI and the runner image to SHA-256-verified ShellCheck v0.11.0 and fix the apt-key test helper's definition order.
 - AO-AGY-ORCH-PROFILE: skip terminal initialization on non-VT hosts and codify Antigravity orchestration safety rules, with regression coverage.
 - autoos:CI-RUNNER-SLOT-MUTEX (2026-11-07, D-4728): lock each runner slot, suppress blind-tick starts over running containers, and reap surplus or aged idle containers without removing busy runners.
 - autoos:USB-SYNC-BOUNDED (2026-11-07, D-4728): bound target-filesystem flushes with a validated positive timeout and kill grace; preserve real sync errors, never retry a failed pre-readback flush or unmount its target, and warn against unplugging the still-mounted stick.

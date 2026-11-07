@@ -2022,9 +2022,9 @@ apt_key_run() {
     local sb="$1" fn="$2" mode="${3:-}"
     (
         AUTOOS_DRY_RUN=0; AUTOOS_SUDO=""; AUTOOS_APT_PREFIX="$sb"; APT_UPDATED=0
-        export TMPDIR="$sb/tmp"; mkdir -p "$TMPDIR"
         log="$sb/calls.log"
         inside() { [[ "$1" == "$sb"/* ]] || { printf 'REFUSED (outside the scratch tree) %s\n' "$1" >>"$log"; return 1; }; }
+        export TMPDIR="$sb/tmp"; command mkdir -p "$TMPDIR"
         curl() {
             printf 'curl %s\n' "$*" >>"$log"
             [[ "$mode" == fail-curl ]] && return 22
