@@ -336,7 +336,7 @@ class ConflictDedupTests(unittest.TestCase):
         self.repo = Path(self._tmp.name)
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
                "-c", "commit.gpgsign=false"]
-        subprocess.run(git + ["init", "-q", str(self.repo)], check=True)
+        subprocess.run(git + ["init", "-q", "-b", "master", str(self.repo)], check=True)
         f = self.repo / "conflict.txt"
         f.write_text("base\n", encoding="utf-8")
         subprocess.run(git + ["-C", str(self.repo), "add", "conflict.txt"], check=True)
