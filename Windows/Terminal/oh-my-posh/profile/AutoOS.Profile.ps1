@@ -3,6 +3,10 @@
 # No downloads or module installation happen while a shell is opening.
 if ([Console]::IsOutputRedirected -or [Console]::IsInputRedirected) { return }
 
+# Hosts without this property (ISE, remoting, custom hosts) are treated as non-VT and cannot render the prompt.
+if (-not $Host.UI.PSObject.Properties['SupportsVirtualTerminal']) { return }
+if (-not $Host.UI.SupportsVirtualTerminal) { return }
+
 if (Get-Module -ListAvailable PSReadLine) {
     Import-Module PSReadLine -ErrorAction SilentlyContinue
     Set-PSReadLineOption -HistoryNoDuplicates -BellStyle None

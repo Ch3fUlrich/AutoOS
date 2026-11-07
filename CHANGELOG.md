@@ -1,4 +1,5 @@
 # Changelog
+- AO-AGY-ORCH-PROFILE: skip terminal initialization on non-VT hosts and codify Antigravity orchestration safety rules, with regression coverage.
 - autoos:CI-RUNNER-SLOT-MUTEX (2026-11-07, D-4728): lock each runner slot, suppress blind-tick starts over running containers, and reap surplus or aged idle containers without removing busy runners.
 - autoos:USB-SYNC-BOUNDED (2026-11-07, D-4728): bound target-filesystem flushes with a validated positive timeout and kill grace; preserve real sync errors, never retry a failed pre-readback flush or unmount its target, and warn against unplugging the still-mounted stick.
 - HANDOFF-DIRECT-READY (2026-11-07, D-4629): kick the context watchdog immediately after ready marker verification, with a five-second timeout and timer-backed nonfatal failures; AUTOOS_READY_KICK=0 disables it. The guard now instructs sessions to run ready as their last action because the successor starts at once. Hermetic tests cover exact kick argv, refusal, missing systemctl, timeout and failed start.
