@@ -2035,18 +2035,26 @@ _usb_copy_readback() {
     (( bad == 0 ))
 }
 
+# _usb_sync_target <mnt>: flush only <mnt>, bounded by AUTOOS_USB_SYNC_TIMEOUT.
+_usb_sync_target() {
+    local seconds="${AUTOOS_USB_SYNC_TIMEOUT-120}" rc=0
+    if [[ ! "$seconds" =~ ^[0-9]+$ || ! "$seconds" =~ [1-9] ]]; then
+        ui_warn "invalid AUTOOS_USB_SYNC_TIMEOUT='$seconds'; using 120 seconds"
+        seconds=120
+    fi
+    timeout --kill-after=5 "$seconds" $AUTOOS_SUDO sync -f "$1" || rc=$?
+    if (( rc == 124 || rc == 137 )); then  # 137: --kill-after fired
+        ui_err "USB sync for $1 timed out after ${seconds}s; the stick may not hold the data yet"
+    elif (( rc != 0 )); then
+        ui_err "USB sync failed rc=$rc for $1; the stick may not hold the data yet"
+    fi
+    return "$rc"
+}
+
 # _usb_copy_onto <image_path> <mountpoint> [extra_file...]
-# Mounts <image_path> read-only (a loop mount - the source is a plain ISO
-# file, never the physical device), refuses before copying anything if any
-# file inside it exceeds FAT32's 4 GiB ceiling (B16 - "check before copying,
-# refuse naming the offending file, rather than failing 20 minutes in"),
-# then copies its contents onto <mountpoint> followed by every extra file
-# (Task 9's rescue templates) into <mountpoint>/rescue/.
-#
-# AUTOOS_FAKE_ISO_MAX_FILE_BYTES/_NAME let a test exercise the B16 refusal
-# without mounting a real multi-gigabyte ISO (AGENTS.md SS5) - production
-# never sets them, so the real mount-and-measure path is what actually runs
-# outside a test.
+# Loop-mount the ISO read-only; B16 rejects oversized files before copying.
+# Extra rescue files go into rescue/. Return 2 specifically for sync failure.
+# AUTOOS_FAKE_ISO_MAX_FILE_BYTES/_NAME test B16 without a real ISO mount.
 _usb_copy_onto() {
     local image="$1" mnt="$2"; shift 2
     local -a extra_files=("$@")
@@ -2079,15 +2087,12 @@ _usb_copy_onto() {
             $AUTOOS_SUDO umount "$src_mnt" 2>/dev/null; rmdir "$src_mnt" 2>/dev/null
             return 1
         fi
-        # Read back EVERY file and compare it with the image (B15: "reads
-        # back" means the bytes, not that the device still enumerates). The
-        # second real build on 2026-09-17 (Windows engine) finished, flushed
-        # and printed "Ready to boot" while the stick had silently replaced
-        # one 16 KB cluster of md5sum.txt and part of the 3.4 GB squashfs
-        # with garbage, at the right sizes, stable on re-read. cp cannot see
-        # that; only reading the stick can - sync first so the comparison
-        # reads what the device holds, not what is still queued to it.
-        sync 2>/dev/null
+        # B15: the 2026-09-17 build returned same-size garbage after copying.
+        # Flush the target, then compare EVERY file's bytes, not enumeration.
+        if ! _usb_sync_target "$mnt"; then
+            $AUTOOS_SUDO umount "$src_mnt" 2>/dev/null; rmdir "$src_mnt" 2>/dev/null
+            return 2
+        fi
         ui_info "reading back $mnt to verify every file against the image"
         if ! _usb_copy_readback "$src_mnt" "$mnt"; then
             ui_err "usb_copy_image: $mnt did not read back identical to $image - the stick is returning different bytes than were written (hardware fault, finding B15); do not boot it, and replace the stick"
@@ -2110,23 +2115,15 @@ _usb_copy_onto() {
 }
 
 # usb_copy_image <device> <image_path> [extra_file...]
-# Copies a hybrid ISO's contents, plus any extra files (Task 9's rescue
-# templates - rescue-bootstrap.sh, ai-clients.conf, ai-dispatcher.sh), onto
-# the FAT32/exFAT partition already on <device>. Never the raw device
-# itself - that is Ventoy2Disk.sh's job, or usb_write_raw's for a
-# writeMode:raw image.
-#
+# Copies a hybrid ISO's contents, plus extra files (Task 9's rescue templates),
+# onto the FAT32/exFAT partition already on <device>. Never the raw device -
+# that is Ventoy2Disk.sh's job, or usb_write_raw's for writeMode:raw.
 # Two callers, two starting states (usb_plan, Task 6):
-#   uefi-copy - usb_guard already ran in mounted-fat32-writable mode, so the
-#               target partition is already mounted, writable, FAT32. This
-#               function never mounts or unmounts anything for that case,
-#               matching the engine's documented "no elevation at all"
-#               (B16): a mount() syscall for an already-mounted filesystem
-#               is not needed.
-#   ventoy    - Ventoy2Disk.sh has just partitioned <device> but mounted
-#               nothing; this function mounts the data partition itself
-#               (needs root - ventoy already requires elevation for the
-#               partitioning step above it) and unmounts it again when done.
+#   uefi-copy - usb_guard already mounted the partition writable FAT32; this
+#               function never mounts or unmounts for it, no elevation (B16).
+#   ventoy    - Ventoy2Disk.sh partitioned <device> but mounted nothing; this
+#               function mounts the data partition itself and unmounts it.
+# Returns nonzero on any failure; 2 from _usb_copy_onto means the flush failed.
 usb_copy_image() {
     local dev="$1" image="$2"
     local -a extra_files=()
@@ -2153,25 +2150,21 @@ usb_copy_image() {
     fi
 
     local rc=0
-    _usb_copy_onto "$image" "$mnt" "${extra_files[@]}" || rc=1
+    _usb_copy_onto "$image" "$mnt" "${extra_files[@]}" || rc=$?
 
     if (( owned_mount )); then
-        sync 2>/dev/null
-        # Finding F9: umount's own exit status used to be discarded, so a
-        # filesystem that failed to flush/unmount still reported the whole
-        # copy as successful. A failed unmount here means the device may
-        # still have unflushed writes sitting in a stale mount - treated as
-        # a hard failure of this call, and the mountpoint is deliberately
-        # left in place (not rmdir'd) rather than pretending cleanup
-        # succeeded too.
-        if ! $AUTOOS_SUDO umount "$mnt" 2>/dev/null; then
+        # F9: never risk unbounded umount writeback after a failed flush.
+        if (( rc == 2 )) || ! _usb_sync_target "$mnt"; then
+            ui_err "$mnt is still mounted; $dev must not be unplugged until it is unmounted manually"
+            rc=1
+        elif ! $AUTOOS_SUDO umount "$mnt" 2>/dev/null; then
             ui_err "usb_copy_image: could not unmount $mnt after writing to $dev (finding F9) - the write may not be fully flushed; do not unplug $dev until it is unmounted manually"
             rc=1
         else
             rmdir "$mnt" 2>/dev/null
         fi
     fi
-
+    (( rc == 2 )) && { ui_err "$mnt is still mounted; $dev must not be unplugged until it is unmounted manually"; rc=1; }
     return "$rc"
 }
 
@@ -2253,10 +2246,11 @@ with open(path, "w", encoding="utf-8") as fh:
     fi
 
     if (( owned_mount )); then
-        sync 2>/dev/null
-        # Finding F9 (same fix as usb_copy_image above): do not discard
-        # umount's own exit status.
-        if ! $AUTOOS_SUDO umount "$mnt" 2>/dev/null; then
+        # F9: keep the mount on flush failure, and check umount's status.
+        if ! _usb_sync_target "$mnt"; then
+            ui_err "$mnt is still mounted; $dev must not be unplugged until it is unmounted manually"
+            rc=1
+        elif ! $AUTOOS_SUDO umount "$mnt" 2>/dev/null; then
             ui_err "usb_ventoy_add_persistence: could not unmount $mnt after writing to $dev (finding F9) - the write may not be fully flushed"
             rc=1
         else
