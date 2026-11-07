@@ -1,4 +1,5 @@
 # Changelog
+- HANDOFF-DIRECT-READY (2026-11-07, D-4629): kick the context watchdog immediately after ready marker verification, with a five-second timeout and timer-backed nonfatal failures; AUTOOS_READY_KICK=0 disables it. The guard now instructs sessions to run ready as their last action because the successor starts at once. Hermetic tests cover exact kick argv, refusal, missing systemctl, timeout and failed start.
 - AO-WSL-PUSH-ROUTE (2026-11-07, D-2241, D-4559, D-4581): keep green records outside the disposable WSL worktree, bind source tips, preserve status through cleanup, and print, never execute, the Git Bash push command.
 - AO-MEASURE-TEST-CRLF (2026-11-07, D-4578): write measure fixtures as UTF-8 bytes on every host and register conflict-repo cleanup before git setup.
 - AO-MEASURE-TEST-DEFAULT-BRANCH (2026-11-07, D-4471): name master explicitly in the measure conflict fixture so it is independent of the host's default branch.

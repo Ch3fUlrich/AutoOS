@@ -23,7 +23,7 @@ def make_ready_fixture(tmp_path):
                        "assert len(sys.argv) == 2\nPath(sys.argv[1]).read_bytes()\n")
     checker.chmod(0o755)
     env = {**{k: os.environ[k] for k in ("SystemRoot", "PATHEXT") if k in os.environ},
-           "PATH": str(tmp_path), "HOME": str(tmp_path),
+           "PATH": str(tmp_path), "HOME": str(tmp_path), "AUTOOS_READY_KICK": "0",
            "XDG_STATE_HOME": str(tmp_path / "state"), "CLAUDE_CODE_SESSION_ID": "session-1"}
     if os.name == "nt":
         wrapper = tmp_path / "handoff-check.cmd"
@@ -233,6 +233,44 @@ def test_deleted_cwd(ready):
         assert not marker.exists()
 
 
+def test_ready_kick(ready, outcome):
+    import contextlib
+    import importlib.util
+    import io
+    handoff, _, checker, env, marker, _ = ready
+    spec = importlib.util.spec_from_file_location("guard_kick", SCRIPT)
+    guard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    env.pop("AUTOOS_READY_KICK")
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] != "systemctl":
+            return subprocess.CompletedProcess(argv, int(outcome == "refused"), "", "")
+        assert marker.is_file(), "kick must follow the verified marker"
+        assert argv == ["systemctl", "--user", "start", "--no-block", "ctx-watchdog.service"]
+        assert kwargs["timeout"] == 5
+        if outcome == "missing":
+            raise FileNotFoundError("missing systemctl")
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(argv, 5)
+        if outcome == "failed":
+            assert kwargs["check"] is True
+            raise subprocess.CalledProcessError(1, argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    stderr = io.StringIO()
+    with patch.dict(os.environ, env, clear=True), patch.object(
+            guard.subprocess, "run", side_effect=fake_run), contextlib.redirect_stderr(stderr):
+        assert guard.cmd_ready([str(handoff)]) == (2 if outcome == "refused" else 0)
+    assert len(calls) == (1 if outcome == "refused" else 2)
+    assert marker.exists() == (outcome != "refused")
+    if outcome in ("failed", "missing", "timeout"):
+        assert len(stderr.getvalue().splitlines()) == 1
+        assert "timer" in stderr.getvalue()
+
+
 # The repository runners deliberately have no pytest dependency.
 class ReadyContracts(unittest.TestCase):
     pass
@@ -249,6 +287,7 @@ for _name, _fn in list(globals().items()):
     if _name.startswith("test_"):
         _values = {"test_refuses_without_checked_pair": ["invalid", "missing", "unexecutable", "card", "handoff"],
                    "test_changed_pair_refused": [0, 1],
+                   "test_ready_kick": ["success", "refused", "failed", "missing", "timeout"],
                    "test_reason": ["cap", "router", "operator", "planned", "bogus"]}.get(_name)
         for _index, _args in enumerate([()] if _values is None else [(v,) for v in _values]):
             setattr(ReadyContracts, f"{_name}_{_index}", _case(_fn, *_args))

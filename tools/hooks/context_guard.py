@@ -228,8 +228,9 @@ def emit_line(level: str, ctx: int, threshold: int, script_path) -> str:
     n = ctx // 1000
     h = threshold // 1000
     script = str(Path(script_path).resolve())
-    tail = ("then run python3 %s ready <handoff-path> (and SendMessage "
-            "RECYCLE-READY <path> to your parent if your brief says so)" % script)
+    tail = ("SendMessage RECYCLE-READY <path> to your parent if your brief says so, "
+            "then run python3 %s ready <handoff-path> as your last action: "
+            "ready ends this session; the successor starts at once" % script)
     if level == "hard":
         return "HARD-CAP ctx=%dk >= %dk: no new work; handoff now, %s" % (n, h, tail)
     return ("HANDOFF-NOW ctx=%dk >= %dk: finish the current step, write your "
@@ -344,6 +345,16 @@ def cmd_ready(args) -> int:
     except OSError as exc:
         print("context_guard: cannot write ready marker: %s" % exc, file=sys.stderr)
         return 2
+    if os.environ.get("AUTOOS_READY_KICK") != "0":
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "start", "--no-block", "ctx-watchdog.service"],
+                capture_output=True, timeout=5, check=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            # The timer remains the backstop; a validated ready must still succeed.
+            detail = " ".join(str(exc).splitlines())
+            print("context_guard: ready kick failed; timer is the backstop: %s" % detail,
+                  file=sys.stderr)
     return 0
 
 
