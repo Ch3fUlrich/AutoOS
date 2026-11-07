@@ -14,7 +14,11 @@
 describe "usb execution"
 
 if it "usb_execute: fake mounts must not flush unrelated host filesystems"; then
-    assert_eq "$(grep -c '^    chmod .*sync' "$ROOT/tests/linux/31-usb-execution.sh")" "2"
+    # Every test that fakes mount must also fake sync (a count would break
+    # whenever a fixture is added); prints the offending test names.
+    assert_eq "$(awk '/^if it /{if(m&&!s)print t; t=$0; m=s=0}
+        />"\$fakebin\/mount"/{m=1} />"\$fakebin\/sync"/{s=1}
+        END{if(m&&!s)print t}' "$ROOT/tests/linux/31-usb-execution.sh")" ""
 fi
 
 if it "usb_execute: executing a plan runs exactly the planned commands, in order"; then
@@ -229,6 +233,127 @@ if it "usb_execute: usb_copy_image refuses a >4GiB inner file before copying any
     out="$(AUTOOS_FAKE_LSBLK="$(fake_usb usb_fat32_mounted)" AUTOOS_FAKE_ISO_MAX_FILE_BYTES=5000000000 \
            AUTOOS_FAKE_ISO_MAX_FILE_NAME="casper/big.squashfs" usb_copy_image /dev/sdb /tmp/x.iso 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"casper/big.squashfs"* && "$out" == *"4 GiB"* ]] && pass || fail "rc=$rc out=$out"
+fi
+
+if it "usb_execute: bounded sync uses only -f and the target mount"; then
+    fakebin="$(mktemp -d)"; record="$fakebin/argv"
+    printf '#!/bin/bash\n[[ "$1" == /dev/sdb1 ]] && printf "%%s\\n" "$2" >"%s/target"\nexit 0\n' "$fakebin" >"$fakebin/mount"
+    printf '#!/bin/bash\nexit 0\n' >"$fakebin/umount"
+    printf '#!/bin/bash\nprintf "%%s|%%s|%%s\\n" "$#" "$1" "$2" >>"%s"\n' "$record" >"$fakebin/sync"
+    chmod +x "$fakebin/"{mount,umount,sync}
+    img="$(mktemp)"
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
+        usb_copy_image /dev/sdb "$img" 2>&1)"; rc=$?
+    expected="2|-f|$(cat "$fakebin/target")"
+    bad=0; calls=0
+    while IFS= read -r call; do
+        ((calls+=1))
+        [[ "$call" == "$expected" ]] || bad=1
+    done <"$record"
+    [[ $rc -eq 0 && $calls -gt 0 && $bad -eq 0 ]] && pass || fail "rc=$rc argv=$(cat "$record") out=$out"
+    rm -rf "$fakebin"; rm -f "$img"
+fi
+
+if it "usb_execute: bounded sync times out and fails copy within ten seconds"; then
+    fakebin="$(mktemp -d)"
+    printf '#!/bin/bash\nexit 0\n' >"$fakebin/mount"
+    printf '#!/bin/bash\necho "$*" >>"%s/umounts"\n' "$fakebin" >"$fakebin/umount"
+    printf '#!/bin/bash\nexec sleep 12\n' >"$fakebin/sync"
+    chmod +x "$fakebin/"{mount,umount,sync}
+    img="$(mktemp)"; started=$SECONDS
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_USB_SYNC_TIMEOUT=1 \
+        AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FAKE_ISO_MAX_FILE_BYTES=1 \
+        usb_copy_image /dev/sdb "$img" 2>&1)"; rc=$?
+    elapsed=$((SECONDS - started))
+    [[ $rc -ne 0 && $elapsed -lt 10 && "$out" == *"timed out after 1s"* \
+        && "$out" == *"still mounted"* && "$out" == *"must not be unplugged"* \
+        && ! -e "$fakebin/umounts" ]] && pass || fail "rc=$rc elapsed=$elapsed out=$out umount=$(cat "$fakebin/umounts" 2>/dev/null)"
+    rm -rf "$fakebin"; rm -f "$img"
+fi
+
+if it "usb_execute: pre-readback sync failure is not retried and leaves the target mounted"; then
+    fakebin="$(mktemp -d)"
+    printf '#!/bin/bash\n[[ "$1" == /dev/sdb1 ]] && echo "$2" >"%s/target"\nexit 0\n' "$fakebin" >"$fakebin/mount"
+    printf '#!/bin/bash\necho "$*" >>"%s/umounts"\n' "$fakebin" >"$fakebin/umount"
+    printf '#!/bin/bash\necho call >>"%s/calls"\nexec sleep 12\n' "$fakebin" >"$fakebin/sync"
+    chmod +x "$fakebin/"{mount,umount,sync}
+    img="$(mktemp)"
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_USB_SYNC_TIMEOUT=1 \
+        AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_copy_image /dev/sdb "$img" 2>&1)"; rc=$?
+    target="$(cat "$fakebin/target")"
+    [[ $rc -ne 0 && "$(wc -l <"$fakebin/calls")" -eq 1 && "$out" == *"still mounted"* \
+        && "$(cat "$fakebin/umounts")" != *"$target"* ]] && pass || fail "rc=$rc out=$out"
+    rm -rf "$fakebin"; rm -f "$img"
+fi
+
+if it "usb_execute: persistence sync timeout leaves the target mounted"; then
+    fakebin="$(mktemp -d)"
+    printf '#!/bin/bash\nexit 0\n' >"$fakebin/mount"
+    cp "$fakebin/mount" "$fakebin/dd"
+    printf '#!/bin/bash\necho called >"%s/umounts"\n' "$fakebin" >"$fakebin/umount"
+    printf '#!/bin/bash\nexec sleep 12\n' >"$fakebin/sync"
+    chmod +x "$fakebin/"{mount,dd,umount,sync}
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_USB_SYNC_TIMEOUT=1 \
+        AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" usb_ventoy_add_persistence /dev/sdb 1 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"still mounted"* && "$out" == *"must not be unplugged"* \
+        && ! -e "$fakebin/umounts" ]] && pass || fail "rc=$rc out=$out"
+    rm -rf "$fakebin"
+fi
+
+if it "usb_execute: bounded sync source contains no bare sync"; then
+    out="$(python3 - "$ROOT/lib/linux/usb.sh" <<'PY'
+import re, shlex, sys
+inside = False
+for n, line in enumerate(open(sys.argv[1]), 1):
+    if line.startswith('_usb_sync_target() {'):
+        inside = True
+    words = re.search(r'\bsync\b', line)  # plain regex: shlex raised on unbalanced quotes
+    # Quoted text and comments dropped; also catches sync; (sync) /usr/bin/sync
+    cmd = re.sub(r'(^|\s)#.*', '', re.sub(r'"(\\.|[^"\\])*"|\'[^\']*\'', '""', line)) if words else ''
+    for m in re.finditer(r'(^|[/\s;&|()])sync($|[\s;&|()])', cmd):
+        if not inside or not cmd[m.end(1):].startswith('sync -f '):
+            print(f'{n}: {line.strip()}')
+    if line.startswith('}'):
+        inside = False
+PY
+)"
+    [[ -z "$out" ]] && pass || fail "bare sync: $out"
+fi
+
+if it "usb_execute: sync EIO reports failed rc=1 and preserves stderr, not timeout"; then
+    fakebin="$(mktemp -d)"
+    printf '#!/bin/bash\necho "sync: fake EIO" >&2\nexit 1\n' >"$fakebin/sync"
+    chmod +x "$fakebin/sync"
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" _usb_sync_target /fake/target 2>&1)"; rc=$?
+    [[ $rc -ne 0 && "$out" == *"failed rc=1"* && "$out" == *"sync: fake EIO"* && "$out" != *"timeout"* ]] && pass || fail "rc=$rc out=$out"
+    rm -rf "$fakebin"
+fi
+
+if it "usb_execute: uefi-copy flush failure returns 1 and says the pre-mounted stick stays mounted"; then
+    fakebin="$(mktemp -d)"
+    printf '#!/bin/bash\nexit 0\n' >"$fakebin/mount"; cp "$fakebin/mount" "$fakebin/cp"
+    printf '#!/bin/bash\necho "$*" >>"%s/umounts"\n' "$fakebin" >"$fakebin/umount"
+    printf '#!/bin/bash\necho "sync: fake EIO" >&2\nexit 1\n' >"$fakebin/sync"
+    chmod +x "$fakebin/"{mount,cp,umount,sync}
+    img="$(mktemp)"
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_FAKE_LSBLK="$(fake_usb usb_fat32_mounted)" \
+        usb_copy_image /dev/sdb "$img" 2>&1)"; rc=$?
+    [[ $rc -eq 1 && "$out" == *"failed rc=1"* && "$out" == *"/media/user/AUTOOS is still mounted"* \
+        && "$(cat "$fakebin/umounts" 2>/dev/null)" != *"/media/user/AUTOOS"* ]] && pass || fail "rc=$rc out=$out"
+    rm -rf "$fakebin"; rm -f "$img"
+fi
+
+if it "usb_execute: invalid sync deadlines warn and retain the 120 second bound"; then
+    fakebin="$(mktemp -d)"
+    printf '#!/bin/bash\nprintf "%%s\\n" "$*"\n' >"$fakebin/timeout"
+    chmod +x "$fakebin/timeout"
+    bad=0
+    for deadline in 0 '' -1 1m abc; do
+        out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_USB_SYNC_TIMEOUT="$deadline" _usb_sync_target /fake/target 2>&1)"
+        [[ "$out" == *"invalid AUTOOS_USB_SYNC_TIMEOUT"* && "$out" == *"--kill-after=5 120 sync -f /fake/target"* ]] || bad=1
+    done
+    [[ $bad -eq 0 ]] && pass || fail "invalid deadline accepted: $out"
+    rm -rf "$fakebin"
 fi
 
 if it "usb_execute: usb_copy_image fails the whole call when umount itself fails after the write (finding F9)"; then
