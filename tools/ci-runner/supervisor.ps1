@@ -65,11 +65,24 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
                 }
             }
         }
-        $procs = @(Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" | Where-Object { $_.CommandLine -match 'runner-loop\.ps1' })
+        $blindTick = $false
+        $procs = @()
+        try {
+            $procs = @(Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -ErrorAction Stop | Where-Object { $_.CommandLine -match 'runner-loop\.ps1' })
+        } catch { $blindTick = $true; Log "blind tick: CIM query failed: $($_.Exception.Message)" }
         $containers = @(docker ps --format '{{.Names}}' 2>$null)
+        if ($LASTEXITCODE -ne 0) { throw 'docker container discovery failed' }
+        $slotNames = @(Get-CiSlotNames -Config $cfg)
+        if ($procs.Count -eq 0 -and @($containers | Where-Object {
+            $containerName = $_
+            @($slotNames | Where-Object { $containerName -like "$_-*" }).Count -gt 0
+        }).Count -gt 0) { $blindTick = $true; Log 'blind tick: no runner-loop processes found while slot containers run' }
+        $maxAge = 120
+        if ($cfg.PSObject.Properties['container_max_age_minutes']) { $maxAge = [double]$cfg.container_max_age_minutes }
         $runnersByRepo = @{}
         foreach ($r in $cfg.repos) {
             $runners = @(gh api "repos/$($r.repo)/actions/runners" --jq '.runners[] | {id, name, status, busy}' 2>$null | ForEach-Object { $_ | ConvertFrom-Json })
+            if ($LASTEXITCODE -ne 0) { throw "runner discovery failed for $($r.repo); skipping tick" }
             $runnersByRepo[[string]$r.repo] = $runners
             # A fresh ephemeral runner shows offline until its session connects: delete a registration
             # only after it has stayed offline for 3 min (measured 2026-10-16: deleting at first sight churned).
@@ -91,6 +104,24 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
             $r = $cfg.repos | Where-Object { $name -match "^$([regex]::Escape($_.prefix))-[0-9]+$" } | Select-Object -First 1
             if (-not $r) { continue }
             $runners = @($runnersByRepo[[string]$r.repo])
+            $slotContainers = @(
+                foreach ($containerName in @($containers | Where-Object { $_ -like "$name-*" })) {
+                    $registration = @($runners | Where-Object { $_.name -eq $containerName })
+                    # Unknown job state is protected, not assumed idle.
+                    $isBusy = $registration.Count -ne 1 -or $registration[0].busy -ne $false
+                    $created = docker inspect --format '{{.Created}}' $containerName 2>$null
+                    if ($LASTEXITCODE -ne 0) { continue }
+                    [pscustomobject]@{ Name = $containerName; Created = [datetimeoffset]::Parse($created); Busy = $isBusy }
+                }
+            )
+            foreach ($remove in @(Get-CiContainersToRemove -Containers $slotContainers -MaxAgeMinutes $maxAge)) {
+                # Recheck job state immediately before removal; API errors fail closed.
+                $fresh = @(gh api "repos/$($r.repo)/actions/runners" --jq '.runners[] | {name, busy}' 2>$null | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.name -eq $remove })
+                if ($LASTEXITCODE -ne 0 -or $fresh.Count -ne 1 -or $fresh[0].busy -ne $false) { continue }
+                docker rm -f $remove *> $null
+                Log "reap $remove rc=$LASTEXITCODE"
+            }
+            if ($blindTick) { continue }
             $loop = $procs | Where-Object { $_.CommandLine -match "-Name\s+'?$([regex]::Escape($name))'?(\s|$)" }
             $loopAlive = (@($loop).Count -gt 0)
             $online = (@($runners | Where-Object { $_.name -like "$name-*" -and $_.status -eq 'online' }).Count -gt 0)

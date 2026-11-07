@@ -12026,12 +12026,9 @@ Test-Case 'go-gate front: the gate script is imported, not restated' {
 
 # ─── ci-runner (D-1380) ─────────────────────────────────────────────────────
 Import-Module (Join-Path $Root 'tools\ci-runner\CiRunner.psm1') -Force -DisableNameChecking
-
 Test-Case 'ci-runner: Get-CiRunnerDockerArgs never puts the registration token in argv' {
     $a = Get-CiRunnerDockerArgs -Name 'workst-a-1-20261016120000' -Repo 'example-owner/example' -Labels 'workst,workstation,fleet-ci' -Memory '8g' -Image 'workst-runner:2.338.0-2'
-    # T1: the function has no token parameter at all...
     Assert-True (-not (@((Get-Command Get-CiRunnerDockerArgs).Parameters.Keys) -match 'Token')) 'Get-CiRunnerDockerArgs takes a token parameter'
-    # ...so argv carries only the ENV NAME, as the exact pair '-e','RUNNER_TOKEN'.
     $pairs = 0
     for ($k = 0; $k -lt $a.Count - 1; $k++) { if ($a[$k] -eq '-e' -and $a[$k + 1] -eq 'RUNNER_TOKEN') { $pairs++ } }
     Assert-Equal $pairs 1
@@ -12050,7 +12047,6 @@ Test-Case 'ci-runner: Get-CiRunnerDockerArgs never puts the registration token i
     Assert-Equal $a[$e + 1] 'bash'
     Assert-Equal $a[$e + 2] 'workst-runner:2.338.0-2'
 }
-
 Test-Case 'ci-runner: Get-CiRunnerDockerArgs -DockerSocket mounts the host socket' {
     $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
     $with = Get-CiRunnerDockerArgs @base -DockerSocket
@@ -12066,7 +12062,6 @@ Test-Case 'ci-runner: Get-CiRunnerDockerArgs -DockerSocket mounts the host socke
     Assert-True (-not ($without -contains '-v')) '-v without -DockerSocket'
     Assert-True (-not ($without -contains '/var/run/docker.sock:/var/run/docker.sock')) 'socket mount without -DockerSocket'
 }
-
 Test-Case 'ci-runner: Get-CiRunnerDockerArgs -NetNs adds the caps it needs' {
     $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
     $net = Get-CiRunnerDockerArgs @base -NetNs
@@ -12081,44 +12076,78 @@ Test-Case 'ci-runner: Get-CiRunnerDockerArgs -NetNs adds the caps it needs' {
     Assert-True (-not ($plain -contains 'NET_ADMIN')) 'NET_ADMIN without -NetNs'
     Assert-True (-not ($plain -contains 'seccomp=unconfined')) 'seccomp=unconfined without -NetNs'
 }
-
 Test-Case 'ci-runner: Get-CiSlotAction starts a slot whose loop is gone' {
-    # T4: loop dead => start, whatever the other signals say.
     Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'start'
-    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 99) 'start'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 99) 'ok'
     Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'start'
 }
-
+Test-Case 'ci-runner: running container refuses start even with missing loop' {
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $true -UnhealthyMinutes 99) 'ok'
+}
+Test-Case 'ci-runner: mutex names are stable and per slot' {
+    Assert-Equal (Get-CiLoopMutexName 'test-a-1') (Get-CiLoopMutexName 'test-a-1')
+    Assert-True ((Get-CiLoopMutexName 'test-a-1') -ne (Get-CiLoopMutexName 'test-a-2')) 'slots share a mutex'
+}
+Test-Case 'ci-runner: second loop mutex acquisition exits without launching' {
+    $mutexName = Get-CiLoopMutexName "test-$([guid]::NewGuid().ToString('N'))"
+    $holder = [System.Threading.Mutex]::new($false, $mutexName)
+    $owned = $false
+    try {
+        $owned = Enter-CiLoopMutex $holder
+        Assert-True $owned 'first loop did not acquire'
+        $modulePath = (Join-Path $Root 'tools/ci-runner/CiRunner.psm1').Replace("'", "''")
+        $code = "Import-Module '$modulePath' -DisableNameChecking; `$m = [Threading.Mutex]::new(`$false, '$mutexName'); try { if (Enter-CiLoopMutex `$m) { `$m.ReleaseMutex(); exit 9 }; exit 0 } finally { `$m.Dispose() }"
+        & pwsh -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code)))
+        Assert-Equal $LASTEXITCODE 0
+    } finally {
+        if ($owned) { $holder.ReleaseMutex() }
+        $holder.Dispose()
+    }
+}
+Test-Case 'ci-runner: reaper age boundary keeps max-1 and removes max+1' {
+    $now = [datetimeoffset]'2026-11-07T12:00:00Z'
+    foreach ($age in @(119, 120, 121)) {
+        $items = @([pscustomobject]@{ Name = 'test-a-1-old'; Created = $now.AddMinutes(-$age); Busy = $false })
+        $removed = @(Get-CiContainersToRemove -Containers $items -Now $now -MaxAgeMinutes 120)
+        Assert-Equal $removed.Count ([int]($age -gt 120))
+    }
+}
+Test-Case 'ci-runner: reaper never removes busy containers and keeps one idle per slot' {
+    $now = [datetimeoffset]'2026-11-07T12:00:00Z'
+    foreach ($slot in @('test-a-1', 'test-a-2')) {
+        $items = @(
+            [pscustomobject]@{ Name = "$slot-busy"; Created = $now.AddMinutes(-999); Busy = $true },
+            [pscustomobject]@{ Name = "$slot-new"; Created = $now.AddMinutes(-1); Busy = $false },
+            [pscustomobject]@{ Name = "$slot-extra"; Created = $now.AddMinutes(-2); Busy = $false }
+        )
+        $removed = @(Get-CiContainersToRemove -Containers $items -Now $now)
+        Assert-True (-not ($removed -contains "$slot-busy")) 'busy container selected for removal'
+        Assert-Equal $removed.Count 1
+        Assert-Equal $removed[0] "$slot-extra"
+    }
+}
 Test-Case 'ci-runner: Get-CiSlotAction leaves a live healthy slot alone' {
-    # T5: loop alive and online, or busy, or its container running => ok.
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'ok'
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 0) 'ok'
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $true -UnhealthyMinutes 0) 'ok'
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 60) 'ok'
 }
-
 Test-Case 'ci-runner: Get-CiSlotAction waits, then restarts, never a busy runner' {
-    # T6: live + not online + not busy + no container: wait up to 5 min, then restart.
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'wait'
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5) 'wait'
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5.5) 'restart'
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'restart'
-    # T6: a running job must not be killed.
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 60) 'ok'
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 600) 'ok'
     Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 600) 'start'
 }
-
 Test-Case 'ci-runner: Test-CiOfflineExpired waits 3 minutes for a fresh runner' {
-    # T7: a fresh ephemeral runner shows offline until its session connects.
     Assert-True (-not (Test-CiOfflineExpired -OfflineMinutes 0)) '0 min must not expire'
     Assert-True (-not (Test-CiOfflineExpired -OfflineMinutes 2.9)) '2.9 min must not expire'
     Assert-True (Test-CiOfflineExpired -OfflineMinutes 3) '3 min must expire'
     Assert-True (Test-CiOfflineExpired -OfflineMinutes 42) '42 min must expire'
 }
-
 Test-Case 'ci-runner: Get-CiSlotNames expands every prefix into its slots' {
-    # T8
     $cfg = [pscustomobject]@{ repos = @(
         [pscustomobject]@{ prefix = 'workst-a'; slots = 2 },
         [pscustomobject]@{ prefix = 'workst-b'; slots = 1 }) }
@@ -12128,9 +12157,7 @@ Test-Case 'ci-runner: Get-CiSlotNames expands every prefix into its slots' {
     Assert-Equal $names[1] 'workst-a-2'
     Assert-Equal $names[2] 'workst-b-1'
 }
-
 Test-Case 'ci-runner: slots.example.json matches the live config shape' {
-    # T9
     $ex = Get-Content -LiteralPath (Join-Path $Root 'tools\ci-runner\slots.example.json') -Raw | ConvertFrom-Json
     $repos = @($ex.repos)
     Assert-True ($repos.Count -ge 2) 'the example needs at least two repos'
@@ -12145,22 +12172,16 @@ Test-Case 'ci-runner: slots.example.json matches the live config shape' {
         Assert-True ([int]$r.slots -ge 1) "slots must be >= 1 on $($r.prefix)"
     }
 }
-
 Test-Case 'ci-runner: ci.yml keeps fork PRs off the self-hosted runners' {
-    # T10
     $lines = @(Get-Content -LiteralPath (Join-Path $Root '.github\workflows\ci.yml'))
     $runsOn = @($lines | Where-Object { $_ -match '^\s*runs-on:' })
     Assert-True ($runsOn.Count -gt 0) 'no runs-on: lines in ci.yml'
-    # Every job, the Windows one included: a self-hosted Windows fleet-ci runner would otherwise
-    # take fork PRs (22aa4730 moved it to [self-hosted, windows, fleet-ci] without the guard).
     foreach ($line in $runsOn) {
         Assert-True ($line -like '*github.event.pull_request.head.repo.full_name == github.repository*') "fork guard missing: $($line.Trim())"
         Assert-True (($line -like "*'ubuntu-latest'*") -or ($line -like "*'windows-latest'*")) "no GitHub-hosted fallback: $($line.Trim())"
     }
 }
-
 Test-Case 'ci-runner: no file under tools/ci-runner hardcodes a host path' {
-    # T11: the install dir is $PSScriptRoot, so nothing names a drive or the install dir.
     $ciDir = Join-Path $Root 'tools\ci-runner'
     $files = @()
     if (Get-Command git -ErrorAction SilentlyContinue) {
@@ -12180,7 +12201,6 @@ Test-Case 'ci-runner: no file under tools/ci-runner hardcodes a host path' {
         Assert-True ($text -notmatch $install) "install dir in tools/ci-runner/$name"
     }
 }
-
 Test-Case 'ci-runner: Get-CiRunnerDockerArgs -CacheVolumes adds the three cache mounts and sccache envs' {
     $cbase = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
     $cmounts = @('ci-cargo-registry-workst-plangraph:/home/runner/.cargo/registry',
@@ -12193,45 +12213,38 @@ Test-Case 'ci-runner: Get-CiRunnerDockerArgs -CacheVolumes adds the three cache 
     $cwith = Get-CiRunnerDockerArgs @cbase -CacheVolumes -CacheScope 'workst-plangraph'
     $cep = [array]::IndexOf([string[]]$cwith, '--entrypoint')
     Assert-True ($cep -ge 0) '--entrypoint missing'
-    # each mount appears as the exact pair '-v','<volume>:<path>'
     foreach ($cm in $cmounts) {
         $cpair = $false
         for ($k = 0; $k -lt $cwith.Count - 1; $k++) { if ($cwith[$k] -eq '-v' -and $cwith[$k + 1] -eq $cm) { $cpair = $true; break } }
         Assert-True $cpair "mount pair '-v','$cm' missing with -CacheVolumes"
     }
-    # each env appears as the exact pair '-e','<K>=<V>'
     foreach ($ce in $cenvs) {
         $cpair = $false
         for ($k = 0; $k -lt $cwith.Count - 1; $k++) { if ($cwith[$k] -eq '-e' -and $cwith[$k + 1] -eq $ce) { $cpair = $true; break } }
         Assert-True $cpair "env pair '-e','$ce' missing with -CacheVolumes"
     }
-    # docker run options must all precede --entrypoint / the image
     foreach ($cneedle in $cwant) {
         $ci = [array]::IndexOf([string[]]$cwith, $cneedle)
         Assert-True ($ci -ge 0) "$cneedle missing from the docker args"
         Assert-True ($ci -lt $cep) "$cneedle must come before --entrypoint"
     }
-    # without the switch none of them appear
     $cwithout = Get-CiRunnerDockerArgs @cbase
     foreach ($cneedle in $cwant) {
         Assert-True (-not (@($cwithout) -contains $cneedle)) "$cneedle appears without -CacheVolumes"
     }
 }
-
 Test-Case 'ci-runner: Get-CiCacheVolumes returns the three cache volume names in order' {
     $cvols = @(Get-CiCacheVolumes -Scope 'workst-plangraph')
     Assert-Equal $cvols.Count 3
     Assert-Equal $cvols[0] 'ci-cargo-registry-workst-plangraph'
     Assert-Equal $cvols[1] 'ci-cargo-git-workst-plangraph'
     Assert-Equal $cvols[2] 'ci-sccache-workst-plangraph'
-    # single source of truth: -CacheVolumes mounts exactly these volumes, in this order
     $cargs = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -CacheVolumes -CacheScope 'workst-plangraph'
     $cgot = @()
     for ($k = 0; $k -lt $cargs.Count - 1; $k++) { if ($cargs[$k] -eq '-v') { $cgot += ($cargs[$k + 1] -split ':')[0] } }
     Assert-Equal $cgot.Count 3
     for ($k = 0; $k -lt 3; $k++) { Assert-Equal $cgot[$k] $cvols[$k] }
 }
-
 Test-Case 'ci-runner: different repository cache scopes have disjoint volume names' {
     $first = @(Get-CiCacheVolumes -Scope 'workst-a')
     $second = @(Get-CiCacheVolumes -Scope 'workst-b')
@@ -12239,7 +12252,6 @@ Test-Case 'ci-runner: different repository cache scopes have disjoint volume nam
     Assert-Equal $second.Count 3
     foreach ($volume in $first) { Assert-True (-not ($second -contains $volume)) "shared volume: $volume" }
 }
-
 Test-Case 'ci-runner: cache volume scope is mandatory and rejects invalid values' {
     $binding = @((Get-Command Get-CiCacheVolumes).Parameters['Scope'].Attributes | Where-Object { $_ -is [System.Management.Automation.ParameterAttribute] })
     Assert-True ($binding[0].Mandatory) 'Scope must be mandatory'
@@ -12249,7 +12261,6 @@ Test-Case 'ci-runner: cache volume scope is mandatory and rejects invalid values
         Assert-True $threw "invalid scope accepted: '$scope'"
     }
 }
-
 Test-Case 'ci-runner: -CacheVolumes throws for empty or invalid CacheScope' {
     $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'x'; Memory = '4g'; Image = 'im:1' }
     $threw = $false
@@ -12261,14 +12272,12 @@ Test-Case 'ci-runner: -CacheVolumes throws for empty or invalid CacheScope' {
         Assert-True $threw "invalid CacheScope accepted: '$scope'"
     }
 }
-
 Test-Case 'ci-runner: no cache switch and no scope still builds uncached argv' {
     $args = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1'
     Assert-Contains $args '--entrypoint'
     Assert-True (-not ($args -contains '-v')) 'cache mount without -CacheVolumes'
     Assert-True (-not ($args -contains 'SCCACHE_DIR=/home/runner/.cache/sccache')) 'cache env without -CacheVolumes'
 }
-
 Test-Case 'ci-runner: Get-CiPrepullImages returns the config prepull array, empty when absent' {
     $cpreCfg = [pscustomobject]@{ prepull = @('postgres:16', 'redis:7') }
     $cpre = @(Get-CiPrepullImages -Config $cpreCfg)
@@ -12281,7 +12290,6 @@ Test-Case 'ci-runner: Get-CiPrepullImages returns the config prepull array, empt
     $cexPre = @(Get-CiPrepullImages -Config $cex)
     Assert-True ($cexPre -contains 'postgres:16') 'slots.example.json has no postgres:16 in prepull'
 }
-
 Test-Case 'ci-runner: Dockerfile pins and verifies Temporal CLI 1.9.1, sccache 0.18.0 and the cache dirs' {
     $cdf = Get-Content -LiteralPath (Join-Path $Root 'tools/ci-runner/Dockerfile') -Raw
     Assert-True ($cdf -match 'v1\.9\.1') 'Temporal CLI v1.9.1 not pinned'
@@ -12299,7 +12307,6 @@ Test-Case 'ci-runner: Dockerfile pins and verifies Temporal CLI 1.9.1, sccache 0
     Assert-True ($cdf -match '/home/runner/\.cargo/git') 'cargo git dir missing'
     Assert-True ($cdf -match '/home/runner/\.cache/sccache') 'sccache cache dir missing'
 }
-
 Test-Case 'ci-runner: Get-CiRunnerDockerArgs adds --cpus and --cpu-shares before --entrypoint' {
     $c1on = Get-CiRunnerDockerArgs -Name 'i1' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1' -Cpus 8
     $c1cpu = -1
@@ -12319,7 +12326,6 @@ Test-Case 'ci-runner: Get-CiRunnerDockerArgs adds --cpus and --cpu-shares before
     Assert-Equal $c1on[$c1sharesNext] '1024'
     Assert-True ($c1cpu -lt $c1ep) '--cpus must come before --entrypoint'
     Assert-True ($c1shares -lt $c1ep) '--cpu-shares must come before --entrypoint'
-    # no -Cpus (default 0) and an explicit -Cpus 0 must add neither flag
     $c1off = Get-CiRunnerDockerArgs -Name 'i2' -Repo 'example-owner/example' -Labels 'x' -Memory '4g' -Image 'im:1'
     Assert-True (-not ($c1off -contains '--cpus')) '--cpus must be absent without -Cpus'
     Assert-True (-not ($c1off -contains '--cpu-shares')) '--cpu-shares must be absent without -Cpus'
@@ -12327,7 +12333,6 @@ Test-Case 'ci-runner: Get-CiRunnerDockerArgs adds --cpus and --cpu-shares before
     Assert-True (-not ($c1zero -contains '--cpus')) '--cpus must be absent with -Cpus 0'
     Assert-True (-not ($c1zero -contains '--cpu-shares')) '--cpu-shares must be absent with -Cpus 0'
 }
-
 Test-Case 'ci-runner: Get-CiSlotCpus prefers repo cpus, then cpus_default, then 8, zero = no cap' {
     $c2cfg = [pscustomobject]@{ cpus_default = 6 }
     $c2cfgNone = [pscustomobject]@{ labels = 'x' }
@@ -12338,11 +12343,9 @@ Test-Case 'ci-runner: Get-CiSlotCpus prefers repo cpus, then cpus_default, then 
     Assert-Equal (Get-CiSlotCpus -Repo $c2repo -Config $c2cfg) 4
     Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfg) 6
     Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfgNone) 8
-    # a resolved 0 means "no cap" and must survive instead of falling back to 8
     Assert-Equal (Get-CiSlotCpus -Repo $c2repoZero -Config $c2cfg) 0
     Assert-Equal (Get-CiSlotCpus -Repo $c2repoBare -Config $c2cfgZero) 0
 }
-
 Test-Case 'ci-runner: Test-CiDiskFloor prunes below the floor and stays off when floor <= 0' {
     Assert-True (Test-CiDiskFloor -FreeGB 4 -FloorGB 50) 'free below the floor must prune'
     Assert-True (-not (Test-CiDiskFloor -FreeGB 60 -FloorGB 50)) 'free above the floor must not prune'
@@ -12350,7 +12353,6 @@ Test-Case 'ci-runner: Test-CiDiskFloor prunes below the floor and stays off when
     Assert-True (-not (Test-CiDiskFloor -FreeGB 1 -FloorGB 0)) 'a floor of 0 disables the check'
     Assert-True (-not (Test-CiDiskFloor -FreeGB 1 -FloorGB (-1))) 'a negative floor disables the check'
 }
-
 Test-Case 'ci-runner: Get-CiPruneCommands returns only the dangling-image and build-cache prunes' {
     $c4 = @(Get-CiPruneCommands)
     Assert-Equal $c4.Count 2
@@ -12366,8 +12368,6 @@ Test-Case 'ci-runner: Get-CiPruneCommands returns only the dangling-image and bu
     Assert-Equal $c4bld[2] '-f'
     Assert-Equal $c4bld[3] '--keep-storage'
     Assert-Equal $c4bld[4] '20gb'
-    # the ci-cargo-registry / ci-cargo-git / ci-sccache caches are named volumes and the
-    # runner/job images are tagged: neither may ever appear in a prune
     foreach ($c4outer in $c4) {
         foreach ($c4inner in $c4outer) {
             Assert-True ($c4inner -ne 'volume') "prune must never touch volumes: $c4inner"
@@ -12376,7 +12376,6 @@ Test-Case 'ci-runner: Get-CiPruneCommands returns only the dangling-image and bu
         }
     }
 }
-
 Test-Case 'ci-runner: slots.example.json sets cpus_default 8 and disk_floor_gb 50' {
     $c5roots = @()
     if ($PSScriptRoot) { $c5roots += (Join-Path $PSScriptRoot '..') }
@@ -12398,7 +12397,6 @@ Test-Case 'ci-runner: slots.example.json sets cpus_default 8 and disk_floor_gb 5
     Assert-Equal ([int]($c5cfg.cpus_default)) 8
     Assert-Equal ([int]($c5cfg.disk_floor_gb)) 50
 }
-
 Test-Case 'ci-runner: Dockerfile installs the Cyrillic-capable fonts and the Python build toolchain' {
     $c6roots = @()
     if ($PSScriptRoot) { $c6roots += (Join-Path $PSScriptRoot '..') }
@@ -12421,7 +12419,6 @@ Test-Case 'ci-runner: Dockerfile installs the Cyrillic-capable fonts and the Pyt
     Assert-True ($c6raw -match 'python3-dev') 'python3-dev missing from the Dockerfile'
     Assert-True ($c6raw -match 'build-essential') 'build-essential missing from the Dockerfile'
 }
-
 # ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')

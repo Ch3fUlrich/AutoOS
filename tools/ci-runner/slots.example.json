@@ -3,6 +3,7 @@
   "prepull": ["postgres:16"],
   "cpus_default": 8,
   "disk_floor_gb": 50,
+  "container_max_age_minutes": 120,
   "repos": [
     {
       "repo": "example-owner/example",

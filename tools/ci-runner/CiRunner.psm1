@@ -58,7 +58,8 @@ function Get-CiSlotAction {
         [Parameter(Mandatory)][bool]$ContainerRunning,
         [Parameter(Mandatory)][double]$UnhealthyMinutes
     )
-    # start: the loop process is gone - nothing else matters, start a new one.
+    # A running container wins even when process discovery misses its loop.
+    if ($ContainerRunning) { return 'ok' }
     if (-not $LoopAlive) { return 'start' }
     # ok: a runner is online, or a job is running, or the container is still up.
     if ($Online -or $Busy -or $ContainerRunning) { return 'ok' }
@@ -160,4 +161,31 @@ function Get-CiPruneCommands {
     return $prunes
 }
 
-Export-ModuleMember -Function Get-CiRunnerDockerArgs, Get-CiSlotAction, Test-CiOfflineExpired, Get-CiSlotNames, Get-CiCacheVolumes, Get-CiPrepullImages, Get-CiSlotCpus, Test-CiDiskFloor, Get-CiPruneCommands
+function Get-CiLoopMutexName {
+    param([Parameter(Mandatory)][ValidatePattern('\A[a-zA-Z0-9-]+\z')][string]$Name)
+    return "Global\AutoOS-CI-Runner-Loop-$Name"
+}
+
+function Enter-CiLoopMutex {
+    param([Parameter(Mandatory)][System.Threading.Mutex]$Mutex)
+    try { return $Mutex.WaitOne(0) }
+    catch [System.Threading.AbandonedMutexException] { return $true }
+}
+
+function Get-CiContainersToRemove {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Containers,
+        [ValidateRange(1, 525600)][double]$MaxAgeMinutes = 120,
+        [datetimeoffset]$Now = [datetimeoffset]::UtcNow
+    )
+    # Input is one slot only. Keep the newest eligible idle container; busy is sacrosanct.
+    $keptIdle = $false
+    foreach ($container in @($Containers | Sort-Object Created -Descending)) {
+        if ($container.Busy) { continue }
+        if (($Now - [datetimeoffset]$container.Created).TotalMinutes -gt $MaxAgeMinutes -or $keptIdle) {
+            $container.Name
+        } else { $keptIdle = $true }
+    }
+}
+
+Export-ModuleMember -Function Get-CiRunnerDockerArgs, Get-CiSlotAction, Test-CiOfflineExpired, Get-CiSlotNames, Get-CiCacheVolumes, Get-CiPrepullImages, Get-CiSlotCpus, Test-CiDiskFloor, Get-CiPruneCommands, Get-CiLoopMutexName, Enter-CiLoopMutex, Get-CiContainersToRemove
