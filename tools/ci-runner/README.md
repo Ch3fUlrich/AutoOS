@@ -70,7 +70,7 @@ One-time migration cleanup: once no slot uses the old shared volumes, run
 The supervisor additionally runs `docker pull` for
 every image in the config's `"prepull"` array (for example `postgres:16`)
 once at startup, so the first job of the day does not pay for a cold pull
-either. Current runner image tag: `workst-runner:2.338.0-4`.
+either. Current runner image tag: `workst-runner:2.338.0-5`.
 
 ## CPU and disk
 

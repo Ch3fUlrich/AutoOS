@@ -5,6 +5,25 @@
 # ─── shellcheck (optional) ──────────────────────────────────────────────────
 describe "static analysis"
 
+if it "CI installs pinned, SHA-verified shellcheck instead of the apt package"; then
+    out="$(python3 - "$ROOT" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+ci = (root / '.github/workflows/ci.yml').read_text(encoding='utf-8')
+installer = root / 'tools/ci/install-shellcheck.sh'
+assert ci.count('bash tools/ci/install-shellcheck.sh') == 2, 'both linter jobs must use the installer'
+assert not re.search(r'apt-get install[^\n]*\bshellcheck\b', ci), 'CI must not install shellcheck from apt'
+script = installer.read_text(encoding='utf-8')
+assert re.search(r'^SHELLCHECK_VERSION=.?0\.11\.0', script, re.M), 'missing version pin'
+assert re.search(r'^SHELLCHECK_SHA256=[\x27\x22]?[0-9a-fA-F]{64}[\x27\x22]?$', script, re.M), 'missing SHA-256 pin'
+assert 'set -euo pipefail' in script and 'sha256sum -c -' in script, 'verification must fail closed'
+assert script.index('sha256sum -c -') < script.index('tar -x'), 'verify before extraction'
+assert 'RUNNER_TEMP' in script and 'GITHUB_PATH' in script, 'use a job-local bin directory'
+assert 'shellcheck --version' in script, 'print the installed version'
+PY
+    )" && pass || fail "$out"
+fi
+
 if it "no installer pipes a downloaded script into a shell (A14)"; then
     # A pipe can't be inspected before it runs and can be swapped mid-stream;
     # a downloaded file can be both (see install_agy(), install_ollama() and
