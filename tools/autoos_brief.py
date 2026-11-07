@@ -1,4 +1,10 @@
-"""Ops brief template store and field validation (AO-WRITER-GUARDS P2)."""
+"""Ops brief template store and field validation (AO-WRITER-GUARDS P2).
+
+D-4491: lane briefs are written by hand and the gate reads them as text through
+autoos_ready_guards.brief_files, so no live lane reaches these guards. They stay
+as the tested field contract for templates/briefs/ops.md until a fields-based
+brief path exists.
+"""
 from __future__ import annotations
 
 import posixpath

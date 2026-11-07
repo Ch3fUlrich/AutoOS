@@ -8,10 +8,8 @@ the handoff threshold it prints one `additionalContext` line telling the agent
 to write its handoff and run `ready`; past the hard threshold it says stop. It
 also drops a per-session state file so the same fill is not re-announced.
 
-The transcript can be tens of megabytes, so only the tail is read: seek to
-`size - TAIL_BYTES`, drop the first partial line, and scan the bounded tail from
-the end for the last assistant+usage record. Files are opened through
-`Path.open` and read in bounded chunks, never iterated whole.
+Usage reads are bounded to the tail. Fleet identity and compaction boundaries
+are streamed once, then only appended bytes are scanned (context_compaction).
 
 Everything is stdlib-only and portable (Linux + Windows) via `pathlib`. The hook
 mode is deliberately fail-silent — a broken transcript, bad stdin or an
@@ -239,9 +237,7 @@ def emit_line(level: str, ctx: int, threshold: int, script_path) -> str:
 def run_hook() -> int:
     """The PostToolUse path: read stdin, compute the fill, maybe announce.
 
-    Any failure — bad stdin, missing fields, a missing or garbled transcript, an
-    unwritable state dir — exits 0 with no output. The state file is written
-    before anything is printed, so a failed write means nothing was announced.
+    Fail silent; persist announce state before printing.
     """
     try:
         payload = json.loads(sys.stdin.read())
@@ -257,18 +253,36 @@ def run_hook() -> int:
         if ctx is None:
             return 0
         handoff, hard = resolve_thresholds()
-        if ctx < handoff:
-            clear_state(session_id)  # back under the line (compaction): the next climb is announced afresh
+        # Keep the scan cursor separate so clearing announce state does not
+        # force another full transcript scan on every low-context tool call.
+        from context_compaction import scan
+        scan_path = state_dir().with_name("ctx-guard-scan") / ("%s.scan" % session_id)
+        try:
+            previous = json.loads(scan_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            previous = None
+        scanned = scan(transcript_path, previous)
+        scan_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(scan_path, scanned)
+        stored = read_state(session_id) or {}
+        boundary = scanned.get("boundary") if scanned.get("fleet") else None
+        compact = bool(boundary)
+        if ctx < handoff and not compact:
+            clear_state(session_id)
             return 0
         level = "hard" if ctx >= hard else "handoff"
         threshold = hard if level == "hard" else handoff
-        if not should_emit(session_id, ctx, level):
+        if not (compact and boundary != stored.get("compaction")) and not should_emit(session_id, ctx, level):
             return 0
         write_state(session_id, {
             "session_id": session_id, "cwd": cwd, "ctx": ctx,
             "ts": time.time(), "level": level,
+            "compaction": boundary,
         })
         line = emit_line(level, ctx, threshold, Path(__file__))
+        if compact:
+            line = line.replace(" >= %dk" % (threshold // 1000),
+                                " (compaction; handoff required)", 1)
         out = {"hookSpecificOutput": {"hookEventName": "PostToolUse",
                                       "additionalContext": line}}
         print(json.dumps(out))
