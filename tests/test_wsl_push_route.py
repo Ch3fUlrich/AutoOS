@@ -19,7 +19,8 @@ class WslPushRouteTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.env = dict({k: v for k, v in os.environ.items()
-                         if not k.startswith("GIT_") and k != "AUTOOS_STATE_DIR"},
+                         if not k.startswith("GIT_") and k not in
+                         ("AUTOOS_STATE_DIR", "AUTOOS_AGENT_RUN_ID")},
                         GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
                         GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
                         GIT_AUTHOR_EMAIL="fixture@example.invalid",
@@ -187,6 +188,26 @@ class WslPushRouteTests(unittest.TestCase):
         self.env["ROUTE_NOT_READY"] = "1"
         self.assert_refused(self.route())
 
+    def assert_early_refusal(self, result):
+        self.assert_refused(result)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(len(result.stderr.splitlines()), 1)
+        self.assertFalse((self.root / "count").exists())
+        self.assertNotIn("'fetch'", self.trace.read_text() if self.trace.exists() else "")
+
+    def test_worker_run_id_refused_with_existing_record(self):
+        store = self.verify / "logs/prepush"
+        store.mkdir(parents=True)
+        record = store / (self.sha + ".json")
+        record.touch()
+        self.env["AUTOOS_AGENT_RUN_ID"] = "worker"
+        self.assert_early_refusal(self.route())
+        self.assertTrue(record.is_file())
+
+    def test_relative_state_dir_refused_before_fetch(self):
+        self.env["AUTOOS_STATE_DIR"] = "logs"
+        self.assert_early_refusal(self.route())
+
     def test_source_head_and_ref_tip_and_stale_refusal(self):
         self.git("checkout", "--detach", cwd=self.source)
         self.assertEqual(self.route().returncode, 0)
@@ -213,6 +234,8 @@ class WslPushRouteTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": str(self.root)}):
             spec.loader.exec_module(module)
             self.assertEqual(module.store_dir(), self.root / "prepush")
+            self.assertEqual(module.RUN_ID_ENV, "AUTOOS_AGENT_RUN_ID")
+            self.assertIn("${" + module.RUN_ID_ENV + ":-}", SCRIPT.read_text())
 
 
 if __name__ == "__main__":

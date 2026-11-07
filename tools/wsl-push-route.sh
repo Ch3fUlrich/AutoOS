@@ -7,6 +7,8 @@ sha=$1
 source_clone=$2
 verify_clone=$3
 [[ $sha =~ ^[0-9a-f]{40}$ ]] || refuse 'sha must be 40 lowercase hex characters'
+[[ -z ${AUTOOS_AGENT_RUN_ID:-} ]] || refuse 'AUTOOS_AGENT_RUN_ID is set; this route is supervisor-only'
+[[ -z ${AUTOOS_STATE_DIR:-} || ${AUTOOS_STATE_DIR:-} == /* ]] || refuse 'AUTOOS_STATE_DIR must be absolute'
 git -C "$source_clone" rev-parse --git-dir >/dev/null 2>&1 || refuse 'source is not a git repo'
 git -C "$verify_clone" rev-parse --git-dir >/dev/null 2>&1 || refuse 'verify is not a git repo'
 source_clone=$(cd "$source_clone" && pwd -P) || refuse 'cannot cd to source clone'
