@@ -65,7 +65,7 @@ class RepoTestCase(unittest.TestCase):
         for rel, text in FIXTURE.items():
             path = cls.repo / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
+            path.write_bytes(text.encode("utf-8"))
         (cls.repo / "blob.bin").write_bytes(BLOB)
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
                "-c", "commit.gpgsign=false"]
@@ -333,6 +333,7 @@ class ConflictDedupTests(unittest.TestCase):
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
         self.repo = Path(self._tmp.name)
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid",
                "-c", "commit.gpgsign=false"]
@@ -359,7 +360,6 @@ class ConflictDedupTests(unittest.TestCase):
         proc = subprocess.run(git + ["-C", str(self.repo), "merge", "-q", "topic"],
                               capture_output=True)
         self.assertNotEqual(proc.returncode, 0, proc.stderr.decode("utf-8", "replace"))
-        self.addCleanup(self._tmp.cleanup)
 
     def test_a_conflicted_path_is_counted_once(self):
         # git ls-files lists the one conflicted path three times (stages
