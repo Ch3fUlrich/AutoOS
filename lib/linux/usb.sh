@@ -2115,9 +2115,15 @@ _usb_copy_onto() {
 }
 
 # usb_copy_image <device> <image_path> [extra_file...]
-# Copy ISO contents and rescue extras onto FAT32/exFAT, never the raw device.
-# uefi-copy uses the existing writable mount without elevation (B16).
-# Ventoy mounts its newly partitioned data filesystem and owns its cleanup.
+# Copies a hybrid ISO's contents, plus extra files (Task 9's rescue templates),
+# onto the FAT32/exFAT partition already on <device>. Never the raw device -
+# that is Ventoy2Disk.sh's job, or usb_write_raw's for writeMode:raw.
+# Two callers, two starting states (usb_plan, Task 6):
+#   uefi-copy - usb_guard already mounted the partition writable FAT32; this
+#               function never mounts or unmounts for it, no elevation (B16).
+#   ventoy    - Ventoy2Disk.sh partitioned <device> but mounted nothing; this
+#               function mounts the data partition itself and unmounts it.
+# Returns nonzero on any failure; 2 from _usb_copy_onto means the flush failed.
 usb_copy_image() {
     local dev="$1" image="$2"
     local -a extra_files=()
