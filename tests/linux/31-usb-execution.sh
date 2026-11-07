@@ -14,7 +14,11 @@
 describe "usb execution"
 
 if it "usb_execute: fake mounts must not flush unrelated host filesystems"; then
-    assert_eq "$(grep -c '^    chmod .*sync' "$ROOT/tests/linux/31-usb-execution.sh")" "2"
+    # Every test that fakes mount must also fake sync (a count would break
+    # whenever a fixture is added); prints the offending test names.
+    assert_eq "$(awk '/^if it /{if(m&&!s)print t; t=$0; m=s=0}
+        />"\$fakebin\/mount"/{m=1} />"\$fakebin\/sync"/{s=1}
+        END{if(m&&!s)print t}' "$ROOT/tests/linux/31-usb-execution.sh")" ""
 fi
 
 if it "usb_execute: executing a plan runs exactly the planned commands, in order"; then
