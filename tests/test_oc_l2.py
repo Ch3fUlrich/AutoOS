@@ -43,6 +43,7 @@ def _before_foreign_creation():
     # Capture BEFORE spawning: stamping after the foreign process would not model PID recycling.
     if os.name != "nt":
         return None
+    assert 60 > oc_l2.oc_l1_stop.NT_START_TOLERANCE_S, "fixture gap must exceed start tolerance"
     return datetime.fromtimestamp(time.time() - 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -660,6 +661,7 @@ class LaneTest(unittest.TestCase):
                 pass
 
     def _lane_with_foreign_pid(self, name, pid, argv=None, start_time="unset", *, started_utc=None):
+        """Foreign PID state; start_time is omitted, matched live, or literal."""
         lane = oc_l2.build_lane(name, self.proj, "p1", self.brief,
                                 "l2-orchestrator", self.l1_inbox,
                                 opencode_bin=self.bin_,
@@ -726,7 +728,6 @@ class LaneTest(unittest.TestCase):
     def test_stop_refuses_a_recycled_pid_that_replays_the_lane_argv(self):
         started_utc = _before_foreign_creation()
         # Windows: replayed argv cannot rescue a later creation time.
-        # The group is only signalled when its recorded PID leads it: only a lane using start_new_session does.
         argv = [self.bin_, "serve", "--hostname", "127.0.0.1",
                 "--port", str(self.srv.port)]
         victim = subprocess.Popen([sys.executable, "-c", _SLEEP_CODE] + argv[1:])
@@ -901,6 +902,7 @@ class ResumeTest(unittest.TestCase):
 
     def setUp(self):
         self._td = tempfile.TemporaryDirectory(prefix="oc_l2_resume_")
+        self.addCleanup(self._td.cleanup)
         self.td = Path(self._td.name)
         self.agents = self.td / "hoststate" / "agents"
         self.srv = FakeServer(PW_VALUE)
@@ -951,7 +953,6 @@ class ResumeTest(unittest.TestCase):
             else:
                 os.environ[k] = v
         self.srv.stop()
-        self.addCleanup(self._td.cleanup)
         self.assertFalse(survivors, f"fake serve PIDs survived teardown: {survivors}")
 
     def _start(self, **over):
