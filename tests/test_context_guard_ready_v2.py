@@ -265,6 +265,9 @@ def test_ready_kick(ready, outcome):
             guard.subprocess, "run", side_effect=fake_run), contextlib.redirect_stderr(stderr):
         assert guard.cmd_ready([str(handoff)]) == (2 if outcome == "refused" else 0)
     assert len(calls) == (1 if outcome == "refused" else 2)
+    # Refusal is an inherent negative control: validation returns before the kick
+    # and emits its own stderr diagnostic, so removing the kick still passes it.
+    # The other outcomes discriminate whether the kick code is present.
     assert marker.exists() == (outcome != "refused")
     if outcome in ("failed", "missing", "timeout"):
         assert len(stderr.getvalue().splitlines()) == 1
