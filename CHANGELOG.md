@@ -1,5 +1,5 @@
 # Changelog
-- autoos:USB-SYNC-BOUNDED (2026-11-07, D-4728): bound USB flushes to the target filesystem with a configurable timeout; fail copies on flush errors instead of waiting on a global sync.
+- autoos:USB-SYNC-BOUNDED (2026-11-07, D-4728): bound target-filesystem flushes with a validated positive timeout and kill grace; preserve real sync errors, never retry a failed pre-readback flush or unmount its target, and warn against unplugging the still-mounted stick.
 - COMPACT-NEVER-REPLACES-HANDOFF (2026-11-07, D-4646): fleet transcript names ending in a counter identify sessions without inherited environment variables; compaction boundaries latch handoff state even below the context threshold. A separate persisted byte cursor streams the transcript once and scans only appended records thereafter; interactive sessions retain threshold behavior.
 - AO-WSL-PUSH-ROUTE (2026-11-07, D-2241, D-4559, D-4581): keep green records outside the disposable WSL worktree, bind source tips, preserve status through cleanup, and print, never execute, the Git Bash push command.
 - AO-MEASURE-TEST-CRLF (2026-11-07, D-4578): write measure fixtures as UTF-8 bytes on every host and register conflict-repo cleanup before git setup.
