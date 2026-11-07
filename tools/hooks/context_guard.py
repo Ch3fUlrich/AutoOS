@@ -1,21 +1,12 @@
 """context_guard: a Claude Code PostToolUse hook that flags context-window cap.
 
-The hook reads the hook JSON off stdin (`transcript_path`, `session_id`, `cwd`)
-and reports how full the model's context window is by summing the three fields
-that occupy it — `input_tokens` plus both cache buckets — of the *last*
-assistant usage record near the end of the transcript. When that fill crosses
-the handoff threshold it prints one `additionalContext` line telling the agent
-to write its handoff and run `ready`; past the hard threshold it says stop. It
-also drops a per-session state file so the same fill is not re-announced.
+Reads hook JSON from stdin and sums input tokens plus both cache buckets in
+the last assistant usage record. Emits additionalContext at handoff/hard caps
+and persists state to avoid re-announcing. Usage reads are tail-bounded;
+context_compaction incrementally scans identity and compaction boundaries.
 
-Usage reads are bounded to the tail. Fleet identity and compaction boundaries
-are streamed once, then only appended bytes are scanned (context_compaction).
-
-Everything is stdlib-only and portable (Linux + Windows) via `pathlib`. The hook
-mode is deliberately fail-silent — a broken transcript, bad stdin or an
-unwritable state dir exits 0 with no output, because a PostToolUse hook must
-never break the agent that called it. The `ready` and `status` sub-commands are
-the exception: those report errors on stderr and exit non-zero.
+Stdlib-only and portable via pathlib. Hook mode fails silently on bad input or
+unwritable state so it cannot break its caller; ready/status report errors.
 
 Thresholds come from the environment: `AUTOOS_CTX_HANDOFF` (default 270000) and
 `AUTOOS_CTX_HARD` (default 300000); a non-integer or empty value falls back.

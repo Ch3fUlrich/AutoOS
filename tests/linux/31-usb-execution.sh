@@ -13,6 +13,10 @@
 # zero tests here has reported a clean run twice already on this branch.
 describe "usb execution"
 
+if it "usb_execute: fake mounts must not flush unrelated host filesystems"; then
+    assert_eq "$(grep -c '^    chmod .*sync' "$ROOT/tests/linux/31-usb-execution.sh")" "2"
+fi
+
 if it "usb_execute: executing a plan runs exactly the planned commands, in order"; then
     plan="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
             usb_plan ubuntu-desktop-lts installer ventoy /dev/sdb)"
@@ -106,6 +110,7 @@ if it "usb_execute: dispatches a Ventoy2Disk.sh plan line through usb_write_vent
     # its serving directory open for a moment afterward, and the rm -rf right
     # below would otherwise race it ("Device or resource busy").
     kill "$http_pid" 2>/dev/null
+    timeout 5 tail --pid="$http_pid" -f /dev/null 2>/dev/null || kill -KILL "$http_pid" 2>/dev/null
     wait "$http_pid" 2>/dev/null
     rm -rf "$rel" "$scratch"
 fi
@@ -139,6 +144,7 @@ if it "usb_execute: usb_write_ventoy caches the extracted tool and skips re-fetc
     # its serving directory open for a moment afterward, and the rm -rf right
     # below would otherwise race it ("Device or resource busy").
     kill "$http_pid" 2>/dev/null
+    timeout 5 tail --pid="$http_pid" -f /dev/null 2>/dev/null || kill -KILL "$http_pid" 2>/dev/null
     wait "$http_pid" 2>/dev/null
     rm -rf "$rel" "$scratch"
 fi
@@ -229,7 +235,9 @@ if it "usb_execute: usb_copy_image fails the whole call when umount itself fails
     fakebin="$(mktemp -d)"
     printf '#!/usr/bin/env bash\nexit 0\n' >"$fakebin/mount"
     printf '#!/usr/bin/env bash\necho "umount: fake failure" >&2\nexit 1\n' >"$fakebin/umount"
-    chmod +x "$fakebin/mount" "$fakebin/umount"
+    # Never flush every filesystem on the CI host for a fake USB write.
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fakebin/sync"
+    chmod +x "$fakebin/mount" "$fakebin/umount" "$fakebin/sync"
     img="$(mktemp)"; printf 'x' >"$img"
     out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
            AUTOOS_FAKE_ISO_MAX_FILE_BYTES=1000000 AUTOOS_FAKE_ISO_MAX_FILE_NAME=x \
@@ -243,7 +251,8 @@ if it "usb_execute: usb_copy_image mounts ventoy's data partition by index, not 
     record="$(mktemp)"
     printf '#!/usr/bin/env bash\necho "$1" >> %s\nexit 0\n' "$record" >"$fakebin/mount"
     printf '#!/usr/bin/env bash\nexit 0\n' >"$fakebin/umount"
-    chmod +x "$fakebin/mount" "$fakebin/umount"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fakebin/sync"
+    chmod +x "$fakebin/mount" "$fakebin/umount" "$fakebin/sync"
     img="$(mktemp)"; printf 'x' >"$img"
     PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_FAKE_LSBLK="$(fake_usb ventoy_partitions_reversed)" \
         AUTOOS_FAKE_ISO_MAX_FILE_BYTES=1000000 AUTOOS_FAKE_ISO_MAX_FILE_NAME=x \
@@ -257,4 +266,3 @@ if it "usb_execute: usb_ventoy_add_persistence caps the default 16GB at half the
     out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_DRY_RUN=1 usb_ventoy_add_persistence /dev/sdb 2>&1)"; rc=$?
     [[ $rc -eq 0 && "$out" == *"capping"* && "$out" == *"15GB"* ]] && pass || fail "rc=$rc out=$out"
 fi
-
