@@ -31,7 +31,7 @@ class ProfileTests(unittest.TestCase):
     def test_redirected_profile(self):
         self.run_profile(". '" + str(PROFILE).replace("'", "''") + "'")
 
-    def run_profile(self, command):
+    def run_profile(self, command, terminal_expected=False):
         with tempfile.TemporaryDirectory(prefix="profile-nonvt-") as tmp:
             env = dict(os.environ)
             for name in ("LOCALAPPDATA", "APPDATA", "HOME", "USERPROFILE"):
@@ -39,8 +39,12 @@ class ProfileTests(unittest.TestCase):
             result = subprocess.run([PWSH, "-NoProfile", "-Command", command],
                                     capture_output=True, text=True, env=env,
                                     cwd=tmp, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stderr, "")
+            if terminal_expected:
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("terminal initialization reached", result.stdout + result.stderr)
+            else:
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
 
     @unittest.skipUnless(PWSH, "pwsh not on PATH")
     def test_forced_nonvt_and_missing_property(self):
@@ -48,13 +52,16 @@ class ProfileTests(unittest.TestCase):
         # with only the read-only Host reference rebound to a synthetic object.
         text = PROFILE.read_text(encoding="utf-8-sig")
         suffix = text.split("{ return }", 1)[1].replace("$Host", "$TestHost")
-        for ui in ("[pscustomobject]@{SupportsVirtualTerminal=$false}",
-                   "[pscustomobject]@{}"):
+        for ui, terminal_expected in (
+                ("[pscustomobject]@{SupportsVirtualTerminal=$false}", False),
+                ("[pscustomobject]@{}", False),
+                ("[pscustomobject]@{SupportsVirtualTerminal=$true}", True)):
             with self.subTest(ui=ui):
                 self.run_profile(
                     "function Test-Profile($TestHost) { Set-StrictMode -Version Latest; "
                     "function Get-Module { throw 'terminal initialization reached' }; "
-                    + suffix + "\n}; Test-Profile ([pscustomobject]@{UI=" + ui + "})")
+                    + suffix + "\n}; Test-Profile ([pscustomobject]@{UI=" + ui + "})",
+                    terminal_expected=terminal_expected)
 
 
 class OrchestratorRulesTests(unittest.TestCase):
