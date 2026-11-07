@@ -298,8 +298,11 @@ for n, line in enumerate(open(sys.argv[1]), 1):
     if line.startswith('_usb_sync_target() {'):
         inside = True
     words = shlex.split(line, comments=True) if re.search(r'\bsync\b', line) else []
-    if 'sync' in words and (not inside or words[words.index('sync') + 1:][:1] != ['-f']):
-        print(f'{n}: {line.strip()}')
+    # Quoted text and comments dropped; also catches sync; (sync) /usr/bin/sync
+    cmd = re.sub(r'(^|\s)#.*', '', re.sub(r'"(\\.|[^"\\])*"|\'[^\']*\'', '""', line)) if words else ''
+    for m in re.finditer(r'(^|[/\s;&|()])sync($|[\s;&|()])', cmd):
+        if not inside or not cmd[m.end(1):].startswith('sync -f '):
+            print(f'{n}: {line.strip()}')
     if line.startswith('}'):
         inside = False
 PY
