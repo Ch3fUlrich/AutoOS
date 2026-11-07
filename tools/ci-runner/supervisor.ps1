@@ -77,8 +77,9 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
             $containerName = $_
             @($slotNames | Where-Object { $containerName -like "$_-*" }).Count -gt 0
         }).Count -gt 0) { $blindTick = $true; Log 'blind tick: no runner-loop processes found while slot containers run' }
-        $maxAge = 120
-        if ($cfg.PSObject.Properties['container_max_age_minutes']) { $maxAge = [double]$cfg.container_max_age_minutes }
+        $ageConfig = Get-CiContainerMaxAge -Config $cfg
+        $maxAge = $ageConfig.Minutes
+        if (-not $ageConfig.Valid) { Log 'invalid or absent container_max_age_minutes; using 120' }
         $runnersByRepo = @{}
         foreach ($r in $cfg.repos) {
             $runners = @(gh api "repos/$($r.repo)/actions/runners" --jq '.runners[] | {id, name, status, busy}' 2>$null | ForEach-Object { $_ | ConvertFrom-Json })
@@ -107,21 +108,27 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
             $slotContainers = @(
                 foreach ($containerName in @($containers | Where-Object { $_ -like "$name-*" })) {
                     $registration = @($runners | Where-Object { $_.name -eq $containerName })
-                    # Unknown job state is protected, not assumed idle.
-                    $isBusy = $registration.Count -ne 1 -or $registration[0].busy -ne $false
+                    # Ambiguous/unknown busy state is protected; a missing registration ages out.
+                    $isBusy = $registration.Count -gt 1 -or ($registration.Count -eq 1 -and $registration[0].busy -ne $false)
+                    $isOnline = $registration.Count -eq 1 -and $registration[0].status -eq 'online'
                     $created = docker inspect --format '{{.Created}}' $containerName 2>$null
                     if ($LASTEXITCODE -ne 0) { continue }
-                    [pscustomobject]@{ Name = $containerName; Created = [datetimeoffset]::Parse($created); Busy = $isBusy }
+                    try { $createdAt = [datetimeoffset]::Parse($created, [Globalization.CultureInfo]::InvariantCulture) }
+                    catch { Log "skip $containerName invalid creation timestamp: $created"; continue }
+                    [pscustomobject]@{ Name = $containerName; Created = $createdAt; Busy = $isBusy; Online = $isOnline }
                 }
             )
             foreach ($remove in @(Get-CiContainersToRemove -Containers $slotContainers -MaxAgeMinutes $maxAge)) {
                 # Recheck job state immediately before removal; API errors fail closed.
-                $fresh = @(gh api "repos/$($r.repo)/actions/runners" --jq '.runners[] | {name, busy}' 2>$null | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.name -eq $remove })
-                if ($LASTEXITCODE -ne 0 -or $fresh.Count -ne 1 -or $fresh[0].busy -ne $false) { continue }
+                $fresh = @(gh api "repos/$($r.repo)/actions/runners" --jq '.runners[] | {name, busy, status}' 2>$null | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.name -eq $remove })
+                if ($LASTEXITCODE -ne 0 -or $fresh.Count -gt 1 -or ($fresh.Count -eq 1 -and $fresh[0].busy -ne $false)) { continue }
+                # Recompute with fresh registration state: age alone must never kill an online runner.
+                $candidate = $slotContainers | Where-Object { $_.Name -eq $remove }
+                $candidate.Online = $fresh.Count -eq 1 -and $fresh[0].status -eq 'online'
+                if ($remove -notin @(Get-CiContainersToRemove -Containers $slotContainers -MaxAgeMinutes $maxAge)) { continue }
                 docker rm -f $remove *> $null
                 Log "reap $remove rc=$LASTEXITCODE"
             }
-            if ($blindTick) { continue }
             $loop = $procs | Where-Object { $_.CommandLine -match "-Name\s+'?$([regex]::Escape($name))'?(\s|$)" }
             $loopAlive = (@($loop).Count -gt 0)
             $online = (@($runners | Where-Object { $_.name -like "$name-*" -and $_.status -eq 'online' }).Count -gt 0)
@@ -135,6 +142,7 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
                 $unhealthyMinutes = 0
             }
             $action = Get-CiSlotAction -LoopAlive $loopAlive -Online $online -Busy $busy -ContainerRunning $running -UnhealthyMinutes $unhealthyMinutes
+            if ($blindTick -and $action -eq 'restart') { continue }
             if ($action -eq 'restart') {
                 foreach ($l in $loop) { Stop-Process -Id $l.ProcessId -Force -ErrorAction SilentlyContinue }
                 Log "restart $name (loop alive, runner not online > 5 min, no container)"

@@ -162,7 +162,7 @@ function Get-CiPruneCommands {
 }
 
 function Get-CiLoopMutexName {
-    param([Parameter(Mandatory)][ValidatePattern('\A[a-zA-Z0-9-]+\z')][string]$Name)
+    param([Parameter(Mandatory)][ValidatePattern('\A[A-Za-z0-9._-]+\z')][string]$Name)
     return "Global\AutoOS-CI-Runner-Loop-$Name"
 }
 
@@ -172,20 +172,31 @@ function Enter-CiLoopMutex {
     catch [System.Threading.AbandonedMutexException] { return $true }
 }
 
+function Get-CiContainerMaxAge {
+    param([Parameter(Mandatory)]$Config)
+    $value = $Config.container_max_age_minutes
+    $number = 0.0
+    $valid = $null -ne $value -and $value -isnot [bool] -and
+        [double]::TryParse([string]$value, [Globalization.NumberStyles]::Float,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$number) -and
+        $number -ge 1 -and $number -le 525600
+    [pscustomobject]@{ Minutes = $(if ($valid) { $number } else { 120 }); Valid = $valid }
+}
+
 function Get-CiContainersToRemove {
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Containers,
         [ValidateRange(1, 525600)][double]$MaxAgeMinutes = 120,
         [datetimeoffset]$Now = [datetimeoffset]::UtcNow
     )
-    # Input is one slot only. Keep the newest eligible idle container; busy is sacrosanct.
+    # Input is one slot only. Online runners never age out; surplus idle duplicates may go.
     $keptIdle = $false
     foreach ($container in @($Containers | Sort-Object Created -Descending)) {
         if ($container.Busy) { continue }
-        if (($Now - [datetimeoffset]$container.Created).TotalMinutes -gt $MaxAgeMinutes -or $keptIdle) {
+        if ((-not $container.Online -and ($Now - [datetimeoffset]$container.Created).TotalMinutes -gt $MaxAgeMinutes) -or $keptIdle) {
             $container.Name
         } else { $keptIdle = $true }
     }
 }
 
-Export-ModuleMember -Function Get-CiRunnerDockerArgs, Get-CiSlotAction, Test-CiOfflineExpired, Get-CiSlotNames, Get-CiCacheVolumes, Get-CiPrepullImages, Get-CiSlotCpus, Test-CiDiskFloor, Get-CiPruneCommands, Get-CiLoopMutexName, Enter-CiLoopMutex, Get-CiContainersToRemove
+Export-ModuleMember -Function Get-CiRunnerDockerArgs, Get-CiSlotAction, Test-CiOfflineExpired, Get-CiSlotNames, Get-CiCacheVolumes, Get-CiPrepullImages, Get-CiSlotCpus, Test-CiDiskFloor, Get-CiPruneCommands, Get-CiLoopMutexName, Enter-CiLoopMutex, Get-CiContainersToRemove, Get-CiContainerMaxAge

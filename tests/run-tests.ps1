@@ -12036,81 +12036,77 @@ Test-Case 'ci-runner: Get-CiRunnerDockerArgs never puts the registration token i
     $tokenPat = [regex]::Escape($tokenLike)
     Assert-True (-not (@($a) -match $tokenPat)) 'a token value leaked into the docker args'
     $m = [array]::IndexOf([string[]]$a, '--memory')
-    Assert-True ($m -ge 0) '--memory missing'
-    Assert-Equal $a[$m + 1] '8g'
-    Assert-Contains $a '--rm'
-    Assert-Contains $a 'workst-runner:2.338.0-2'
-    Assert-Contains $a 'REPO_URL=https://github.com/example-owner/example'
-    Assert-Contains $a 'RUNNER_LABELS=workst,workstation,fleet-ci'
+    Assert-True ($m -ge 0) '--memory missing'; Assert-Equal $a[$m + 1] '8g'; Assert-Contains $a '--rm'; Assert-Contains $a 'workst-runner:2.338.0-2'; Assert-Contains $a 'REPO_URL=https://github.com/example-owner/example'; Assert-Contains $a 'RUNNER_LABELS=workst,workstation,fleet-ci'
     $e = [array]::IndexOf([string[]]$a, '--entrypoint')
-    Assert-True ($e -ge 0) '--entrypoint missing'
-    Assert-Equal $a[$e + 1] 'bash'
-    Assert-Equal $a[$e + 2] 'workst-runner:2.338.0-2'
+    Assert-True ($e -ge 0) '--entrypoint missing'; Assert-Equal $a[$e + 1] 'bash'; Assert-Equal $a[$e + 2] 'workst-runner:2.338.0-2'
 }
 Test-Case 'ci-runner: Get-CiRunnerDockerArgs -DockerSocket mounts the host socket' {
     $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
     $with = Get-CiRunnerDockerArgs @base -DockerSocket
     $g = [array]::IndexOf([string[]]$with, '--group-add')
-    Assert-True ($g -ge 0) '--group-add missing with -DockerSocket'
-    Assert-Equal $with[$g + 1] '0'
+    Assert-True ($g -ge 0) '--group-add missing with -DockerSocket'; Assert-Equal $with[$g + 1] '0'
     $v = [array]::IndexOf([string[]]$with, '-v')
-    Assert-True ($v -ge 0) '-v missing with -DockerSocket'
-    Assert-Equal $with[$v + 1] '/var/run/docker.sock:/var/run/docker.sock'
+    Assert-True ($v -ge 0) '-v missing with -DockerSocket'; Assert-Equal $with[$v + 1] '/var/run/docker.sock:/var/run/docker.sock'
     $without = Get-CiRunnerDockerArgs @base
-    Assert-True (-not ($without -contains '--group-add')) '--group-add without -DockerSocket'
-    Assert-True (-not ($without -contains '0')) 'group 0 without -DockerSocket'
-    Assert-True (-not ($without -contains '-v')) '-v without -DockerSocket'
-    Assert-True (-not ($without -contains '/var/run/docker.sock:/var/run/docker.sock')) 'socket mount without -DockerSocket'
+    Assert-True (-not ($without -contains '--group-add')) '--group-add without -DockerSocket'; Assert-True (-not ($without -contains '0')) 'group 0 without -DockerSocket'; Assert-True (-not ($without -contains '-v')) '-v without -DockerSocket'; Assert-True (-not ($without -contains '/var/run/docker.sock:/var/run/docker.sock')) 'socket mount without -DockerSocket'
 }
 Test-Case 'ci-runner: Get-CiRunnerDockerArgs -NetNs adds the caps it needs' {
     $base = @{ Name = 'i1'; Repo = 'example-owner/example'; Labels = 'workst,workstation,fleet-ci'; Memory = '4g'; Image = 'im:1' }
     $net = Get-CiRunnerDockerArgs @base -NetNs
-    Assert-Contains $net '--cap-add'
-    Assert-Contains $net 'SYS_ADMIN'
-    Assert-Contains $net 'NET_ADMIN'
-    Assert-Contains $net '--security-opt'
-    Assert-Contains $net 'seccomp=unconfined'
+    Assert-Contains $net '--cap-add'; Assert-Contains $net 'SYS_ADMIN'; Assert-Contains $net 'NET_ADMIN'; Assert-Contains $net '--security-opt'; Assert-Contains $net 'seccomp=unconfined'
     $plain = Get-CiRunnerDockerArgs @base
-    Assert-True (-not ($plain -contains '--cap-add')) '--cap-add without -NetNs'
-    Assert-True (-not ($plain -contains 'SYS_ADMIN')) 'SYS_ADMIN without -NetNs'
-    Assert-True (-not ($plain -contains 'NET_ADMIN')) 'NET_ADMIN without -NetNs'
-    Assert-True (-not ($plain -contains 'seccomp=unconfined')) 'seccomp=unconfined without -NetNs'
+    Assert-True (-not ($plain -contains '--cap-add')) '--cap-add without -NetNs'; Assert-True (-not ($plain -contains 'SYS_ADMIN')) 'SYS_ADMIN without -NetNs'; Assert-True (-not ($plain -contains 'NET_ADMIN')) 'NET_ADMIN without -NetNs'; Assert-True (-not ($plain -contains 'seccomp=unconfined')) 'seccomp=unconfined without -NetNs'
 }
-Test-Case 'ci-runner: Get-CiSlotAction starts a slot whose loop is gone' {
-    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'start'
-    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 99) 'ok'
-    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'start'
+Test-Case 'ci-runner: Get-CiSlotAction starts a slot whose loop is gone when no container runs' {
+    Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'start'; Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 99) 'ok'; Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'start'
 }
 Test-Case 'ci-runner: running container refuses start even with missing loop' {
     Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $false -ContainerRunning $true -UnhealthyMinutes 99) 'ok'
 }
 Test-Case 'ci-runner: mutex names are stable and per slot' {
-    Assert-Equal (Get-CiLoopMutexName 'test-a-1') (Get-CiLoopMutexName 'test-a-1')
-    Assert-True ((Get-CiLoopMutexName 'test-a-1') -ne (Get-CiLoopMutexName 'test-a-2')) 'slots share a mutex'
+    Assert-True ((Get-CiLoopMutexName 'gpu_pool.v1-1') -like '*gpu_pool.v1-1') 'valid prefix rejected'
+    foreach ($bad in @('', 'bad\name')) { $threw = $false; try { Get-CiLoopMutexName $bad } catch { $threw = $true }; Assert-True $threw 'invalid mutex name accepted' }
+    Assert-Equal (Get-CiLoopMutexName 'test-a-1') (Get-CiLoopMutexName 'test-a-1'); Assert-True ((Get-CiLoopMutexName 'test-a-1') -ne (Get-CiLoopMutexName 'test-a-2')) 'slots share a mutex'
 }
-Test-Case 'ci-runner: second loop mutex acquisition exits without launching' {
-    $mutexName = Get-CiLoopMutexName "test-$([guid]::NewGuid().ToString('N'))"
+Test-Case 'ci-runner: second loop integration exits without gh or docker' {
+    $slot = "test-$([guid]::NewGuid().ToString('N'))"; $mutexName = Get-CiLoopMutexName $slot
+    $temp = Join-Path ([IO.Path]::GetTempPath()) $slot; [void](New-Item $temp -ItemType Directory)
+    $log = Join-Path $Root "tools/ci-runner/$slot.log"; $stop = Join-Path $Root "tools/ci-runner/stop-$slot"
+    $marker = Join-Path $temp 'called'; $oldPath = $env:PATH
     $holder = [System.Threading.Mutex]::new($false, $mutexName)
     $owned = $false
     try {
         $owned = Enter-CiLoopMutex $holder
         Assert-True $owned 'first loop did not acquire'
-        $modulePath = (Join-Path $Root 'tools/ci-runner/CiRunner.psm1').Replace("'", "''")
-        $code = "Import-Module '$modulePath' -DisableNameChecking; `$m = [Threading.Mutex]::new(`$false, '$mutexName'); try { if (Enter-CiLoopMutex `$m) { `$m.ReleaseMutex(); exit 9 }; exit 0 } finally { `$m.Dispose() }"
-        & pwsh -NoProfile -EncodedCommand ([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code)))
-        Assert-Equal $LASTEXITCODE 0
+        foreach ($tool in @('gh', 'docker')) {
+            Set-Content (Join-Path $temp "$tool.cmd") "@echo off`r`necho called>`"$marker`"`r`necho stop>`"$stop`"`r`necho fake-token"
+            Set-Content (Join-Path $temp "$tool.ps1") "Set-Content '$marker' called; Set-Content '$stop' stop; 'fake-token'"
+        }
+        $env:PATH = "$temp$([IO.Path]::PathSeparator)$oldPath"
+        & pwsh -NoProfile -File (Join-Path $Root 'tools/ci-runner/runner-loop.ps1') -Repo example-owner/example -Name $slot
+        Assert-Equal $LASTEXITCODE 0; Assert-True ((Get-Content $log -Raw) -match 'another loop owns') 'duplicate loop did not refuse'; Assert-True (-not (Test-Path $marker)) 'duplicate loop called gh/docker'
     } finally {
         if ($owned) { $holder.ReleaseMutex() }
         $holder.Dispose()
+        $env:PATH = $oldPath; Remove-Item $log, $stop -ErrorAction SilentlyContinue
+        Remove-Item $temp -Recurse -Force
     }
 }
-Test-Case 'ci-runner: reaper age boundary keeps max-1 and removes max+1' {
+Test-Case 'ci-runner: reaper age boundary 119 kept, 120 kept, 121 removed' {
     $now = [datetimeoffset]'2026-11-07T12:00:00Z'
-    foreach ($age in @(119, 120, 121)) {
-        $items = @([pscustomobject]@{ Name = 'test-a-1-old'; Created = $now.AddMinutes(-$age); Busy = $false })
+    foreach ($case in @(@(119, 0), @(120, 0), @(121, 1))) {
+        $items = @([pscustomobject]@{ Name = 'test-a-1-old'; Created = $now.AddMinutes(-$case[0]); Busy = $false; Online = $false })
         $removed = @(Get-CiContainersToRemove -Containers $items -Now $now -MaxAgeMinutes 120)
-        Assert-Equal $removed.Count ([int]($age -gt 120))
+        Assert-Equal $removed.Count $case[1]
     }
+}
+Test-Case 'ci-runner: online idle older than max age kept, offline idle removed' {
+    $now = [datetimeoffset]::UtcNow
+    foreach ($online in @($true, $false)) { $item = [pscustomobject]@{ Name = 'old'; Created = $now.AddMinutes(-121); Busy = $false; Online = $online }; Assert-Equal (@(Get-CiContainersToRemove -Containers @($item) -Now $now).Count) $(if ($online) { 0 } else { 1 }) }
+}
+Test-Case 'ci-runner: container max age validates range and falls back to 120' {
+    foreach ($value in @(0, '2h', 'typo', -1, 525601, $null, $true, 'NaN')) { $age = Get-CiContainerMaxAge @{container_max_age_minutes = $value}; Assert-Equal $age.Minutes 120; Assert-True (-not $age.Valid) 'invalid age accepted' }
+    foreach ($value in @(1, 120, 525600, '60')) { $age = Get-CiContainerMaxAge @{container_max_age_minutes = $value}; Assert-Equal $age.Minutes ([double]$value); Assert-True $age.Valid 'valid age rejected' }
 }
 Test-Case 'ci-runner: reaper never removes busy containers and keeps one idle per slot' {
     $now = [datetimeoffset]'2026-11-07T12:00:00Z'
@@ -12121,22 +12117,14 @@ Test-Case 'ci-runner: reaper never removes busy containers and keeps one idle pe
             [pscustomobject]@{ Name = "$slot-extra"; Created = $now.AddMinutes(-2); Busy = $false }
         )
         $removed = @(Get-CiContainersToRemove -Containers $items -Now $now)
-        Assert-True (-not ($removed -contains "$slot-busy")) 'busy container selected for removal'
-        Assert-Equal $removed.Count 1
-        Assert-Equal $removed[0] "$slot-extra"
+        Assert-True (-not ($removed -contains "$slot-busy")) 'busy container selected for removal'; Assert-Equal $removed.Count 1; Assert-Equal $removed[0] "$slot-extra"
     }
 }
 Test-Case 'ci-runner: Get-CiSlotAction leaves a live healthy slot alone' {
-    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'ok'
-    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 0) 'ok'
-    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $true -UnhealthyMinutes 0) 'ok'
-    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 60) 'ok'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'ok'; Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 0) 'ok'; Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $true -UnhealthyMinutes 0) 'ok'; Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $true -Busy $true -ContainerRunning $true -UnhealthyMinutes 60) 'ok'
 }
 Test-Case 'ci-runner: Get-CiSlotAction waits, then restarts, never a busy runner' {
-    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'wait'
-    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5) 'wait'
-    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5.5) 'restart'
-    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'restart'
+    Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 0) 'wait'; Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5) 'wait'; Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 5.5) 'restart'; Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $false -ContainerRunning $false -UnhealthyMinutes 60) 'restart'
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 60) 'ok'
     Assert-Equal (Get-CiSlotAction -LoopAlive $true -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 600) 'ok'
     Assert-Equal (Get-CiSlotAction -LoopAlive $false -Online $false -Busy $true -ContainerRunning $false -UnhealthyMinutes 600) 'start'
@@ -12419,7 +12407,6 @@ Test-Case 'ci-runner: Dockerfile installs the Cyrillic-capable fonts and the Pyt
     Assert-True ($c6raw -match 'python3-dev') 'python3-dev missing from the Dockerfile'
     Assert-True ($c6raw -match 'build-essential') 'build-essential missing from the Dockerfile'
 }
-# ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')
 Write-Host ("  " + (C "passed $script:Pass" '38;5;71') +
@@ -12432,4 +12419,3 @@ if ($script:Fail) {
     exit 1
 }
 exit 0
-# Harness path declaration: 'tests\test_opencode_auth_bind.py'
