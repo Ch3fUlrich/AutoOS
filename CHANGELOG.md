@@ -1,4 +1,5 @@
 # Changelog
+- AO-BRIEF-GUARDS-FOLLOWUP (2026-11-07, D-4491): validate expanded test scopes, substitute template fields in one pass, remove self-built probe assertions, and document why brief guards have no live caller.
 - AO-WSL-PUSH-ROUTE (2026-11-07, D-2241, D-4559, D-4581): keep green records outside the disposable WSL worktree, bind source tips, preserve status through cleanup, and print, never execute, the Git Bash push command.
 - AO-MEASURE-TEST-CRLF (2026-11-07, D-4578): write measure fixtures as UTF-8 bytes on every host and register conflict-repo cleanup before git setup.
 - AO-MEASURE-TEST-DEFAULT-BRANCH (2026-11-07, D-4471): name master explicitly in the measure conflict fixture so it is independent of the host's default branch.
