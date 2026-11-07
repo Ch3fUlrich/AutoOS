@@ -222,6 +222,8 @@ Before you claim a change is complete:
 - [ ] `README.md` updated if you changed a flag or an entry point
 - [ ] CI green on the branch **before** `main` moves: push the branch, run
       `gh workflow run CI --ref <branch>`, and fast-forward `main` only after it passes
+- [ ] Windows only: when prepush refuses on env-only failures, `tools/wsl-push-route.sh <sha> <source-clone> <verify-clone>` runs the gate in WSL
+      (its fetch moves the verify clone's origin/main) and prints the push; run that line from Git Bash as a plain command.
 
 Do not report work as done because the code looks right. Run it.
 
