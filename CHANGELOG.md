@@ -1,5 +1,5 @@
 # Changelog
-- AO-WSL-PUSH-ROUTE (2026-11-07, D-2241, D-4559): run the gate in a disposable WSL linked worktree and print, never execute, the plain push command.
+- AO-WSL-PUSH-ROUTE (2026-11-07, D-2241, D-4559, D-4581): keep green records outside the disposable WSL worktree, bind source tips, preserve status through cleanup, and print, never execute, the Git Bash push command.
 - AO-MEASURE-TEST-DEFAULT-BRANCH (2026-11-07, D-4471): name master explicitly in the measure conflict fixture so it is independent of the host's default branch.
 - AO-OC-L2-STOP-TESTS-WIN (2026-11-07, D-3738, D-4471): kill remaining fake serve trees in resume teardown and test recycled-PID refusal on Windows, where identity is creation time only; retain POSIX identity assertions; mentions-the-word case is POSIX-only.
 

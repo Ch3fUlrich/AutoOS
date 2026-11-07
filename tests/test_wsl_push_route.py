@@ -1,11 +1,13 @@
 """Hermetic Linux-only checks for the print-only WSL gate route."""
 import os
+import importlib.util
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "tools/wsl-push-route.sh"
 
@@ -16,7 +18,10 @@ class WslPushRouteTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="route-test-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.env = dict(os.environ, GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
+        self.env = dict({k: v for k, v in os.environ.items()
+                         if not k.startswith("GIT_") and k != "AUTOOS_STATE_DIR"},
+                        GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1",
+                        GIT_AUTHOR_NAME="Fixture", GIT_COMMITTER_NAME="Fixture",
                         GIT_AUTHOR_EMAIL="fixture@example.invalid",
                         GIT_COMMITTER_EMAIL="fixture@example.invalid",
                         GIT_TERMINAL_PROMPT="0", PYTHONDONTWRITEBYTECODE="1")
@@ -28,10 +33,16 @@ class WslPushRouteTests(unittest.TestCase):
         tools = self.source / "tools"
         tools.mkdir()
         (tools / "prepush.py").write_text(
-            'import os, pathlib, sys\n'
-            'state = pathlib.Path(os.environ["ROUTE_STATE"])\n'
+            'import os, pathlib, subprocess, sys\n'
+            'root = pathlib.Path.cwd().resolve()\n'
+            'if not os.environ.get("AUTOOS_STATE_DIR"): sys.exit(8)\n'
+            'store = pathlib.Path(os.environ["AUTOOS_STATE_DIR"]).resolve()\n'
+            'if store == root or root in store.parents: sys.exit(8)\n'
+            'sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()\n'
             'if "--check-ready" in sys.argv:\n'
-            '    sys.exit(0 if state.exists() else 1)\n'
+            '    sys.exit(0 if (store / "prepush" / (sys.argv[2] + ".json")).is_file() else 1)\n'
+            'state = store / "prepush" / (sha + ".json")\n'
+            'state.parent.mkdir(parents=True, exist_ok=True)\n'
             'count = pathlib.Path(os.environ["ROUTE_COUNT"])\n'
             'count.write_text(count.read_text() + "gate\\n" if count.exists() else "gate\\n")\n'
             'if os.environ.get("ROUTE_RED"): sys.exit(7)\n'
@@ -43,8 +54,7 @@ class WslPushRouteTests(unittest.TestCase):
         self.git("clone", str(self.origin), str(self.verify))
         (self.source / "change").write_text("candidate\n", encoding="utf-8")
         self.sha = self.commit("candidate")
-        self.env.update(ROUTE_STATE=str(self.root / "state"),
-                        ROUTE_COUNT=str(self.root / "count"), TMPDIR=str(self.root))
+        self.env.update(ROUTE_COUNT=str(self.root / "count"), TMPDIR=str(self.root))
         self.before = self.git("worktree", "list", "--porcelain", cwd=self.verify)
         self.head = self.git("rev-parse", "HEAD", cwd=self.verify)
         self.origin_head = self.git("rev-parse", "main", cwd=self.origin)
@@ -56,6 +66,7 @@ class WslPushRouteTests(unittest.TestCase):
             '#!/usr/bin/env python3\nimport os, sys\n'
             'with open(os.environ["ROUTE_TRACE"], "a") as f: f.write(repr(sys.argv[1:]) + "\\n")\n'
             'if "push" in sys.argv[1:]: sys.exit(97)\n'
+            'if "worktree" in sys.argv and os.environ.get("ROUTE_FAIL") in sys.argv: sys.exit(9)\n'
             'os.execv(os.environ["ROUTE_GIT"], ["git"] + sys.argv[1:])\n', encoding="utf-8")
         (shim / "git").chmod(0o755)
         self.env.update(PATH=str(shim) + os.pathsep + self.env["PATH"],
@@ -93,7 +104,10 @@ class WslPushRouteTests(unittest.TestCase):
             result = self.route()
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.splitlines()[-1], expected)
-            self.assertEqual(sum("push" in line for line in result.stdout.splitlines()), 2)
+            self.assertIn("The script did not push; in Git Bash run the next line as a plain command (rule 3.27).",
+                          result.stdout.splitlines())
+            self.assertTrue((self.verify / "logs/prepush" / (self.sha + ".json")).is_file())
+            self.assertFalse(list(self.root.glob("wsl-route-log.*")))
             if second:
                 self.assertIn(f"skipped: {self.sha} already has a green record", result.stdout)
             self.assert_clean()
@@ -105,6 +119,7 @@ class WslPushRouteTests(unittest.TestCase):
         result = self.route()
         self.assert_refused(result)
         self.assertIn("log:", result.stderr)
+        self.assertIn("exit 7", result.stderr)
         log = result.stdout.strip().removeprefix("gate log: ")
         self.assertTrue(Path(log).is_file())
 
@@ -146,7 +161,7 @@ class WslPushRouteTests(unittest.TestCase):
         sha = "0" * 40
         result = self.route(sha, str(self.source), str(self.verify))
         self.assert_refused(result)
-        self.assertIn(sha + ": source will not serve", result.stderr)
+        self.assertIn(sha + ": not source HEAD or a ref tip", result.stderr)
         self.assertFalse((self.root / "count").exists())
 
     def test_static_no_executable_push(self):
@@ -156,6 +171,48 @@ class WslPushRouteTests(unittest.TestCase):
                 continue
             if re.search(r"\bpush\b", line):
                 self.assertTrue(line.startswith(("printf ", "echo ")), line)
+                self.assertNotRegex(line, r"[|;&]\s*(?:bash|sh|eval)\b")
+
+    def test_inherited_store(self):
+        store = self.root / "shared"
+        self.env["AUTOOS_STATE_DIR"] = str(store)
+        self.assertEqual(self.route().returncode, 0)
+        self.assertTrue((store / "prepush" / (self.sha + ".json")).is_file())
+        self.assertFalse((self.verify / "logs").exists())
+
+    def test_wrong_sha_record_does_not_pass(self):
+        store = self.verify / "logs/prepush"
+        store.mkdir(parents=True)
+        (store / (self.origin_head + ".json")).touch()
+        self.env["ROUTE_NOT_READY"] = "1"
+        self.assert_refused(self.route())
+
+    def test_source_head_and_ref_tip_and_stale_refusal(self):
+        self.git("checkout", "--detach", cwd=self.source)
+        self.assertEqual(self.route().returncode, 0)
+        (self.source / "new").touch()
+        self.commit("new detached head")
+        self.assertEqual(self.route().returncode, 0)  # main still names candidate
+        self.git("update-ref", "refs/heads/main", "HEAD", cwd=self.source)
+        result = self.route()
+        self.assert_refused(result)
+        self.assertIn("not source HEAD or a ref tip", result.stderr)
+
+    def test_cleanup_failures_preserve_status_and_prune(self):
+        for action in ("remove", "add"):
+            self.env["ROUTE_FAIL"] = action
+            result = self.route()
+            self.assertEqual(result.returncode, 0 if action == "remove" else 9, result.stderr)
+            self.assertIn("warning: worktree remove failed", result.stderr)
+            self.assertIn("'prune'", self.trace.read_text())
+            self.assert_clean()
+
+    def test_real_store_dir_override(self):
+        spec = importlib.util.spec_from_file_location("route_real_prepush", SCRIPT.with_name("prepush.py"))
+        module = importlib.util.module_from_spec(spec)
+        with mock.patch.dict(os.environ, {"AUTOOS_STATE_DIR": str(self.root)}):
+            spec.loader.exec_module(module)
+            self.assertEqual(module.store_dir(), self.root / "prepush")
 
 
 if __name__ == "__main__":
