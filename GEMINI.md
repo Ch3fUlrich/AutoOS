@@ -19,6 +19,18 @@ This file is *only* the Gemini/Antigravity delta. Start at the router:
 - Before changing a design choice, check for a `docs/decisions/` equivalent;
   before building something, check `.agents/skills/` — it may already exist.
 
+## Orchestrator rules (Antigravity)
+
+- Use a long `WaitMsBeforeAsync` instead of forcing end-of-turn background launches.
+- Never poll; wait for the completion notice.
+- Spawn writers and seats through the plangraph spawner MCP, never by hand.
+- Run reviews with role review.
+- Never bypass hooks: no `core.hooksPath=/dev/null` and no `--no-verify`.
+- End every wrapper with `exit $LASTEXITCODE`; never print a failing code and exit 0.
+- Edit JSON config only through a parser; write a backup first; never overwrite a whole config file.
+- Never echo tokens or MCP config values.
+- Never merge before every review seat has finished.
+
 ## Scratch hygiene
 
 - **Never** create scratch scripts in random locations or the repo root.
