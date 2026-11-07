@@ -1,4 +1,5 @@
 # Changelog
+- OG-RULE-SUPERSEDE (2026-11-07, D-4702, D-4704): memory.pg gains optional Rule.status (active | superseded) and the edges RuleSupersedes (Rule -> Rule) and RetiresRule (Decision -> Rule), additive for all graphs; schema.md mirrors it. Declared only: live after the operator-owned cluster apply.
 - COMPACT-NEVER-REPLACES-HANDOFF (2026-11-07, D-4646): fleet transcript names ending in a counter identify sessions without inherited environment variables; compaction boundaries latch handoff state even below the context threshold. A separate persisted byte cursor streams the transcript once and scans only appended records thereafter; interactive sessions retain threshold behavior.
 - AO-WSL-PUSH-ROUTE (2026-11-07, D-2241, D-4559, D-4581): keep green records outside the disposable WSL worktree, bind source tips, preserve status through cleanup, and print, never execute, the Git Bash push command.
 - AO-MEASURE-TEST-CRLF (2026-11-07, D-4578): write measure fixtures as UTF-8 bytes on every host and register conflict-repo cleanup before git setup.

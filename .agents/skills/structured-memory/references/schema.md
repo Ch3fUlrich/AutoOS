@@ -24,14 +24,14 @@ for project-specific info. See [SKILL.md](../SKILL.md) for the recall/persist pr
 |---|---|---|
 | `Project` | One repository / workstream | `slug`, `name?`, `path?`, `summary?` |
 | `Decision` | A choice that was made and why | `slug`, `title`, `rationale?`, `status`, `date?`, `embedding?` |
-| `Rule` | A hard constraint agents must follow | `slug`, `statement`, `severity` |
+| `Rule` | A hard constraint agents must follow | `slug`, `statement`, `severity`, `status?` |
 | `Preference` | A soft, overridable inclination (often global) | `slug`, `statement`, `scope` |
 | `Convention` | A repeatable pattern/way-of-doing | `slug`, `name`, `example?` |
 | `Component` | A notable part of a system | `slug`, `name`, `kind?`, `location?` |
 | `Task` | Ongoing/planned work worth remembering | `slug`, `title`, `state` |
 
 `status` for `Decision`: `proposed | accepted | superseded | deprecated` (an enum — other
-values are rejected). `severity` for `Rule`: `must | should`. `scope` for `Preference`:
+values are rejected). `severity` for `Rule`: `must | should`; `status` for `Rule`: `active | superseded`, optional, absent means active. `scope` for `Preference`:
 `global | <project-slug>`. Every type is `@key(slug)`, so `load --mode merge` upserts by
 slug and is idempotent. `Decision.embedding` is `Vector(768)` populated from `rationale`
 (`nomic-embed-text`); it is optional and regenerable via `scripts/populate-embeddings.py`.
@@ -57,6 +57,8 @@ graph forms real clusters instead of a star).
 | `Implements` | `Task` → `Decision` | task realizes a decision |
 | `DependsOn` | `Component` → `Component` | component depends on another |
 | `Supersedes` | `Decision` → `Decision` | replaces an earlier decision |
+| `RuleSupersedes` | `Rule` → `Rule` | replaces an earlier rule |
+| `RetiresRule` | `Decision` → `Rule` | a decision ends a rule |
 
 There is **no** generic `relates-to (any → any)` edge — edges are typed and directional,
 and an undeclared type fails with `type error: T4: unknown edge type`.

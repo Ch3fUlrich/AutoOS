@@ -37,10 +37,13 @@ node Decision {
   @index(status)
 }
 
+// `status` is optional because adding a non-nullable property to an existing
+// node is rejected; a Rule without status is active (D-4702, D-4704).
 node Rule {
   slug: String
   statement: String
   severity: enum(must, should)
+  status: enum(active, superseded)?
   @key(slug)
   @index(severity)
 }
@@ -91,3 +94,5 @@ edge Addresses: Task -> Component                // a task works on a component
 edge Implements: Task -> Decision                // a task realizes a decision
 edge DependsOn: Component -> Component           // component depends on another
 edge Supersedes: Decision -> Decision            // a decision replaces an earlier one
+edge RuleSupersedes: Rule -> Rule                // a rule replaces an earlier rule (D-4702)
+edge RetiresRule: Decision -> Rule               // a decision ends a rule (D-4704)
