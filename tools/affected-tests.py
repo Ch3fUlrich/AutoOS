@@ -643,8 +643,8 @@ RULE_CITING_FILES = ("CHANGELOG.md",)
 # A new tree-wide lint over the suites must be added here, the way a new harness must be
 # added to `tests/test_suite_wiring.py`'s WIRING: an unstated scan is an unselected one.
 REPO_META_SCANS = (
-    ("tests/test_wsl_push_route.py", re.compile(r"^tools/wsl-push-route\.sh$")),
-    ("tests/test_suite_wiring.py",
+    ("tests/test_wsl_push_route.py", re.compile(r"^tools/wsl-push-route\.sh$")),  # Selection gap, no CI red: name-maps .py only.
+    ("tests/test_suite_wiring.py",  # every unit test file, and every harness that runs one
      re.compile(r"^tests/(test_[^/]+\.py|linux/[^/]+\.sh|run-tests\.ps1)$"
                 r"|^\.github/workflows/[^/]+\.ya?ml$")),
     # the POSIX-guard scan over tests/, and the BOM scan over every .ps1/.psm1 in git.

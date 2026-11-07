@@ -195,13 +195,24 @@ class WslPushRouteTests(unittest.TestCase):
         self.assertFalse((self.root / "count").exists())
         self.assertNotIn("'fetch'", self.trace.read_text() if self.trace.exists() else "")
 
+    def test_empty_run_id_runs_normally(self):
+        self.env["AUTOOS_AGENT_RUN_ID"] = ""
+        result = self.route()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1],
+                         f"MSYS_NO_PATHCONV=1 wsl.exe -- git -C {self.verify} "
+                         f"push origin {self.sha}:refs/heads/main")
+        self.assert_clean()
+
     def test_worker_run_id_refused_with_existing_record(self):
         store = self.verify / "logs/prepush"
         store.mkdir(parents=True)
         record = store / (self.sha + ".json")
         record.touch()
         self.env["AUTOOS_AGENT_RUN_ID"] = "worker"
-        self.assert_early_refusal(self.route())
+        result = self.route()
+        self.assert_early_refusal(result)
+        self.assertIn("AUTOOS_AGENT_RUN_ID is set; this route is supervisor-only", result.stderr)
         self.assertTrue(record.is_file())
 
     def test_relative_state_dir_refused_before_fetch(self):
