@@ -1,10 +1,14 @@
 # Changelog
 - autoos:CI-RUNNER-SLOT-MUTEX (2026-11-07, D-4728): lock each runner slot, suppress blind-tick starts over running containers, and reap surplus or aged idle containers without removing busy runners.
+- HANDOFF-DIRECT-READY (2026-11-07, D-4629): kick the context watchdog immediately after ready marker verification, with a five-second timeout and timer-backed nonfatal failures; AUTOOS_READY_KICK=0 disables it. The guard now instructs sessions to run ready as their last action because the successor starts at once. Hermetic tests cover exact kick argv, refusal, missing systemctl, timeout and failed start.
+- AO-BRIEF-GUARDS-FOLLOWUP (2026-11-07, D-4491): validate expanded test scopes, substitute template fields in one pass, remove self-built probe assertions, and document why brief guards have no live caller.
 - COMPACT-NEVER-REPLACES-HANDOFF (2026-11-07, D-4646): fleet transcript names ending in a counter identify sessions without inherited environment variables; compaction boundaries latch handoff state even below the context threshold. A separate persisted byte cursor streams the transcript once and scans only appended records thereafter; interactive sessions retain threshold behavior.
 - AO-WSL-PUSH-ROUTE (2026-11-07, D-2241, D-4559, D-4581): keep green records outside the disposable WSL worktree, bind source tips, preserve status through cleanup, and print, never execute, the Git Bash push command.
 - AO-MEASURE-TEST-CRLF (2026-11-07, D-4578): write measure fixtures as UTF-8 bytes on every host and register conflict-repo cleanup before git setup.
 - AO-MEASURE-TEST-DEFAULT-BRANCH (2026-11-07, D-4471): name master explicitly in the measure conflict fixture so it is independent of the host's default branch.
 - AO-OC-L2-STOP-TESTS-WIN (2026-11-07, D-3738, D-4471): kill remaining fake serve trees in resume teardown and test recycled-PID refusal on Windows, where identity is creation time only; retain POSIX identity assertions; mentions-the-word case is POSIX-only.
+
+- OC-L1-SOL-TEST: diagnose canary session errors without echoing provider payloads or secrets; retain the existing fail-closed guard and OpenCode 2.0.12 rendering. Live OpenCode 2.2.5 start passed before this diagnostic change, so the earlier no-reply failure was not reproduced.
 
 - AO-STACK-UP-FORK-IMAGE (2026-11-06, D-4464): apply the optional host-local fork-image compose overlay last so stack commands retain the host's gateway digest; deduplicate compose env setup and test config selection and overlay order.
 - AO-BRIEF-RENDER-UNWIRED (2026-11-06, D-4464): remove the unused brief renderer, retain field/scope guards and re-point tests directly; drop rendered-output pins only.

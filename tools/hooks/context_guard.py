@@ -1,21 +1,12 @@
 """context_guard: a Claude Code PostToolUse hook that flags context-window cap.
 
-The hook reads the hook JSON off stdin (`transcript_path`, `session_id`, `cwd`)
-and reports how full the model's context window is by summing the three fields
-that occupy it — `input_tokens` plus both cache buckets — of the *last*
-assistant usage record near the end of the transcript. When that fill crosses
-the handoff threshold it prints one `additionalContext` line telling the agent
-to write its handoff and run `ready`; past the hard threshold it says stop. It
-also drops a per-session state file so the same fill is not re-announced.
+Reads hook JSON from stdin and sums input tokens plus both cache buckets in
+the last assistant usage record. Emits additionalContext at handoff/hard caps
+and persists state to avoid re-announcing. Usage reads are tail-bounded;
+context_compaction incrementally scans identity and compaction boundaries.
 
-Usage reads are bounded to the tail. Fleet identity and compaction boundaries
-are streamed once, then only appended bytes are scanned (context_compaction).
-
-Everything is stdlib-only and portable (Linux + Windows) via `pathlib`. The hook
-mode is deliberately fail-silent — a broken transcript, bad stdin or an
-unwritable state dir exits 0 with no output, because a PostToolUse hook must
-never break the agent that called it. The `ready` and `status` sub-commands are
-the exception: those report errors on stderr and exit non-zero.
+Stdlib-only and portable via pathlib. Hook mode fails silently on bad input or
+unwritable state so it cannot break its caller; ready/status report errors.
 
 Thresholds come from the environment: `AUTOOS_CTX_HANDOFF` (default 270000) and
 `AUTOOS_CTX_HARD` (default 300000); a non-integer or empty value falls back.
@@ -226,8 +217,9 @@ def emit_line(level: str, ctx: int, threshold: int, script_path) -> str:
     n = ctx // 1000
     h = threshold // 1000
     script = str(Path(script_path).resolve())
-    tail = ("then run python3 %s ready <handoff-path> (and SendMessage "
-            "RECYCLE-READY <path> to your parent if your brief says so)" % script)
+    tail = ("SendMessage RECYCLE-READY <path> to your parent if your brief says so, "
+            "then run python3 %s ready <handoff-path> as your last action: "
+            "ready ends this session; the successor starts at once" % script)
     if level == "hard":
         return "HARD-CAP ctx=%dk >= %dk: no new work; handoff now, %s" % (n, h, tail)
     return ("HANDOFF-NOW ctx=%dk >= %dk: finish the current step, write your "
@@ -358,6 +350,16 @@ def cmd_ready(args) -> int:
     except OSError as exc:
         print("context_guard: cannot write ready marker: %s" % exc, file=sys.stderr)
         return 2
+    if os.environ.get("AUTOOS_READY_KICK") != "0":
+        try:
+            subprocess.run(
+                ["systemctl", "--user", "start", "--no-block", "ctx-watchdog.service"],
+                capture_output=True, timeout=5, check=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            # The timer remains the backstop; a validated ready must still succeed.
+            detail = " ".join(str(exc).splitlines())
+            print("context_guard: ready kick failed; timer is the backstop: %s" % detail,
+                  file=sys.stderr)
     return 0
 
 
