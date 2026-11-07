@@ -1,10 +1,4 @@
-"""tests/test_oc_l2.py - the L2 phase lane (D-665 AO-L2-LAUNCH).
-
-unittest, stdlib only, NO real opencode: the same fakes as the L1 launcher
-suite (tests/_oc_l1_fakes.py) stand in for the server and the binary, and the
-lane goes through `oc_l1.main` for real, so what is pinned here is what the
-launcher would actually render, spawn and prompt.
-"""
+"""L2 goes through oc_l1.main for real; tests/_oc_l1_fakes.py supplies fakes."""
 
 import contextlib
 import io
@@ -16,6 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -42,6 +37,16 @@ from _oc_l1_fakes import (  # noqa: E402
 )
 
 GUARD_DIR = ROOT / "configuration" / "opencode" / "plugins" / "bash-guard"
+
+
+def _before_foreign_creation():
+    # Capture BEFORE spawning: stamping after the foreign process would not model PID recycling.
+    if os.name != "nt":
+        return None
+    assert 60 > oc_l2.oc_l1_stop.NT_START_TOLERANCE_S, "fixture gap must exceed start tolerance"
+    return datetime.fromtimestamp(time.time() - 60, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 BRIEF = "GOAL: make the tests green.\nFILES: tools/\nDONE: suite passes.\n"
 # Where the spawner keeps its run records (F4, hermetic): the whole suite pins
 # this to a temp dir, so no test ever reads or writes the host's state. Named by
@@ -655,20 +660,15 @@ class LaneTest(unittest.TestCase):
             except (ProcessLookupError, PermissionError, OSError):
                 pass
 
-    def _lane_with_foreign_pid(self, name, pid, argv=None, start_time="unset"):
-        """A lane whose state file names a PID stop must not accept.
-
-        `argv` and `start_time` are what the launcher records for its own child;
-        `start_time="unset"` keeps the pre-fix shape (no such key at all),
-        "match" reads the live PID's real value, anything else is written as-is.
-        """
+    def _lane_with_foreign_pid(self, name, pid, argv=None, start_time="unset", *, started_utc=None):
+        """Foreign PID state; start_time is omitted, matched live, or literal."""
         lane = oc_l2.build_lane(name, self.proj, "p1", self.brief,
                                 "l2-orchestrator", self.l1_inbox,
                                 opencode_bin=self.bin_,
                                 password_env=PW_ENV, port=self.srv.port)
         Path(lane["scratch_dir"]).mkdir(parents=True, exist_ok=True)
         st = {"name": name, "session_id": "ses_x", "port": self.srv.port,
-              "pid": pid, "started_utc": oc_l2._now_ts()}
+              "pid": pid, "started_utc": started_utc or oc_l2._now_ts()}
         if argv is not None:
             st["argv"] = argv
         if start_time == "match":
@@ -680,16 +680,18 @@ class LaneTest(unittest.TestCase):
         return lane
 
     def test_stop_refuses_a_pid_that_is_not_the_lane(self):
+        started_utc = _before_foreign_creation()
         sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
         try:
             name = self._lane_name()
-            lane = self._lane_with_foreign_pid(name, sleeper.pid)
+            lane = self._lane_with_foreign_pid(name, sleeper.pid, started_utc=started_utc)
             sf = Path(lane["state_file"])
             out = oc_l2.cmd_stop(name)
             self.assertIsNone(sleeper.poll(), "stop killed a process that is not the lane")
             self.assertIs(out["stopped"], False)
             self.assertTrue(out["orphan"])
-            self.assertIn("argv", out["detail"],
+            self.assertIn("creation time" if os.name == "nt" else "argv", out["detail"],
+                          "a later creation time must be refused" if os.name == "nt" else
                           "a state file with no recorded command must be refused, "
                           "naming the missing record as the reason")
             self.assertTrue(sf.is_file(), "a refused stop must keep the state file")
@@ -697,11 +699,10 @@ class LaneTest(unittest.TestCase):
             sleeper.kill()
             sleeper.wait()
 
+    @unittest.skipIf(os.name == "nt", "Windows identity is creation time only, argv is never read")
     def test_stop_refuses_a_recycled_pid_that_only_mentions_the_word(self):
-        # Identity is the whole recorded command line, not a token that happens
-        # to contain the binary's name: a recycled PID running a grep, a tail or
-        # an editor over such a path is not the lane, and signalling its process
-        # group would be the kill-by-name this tool forbids.
+        # Identity is the whole recorded command, not a token: signalling the
+        # group would be forbidden kill-by-name.
         argv = [self.bin_, "serve", "--hostname", "127.0.0.1",
                 "--port", str(self.srv.port)]
         sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)",
@@ -724,27 +725,22 @@ class LaneTest(unittest.TestCase):
         self.assertIs(out["stopped"], False)
         self.assertIn("no lane config", out["detail"])
 
-    # (3b) Sonnet final REJECT 2026-10-08 finding 4: identity is the WHOLE
-    #      recorded command line plus the kernel start time of that exact PID,
-    #      and the process GROUP is only signalled when the recorded PID leads
-    #      it - which only a lane this launcher started with start_new_session
-    #      ever does.
     def test_stop_refuses_a_recycled_pid_that_replays_the_lane_argv(self):
-        # A recycled PID can inherit the dead lane's number AND, if the new
-        # owner is another copy of the same wrapper, its command line. The
-        # starttime is the one fact a recycler cannot fake.
+        started_utc = _before_foreign_creation()
+        # Windows: replayed argv cannot rescue a later creation time.
         argv = [self.bin_, "serve", "--hostname", "127.0.0.1",
                 "--port", str(self.srv.port)]
         victim = subprocess.Popen([sys.executable, "-c", _SLEEP_CODE] + argv[1:])
         try:
             name = self._lane_name()
-            lane = self._lane_with_foreign_pid(name, victim.pid, argv=argv,
-                                               start_time=oc_l1_serve.proc_starttime(victim.pid) + 1)
+            lane = self._lane_with_foreign_pid(name, victim.pid, argv=argv, started_utc=started_utc,
+                                               start_time=("unset" if os.name == "nt" else
+                                                           oc_l1_serve.proc_starttime(victim.pid) + 1))
             out = oc_l2.cmd_stop(name)
             self.assertIsNone(victim.poll(), "stop killed a recycled PID")
             self.assertIs(out["stopped"], False)
             self.assertTrue(out["orphan"])
-            self.assertIn("start", out["detail"].lower())
+            self.assertIn("creation time" if os.name == "nt" else "start", out["detail"].lower())
             self.assertTrue(Path(lane["state_file"]).is_file())
         finally:
             victim.kill()
@@ -906,6 +902,7 @@ class ResumeTest(unittest.TestCase):
 
     def setUp(self):
         self._td = tempfile.TemporaryDirectory(prefix="oc_l2_resume_")
+        self.addCleanup(self._td.cleanup)
         self.td = Path(self._td.name)
         self.agents = self.td / "hoststate" / "agents"
         self.srv = FakeServer(PW_VALUE)
@@ -936,26 +933,27 @@ class ResumeTest(unittest.TestCase):
         self.addCleanup(mock.patch.stopall)
 
     def tearDown(self):
-        # F7: every fake `opencode serve` this test started is the test's own
-        # child; a resume that restarted a lane, or a failure mid-body, must not
-        # leave one holding a port and sleeping for 300 s past the suite.
+        # F7: a leftover fake serve holds a port and sleeps 300 s past the suite.
+        survivors = []
         for pid in self._pids:
             if pid and pid_alive(pid):
-                # killpg/SIGKILL are POSIX-only: the group is already gone on
-                # Windows, where the stop path killed the process by pid.
                 if os.name != "nt":
                     try:
                         os.killpg(pid, signal.SIGKILL)
                     except (ProcessLookupError, PermissionError, OSError):
                         pass
-                oc_l2._wait_gone(pid, 5.0)
+                else:
+                    oc_l1_serve._kill_pid(pid)
+                gone = oc_l2._wait_gone(pid, 5.0)
+                if os.name == "nt" and not gone:
+                    survivors.append(pid)
         for k, v in self._envs.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
         self.srv.stop()
-        self._td.cleanup()
+        self.assertFalse(survivors, f"fake serve PIDs survived teardown: {survivors}")
 
     def _start(self, **over):
         kw = dict(combo="l2-orchestrator", opencode_bin=self.bin_,
@@ -1626,10 +1624,8 @@ class ResumeTest(unittest.TestCase):
 
     # (2e3) a restart is not attempted over a stop that was REFUSED
     def test_resume_reports_a_refused_stop_instead_of_starting_over_it(self):
-        # cmd_stop will not signal a pid it cannot prove is the lane, and that
-        # process stays up with its state file: cmd_start's only answer for it is
-        # "already running", which would be reported as a failed restart that
-        # names neither the refusal nor the lane still holding the port.
+        # A refused stop leaves the process up; cmd_start only gives misleading
+        # "already running", naming neither refusal nor port holder.
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
         self.srv.items = []
@@ -1637,17 +1633,21 @@ class ResumeTest(unittest.TestCase):
         self.srv.session_outcome = "failed"
         lane = oc_l2.read_config(result["lane"])
         sf = Path(lane["state_file"])
+        foreign_started_utc = _before_foreign_creation()
         sleeper = subprocess.Popen([sys.executable, "-c", _SLEEP_CODE])
         try:
             st = json.loads(sf.read_text(encoding="utf-8"))
             st["pid"] = sleeper.pid
+            if os.name == "nt":
+                st["started_utc"] = foreign_started_utc
             st.pop("argv", None)
             st.pop("start_time", None)
             sf.write_text(json.dumps(st), encoding="utf-8")
             out = oc_l2.cmd_resume(result["lane"])
             self.assertFalse(out["restarted"], out)
             self.assertIn("stop refused", out["restart_failed"], out)
-            self.assertIn("cannot be verified", out["restart_failed"], out)
+            self.assertIn("creation time" if os.name == "nt" else "cannot be verified",
+                          out["restart_failed"], out)
             self.assertIn("restart failed: stop refused", out["detail"], out)
             self.assertIs(out["stop"]["stopped"], False, out)
             self.assertNotIn("start", out, "a refused stop started the lane again")
