@@ -2035,6 +2035,14 @@ _usb_copy_readback() {
     (( bad == 0 ))
 }
 
+# _usb_sync_target <mnt>: flush only <mnt>, bounded by AUTOOS_USB_SYNC_TIMEOUT.
+_usb_sync_target() {
+    if ! timeout "${AUTOOS_USB_SYNC_TIMEOUT:-120}" $AUTOOS_SUDO sync -f "$1" 2>/dev/null; then
+        ui_err "USB sync failed for $1 (timeout ${AUTOOS_USB_SYNC_TIMEOUT:-120}s); the stick may not hold the data yet"
+        return 1
+    fi
+}
+
 # _usb_copy_onto <image_path> <mountpoint> [extra_file...]
 # Mounts <image_path> read-only (a loop mount - the source is a plain ISO
 # file, never the physical device), refuses before copying anything if any
@@ -2047,13 +2055,6 @@ _usb_copy_readback() {
 # without mounting a real multi-gigabyte ISO (AGENTS.md SS5) - production
 # never sets them, so the real mount-and-measure path is what actually runs
 # outside a test.
-_usb_sync_target() {
-    if ! timeout "${AUTOOS_USB_SYNC_TIMEOUT:-120}" $AUTOOS_SUDO sync -f "$1" 2>/dev/null; then
-        ui_err "USB sync failed for $1 (timeout ${AUTOOS_USB_SYNC_TIMEOUT:-120}s); the stick may not hold the data yet"
-        return 1
-    fi
-}
-
 _usb_copy_onto() {
     local image="$1" mnt="$2"; shift 2
     local -a extra_files=("$@")
