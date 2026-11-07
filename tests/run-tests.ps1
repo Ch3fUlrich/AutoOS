@@ -5601,7 +5601,7 @@ Test-Case 'context_guard hook and ready-v2 contracts (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $out = ''; $rc = 0; foreach ($t in 'tests\test_context_guard.py','tests\test_context_guard_ready_v2.py') { $out += & $py.Source (Join-Path $Root $t) 2>&1 | Out-String; if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE; break } } }
+    try { $out = ''; $rc = 0; foreach ($t in 'tests\test_context_guard.py','tests\test_context_guard_compaction.py','tests\test_context_guard_ready_v2.py') { $out += & $py.Source (Join-Path $Root $t) 2>&1 | Out-String; if ($LASTEXITCODE -ne 0) { $rc = $LASTEXITCODE; break } } }
     finally { $ErrorActionPreference = $prev }
     Assert-Equal $rc 0 "context_guard unit tests failed: $out"
 }
