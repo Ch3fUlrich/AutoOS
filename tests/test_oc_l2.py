@@ -20,7 +20,6 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 import oc_l1  # noqa: E402
 import oc_l1_serve  # noqa: E402
-import oc_l1_stop  # noqa: E402
 import oc_l2  # noqa: E402
 import autoos_inbox  # noqa: E402
 from _oc_l1_fakes import (  # noqa: E402
@@ -700,7 +699,8 @@ class LaneTest(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "Windows identity is creation time only, argv is never read")
     def test_stop_refuses_a_recycled_pid_that_only_mentions_the_word(self):
-        # Identity is the whole recorded command, not a token: signalling the group would be forbidden kill-by-name.
+        # Identity is the whole recorded command, not a token: signalling the
+        # group would be forbidden kill-by-name.
         argv = [self.bin_, "serve", "--hostname", "127.0.0.1",
                 "--port", str(self.srv.port)]
         sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)",
@@ -739,9 +739,7 @@ class LaneTest(unittest.TestCase):
             self.assertIsNone(victim.poll(), "stop killed a recycled PID")
             self.assertIs(out["stopped"], False)
             self.assertTrue(out["orphan"])
-            self.assertIn("start", out["detail"].lower())
-            if os.name == "nt":
-                self.assertIn("creation time", out["detail"])
+            self.assertIn("creation time" if os.name == "nt" else "start", out["detail"].lower())
             self.assertTrue(Path(lane["state_file"]).is_file())
         finally:
             victim.kill()
@@ -953,8 +951,8 @@ class ResumeTest(unittest.TestCase):
             else:
                 os.environ[k] = v
         self.srv.stop()
+        self.addCleanup(self._td.cleanup)
         self.assertFalse(survivors, f"fake serve PIDs survived teardown: {survivors}")
-        self._td.cleanup()
 
     def _start(self, **over):
         kw = dict(combo="l2-orchestrator", opencode_bin=self.bin_,
@@ -1625,7 +1623,8 @@ class ResumeTest(unittest.TestCase):
 
     # (2e3) a restart is not attempted over a stop that was REFUSED
     def test_resume_reports_a_refused_stop_instead_of_starting_over_it(self):
-        # A refused stop leaves the process up; cmd_start only gives misleading "already running", naming neither refusal nor port holder.
+        # A refused stop leaves the process up; cmd_start only gives misleading
+        # "already running", naming neither refusal nor port holder.
         result, rc = self._start()
         self.assertEqual(rc, 0, result)
         self.srv.items = []
