@@ -297,7 +297,7 @@ inside = False
 for n, line in enumerate(open(sys.argv[1]), 1):
     if line.startswith('_usb_sync_target() {'):
         inside = True
-    words = shlex.split(line, comments=True) if re.search(r'\bsync\b', line) else []
+    words = re.search(r'\bsync\b', line)  # plain regex: shlex raised on unbalanced quotes
     # Quoted text and comments dropped; also catches sync; (sync) /usr/bin/sync
     cmd = re.sub(r'(^|\s)#.*', '', re.sub(r'"(\\.|[^"\\])*"|\'[^\']*\'', '""', line)) if words else ''
     for m in re.finditer(r'(^|[/\s;&|()])sync($|[\s;&|()])', cmd):
@@ -317,6 +317,20 @@ if it "usb_execute: sync EIO reports failed rc=1 and preserves stderr, not timeo
     out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" _usb_sync_target /fake/target 2>&1)"; rc=$?
     [[ $rc -ne 0 && "$out" == *"failed rc=1"* && "$out" == *"sync: fake EIO"* && "$out" != *"timeout"* ]] && pass || fail "rc=$rc out=$out"
     rm -rf "$fakebin"
+fi
+
+if it "usb_execute: uefi-copy flush failure returns 1 and says the pre-mounted stick stays mounted"; then
+    fakebin="$(mktemp -d)"
+    printf '#!/bin/bash\nexit 0\n' >"$fakebin/mount"; cp "$fakebin/mount" "$fakebin/cp"
+    printf '#!/bin/bash\necho "$*" >>"%s/umounts"\n' "$fakebin" >"$fakebin/umount"
+    printf '#!/bin/bash\necho "sync: fake EIO" >&2\nexit 1\n' >"$fakebin/sync"
+    chmod +x "$fakebin/"{mount,cp,umount,sync}
+    img="$(mktemp)"
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_FAKE_LSBLK="$(fake_usb usb_fat32_mounted)" \
+        usb_copy_image /dev/sdb "$img" 2>&1)"; rc=$?
+    [[ $rc -eq 1 && "$out" == *"failed rc=1"* && "$out" == *"/media/user/AUTOOS is still mounted"* \
+        && "$(cat "$fakebin/umounts" 2>/dev/null)" != *"/media/user/AUTOOS"* ]] && pass || fail "rc=$rc out=$out"
+    rm -rf "$fakebin"; rm -f "$img"
 fi
 
 if it "usb_execute: invalid sync deadlines warn and retain the 120 second bound"; then

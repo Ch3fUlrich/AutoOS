@@ -2043,7 +2043,7 @@ _usb_sync_target() {
         seconds=120
     fi
     timeout --kill-after=5 "$seconds" $AUTOOS_SUDO sync -f "$1" || rc=$?
-    if (( rc == 124 )); then
+    if (( rc == 124 || rc == 137 )); then  # 137: --kill-after fired
         ui_err "USB sync for $1 timed out after ${seconds}s; the stick may not hold the data yet"
     elif (( rc != 0 )); then
         ui_err "USB sync failed rc=$rc for $1; the stick may not hold the data yet"
@@ -2164,7 +2164,7 @@ usb_copy_image() {
             rmdir "$mnt" 2>/dev/null
         fi
     fi
-
+    (( rc == 2 )) && { ui_err "$mnt is still mounted; $dev must not be unplugged until it is unmounted manually"; rc=1; }
     return "$rc"
 }
 
