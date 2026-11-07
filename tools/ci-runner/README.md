@@ -95,6 +95,13 @@ decision 2026-10-16, D-1425:
   (`docker builder prune -f --keep-storage 20gb`). It never touches volumes
   (the `ci-cargo-*` and `ci-sccache` caches live there) and never removes
   tagged images such as `workst-runner:*` or the pre-pulled job images.
+- **One loop per slot, idle reaper.** Each `runner-loop.ps1` holds a named
+  mutex for its slot; a second loop for the same slot exits without starting.
+  The supervisor never starts a slot while its container runs, and removes
+  idle, offline slot containers that are surplus or older than the config's
+  `"container_max_age_minutes"` (default 120; invalid values fall back to 120).
+  A busy or online runner is never removed, and a container with no runner
+  registration yet is kept for its first 10 minutes.
 
 ### Measured (2026-10-16, autoos:CI-SPEED-WORKST)
 

@@ -184,7 +184,7 @@ function Get-CiContainerMaxAge {
     $value = $Config.container_max_age_minutes
     $number = 0.0
     $valid = $null -ne $value -and $value -isnot [bool] -and
-        [double]::TryParse([string]$value, [Globalization.NumberStyles]::Float,
+        [double]::TryParse([Convert]::ToString($value, [Globalization.CultureInfo]::InvariantCulture), [Globalization.NumberStyles]::Float,
             [Globalization.CultureInfo]::InvariantCulture, [ref]$number) -and
         $number -ge 1 -and $number -le 525600
     [pscustomobject]@{ Minutes = $(if ($valid) { $number } else { 120 }); Valid = $valid }
@@ -194,16 +194,20 @@ function Get-CiContainersToRemove {
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Containers,
         [ValidateRange(1, 525600)][double]$MaxAgeMinutes = 120,
+        [ValidateRange(0, 1440)][double]$RegistrationGraceMinutes = 10,
         [datetimeoffset]$Now = [datetimeoffset]::UtcNow
     )
     # Input is one slot only. An online runner is never removed (GitHub may be assigning it a
     # job); offline idle containers go when surplus or past max age. Online sorts first, so an
-    # online one counts as the slot's kept idle container.
+    # online one counts as the slot's kept idle container. A container with no runner registration
+    # yet (Unregistered) is never removed inside the grace: it may be the live loop's fresh launch.
     $keptIdle = $false
     foreach ($container in @($Containers | Sort-Object @{ Expression = { [bool]$_.Online }; Descending = $true }, @{ Expression = 'Created'; Descending = $true })) {
         if ($container.Busy) { continue }
         if ($container.Online) { $keptIdle = $true; continue }
-        if (($Now - [datetimeoffset]$container.Created).TotalMinutes -gt $MaxAgeMinutes -or $keptIdle) {
+        $age = ($Now - [datetimeoffset]$container.Created).TotalMinutes
+        if ($container.Unregistered -and $age -lt $RegistrationGraceMinutes) { continue }
+        if ($age -gt $MaxAgeMinutes -or $keptIdle) {
             $container.Name
         } else { $keptIdle = $true }
     }

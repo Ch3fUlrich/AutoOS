@@ -12103,15 +12103,24 @@ Test-Case 'ci-runner: reaper age boundary 119 kept, 120 kept, 121 removed' {
 Test-Case 'ci-runner: slot instance pattern never claims a slot whose name it prefixes' {
     $re = Get-CiSlotInstancePattern 'workst-a-1'; Assert-True ('workst-a-1-20261107120000' -match $re) 'own instance missed'; foreach ($n in @('workst-a-1-1-20261107120000', 'workst-a-10-20261107120000', 'workst-a-1-2026')) { Assert-True ($n -notmatch $re) "foreign name matched: $n" }
 }
-Test-Case 'ci-runner: online idle older than max age kept, offline idle removed' {
+Test-Case 'ci-runner: online idle kept at any age, surplus offline idle removed, 121-min offline idle removed' {
     $n = [datetimeoffset]::UtcNow; $pair = @([pscustomobject]@{ Name = 'new-offline'; Created = $n.AddMinutes(-1); Busy = $false; Online = $false }, [pscustomobject]@{ Name = 'old-online'; Created = $n.AddMinutes(-5); Busy = $false; Online = $true }); Assert-Equal (@(Get-CiContainersToRemove -Containers $pair -Now $n) -join ',') 'new-offline'
     $two = @('a', 'b') | ForEach-Object { [pscustomobject]@{ Name = $_; Created = $n.AddMinutes(-500); Busy = $false; Online = $true } }; Assert-Equal @(Get-CiContainersToRemove -Containers $two -Now $n).Count 0
     $now = [datetimeoffset]::UtcNow
     foreach ($online in @($true, $false)) { $item = [pscustomobject]@{ Name = 'old'; Created = $now.AddMinutes(-121); Busy = $false; Online = $online }; Assert-Equal (@(Get-CiContainersToRemove -Containers @($item) -Now $now).Count) $(if ($online) { 0 } else { 1 }) }
 }
+Test-Case 'ci-runner: an unregistered container is kept inside the registration grace, then judged normally' {
+    $n = [datetimeoffset]'2026-11-07T12:00:00Z'; $fresh = [pscustomobject]@{ Name = 'fresh'; Created = $n.AddMinutes(-1); Busy = $false; Online = $false; Unregistered = $true }
+    $online = [pscustomobject]@{ Name = 'old-online'; Created = $n.AddMinutes(-30); Busy = $false; Online = $true }
+    Assert-Equal @(Get-CiContainersToRemove -Containers @($fresh, $online) -Now $n).Count 0
+    Assert-Equal @(Get-CiContainersToRemove -Containers @($fresh) -Now $n.AddMinutes(8) -MaxAgeMinutes 1).Count 0; Assert-Equal @(Get-CiContainersToRemove -Containers @($fresh) -Now $n.AddMinutes(10) -MaxAgeMinutes 1).Count 1
+}
+Test-Case 'ci-runner: supervisor marks unregistered containers at the tick and on the pre-removal recheck' {
+    $sv = Get-Content -Raw (Join-Path $Root 'tools/ci-runner/supervisor.ps1'); Assert-True ($sv -match 'Unregistered = \$registration\.Count -eq 0') 'tick wiring missing'; Assert-True ($sv -match '\$candidate\.Unregistered = \$fresh\.Count -eq 0') 'recheck wiring missing'
+}
 Test-Case 'ci-runner: container max age validates range and falls back to 120' {
     foreach ($value in @(0, '2h', 'typo', -1, 525601, $null, $true, 'NaN')) { $age = Get-CiContainerMaxAge @{container_max_age_minutes = $value}; Assert-Equal $age.Minutes 120; Assert-True (-not $age.Valid) 'invalid age accepted' }
-    foreach ($value in @(1, 120, 525600, '60')) { $age = Get-CiContainerMaxAge @{container_max_age_minutes = $value}; Assert-Equal $age.Minutes ([double]$value); Assert-True $age.Valid 'valid age rejected' }
+    foreach ($value in @(1, 120, 525600, '60', 90.5)) { $age = Get-CiContainerMaxAge @{container_max_age_minutes = $value}; Assert-Equal $age.Minutes ([double]$value); Assert-True $age.Valid 'valid age rejected' }
 }
 Test-Case 'ci-runner: reaper never removes busy containers and keeps one idle per slot' {
     $now = [datetimeoffset]'2026-11-07T12:00:00Z'
@@ -12412,6 +12421,8 @@ Test-Case 'ci-runner: Dockerfile installs the Cyrillic-capable fonts and the Pyt
     Assert-True ($c6raw -match 'python3-dev') 'python3-dev missing from the Dockerfile'
     Assert-True ($c6raw -match 'build-essential') 'build-essential missing from the Dockerfile'
 }
+
+# ─── Summary ────────────────────────────────────────────────────────────────
 Write-Host ''
 Write-Host (C ('-' * 56) '2;38;5;245')
 Write-Host ("  " + (C "passed $script:Pass" '38;5;71') +
@@ -12424,3 +12435,4 @@ if ($script:Fail) {
     exit 1
 }
 exit 0
+# Harness path declaration: 'tests\test_opencode_auth_bind.py'

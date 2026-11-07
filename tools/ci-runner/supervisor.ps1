@@ -117,7 +117,7 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
                     if ($LASTEXITCODE -ne 0) { continue }
                     try { $createdAt = [datetimeoffset]::Parse($created, [Globalization.CultureInfo]::InvariantCulture) }
                     catch { Log "skip $containerName invalid creation timestamp: $created"; continue }
-                    [pscustomobject]@{ Name = $containerName; Created = $createdAt; Busy = $isBusy; Online = $isOnline }
+                    [pscustomobject]@{ Name = $containerName; Created = $createdAt; Busy = $isBusy; Online = $isOnline; Unregistered = $registration.Count -eq 0 }
                 }
             )
             foreach ($remove in @(Get-CiContainersToRemove -Containers $slotContainers -MaxAgeMinutes $maxAge)) {
@@ -129,6 +129,7 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
                 # Recompute with fresh registration state: age alone must never kill an online runner.
                 $candidate = $slotContainers | Where-Object { $_.Name -eq $remove }
                 $candidate.Online = $fresh.Count -eq 1 -and $fresh[0].status -eq 'online'
+                $candidate.Unregistered = $fresh.Count -eq 0
                 if ($remove -notin @(Get-CiContainersToRemove -Containers $slotContainers -MaxAgeMinutes $maxAge)) { continue }
                 docker rm -f $remove *> $null
                 Log "reap $remove rc=$LASTEXITCODE"
