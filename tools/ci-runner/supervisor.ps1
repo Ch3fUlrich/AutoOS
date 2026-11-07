@@ -122,6 +122,8 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
                 # Recheck job state immediately before removal; API errors fail closed.
                 $fresh = @(gh api --paginate "repos/$($r.repo)/actions/runners" --jq '.runners[] | {name, busy, status}' 2>$null | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.name -eq $remove })
                 if ($LASTEXITCODE -ne 0 -or $fresh.Count -gt 1 -or ($fresh.Count -eq 1 -and $fresh[0].busy -ne $false)) { continue }
+                # Registered at the tick but missing now: unknown state, fail closed.
+                if ($fresh.Count -eq 0 -and @($runners | Where-Object { $_.name -eq $remove }).Count -gt 0) { continue }
                 # Recompute with fresh registration state: age alone must never kill an online runner.
                 $candidate = $slotContainers | Where-Object { $_.Name -eq $remove }
                 $candidate.Online = $fresh.Count -eq 1 -and $fresh[0].status -eq 'online'

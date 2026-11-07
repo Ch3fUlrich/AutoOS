@@ -12102,6 +12102,7 @@ Test-Case 'ci-runner: reaper age boundary 119 kept, 120 kept, 121 removed' {
 }
 Test-Case 'ci-runner: online idle older than max age kept, offline idle removed' {
     $n = [datetimeoffset]::UtcNow; $pair = @([pscustomobject]@{ Name = 'new-offline'; Created = $n.AddMinutes(-1); Busy = $false; Online = $false }, [pscustomobject]@{ Name = 'old-online'; Created = $n.AddMinutes(-5); Busy = $false; Online = $true }); Assert-Equal (@(Get-CiContainersToRemove -Containers $pair -Now $n) -join ',') 'new-offline'
+    $two = @('a', 'b') | ForEach-Object { [pscustomobject]@{ Name = $_; Created = $n.AddMinutes(-500); Busy = $false; Online = $true } }; Assert-Equal @(Get-CiContainersToRemove -Containers $two -Now $n).Count 0
     $now = [datetimeoffset]::UtcNow
     foreach ($online in @($true, $false)) { $item = [pscustomobject]@{ Name = 'old'; Created = $now.AddMinutes(-121); Busy = $false; Online = $online }; Assert-Equal (@(Get-CiContainersToRemove -Containers @($item) -Now $now).Count) $(if ($online) { 0 } else { 1 }) }
 }
