@@ -189,9 +189,10 @@ function Get-CiContainersToRemove {
         [ValidateRange(1, 525600)][double]$MaxAgeMinutes = 120,
         [datetimeoffset]$Now = [datetimeoffset]::UtcNow
     )
-    # Input is one slot only. Online runners never age out; surplus idle duplicates may go.
+    # Input is one slot only. Online runners never age out; surplus idle duplicates may go,
+    # and the idle container kept is an online one when there is one (it can take a job now).
     $keptIdle = $false
-    foreach ($container in @($Containers | Sort-Object Created -Descending)) {
+    foreach ($container in @($Containers | Sort-Object @{ Expression = { [bool]$_.Online }; Descending = $true }, @{ Expression = 'Created'; Descending = $true })) {
         if ($container.Busy) { continue }
         if ((-not $container.Online -and ($Now - [datetimeoffset]$container.Created).TotalMinutes -gt $MaxAgeMinutes) -or $keptIdle) {
             $container.Name

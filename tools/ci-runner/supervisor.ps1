@@ -82,7 +82,7 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
         if (-not $ageConfig.Valid) { Log 'invalid or absent container_max_age_minutes; using 120' }
         $runnersByRepo = @{}
         foreach ($r in $cfg.repos) {
-            $runners = @(gh api "repos/$($r.repo)/actions/runners" --jq '.runners[] | {id, name, status, busy}' 2>$null | ForEach-Object { $_ | ConvertFrom-Json })
+            $runners = @(gh api --paginate "repos/$($r.repo)/actions/runners" --jq '.runners[] | {id, name, status, busy}' 2>$null | ForEach-Object { $_ | ConvertFrom-Json })
             if ($LASTEXITCODE -ne 0) { throw "runner discovery failed for $($r.repo); skipping tick" }
             $runnersByRepo[[string]$r.repo] = $runners
             # A fresh ephemeral runner shows offline until its session connects: delete a registration
@@ -120,7 +120,7 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
             )
             foreach ($remove in @(Get-CiContainersToRemove -Containers $slotContainers -MaxAgeMinutes $maxAge)) {
                 # Recheck job state immediately before removal; API errors fail closed.
-                $fresh = @(gh api "repos/$($r.repo)/actions/runners" --jq '.runners[] | {name, busy, status}' 2>$null | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.name -eq $remove })
+                $fresh = @(gh api --paginate "repos/$($r.repo)/actions/runners" --jq '.runners[] | {name, busy, status}' 2>$null | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.name -eq $remove })
                 if ($LASTEXITCODE -ne 0 -or $fresh.Count -gt 1 -or ($fresh.Count -eq 1 -and $fresh[0].busy -ne $false)) { continue }
                 # Recompute with fresh registration state: age alone must never kill an online runner.
                 $candidate = $slotContainers | Where-Object { $_.Name -eq $remove }
