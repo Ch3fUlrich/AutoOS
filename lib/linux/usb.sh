@@ -2047,6 +2047,13 @@ _usb_copy_readback() {
 # without mounting a real multi-gigabyte ISO (AGENTS.md SS5) - production
 # never sets them, so the real mount-and-measure path is what actually runs
 # outside a test.
+_usb_sync_target() {
+    if ! timeout "${AUTOOS_USB_SYNC_TIMEOUT:-120}" $AUTOOS_SUDO sync -f "$1" 2>/dev/null; then
+        ui_err "USB sync failed for $1 (timeout ${AUTOOS_USB_SYNC_TIMEOUT:-120}s); the stick may not hold the data yet"
+        return 1
+    fi
+}
+
 _usb_copy_onto() {
     local image="$1" mnt="$2"; shift 2
     local -a extra_files=("$@")
@@ -2079,15 +2086,12 @@ _usb_copy_onto() {
             $AUTOOS_SUDO umount "$src_mnt" 2>/dev/null; rmdir "$src_mnt" 2>/dev/null
             return 1
         fi
-        # Read back EVERY file and compare it with the image (B15: "reads
-        # back" means the bytes, not that the device still enumerates). The
-        # second real build on 2026-09-17 (Windows engine) finished, flushed
-        # and printed "Ready to boot" while the stick had silently replaced
-        # one 16 KB cluster of md5sum.txt and part of the 3.4 GB squashfs
-        # with garbage, at the right sizes, stable on re-read. cp cannot see
-        # that; only reading the stick can - sync first so the comparison
-        # reads what the device holds, not what is still queued to it.
-        sync 2>/dev/null
+        # B15: the 2026-09-17 build returned same-size garbage after copying.
+        # Flush the target, then compare EVERY file's bytes, not enumeration.
+        if ! _usb_sync_target "$mnt"; then
+            $AUTOOS_SUDO umount "$src_mnt" 2>/dev/null; rmdir "$src_mnt" 2>/dev/null
+            return 1
+        fi
         ui_info "reading back $mnt to verify every file against the image"
         if ! _usb_copy_readback "$src_mnt" "$mnt"; then
             ui_err "usb_copy_image: $mnt did not read back identical to $image - the stick is returning different bytes than were written (hardware fault, finding B15); do not boot it, and replace the stick"
@@ -2156,14 +2160,9 @@ usb_copy_image() {
     _usb_copy_onto "$image" "$mnt" "${extra_files[@]}" || rc=1
 
     if (( owned_mount )); then
-        sync 2>/dev/null
-        # Finding F9: umount's own exit status used to be discarded, so a
-        # filesystem that failed to flush/unmount still reported the whole
-        # copy as successful. A failed unmount here means the device may
-        # still have unflushed writes sitting in a stale mount - treated as
-        # a hard failure of this call, and the mountpoint is deliberately
-        # left in place (not rmdir'd) rather than pretending cleanup
-        # succeeded too.
+        _usb_sync_target "$mnt" || rc=1
+        # Finding F9: failed umount means failure; retain the stale mountpoint
+        # because the device may still have unflushed writes.
         if ! $AUTOOS_SUDO umount "$mnt" 2>/dev/null; then
             ui_err "usb_copy_image: could not unmount $mnt after writing to $dev (finding F9) - the write may not be fully flushed; do not unplug $dev until it is unmounted manually"
             rc=1
@@ -2253,7 +2252,7 @@ with open(path, "w", encoding="utf-8") as fh:
     fi
 
     if (( owned_mount )); then
-        sync 2>/dev/null
+        _usb_sync_target "$mnt" || rc=1
         # Finding F9 (same fix as usb_copy_image above): do not discard
         # umount's own exit status.
         if ! $AUTOOS_SUDO umount "$mnt" 2>/dev/null; then

@@ -225,6 +225,41 @@ if it "usb_execute: usb_copy_image refuses a >4GiB inner file before copying any
     [[ $rc -ne 0 && "$out" == *"casper/big.squashfs"* && "$out" == *"4 GiB"* ]] && pass || fail "rc=$rc out=$out"
 fi
 
+if it "usb_execute: bounded sync uses only -f and the target mount"; then
+    fakebin="$(mktemp -d)"; record="$fakebin/argv"
+    printf '#!/bin/bash\nprintf "%%s\\n" "$2" >"%s/target"\n' "$fakebin" >"$fakebin/mount"
+    printf '#!/bin/bash\nexit 0\n' >"$fakebin/umount"
+    printf '#!/bin/bash\nprintf "%%s\\n" "$#" "$@" >>"%s"\n' "$record" >"$fakebin/sync"
+    chmod +x "$fakebin/"{mount,umount,sync}
+    img="$(mktemp)"
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" \
+        AUTOOS_FAKE_ISO_MAX_FILE_BYTES=1 usb_copy_image /dev/sdb "$img" 2>&1)"; rc=$?
+    expected="$(printf '2\n-f\n%s' "$(cat "$fakebin/target")")"
+    [[ $rc -eq 0 && "$(cat "$record")" == "$expected" ]] && pass || fail "rc=$rc argv=$(cat "$record") out=$out"
+    rm -rf "$fakebin"; rm -f "$img"
+fi
+
+if it "usb_execute: bounded sync times out and fails copy within ten seconds"; then
+    fakebin="$(mktemp -d)"
+    printf '#!/bin/bash\nexit 0\n' >"$fakebin/mount"
+    cp "$fakebin/mount" "$fakebin/umount"
+    printf '#!/bin/bash\nexec sleep 12\n' >"$fakebin/sync"
+    chmod +x "$fakebin/"{mount,umount,sync}
+    img="$(mktemp)"; started=$SECONDS
+    out="$(PATH="$fakebin:$PATH" AUTOOS_SUDO="" AUTOOS_USB_SYNC_TIMEOUT=1 \
+        AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_FAKE_ISO_MAX_FILE_BYTES=1 \
+        usb_copy_image /dev/sdb "$img" 2>&1)"; rc=$?
+    elapsed=$((SECONDS - started))
+    [[ $rc -ne 0 && $elapsed -lt 10 && "$out" == *"sync"* && "$out" == *"timeout 1"* \
+        && "$out" == *"stick may not hold the data yet"* ]] && pass || fail "rc=$rc elapsed=$elapsed out=$out"
+    rm -rf "$fakebin"; rm -f "$img"
+fi
+
+if it "usb_execute: bounded sync source contains no bare sync"; then
+    out="$(grep -nE '^\s*sync( |$)' "$ROOT/lib/linux/usb.sh")"; rc=$?
+    [[ $rc -eq 1 ]] && pass || fail "bare sync: $out"
+fi
+
 if it "usb_execute: usb_copy_image fails the whole call when umount itself fails after the write (finding F9)"; then
     fakebin="$(mktemp -d)"
     printf '#!/usr/bin/env bash\nexit 0\n' >"$fakebin/mount"
@@ -257,4 +292,3 @@ if it "usb_execute: usb_ventoy_add_persistence caps the default 16GB at half the
     out="$(AUTOOS_FAKE_LSBLK="$(fake_usb good_stick)" AUTOOS_DRY_RUN=1 usb_ventoy_add_persistence /dev/sdb 2>&1)"; rc=$?
     [[ $rc -eq 0 && "$out" == *"capping"* && "$out" == *"15GB"* ]] && pass || fail "rc=$rc out=$out"
 fi
-
