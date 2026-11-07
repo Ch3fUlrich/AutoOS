@@ -166,6 +166,13 @@ function Get-CiLoopMutexName {
     return "Global\AutoOS-CI-Runner-Loop-$Name"
 }
 
+function Get-CiSlotInstancePattern {
+    # runner-loop names each instance <slot>-yyyyMMddHHmmss; an exact match keeps slot workst-a-1
+    # from claiming workst-a-1-1's containers and runners.
+    param([Parameter(Mandatory)][string]$Name)
+    return "^$([regex]::Escape($Name))-\d{14}$"
+}
+
 function Enter-CiLoopMutex {
     param([Parameter(Mandatory)][System.Threading.Mutex]$Mutex)
     try { return $Mutex.WaitOne(0) }
@@ -202,4 +209,4 @@ function Get-CiContainersToRemove {
     }
 }
 
-Export-ModuleMember -Function Get-CiRunnerDockerArgs, Get-CiSlotAction, Test-CiOfflineExpired, Get-CiSlotNames, Get-CiCacheVolumes, Get-CiPrepullImages, Get-CiSlotCpus, Test-CiDiskFloor, Get-CiPruneCommands, Get-CiLoopMutexName, Enter-CiLoopMutex, Get-CiContainersToRemove, Get-CiContainerMaxAge
+Export-ModuleMember -Function Get-CiRunnerDockerArgs, Get-CiSlotAction, Test-CiOfflineExpired, Get-CiSlotNames, Get-CiCacheVolumes, Get-CiPrepullImages, Get-CiSlotCpus, Test-CiDiskFloor, Get-CiPruneCommands, Get-CiLoopMutexName, Enter-CiLoopMutex, Get-CiContainersToRemove, Get-CiContainerMaxAge, Get-CiSlotInstancePattern

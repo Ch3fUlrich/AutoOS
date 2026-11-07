@@ -105,8 +105,10 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
             $r = $cfg.repos | Where-Object { $name -match "^$([regex]::Escape($_.prefix))-[0-9]+$" } | Select-Object -First 1
             if (-not $r) { continue }
             $runners = @($runnersByRepo[[string]$r.repo])
+            # Exact instance names (runner-loop: <slot>-yyyyMMddHHmmss): slot workst-a-1 must not claim workst-a-1-1-*.
+            $slotRe = Get-CiSlotInstancePattern -Name $name
             $slotContainers = @(
-                foreach ($containerName in @($containers | Where-Object { $_ -like "$name-*" })) {
+                foreach ($containerName in @($containers | Where-Object { $_ -match $slotRe })) {
                     $registration = @($runners | Where-Object { $_.name -eq $containerName })
                     # Ambiguous/unknown busy state is protected; a missing registration ages out.
                     $isBusy = $registration.Count -gt 1 -or ($registration.Count -eq 1 -and $registration[0].busy -ne $false)
@@ -133,9 +135,9 @@ while (-not (Test-Path (Join-Path $dir "stop-supervisor"))) {
             }
             $loop = $procs | Where-Object { $_.CommandLine -match "-Name\s+'?$([regex]::Escape($name))'?(\s|$)" }
             $loopAlive = (@($loop).Count -gt 0)
-            $online = (@($runners | Where-Object { $_.name -like "$name-*" -and $_.status -eq 'online' }).Count -gt 0)
-            $busy = (@($runners | Where-Object { $_.name -like "$name-*" -and $_.busy }).Count -gt 0)
-            $running = (@($containers | Where-Object { $_ -like "$name-*" }).Count -gt 0)
+            $online = (@($runners | Where-Object { $_.name -match $slotRe -and $_.status -eq 'online' }).Count -gt 0)
+            $busy = (@($runners | Where-Object { $_.name -match $slotRe -and $_.busy }).Count -gt 0)
+            $running = (@($containers | Where-Object { $_ -match $slotRe }).Count -gt 0)
             if ($loop -and -not $online -and -not $busy -and -not $running) {
                 if (-not $unhealthySince.ContainsKey($name)) { $unhealthySince[$name] = Get-Date }
                 $unhealthyMinutes = ((Get-Date) - $unhealthySince[$name]).TotalMinutes
