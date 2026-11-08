@@ -1,4 +1,5 @@
 # Changelog
+- autoos:OC-L1-RECYCLE-GATE-ORDER (2026-11-08, D-4876): oc_l1_recycle runs the optional handoff_check card gate only at the hard level before restart, never before the handoff-level announce that asks the lane to write the card.
 - AO-CI-SHELLCHECK-PIN: pin CI and the runner image to SHA-256-verified ShellCheck v0.11.0 and fix the apt-key test helper's definition order.
 - AO-AGY-ORCH-PROFILE: skip terminal initialization on non-VT hosts and codify Antigravity orchestration safety rules, with regression coverage.
 - autoos:CI-RUNNER-SLOT-MUTEX (2026-11-07, D-4728): lock each runner slot, suppress blind-tick starts over running containers, and reap surplus or aged idle containers without removing busy runners.

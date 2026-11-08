@@ -303,17 +303,19 @@ def _check(lane, state, sid, port, password, thr, warn, http, serve):
 
     announced = read_state(sid)
     try:
+        if level == "handoff":
+            if announced:
+                return _out(EXIT_OK, lane, "skipped", [warn], level=level, **info)
+            _announce(lane, port, password, sid, ctx, level, thr, http)
+            return _out(EXIT_OK, lane, "announced", [warn], level=level, **info)
+        # D-4876: the announce asks the lane to write its card, so the card gate
+        # runs only here, at the hard level, before anything restarts.
         if lane.get("handoff_check"):
             from oc_l1_handoff_gate import blocked
             failure = blocked(lane, state, sid, port, password, http)
             if failure:
                 return _out(EXIT_FAILED, lane, "handoff_check_failed", [warn], level=level,
                             detail=failure, **info)
-        if level == "handoff":
-            if announced:
-                return _out(EXIT_OK, lane, "skipped", [warn], level=level, **info)
-            _announce(lane, port, password, sid, ctx, level, thr, http)
-            return _out(EXIT_OK, lane, "announced", [warn], level=level, **info)
 
         reason = merge_in_progress(lane)  # a merge wins over the cooldown: deferred (exit 3), not cooldown
         if reason:

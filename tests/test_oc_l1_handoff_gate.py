@@ -29,19 +29,48 @@ class GateTest(RecycleBase):
         self.assertEqual(self.check()[1]["action"], "restarted")
         self.assertEqual(len(creates(self.srv)), 1)
 
-    def test_both_levels_run_the_gate_before_any_action(self):
-        for tokens in (280000, 310000):
-            for body in ("raise SystemExit(1)", None):
-                with self.subTest(tokens=tokens, body=body):
-                    self.write_state()
-                    self.srv.requests = []
-                    self.fill(tokens)
-                    if body is None:
-                        self.checker.unlink()
-                    else:
-                        self.stub(body)
-                    self.assertEqual(self.check()[1]["action"], "handoff_check_failed")
-                    self.assertEqual(creates(self.srv), [])
+    def test_hard_level_runs_the_gate_before_restart(self):
+        for body in ("raise SystemExit(1)", None, "card"):
+            with self.subTest(body=body):
+                self.write_state()
+                self.srv.requests = []
+                self.fill(310000)
+                if body is None:
+                    self.checker.unlink()
+                elif body == "card":
+                    self.card.unlink()
+                else:
+                    self.stub(body)
+                self.assertEqual(self.check()[1]["action"], "handoff_check_failed")
+                self.assertEqual(creates(self.srv), [])
+                if not self.card.exists():
+                    self.card.write_text("card")
+                self.stub("raise SystemExit(0)")
+
+    def test_handoff_level_announces_without_running_the_gate(self):
+        # D-4876: the announce asks the lane to write its card, so the card
+        # (or a failing checker) must never block the announce itself.
+        for body in ("raise SystemExit(1)", None, "card"):
+            with self.subTest(body=body):
+                self.write_state()
+                self.srv.requests = []
+                with contextlib.suppress(OSError):
+                    oc_l1_recycle.clear_state(self.state()["session_id"])
+                self.fill(280000)
+                if body is None:
+                    self.checker.unlink()
+                elif body == "card":
+                    self.card.unlink()
+                else:
+                    self.stub(body)
+                out = self.check()[1]
+                self.assertEqual(out["action"], "announced")
+                self.assertEqual(creates(self.srv), [])
+                self.assertEqual(len(prompts(self.srv)), 1)
+                self.assertNotIn("handoff_check_failed", self.state())
+                if not self.card.exists():
+                    self.card.write_text("card")
+                self.stub("raise SystemExit(0)")
 
     def test_checker_read_atime_is_not_a_card_change(self):
         import os
