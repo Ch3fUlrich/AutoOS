@@ -45,6 +45,7 @@ class GateTest(RecycleBase):
                 self.assertEqual(creates(self.srv), [])
                 if not self.card.exists():
                     self.card.write_text("card")
+                self.stub("raise SystemExit(0)")
 
     def test_handoff_level_announces_without_running_the_gate(self):
         # D-4876: the announce asks the lane to write its card, so the card
