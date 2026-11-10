@@ -136,7 +136,8 @@
             "workstation",
             "ai-coding",
             "light",
-            "server"
+            "server",
+            "rpi-moonlight"
           ],
           "verify": "gh --version",
           "homepage": "https://cli.github.com/"

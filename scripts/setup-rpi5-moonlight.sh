@@ -52,7 +52,7 @@ fi
 
 if [[ "$MODE" == "no-agents" ]]; then
     echo "Profile: Moonlight streaming, CEC TV automation, gamepad support, Kitty & Zsh (no AI agents)"
-    exec bash "$ROOT/setup.sh" --only moonlight,antimicrox,rpi-cec-tv,rpi-moonlight-console,kitty,jetbrains-mono-nerd-font,lsd,bat,zsh,oh-my-zsh,zsh-plugins,powerlevel10k,tailscale "${EXTRA_ARGS[@]}"
+    exec bash "$ROOT/setup.sh" --only moonlight,antimicrox,rpi-cec-tv,rpi-moonlight-console,kitty,jetbrains-mono-nerd-font,lsd,bat,zsh,oh-my-zsh,zsh-plugins,powerlevel10k,tailscale,gh "${EXTRA_ARGS[@]}"
 else
     echo "Profile: Full stack with Moonlight console, CEC TV automation, gamepad support & coding agents (Claude, agy, OpenCode, Pi)"
     exec bash "$ROOT/setup.sh" --profile rpi-moonlight "${EXTRA_ARGS[@]}"
