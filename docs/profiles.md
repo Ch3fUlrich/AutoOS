@@ -33,6 +33,7 @@ menu afterwards.
 | `light` | ✅ | ✅ | ✅ | Raspberry Pi 5 and similar — Claude Code, Tailscale, Herdr |
 | `server` | — | ✅ | — | Headless: shell, networking, containers, no GUI |
 | `everyday` | ✅ | ✅ | ✅ | Personal desktop; available apps and vendor setup steps vary by platform |
+| `rpi-moonlight` | — | ✅ | — | Raspberry Pi 5 Moonlight streaming console with gamepad support and optional coding agents |
 | `rescue` | ✅ | ✅ | ✅ | Disaster-recovery USB stick: disk/filesystem repair, hardware diagnostics and Windows recovery tools for whoever gets handed the drive |
 | `local-ai` | ✅ | ✅ | ✅ | Offline AI inference via Ollama — no API key, no network, but 1.4-4.7 GB per model (B21) |
 | `custom` | ✅ | ✅ | ✅ | Nothing pre-ticked |

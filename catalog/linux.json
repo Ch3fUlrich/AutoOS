@@ -10,7 +10,8 @@
     "local-ai": "Local AI inference with Ollama — no API key and no network, but models are 1.4-4.7 GB.",
     "custom": "Start with nothing ticked and choose by hand.",
     "everyday": "Everyday desktop: browsing, media, games, remote control and 3D printing.",
-    "build-server": "Headless build/CI/agent-routing node — disk, console, SSH+Tailscale, Docker, a self-hosted GitHub Actions runner, Bitwarden CLI and the plangraph OmniRoute spawner node."
+    "build-server": "Headless build/CI/agent-routing node — disk, console, SSH+Tailscale, Docker, a self-hosted GitHub Actions runner, Bitwarden CLI and the plangraph OmniRoute spawner node.",
+    "rpi-moonlight": "Raspberry Pi 5 Moonlight streaming console with gamepad support and optional coding agents."
   },
   "categories": [
     {
@@ -42,7 +43,8 @@
             "workstation",
             "ai-coding",
             "light",
-            "server"
+            "server",
+            "rpi-moonlight"
           ],
           "verify": "git --version",
           "homepage": "https://git-scm.com/"
@@ -57,7 +59,8 @@
             "workstation",
             "ai-coding",
             "light",
-            "server"
+            "server",
+            "rpi-moonlight"
           ],
           "verify": "curl --version",
           "homepage": "https://curl.se/"
@@ -184,7 +187,8 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "server"
+            "server",
+            "rpi-moonlight"
           ],
           "verify": "zsh --version",
           "homepage": "https://www.zsh.org/"
@@ -203,7 +207,8 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "server"
+            "server",
+            "rpi-moonlight"
           ],
           "homepage": "https://ohmyz.sh/"
         },
@@ -219,7 +224,8 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "server"
+            "server",
+            "rpi-moonlight"
           ],
           "homepage": "https://github.com/zsh-users/zsh-autosuggestions"
         },
@@ -235,7 +241,8 @@
           "profiles": [
             "workstation",
             "ai-coding",
-            "server"
+            "server",
+            "rpi-moonlight"
           ],
           "homepage": "https://github.com/romkatv/powerlevel10k"
         },
@@ -279,10 +286,73 @@
             "workstation",
             "ai-coding",
             "light",
-            "server"
+            "server",
+            "rpi-moonlight"
           ],
           "verify": "fzf --version",
           "homepage": "https://github.com/junegunn/fzf"
+        },
+        {
+          "id": "kitty",
+          "name": "Kitty",
+          "description": "GPU-accelerated terminal emulator with Wayland support",
+          "provider": "apt",
+          "package": "kitty",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "rpi-moonlight"
+          ],
+          "verify": "kitty --version",
+          "postInstall": "setup_kitty_config",
+          "homepage": "https://sw.kovidgoyal.net/kitty/"
+        },
+        {
+          "id": "lsd",
+          "name": "lsd",
+          "description": "Next-gen ls with Nerd Font icons and colors",
+          "provider": "apt",
+          "package": "lsd",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "rpi-moonlight"
+          ],
+          "verify": "lsd --version",
+          "postInstall": "setup_lsd_aliases",
+          "homepage": "https://github.com/lsd-rs/lsd"
+        },
+        {
+          "id": "bat",
+          "name": "bat",
+          "description": "cat clone with syntax highlighting and Git integration",
+          "provider": "apt",
+          "package": "bat",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "rpi-moonlight"
+          ],
+          "verify": "batcat --version",
+          "postInstall": "setup_bat_alias",
+          "homepage": "https://github.com/sharkdp/bat"
+        },
+        {
+          "id": "jetbrains-mono-nerd-font",
+          "name": "JetBrains Mono Nerd Font",
+          "description": "Developer font with programming ligatures and icons",
+          "provider": "script",
+          "package": "jetbrains-mono-nerd-font",
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "rpi-moonlight"
+          ],
+          "homepage": "https://www.nerdfonts.com/"
         }
       ]
     },
@@ -323,7 +393,8 @@
             "ai-coding",
             "light",
             "server",
-            "rescue"
+            "rescue",
+            "rpi-moonlight"
           ],
           "verify": "claude --version",
           "homepage": "https://docs.anthropic.com/en/docs/claude-code",
@@ -406,7 +477,8 @@
             "ai-coding",
             "light",
             "server",
-            "rescue"
+            "rescue",
+            "rpi-moonlight"
           ],
           "verify": "agy --version",
           "homepage": "https://antigravity.google/product/antigravity-cli",
@@ -811,7 +883,8 @@
             "workstation",
             "ai-coding",
             "light",
-            "server"
+            "server",
+            "rpi-moonlight"
           ],
           "verify": "opencode --version",
           "postInstall": "setup_opencode_config",
@@ -1021,6 +1094,43 @@
           ],
           "notes": "Up-to-date documentation lookups for frameworks and libraries.",
           "homepage": "https://github.com/upstash/context7-mcp"
+        },
+        {
+          "id": "pi-coding-agent",
+          "name": "Pi Coding Agent",
+          "description": "Minimalist autonomous coding agent for terminal",
+          "provider": "npm",
+          "package": "@earendil-works/pi-coding-agent",
+          "requires": [
+            "nodejs"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "rpi-moonlight"
+          ],
+          "verify": "pi --version",
+          "homepage": "https://github.com/earendil-works/pi-coding-agent"
+        },
+        {
+          "id": "agy-pi",
+          "name": "Antigravity Pi Extension",
+          "description": "Antigravity model provider extension for Pi Coding Agent",
+          "provider": "npm",
+          "package": "agy-pi",
+          "requires": [
+            "pi-coding-agent",
+            "agy"
+          ],
+          "profiles": [
+            "workstation",
+            "ai-coding",
+            "light",
+            "rpi-moonlight"
+          ],
+          "homepage": "https://github.com/Ch3fUlrich/autoos",
+          "postInstall": "setup_agy_pi_config"
         }
       ]
     },
@@ -1041,7 +1151,8 @@
             "workstation",
             "ai-coding",
             "light",
-            "server"
+            "server",
+            "rpi-moonlight"
           ],
           "verify": "tailscale version",
           "homepage": "https://tailscale.com/"
@@ -1297,13 +1408,14 @@
           "id": "moonlight",
           "name": "Moonlight",
           "description": "Stream games from a compatible host",
-          "provider": "manual",
+          "provider": "script",
           "package": "moonlight",
           "profiles": [
-            "everyday"
+            "everyday",
+            "rpi-moonlight"
           ],
           "homepage": "https://moonlight-stream.org/",
-          "notes": "Action required: use the official download page and follow the vendor installer; AutoOS does not automate this installer."
+          "verify": "moonlight-qt --version"
         },
         {
           "id": "jellyfin-client",
@@ -1340,6 +1452,19 @@
           ],
           "homepage": "https://www.unifiedremote.com/download",
           "notes": "Install the Unified Remote app on your phone and pair with this server. Review remote access settings before use."
+        },
+        {
+          "id": "antimicrox",
+          "name": "AntiMicroX",
+          "description": "Gamepad mapping utility for Moonlight and Linux games",
+          "provider": "apt",
+          "package": "antimicrox",
+          "profiles": [
+            "everyday",
+            "rpi-moonlight"
+          ],
+          "verify": "antimicrox --version",
+          "homepage": "https://github.com/AntiMicroX/antimicrox"
         }
       ]
     },

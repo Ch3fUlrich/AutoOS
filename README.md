@@ -31,6 +31,7 @@ A profile is a starting set of ticks; the suggestion comes from your hardware.
 | `server` *(Linux)* | Headless: shell, networking, containers, no GUI |
 | `custom` | Nothing pre-ticked |
 | `everyday` | Browsers, media, gaming, remote control and resin-printing tools |
+| `rpi-moonlight` *(Linux)* | Raspberry Pi 5 Moonlight streaming console with gamepad support and coding agents |
 
 Details: [Profiles & detection](docs/profiles.md).
 
