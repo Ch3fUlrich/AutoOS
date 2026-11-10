@@ -1465,6 +1465,50 @@
           ],
           "verify": "antimicrox --version",
           "homepage": "https://github.com/AntiMicroX/antimicrox"
+        },
+        {
+          "id": "cec-utils",
+          "name": "CEC Utilities",
+          "description": "HDMI-CEC control tools and cec-client for TV automation",
+          "provider": "apt",
+          "package": "cec-utils v4l-utils",
+          "profiles": [
+            "workstation",
+            "rpi-moonlight"
+          ],
+          "verify": "cec-client --version",
+          "homepage": "https://github.com/Pulse-Eight/libcec"
+        },
+        {
+          "id": "rpi-cec-tv",
+          "name": "Raspberry Pi HDMI-CEC TV Control",
+          "description": "Auto TV power-on, input switch on boot, and standby on shutdown",
+          "provider": "custom",
+          "package": "rpi-cec-tv",
+          "requires": [
+            "cec-utils"
+          ],
+          "profiles": [
+            "rpi-moonlight"
+          ],
+          "postInstall": "setup_rpi_cec_tv",
+          "homepage": "https://github.com/Ch3fUlrich/autoos"
+        },
+        {
+          "id": "rpi-moonlight-console",
+          "name": "Moonlight Console & Controller Manager",
+          "description": "Fullscreen Moonlight startup and AntiMicroX controller manager",
+          "provider": "custom",
+          "package": "rpi-moonlight-console",
+          "requires": [
+            "moonlight",
+            "antimicrox"
+          ],
+          "profiles": [
+            "rpi-moonlight"
+          ],
+          "postInstall": "setup_rpi_moonlight_console",
+          "homepage": "https://github.com/Ch3fUlrich/autoos"
         }
       ]
     },
