@@ -989,15 +989,8 @@ function Install-AutoOSCostGate {
 }
 
 function Write-AutoOSClaudeHostReadiness {
-    <#
-      .SYNOPSIS
-        Say at install time whether a restored session will have anywhere to appear.
-      .DESCRIPTION
-        A restore with no terminal host does nothing (ADR 0002). Naming that here
-        beats letting the user find out after a reboot.
-    #>
+    # ADR 0002: warn now when a restored session would have nowhere to appear.
     param([hashtable]$Config)
-
     if (Get-AutoOSClaudeTerminalHost -Config $Config) {
         Write-AutoOSLine 'restored sessions will open in Windows Terminal tabs' -Level ok
     } else {
@@ -1015,9 +1008,7 @@ function Install-AutoOSPoshTheme {
 }
 
 function Add-AutoOSProfileLine {
-    <#
-      .SYNOPSIS Append (or with -Prepend, prepend) a line to a shell profile exactly once, with a backup.
-    #>
+    # Append/prepend a line or block once by marker, backing up before changes.
     param(
         [Parameter(Mandatory)][string]$ProfilePath,
         [Parameter(Mandatory)][string]$Line,
@@ -1030,51 +1021,58 @@ function Add-AutoOSProfileLine {
         return
     }
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    if (Test-Path $ProfilePath) {
+    if (($present = Test-Path -LiteralPath $ProfilePath)) {
         # -SimpleMatch: the line contains |, $ and . which are regex metacharacters.
         $existing = Get-Content -Path $ProfilePath -Raw -ErrorAction SilentlyContinue
         if ($existing -and (Select-String -InputObject $existing -Pattern $Marker -SimpleMatch -Quiet)) {
             Write-AutoOSLine "profile already configured ($Marker)" -Level muted
             return
         }
-        $null = Copy-AutoOSBackup -Path $ProfilePath
+        if (-not $Prepend) { $null = Copy-AutoOSBackup -Path $ProfilePath }
     } else {
         New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
     }
     if ($Prepend) {
-        # A guard is useless at the end of a profile: everything slow has already run.
-        # Rule 4: the rest of the file must come back unchanged, so it is decoded and
-        # re-encoded in its own encoding (a BOM-less 5.1 profile is usually ANSI).
+        # Guards precede native hooks; round-trip the rest in its original encoding.
         $bytes = [IO.File]::ReadAllBytes($ProfilePath)
         $bom = 0
         if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
             $enc = [Text.UTF8Encoding]::new($false); $bom = 3
+        } elseif ($bytes.Length -ge 4 -and [BitConverter]::ToString($bytes, 0, 4) -eq 'FF-FE-00-00') {
+            $enc = [Text.UTF32Encoding]::new($false, $false); $bom = 4
+        } elseif ($bytes.Length -ge 4 -and [BitConverter]::ToString($bytes, 0, 4) -eq '00-00-FE-FF') {
+            $enc = [Text.UTF32Encoding]::new($true, $false); $bom = 4
         } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
             $enc = [Text.UnicodeEncoding]::new($false, $false); $bom = 2
         } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
             $enc = [Text.UnicodeEncoding]::new($true, $false); $bom = 2
-        } elseif ($bytes.Length -eq 0) {
-            # a new profile: UTF-8 with BOM reads the same in 5.1 and 7
-            $enc = [Text.UTF8Encoding]::new($false); $bytes = [byte[]](0xEF, 0xBB, 0xBF); $bom = 3
         } else {
             try {
                 $enc = [Text.UTF8Encoding]::new($false, $true)
                 [void]$enc.GetString($bytes)
             } catch {
-                # Some ANSI code page, which one is unknowable from here. Latin-1 maps every
-                # byte to one char and back, so the file round-trips unchanged whatever it
-                # was; `using`/`param` are ASCII, so the parser still finds them.
+                # Latin-1 round-trips unknown ANSI bytes; using/param remain parseable ASCII.
                 $enc = [Text.Encoding]::GetEncoding(28591)
             }
         }
         $body = $enc.GetString($bytes, $bom, $bytes.Length - $bom)
         # `using` and `param` must stay the first statements, so the guard goes after them.
         $ast = [Management.Automation.Language.Parser]::ParseInput($body, [ref]$null, [ref]$null)
+        if ($ast.BeginBlock -or $ast.ProcessBlock -or $ast.DynamicParamBlock -or ($ast.PSObject.Properties['CleanBlock'] -and $ast.CleanBlock) -or ($ast.EndBlock -and -not $ast.EndBlock.Unnamed)) {
+            Write-AutoOSLine "profile has named blocks; left unchanged (manual guard needed): $ProfilePath" -Level warn
+            return
+        }
+        if ($present) { $null = Copy-AutoOSBackup -Path $ProfilePath }
         $at = 0
         foreach ($u in $ast.UsingStatements) { $at = [Math]::Max($at, $u.Extent.EndOffset) }
         if ($ast.ParamBlock) { $at = [Math]::Max($at, $ast.ParamBlock.Extent.EndOffset) }
+        # Later prepends (notably OpenHands) must not displace the background guard.
+        foreach ($statement in @($ast.EndBlock.Statements)) {
+            if ($statement.Extent.Text.Contains('# AutoOS background-shell guard:')) { $at = [Math]::Max($at, $statement.Extent.EndOffset) }
+        }
+        $suffix = $body.Substring($at); $separator = if ($suffix -match '^\r?\n') { '' } else { "`r`n" }
         $new = if ($at -eq 0) { "# added by AutoOS`r`n$Line`r`n$body" }
-               else { $body.Substring(0, $at) + "`r`n# added by AutoOS`r`n$Line" + $body.Substring($at) }
+               else { $body.Substring(0, $at) + "`r`n# added by AutoOS`r`n$Line$separator" + $suffix }
         $out = [IO.MemoryStream]::new()
         $out.Write($bytes, 0, $bom)
         $newBytes = $enc.GetBytes($new)
@@ -1087,15 +1085,7 @@ function Add-AutoOSProfileLine {
 }
 
 function Install-AutoOSWindhawkMods {
-    <#
-      .SYNOPSIS
-        Seed Windhawk mod settings, including the taskbar clock layout.
-      .DESCRIPTION
-        Windhawk has no CLI for installing mods, so AutoOS pre-seeds each mod's
-        settings in the registry and then tells the user which mods to enable
-        from the Windhawk UI. Settings written before the mod exists are picked
-        up when it is installed, so the order does not matter.
-    #>
+    # Windhawk has no install CLI: pre-seed registry settings, then name mods to enable in its UI.
     $catalogPath = Join-Path $script:RepoRoot 'catalog\windows.json'
     $catalog = Get-Content -Path $catalogPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $catalog.PSObject.Properties.Name.Contains('windhawk_mods')) { return }
@@ -2969,29 +2959,8 @@ function Sync-AutoOSSkillDirs {
 }
 
 function Sync-AutoOSAgentSkillTargets {
-    <#
-      .SYNOPSIS
-        Mirror the repo's skills into the user-scope dirs the other agents read.
-
-      .DESCRIPTION
-        Clients that follow the Agent Skills convention read a user-scope
-        directory: gemini, qoder and qwen read ~/.agents/skills; codex reads
-        ~/.codex/skills. Claude Code reads ~/.claude/skills and Antigravity
-        ~/.gemini/config/skills (the same list as agent_skill_link_dests on
-        Linux). Each skill is linked individually by
-        Sync-AutoOSSkillDirs, so the user's own entries sit beside ours and are
-        never touched, and a second run is a no-op.
-
-        Every destination gets -RetargetRetiredClone (see Sync-AutoOSSkillDirs):
-        setup moves recognised links into the retired agent-skills clone
-        (operator Q-018, 2026-09-28). AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 opts out.
-
-        ~/.codex/skills is only written when codex is actually there (its
-        command is on PATH or its ~/.codex directory exists): creating the
-        directory for a tool the machine does not have is worse than doing
-        nothing. ~/.agents/skills has no such guard - it is the shared
-        convention directory, not one vendor's.
-    #>
+    # Mirror per-skill links to native user-scope readers, preserving user entries (AGENTS.md section 8).
+    # Q-018: retarget recognized retired-clone links unless opted out; only seed codex if installed.
     param([Parameter(Mandatory)][string]$Source)
     $retarget = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS -ne '0'
     $dests = @(
@@ -4166,15 +4135,46 @@ function Enable-AutoOSSidekickExtra {
 }
 
 function Invoke-AutoOSPostInstall {
-    param([Parameter(Mandatory)][psobject]$Component)
-    if (-not $Component.PostInstall) { return }
-    $fn = Get-Command $Component.PostInstall -ErrorAction SilentlyContinue
-    if (-not $fn) {
-        Write-AutoOSLine "post-install '$($Component.PostInstall)' not found" -Level warn
-        return
+    param([Parameter(Mandatory)][psobject]$Component, [string]$Documents = [Environment]::GetFolderPath('MyDocuments'))
+    if ($Component.PostInstall) {
+        $fn = Get-Command $Component.PostInstall -ErrorAction SilentlyContinue
+        if ($fn) {
+            Write-AutoOSLine "post-install: $($Component.PostInstall)" -Level step
+            & $fn
+        } else { Write-AutoOSLine "post-install '$($Component.PostInstall)' not found" -Level warn }
     }
-    Write-AutoOSLine "post-install: $($Component.PostInstall)" -Level step
-    & $fn
+    # Setup calls this for installed AND already-present components, even without a callback.
+    $category = $Component.PSObject.Properties['CategoryId']
+    if (-not (($category -and $category.Value -in @('terminal', 'ai-coding')) -or $Component.Id -eq 'miniconda')) { return }
+    $guard = @'
+if (-not (& { # AutoOS background-shell guard: native profile hooks need an interactive terminal, not an agent/background shell.
+    param([scriptblock]$Probe = {
+        @{ HostName = $Host.Name; InputRedirected = [Console]::IsInputRedirected
+           OutputRedirected = [Console]::IsOutputRedirected; Arguments = [Environment]::GetCommandLineArgs() }
+    })
+    try {
+        $state = & $Probe
+        # -File/-Command consume the remainder: a payload's -NoExit is not a host option.
+        $hostArguments = @($state.Arguments)
+        for ($i = 0; $i -lt $hostArguments.Count; $i++) {
+            if ($hostArguments[$i] -match '^-(Command|CommandWithArgs|C|File|F)$') { $hostArguments = $hostArguments[0..$i]; break }
+        }
+        return ($state.HostName -eq 'ConsoleHost' -and -not $state.InputRedirected -and -not $state.OutputRedirected -and
+            -not @($hostArguments -match '^-(NonInteractive|NonI)$').Count -and
+            (@($hostArguments -match '^-NoExit$').Count -or
+             -not @($state.Arguments -match '^-(Command|CommandWithArgs|C|EncodedCommand|Enc|EC|E|File|F)$').Count))
+    } catch { return $false }
+})) { return }
+'@
+    if (-not $Documents) { return }
+    foreach ($folder in @('PowerShell', 'WindowsPowerShell')) {
+        foreach ($name in @('Microsoft.PowerShell_profile.ps1', 'profile.ps1')) {
+            $path = Join-Path $Documents "$folder\$name"
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                Add-AutoOSProfileLine -Prepend -ProfilePath $path -Line $guard -Marker 'AutoOS background-shell guard'
+            }
+        }
+    }
 }
 
 Export-ModuleMember -Function `
