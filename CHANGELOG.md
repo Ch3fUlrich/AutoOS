@@ -1,4 +1,5 @@
 # Changelog
+- AO-RPI-INSTALLER-LOWS: guard standalone desktop detection when its optional module cannot be sourced, isolate Moonlight os-release assignments in a subshell, and restore setup-loader and failed-dearmor no-write assertions with hermetic regression coverage. The apt key download, dearmor and sources-list write path is unchanged.
 - AO-MAIN-CI-RED-RPI5 fix round 2: preserve existing Moonlight apt lists, select only supported os-release distro suites with a Flatpak fallback, and gate path overrides behind the Linux test harness. Stage signing keys atomically so failed dearmor retries safely; move desktop detection behind a module hook without raising size baselines and register hermetic regression tests as part 47.
 - autoos:OC-L1-RECYCLE-GATE-ORDER (2026-11-08, D-4876): oc_l1_recycle runs the optional handoff_check card gate only at the hard level before restart, never before the handoff-level announce that asks the lane to write the card.
 - AO-CI-SHELLCHECK-PIN: pin CI and the runner image to SHA-256-verified ShellCheck v0.11.0 and fix the apt-key test helper's definition order.
