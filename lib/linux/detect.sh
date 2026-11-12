@@ -443,7 +443,6 @@ script_is_installed() {
         zsh-plugins)     [[ -d "$SYS_HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]] ;;
         powerlevel10k)   [[ -d "$SYS_HOME/.oh-my-zsh/custom/themes/powerlevel10k" ]] ;;
         meslo-nerd-font) [[ -f "$SYS_HOME/.local/share/fonts/MesloLGS NF Regular.ttf" ]] ;;
-        jetbrains-mono-nerd-font) [[ -f "$SYS_HOME/.local/share/fonts/JetBrainsMonoNerdFont/JetBrainsMonoNerdFont-Regular.ttf" || -f "/usr/local/share/fonts/JetBrainsMonoNerdFont/JetBrainsMonoNerdFont-Regular.ttf" ]] ;;
         nodesource-lts)  has_bin node ;;
         docker)          has_bin docker ;;
         tailscale)       has_bin tailscale ;;
@@ -461,7 +460,6 @@ script_is_installed() {
         gh)              has_bin gh ;;
         uv)              has_bin uv ;;
         ollama)          has_bin ollama ;;
-        moonlight)       has_bin moonlight-qt || has_bin moonlight ;;
         claude-autostart) [[ -f "$SYS_HOME/.config/systemd/user/claude-sessions-restore.service" ]] ;;
         # Both halves install_taildrop_sort writes, or neither: the script the
         # unit runs and the timer that runs it. One without the other is a
@@ -496,7 +494,7 @@ script_is_installed() {
         bitwarden-chrome) [[ -f /opt/google/chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
                          [[ -f /usr/share/google-chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
                          [[ -f /etc/opt/chrome/policies/managed/bitwarden.json ]] ;;
-        *)               return 1 ;;
+        *) declare -F desktop_script_is_installed >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/install-desktop-extras.sh"; desktop_script_is_installed "$1" ;;
     esac
 }
 
