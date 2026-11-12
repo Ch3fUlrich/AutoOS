@@ -15,7 +15,7 @@ if it "fields do not shift when 'requires' is empty"; then
     # Regression: tab is an IFS whitespace char, so consecutive tabs collapsed
     # and every empty field shifted the remaining columns left.
     i="$(catalog_index_of git)"
-    assert_eq "${CAT_PROFILES[i]}" "workstation,ai-coding,light,server"
+    assert_eq "${CAT_PROFILES[i]}" "workstation,ai-coding,light,server,rpi-moonlight"
 fi
 
 if it "group is populated, not swallowed into another column"; then
