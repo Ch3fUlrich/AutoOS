@@ -10,8 +10,6 @@
 #   The SYS_*/CAT_*/MENU_*/*_STATE globals below are this module's public
 #   interface - they are read by setup.sh, serve.py's probe and the tests,
 #   none of which shellcheck can see from here.
-
-
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
 # ─── Where commands hide when they are not on PATH ──────────────────────────
