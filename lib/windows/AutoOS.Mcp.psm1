@@ -132,7 +132,7 @@ function Invoke-AutoOSCodexProbeProcess {
         $null = $process.Start()
         $process.BeginOutputReadLine(); $process.BeginErrorReadLine()
         if (-not $process.WaitForExit($TimeoutMilliseconds)) {
-            $process.Kill()
+            try { $process.Kill() } catch { } # An exit race must not hide the timeout reason.
             $null = $process.WaitForExit(1000)
             throw (New-Object TimeoutException('import probe timed out'))
         }
@@ -254,6 +254,9 @@ function Set-AutoOSCodexMcpEntry {
             [IO.File]::WriteAllBytes($temp, [byte[]]($preamble + $encoding.GetBytes($candidate)))
             if (Test-Path -LiteralPath $path) { [IO.File]::Replace($temp, $path, [NullString]::Value) }
             else { [IO.File]::Move($temp, $path) }
+        } catch {
+            Write-AutoOSLine "Codex MCP '$name' skipped: config.toml is in use or cannot be replaced" -Level warn
+            continue
         } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force } }
         Write-AutoOSLine "Codex MCP '$name' configured in $path" -Level ok
     }

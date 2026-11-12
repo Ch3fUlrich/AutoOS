@@ -7,7 +7,7 @@
     Assert-Equal ($spec.args -join ',') '-m,plangraph.spawner.mcp'
 }
 
-foreach ($scenario in @('create', 'append', 'replace', 'equal', 'quoted', 'dotted', 'quoted-dotted', 'inline', 'nested', 'literal-key', 'array-type', 'multiline', 'native-ok', 'native-fail', 'absent', 'unset', 'missing', 'import', 'venv', 'dry-create', 'dry-replace', 'data', 'array-table', 'array-table-spaced', 'following-array', 'no-newline', 'atomic', 'relative', 'missing-root_env', 'missing-args', 'missing-env_vars', 'timeout', 'native-isolation')) {
+foreach ($scenario in @('create', 'append', 'replace', 'equal', 'quoted', 'dotted', 'quoted-dotted', 'inline', 'nested', 'literal-key', 'array-type', 'multiline', 'native-ok', 'native-fail', 'absent', 'unset', 'missing', 'import', 'venv', 'dry-create', 'dry-replace', 'data', 'array-table', 'array-table-spaced', 'following-array', 'no-newline', 'atomic', 'in-use', 'relative', 'missing-root_env', 'missing-args', 'missing-env_vars', 'timeout', 'native-isolation')) {
     Test-Case "codex spawner MCP $scenario is hermetic and idempotent" {
         $nativePython = Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1; if ($scenario -like 'native-*' -and -not $nativePython) { Skip 'no python for native import probe'; return }
         $scratch = Join-Path $env:TEMP ('autoos-codex-' + [Guid]::NewGuid().ToString('N'))
@@ -64,7 +64,7 @@ foreach ($scenario in @('create', 'append', 'replace', 'equal', 'quoted', 'dotte
             # A read/delete-sharing handle permits atomic replacement, not an in-place write.
             if ($scenario -eq 'atomic') { $originalHandle = [IO.File]::Open($cfg, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::Read -bor [IO.FileShare]::Delete)) }
             if ($scenario -in @('dotted', 'quoted-dotted', 'inline')) { $definition = switch ($scenario) { dotted { "$server.command = 'old'" } quoted-dotted { "`"$server`".command = 'old'" } inline { "$server = { command = 'old' }" } }; [IO.File]::WriteAllText($cfg, ("[mcp_servers]`n$definition`n" + $suffix), $encoding) }
-            if ($scenario -eq 'append') { [IO.File]::WriteAllText($cfg, $prefix.TrimEnd([char[]]"`r`n"), $encoding) }
+            if ($scenario -in @('append', 'in-use')) { [IO.File]::WriteAllText($cfg, $prefix.TrimEnd([char[]]"`r`n"), $encoding) }
             if ($scenario -eq 'multiline') { [IO.File]::WriteAllText($cfg, $prefix, $encoding) }
             if ($scenario -in @('equal', 'literal-key', 'array-type')) {
                 $literalCommand = (Join-Path $bin 'python.exe')
@@ -125,6 +125,25 @@ foreach ($scenario in @('create', 'append', 'replace', 'equal', 'quoted', 'dotte
                 Assert-True ([IO.File]::ReadAllText($log) -match "skipped.*missing.*$key") 'missing catalog key reason absent'
                 Assert-True (-not (Test-Path $cfg)) 'invalid catalog wrote a config'
                 Assert-Equal $probeState.Calls 0
+                return
+            } elseif ($scenario -eq 'in-use') {
+                $lockedHandle = [IO.File]::Open($cfg, 'Open', 'Read', 'Read')
+                try {
+                    Set-AutoOSCodexSpawnerMcp -ImportProbe $probe
+                    $out = [IO.File]::ReadAllText($log)
+                    Assert-True ($out -match ('WARN\s+' + [regex]::Escape("Codex MCP '$server' skipped: config.toml is in use or cannot be replaced"))) 'locked config warning missing'
+                    Assert-True ($out -notmatch 'configured in') 'locked config reported configured'
+                    Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($cfg))) $before
+                    Assert-Equal @(Get-ChildItem -LiteralPath $cfgDir -Filter '*.tmp' -Force).Count 0
+                    $backups = @(Get-ChildItem -LiteralPath $cfgDir -Filter '*.autoos-backup-*')
+                    Assert-Equal $backups.Count 1
+                    Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName))) $before
+                } finally { $lockedHandle.Dispose() }
+                Set-AutoOSCodexSpawnerMcp -ImportProbe $probe
+                Assert-True ([IO.File]::ReadAllText($cfg).Contains("[mcp_servers.$server]")) 'unlocked config was not configured'
+                Assert-True ([IO.File]::ReadAllText($log) -match 'configured in') 'unlocked config success missing'
+                Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName))) $before
+                Assert-Equal @(Get-ChildItem -LiteralPath $cfgDir -Filter '*.tmp' -Force).Count 0
                 return
             } elseif ($scenario -like 'native-*') { Invoke-AutoOSPostInstall -Component ([pscustomobject]@{ PostInstall = 'Set-AutoOSCodexSpawnerMcp' }) } else { Set-AutoOSCodexSpawnerMcp -ImportProbe $probe }
             $out = [IO.File]::ReadAllText($log)
