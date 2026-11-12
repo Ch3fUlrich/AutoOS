@@ -196,7 +196,8 @@ function Install-AutoOSProfileGuard {
     )
     # Setup calls this for installed AND already-present components, even without a callback.
     $category = $Component.PSObject.Properties['CategoryId']
-    if (-not (($category -and $category.Value -in @('terminal', 'ai-coding')) -or $Component.Id -eq 'miniconda')) { return }
+    $id = $Component.PSObject.Properties['Id']
+    if (-not (($category -and $category.Value -in @('terminal', 'ai-coding')) -or ($id -and $id.Value -eq 'miniconda'))) { return }
     $guard = @'
 if (-not (& { # AutoOS background-shell guard: native profile hooks need an interactive terminal, not an agent/background shell.
     param([scriptblock]$Probe = {

@@ -1,8 +1,6 @@
 ﻿#Requires -Version 5.1
 # Dot-sourced by run-tests.ps1 in the profile-writing group, using its test helpers.
-
 . (Join-Path $PSScriptRoot 'profile-guard.fixtures.ps1')
-
 function Invoke-BackgroundProfileFixture {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Fixture variables are consumed by dynamically scoped test bodies.')]
     param([scriptblock]$Body)
@@ -88,8 +86,14 @@ Test-Case 'background profile guard post-install: DryRun and missing profiles wr
         Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Recurse -File).Count 0
     }
 }
-Test-Case 'background profile guard post-install: agent, shell and conda components without callbacks are reached; unrelated components are not' {
+Test-Case 'background profile guard post-install: component selection tolerates missing Id and CategoryId; unrelated components are not guarded' {
     Invoke-BackgroundProfileFixture {
+        $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+        & (Get-Module -All AutoOS.ProfileGuard) { param($Documents) Install-AutoOSProfileGuard -Component ([pscustomobject]@{}) -Documents $Documents -Backup { throw 'unrelated component must not back up' } } $docs
+        Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $before
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Recurse -File).Count 1
+        & (Get-Module -All AutoOS.ProfileGuard) { param($Documents) Install-AutoOSProfileGuard -Component ([pscustomobject]@{ CategoryId = 'terminal' }) -Documents $Documents -Backup { param($Path) Copy-AutoOSBackup -Path $Path } } $docs 6>$null
+        Assert-True ([IO.File]::ReadAllText($p).Contains($marker)) 'terminal component without Id was not guarded'
         foreach ($case in @(@('powershell7', 'terminal', $true), @('opencode', 'ai-coding', $true), @('miniconda', 'science', $true), @('widget', 'media', $false))) {
             [IO.File]::WriteAllText($p, $seed)
             $component.Id = $case[0]; $component.CategoryId = $case[1]; & $apply 6>$null
@@ -276,7 +280,6 @@ Test-Case 'background profile guard: redirected command-mode PowerShell never re
         } finally { foreach ($name in $savedMarkers.Keys) { [Environment]::SetEnvironmentVariable($name, $savedMarkers[$name]) } }
     }
 }
-
 function Get-BackgroundProfileGuardReference {
     # Generate the current block through production code, in a separate scratch profile.
     $referenceDocs = Join-Path $scratch 'reference'
