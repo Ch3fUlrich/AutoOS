@@ -29,7 +29,7 @@
 #   (AUTOOS_NO_COLOR, AUTOOS_DRY_RUN, AUTOOS_VERIFY) or to stand in for
 #   detection results inside subshells; the linter sees no reader for them.
 
-set -uo pipefail
+set -uo pipefail; export AUTOOS_TEST_MODE=1 # Opt into hermetic installer path overrides.
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 

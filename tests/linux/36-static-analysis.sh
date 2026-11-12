@@ -29,11 +29,11 @@ if it "no installer pipes a downloaded script into a shell (A14)"; then
     # a downloaded file can be both (see install_agy(), install_ollama() and
     # install_uv() in lib/linux/install.sh for the fixed pattern). This is
     # the regression guard for A14: no `curl`/`wget` line may feed a shell
-    # interpreter through a pipe, in this file or in templates/. Comment
+    # interpreter through a pipe, in any installer module or templates/. Comment
     # lines are skipped deliberately — several installers document the old,
     # vulnerable one-liner in a comment (`curl ... | bash`) as the pattern
     # they replaced, and that prose must not itself trip the check.
-    files=(lib/linux/install.sh templates/*.sh)
+    files=(lib/linux/install*.sh templates/*.sh)
     bad=""
     for f in "${files[@]}"; do
         [[ -f "$f" ]] || continue
