@@ -43,3 +43,4 @@ if it "headless hides the desktop category"; then
     else pass; fi
     catalog_load catalog/linux.json x64 0
 fi
+

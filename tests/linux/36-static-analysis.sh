@@ -152,3 +152,4 @@ if it "public-scrub: the shipped patterns catch each shape and no documentation 
         fi
     fi
 fi
+

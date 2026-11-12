@@ -3,6 +3,17 @@
 # Uses its caller's shell options, ui_*, has_cmd and idempotent editing helpers.
 # shellcheck shell=bash
 
+# Pure inspection hook, also loaded lazily by standalone detect.sh callers.
+desktop_script_is_installed() {
+    case "$1" in
+        jetbrains-mono-nerd-font)
+            [[ -f "$SYS_HOME/.local/share/fonts/JetBrainsMonoNerdFont/JetBrainsMonoNerdFont-Regular.ttf" ||
+               -f /usr/local/share/fonts/JetBrainsMonoNerdFont/JetBrainsMonoNerdFont-Regular.ttf ]] ;;
+        moonlight) has_bin moonlight-qt || has_bin moonlight ;;
+        *) return 1 ;;
+    esac
+}
+
 install_zsh_plugins() {
     local custom="$SYS_HOME/.oh-my-zsh/custom/plugins"
     clone_or_update https://github.com/zsh-users/zsh-autosuggestions      "$custom/zsh-autosuggestions" 1
