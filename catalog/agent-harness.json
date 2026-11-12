@@ -125,6 +125,13 @@
       "script": "tools/autoos_agent_mcp.py"
     }
   },
+  "codex_mcp_servers": {
+    "plangraph-spawner": {
+      "root_env": "PLANGRAPH_ROOT",
+      "args": ["-m", "plangraph.spawner.mcp"],
+      "env_vars": ["AUTOOS_OMNIROUTE_KEY", "PLANGRAPH_GATEWAY_LOG_TOKEN", "AUTOOS_ROOT", "AUTOOS_HOST_NAME"]
+    }
+  },
   "roles": {
     "orchestrator": {
       "description": "Top of the tree: plans, briefs, judges and commits. May spawn.",
