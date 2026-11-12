@@ -14,6 +14,9 @@ $ErrorActionPreference = 'Stop'
 # Do not force a sibling import: that would remove the caller's global copy.
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1') -DisableNameChecking
 
+# One source for the installed guard; other launchers can opt in with AUTOOS_BACKGROUND_SHELL.
+$script:BackgroundShellMarkers = @('AI_AGENT', 'CLAUDECODE', 'OPENCODE', 'CODEX_SANDBOX', 'AUTOOS_BACKGROUND_SHELL')
+
 function Add-AutoOSGuardedProfileLine {
     <#
       .SYNOPSIS
@@ -198,22 +201,26 @@ function Install-AutoOSProfileGuard {
 if (-not (& { # AutoOS background-shell guard: native profile hooks need an interactive terminal, not an agent/background shell.
     param([scriptblock]$Probe = {
         @{ HostName = $Host.Name; InputRedirected = [Console]::IsInputRedirected
-           OutputRedirected = [Console]::IsOutputRedirected; Arguments = [Environment]::GetCommandLineArgs() }
+           OutputRedirected = [Console]::IsOutputRedirected; Arguments = [Environment]::GetCommandLineArgs()
+           Environment = [Environment]::GetEnvironmentVariables() }
     })
     try {
+        $agentMarkers = @(__AUTOOS_AGENT_MARKERS__)
         $state = & $Probe
-        # -File/-Command consume the remainder: a payload's -NoExit is not a host option.
+        # -File/-Command consume the remainder: a payload's -NonInteractive is not a host option.
         $hostArguments = @($state.Arguments)
         for ($i = 0; $i -lt $hostArguments.Count; $i++) {
             if ($hostArguments[$i] -match '^-(Command|CommandWithArgs|C|File|F)$') { $hostArguments = $hostArguments[0..$i]; break }
         }
+        foreach ($name in $agentMarkers) {
+            if (-not [string]::IsNullOrEmpty($state.Environment[$name])) { return $false }
+        }
         return ($state.HostName -eq 'ConsoleHost' -and -not $state.InputRedirected -and -not $state.OutputRedirected -and
-            -not @($hostArguments -match '^-(NonInteractive|NonI)$').Count -and
-            (@($hostArguments -match '^-NoExit$').Count -or
-             -not @($state.Arguments -match '^-(Command|CommandWithArgs|C|EncodedCommand|Enc|EC|E|File|F)$').Count))
+            -not @($hostArguments -match '^-(NonInteractive|NonI)$').Count)
     } catch { return $false }
 })) { return }
 '@
+    $guard = $guard.Replace('__AUTOOS_AGENT_MARKERS__', (($script:BackgroundShellMarkers | ForEach-Object { "'$_'" }) -join ', '))
     if (-not $Documents) { return }
     foreach ($folder in @('PowerShell', 'WindowsPowerShell')) {
         foreach ($name in @('Microsoft.PowerShell_profile.ps1', 'profile.ps1')) {

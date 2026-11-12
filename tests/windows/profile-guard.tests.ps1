@@ -103,25 +103,70 @@ Test-Case 'background profile guard post-install: agent, shell and conda compone
         Assert-True ($setupText -match "(?m)if \(\`$state -in @\('installed', 'skipped'\)\).*Invoke-AutoOSPostInstall -Component \`$c") 'normal setup no longer reaches the profile guard'
     }
 }
-Test-Case 'background profile guard predicate: interactive inputs, every mode switch, NoExit, redirection, host and probe exceptions' {
+Test-Case 'background profile guard predicate: console payloads keep profiles; host NonInteractive, redirection, other hosts and probe exceptions skip' {
     Invoke-BackgroundProfileFixture {
         & $apply 6>$null
         $ast = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$null); $predicate = $ast.Find({ param($n) $n -is [Management.Automation.Language.ScriptBlockExpressionAst] }, $true).ScriptBlock.GetScriptBlock()
-        $inputs = @{ HostName = 'ConsoleHost'; InputRedirected = $false; OutputRedirected = $false; Arguments = @('pwsh') }
         $probe = { $inputs }
-        Assert-Equal (& $predicate $probe) $true
-        foreach ($switch in @('-Command', '-CommandWithArgs', '-C', '-EncodedCommand', '-Enc', '-EC', '-E', '-File', '-F', '-NonInteractive', '-NonI')) {
-            $inputs.Arguments = @('powershell', $switch.ToUpperInvariant(), 'payload'); Assert-Equal (& $predicate $probe) $false $switch
-            $inputs.Arguments = @('powershell', '-NoExit', $switch, 'payload'); Assert-Equal (& $predicate $probe) ($switch -notlike '-Non*') "host -NoExit $switch"
-            $inputs.Arguments = @('powershell', $switch, 'payload', '-NoExit'); Assert-Equal (& $predicate $probe) ($switch -match '^-(EncodedCommand|Enc|EC|E)$') "$switch payload -NoExit"
+        $cases = @(
+            @('console, no args', @{}, $true),
+            @('-NonInteractive', @{ Arguments = @('pwsh', '-NonInteractive') }, $false),
+            @('-NonI', @{ Arguments = @('pwsh', '-NONI') }, $false),
+            @('-NoExit -NonInteractive', @{ Arguments = @('pwsh', '-NoExit', '-NonInteractive') }, $false),
+            @('-NonI -NoExit', @{ Arguments = @('pwsh', '-NonI', '-NoExit') }, $false),
+            @('input redirected', @{ InputRedirected = $true }, $false),
+            @('output redirected', @{ OutputRedirected = $true }, $false),
+            @('other host', @{ HostName = 'OtherHost' }, $false),
+            @('not a host switch', @{ Arguments = @('pwsh', '-CommandNotASwitch', 'file-with--NonI.ps1') }, $true)
+        )
+        foreach ($switch in @('-File', '-F', '-Command', '-CommandWithArgs', '-C', '-EncodedCommand', '-Enc', '-EC', '-E')) {
+            $cases += ,@("$switch, no payload", @{ Arguments = @('pwsh', $switch) }, $true)
+            $cases += ,@($switch, @{ Arguments = @('pwsh', $switch.ToUpperInvariant(), 'x.ps1') }, $true)
+            $cases += ,@("host -NoExit $switch", @{ Arguments = @('pwsh', '-NoExit', $switch, 'payload') }, $true)
+            $cases += ,@("$switch payload -NoExit", @{ Arguments = @('pwsh', $switch, 'payload', '-NoExit') }, $true)
         }
-        $inputs.Arguments = @('pwsh', '-NoLogo', '-CommandNotASwitch', 'file-with--NonI.ps1'); Assert-Equal (& $predicate $probe) $true
-        foreach ($mode in @('-Command', '-File')) { $inputs.Arguments = @('pwsh', '-NoExit', $mode, 'payload', '-NonInteractive'); Assert-Equal (& $predicate $probe) $true 'payload is not a host option' }
-        foreach ($field in @('InputRedirected', 'OutputRedirected', 'HostName')) {
-            $old = $inputs[$field]; $inputs[$field] = if ($field -eq 'HostName') { 'OtherHost' } else { $true }
-            Assert-Equal (& $predicate $probe) $false $field; $inputs[$field] = $old
+        foreach ($mode in @('-File', '-F', '-Command', '-CommandWithArgs', '-C')) {
+            $cases += ,@("$mode payload -NonInteractive", @{ Arguments = @('pwsh', $mode, 'x.ps1', '-NonInteractive') }, $true)
+            $cases += ,@("-NonI before $mode", @{ Arguments = @('pwsh', '-NonI', $mode, 'payload') }, $false)
+        }
+        foreach ($case in $cases) {
+            $inputs = @{ HostName = 'ConsoleHost'; InputRedirected = $false; OutputRedirected = $false; Arguments = @('pwsh'); Environment = @{} }
+            foreach ($field in $case[1].Keys) { $inputs[$field] = $case[1][$field] }
+            Assert-Equal (& $predicate $probe) $case[2] $case[0]
         }
         Assert-Equal (& $predicate { throw 'no console handles' }) $false
+    }
+}
+function Get-BackgroundProfileMarker {
+    & (Get-Module -All AutoOS.ProfileGuard) { $script:BackgroundShellMarkers }
+}
+Test-Case 'background profile guard predicate: each non-empty agent marker skips, empty or unset markers keep, and the rendered list has one module source' {
+    Invoke-BackgroundProfileFixture {
+        & $apply 6>$null
+        $markers = @(Get-BackgroundProfileMarker)
+        Assert-Equal ($markers -join ',') 'AI_AGENT,CLAUDECODE,OPENCODE,CODEX_SANDBOX,AUTOOS_BACKGROUND_SHELL'
+        $ast = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$null)
+        $assignments = @($ast.FindAll({ param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$agentMarkers' }, $true))
+        Assert-Equal $assignments.Count 1 'rendered guard must have exactly one marker list'
+        $rendered = $assignments[0].Right.Find({ param($n) $n -is [Management.Automation.Language.ArrayExpressionAst] }, $true).SafeGetValue()
+        Assert-Equal ($rendered -join ',') ($markers -join ',') 'rendered markers differ from the module source'
+        $predicate = $ast.Find({ param($n) $n -is [Management.Automation.Language.ScriptBlockExpressionAst] }, $true).ScriptBlock.GetScriptBlock()
+        $inputs = @{ HostName = 'ConsoleHost'; InputRedirected = $false; OutputRedirected = $false; Arguments = @('pwsh'); Environment = @{} }
+        $probe = { $inputs }
+        Assert-Equal (& $predicate $probe) $true 'unset markers'
+        foreach ($name in $markers) {
+            foreach ($value in @('agent', ' ', '')) {
+                $inputs.Environment = @{ $name = $value }
+                Assert-Equal (& $predicate $probe) ([string]::IsNullOrEmpty($value)) "$name='$value'"
+            }
+        }
+        # Equality alone could allow a second hard-coded copy: changing the source must change the guard.
+        $guardModule = Get-Module -All AutoOS.ProfileGuard
+        try {
+            & $guardModule { $script:BackgroundShellMarkers = @('AUTOOS_TEST_MARKER') }
+            & $apply 6>$null
+            Assert-True ([IO.File]::ReadAllText($p).Contains('$agentMarkers = @(''AUTOOS_TEST_MARKER'')')) 'rendering did not use the module marker list'
+        } finally { & $guardModule { param($original) $script:BackgroundShellMarkers = $original } $markers }
     }
 }
 Test-Case 'background profile guard: later OpenHands prepends stay below it and a preamble ending at EOF remains valid' {
@@ -148,18 +193,27 @@ Test-Case 'background profile guard: named-block profiles warn and remain byte-i
         }
     }
 }
-Test-Case 'background profile guard: non-interactive command-mode PowerShell never reaches the sentinel' {
+Test-Case 'background profile guard: redirected command-mode PowerShell never reaches the sentinel' {
     Invoke-BackgroundProfileFixture {
         [IO.File]::WriteAllText($p, "'profile-sentinel'`r`n")
         & $apply 6>$null
-        foreach ($engine in @('pwsh', 'powershell.exe')) {
-            $exe = Get-Command $engine -ErrorAction SilentlyContinue; if (-not $exe) { continue }
-            $command = ". '$($p.Replace("'", "''"))'; 'command-completed'"
-            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-            $output = & $exe.Source -NoProfile -NonInteractive -EncodedCommand $encoded | Out-String
-            Assert-Equal $LASTEXITCODE 0
-            Assert-True ($output -match 'command-completed' -and $output -notmatch 'profile-sentinel') "$engine ran profile hooks or failed to execute"
-        }
+        $savedMarkers = @{}
+        try {
+            foreach ($name in (Get-BackgroundProfileMarker)) {
+                $savedMarkers[$name] = [Environment]::GetEnvironmentVariable($name)
+                [Environment]::SetEnvironmentVariable($name, $null)
+            }
+            foreach ($engine in @('pwsh', 'powershell.exe')) {
+                $exe = Get-Command $engine -ErrorAction SilentlyContinue; if (-not $exe) { continue }
+                $command = ". '$($p.Replace("'", "''"))'; 'command-completed'; 'stdout-redirected=' + [Console]::IsOutputRedirected"
+                $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+                # Out-String redirects stdout: -EncodedCommand alone must not skip the profile.
+                $output = & $exe.Source -NoProfile -EncodedCommand $encoded | Out-String
+                Assert-Equal $LASTEXITCODE 0
+                Assert-True ($output -match 'stdout-redirected=True') "$engine did not run with redirected stdout"
+                Assert-True ($output -match 'command-completed' -and $output -notmatch 'profile-sentinel') "$engine ran profile hooks or failed to execute"
+            }
+        } finally { foreach ($name in $savedMarkers.Keys) { [Environment]::SetEnvironmentVariable($name, $savedMarkers[$name]) } }
     }
 }
 
@@ -172,6 +226,47 @@ function Get-BackgroundProfileGuardReference {
     Invoke-AutoOSPostInstall -Component $component -Documents $referenceDocs 6>$null
     $ast = [Management.Automation.Language.Parser]::ParseFile($referencePath, [ref]$null, [ref]$null)
     $ast.EndBlock.Statements[0].Extent.Text
+}
+Test-Case 'background profile guard: literal previous round-1 guard is replaced once with a backup, then already configured' {
+    Invoke-BackgroundProfileFixture {
+        # Literal shipped guard, not derived from the implementation being tested.
+        $previous = @'
+if (-not (& { # AutoOS background-shell guard: native profile hooks need an interactive terminal, not an agent/background shell.
+    param([scriptblock]$Probe = {
+        @{ HostName = $Host.Name; InputRedirected = [Console]::IsInputRedirected
+           OutputRedirected = [Console]::IsOutputRedirected; Arguments = [Environment]::GetCommandLineArgs() }
+    })
+    try {
+        $state = & $Probe
+        # -File/-Command consume the remainder: a payload's -NoExit is not a host option.
+        $hostArguments = @($state.Arguments)
+        for ($i = 0; $i -lt $hostArguments.Count; $i++) {
+            if ($hostArguments[$i] -match '^-(Command|CommandWithArgs|C|File|F)$') { $hostArguments = $hostArguments[0..$i]; break }
+        }
+        return ($state.HostName -eq 'ConsoleHost' -and -not $state.InputRedirected -and -not $state.OutputRedirected -and
+            -not @($hostArguments -match '^-(NonInteractive|NonI)$').Count -and
+            (@($hostArguments -match '^-NoExit$').Count -or
+             -not @($state.Arguments -match '^-(Command|CommandWithArgs|C|EncodedCommand|Enc|EC|E|File|F)$').Count))
+    } catch { return $false }
+})) { return }
+'@
+        $current = (Get-BackgroundProfileGuardReference) -replace '\r?\n', "`r`n"
+        $previous = $previous -replace '\r?\n', "`r`n"
+        Assert-True ($previous -cne $current) 'round-1 guard still has the over-broad predicate'
+        $prefix = "# added by AutoOS`r`n"; $suffix = "`r`n'profile-sentinel'`r`n"
+        [IO.File]::WriteAllText($p, ($prefix + $previous + $suffix), [Text.UTF8Encoding]::new($true))
+        $original = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+        $log = Get-AutoOSConsoleCapture $apply
+        Assert-True ($log -match 'profile updated' -and $log -notmatch 'already configured') 'round-1 guard was not updated'
+        Assert-Equal ([IO.File]::ReadAllText($p)) ($prefix + $current + $suffix)
+        $after = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+        $log = Get-AutoOSConsoleCapture $apply
+        Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $after
+        Assert-True ($log -match 'already configured' -and $log -notmatch 'profile updated') 'second run did not leave the current guard alone'
+        $backups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $p) -Filter '*.autoos-backup-*')
+        Assert-Equal $backups.Count 1
+        Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName))) $original
+    }
 }
 Test-Case 'background profile guard: outdated block is replaced once in place, preserving all surrounding bytes and its backup' {
     $encodings = @([Text.UTF8Encoding]::new($true), [Text.UnicodeEncoding]::new($false, $true), [Text.UnicodeEncoding]::new($true, $true),
