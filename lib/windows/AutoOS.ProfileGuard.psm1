@@ -200,23 +200,28 @@ function Install-AutoOSProfileGuard {
     $guard = @'
 if (-not (& { # AutoOS background-shell guard: native profile hooks need an interactive terminal, not an agent/background shell.
     param([scriptblock]$Probe = {
+        $environment = [Collections.Hashtable]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($entry in [Environment]::GetEnvironmentVariables().GetEnumerator()) {
+            # Windows names ignore case; an empty case-colliding entry must not hide an agent.
+            if (-not [string]::IsNullOrEmpty($entry.Value)) { $environment[$entry.Key] = $entry.Value }
+        }
         @{ HostName = $Host.Name; InputRedirected = [Console]::IsInputRedirected
            OutputRedirected = [Console]::IsOutputRedirected; Arguments = [Environment]::GetCommandLineArgs()
-           Environment = [Environment]::GetEnvironmentVariables() }
+           Environment = $environment }
     })
     try {
         $agentMarkers = @(__AUTOOS_AGENT_MARKERS__)
         $state = & $Probe
-        # -File/-Command consume the remainder: a payload's -NonInteractive is not a host option.
+        # -File/-Command/-EncodedCommand consume the remainder: payload switches are not host options.
         $hostArguments = @($state.Arguments)
         for ($i = 0; $i -lt $hostArguments.Count; $i++) {
-            if ($hostArguments[$i] -match '^-(Command|CommandWithArgs|C|File|F)$') { $hostArguments = $hostArguments[0..$i]; break }
+            if ($hostArguments[$i] -match '^[-/](Command|CommandWithArgs|C|EncodedCommand|Enc|EC|E|File|F)$') { $hostArguments = $hostArguments[0..$i]; break }
         }
         foreach ($name in $agentMarkers) {
             if (-not [string]::IsNullOrEmpty($state.Environment[$name])) { return $false }
         }
         return ($state.HostName -eq 'ConsoleHost' -and -not $state.InputRedirected -and -not $state.OutputRedirected -and
-            -not @($hostArguments -match '^-(NonInteractive|NonI)$').Count)
+            -not @($hostArguments -match '^[-/](NonInteractive|NonI)$').Count)
     } catch { return $false }
 })) { return }
 '@

@@ -1,6 +1,8 @@
 ﻿#Requires -Version 5.1
 # Dot-sourced by run-tests.ps1 in the profile-writing group, using its test helpers.
 
+. (Join-Path $PSScriptRoot 'profile-guard.fixtures.ps1')
+
 function Invoke-BackgroundProfileFixture {
     [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Fixture variables are consumed by dynamically scoped test bodies.')]
     param([scriptblock]$Body)
@@ -112,6 +114,8 @@ Test-Case 'background profile guard predicate: console payloads keep profiles; h
             @('console, no args', @{}, $true),
             @('-NonInteractive', @{ Arguments = @('pwsh', '-NonInteractive') }, $false),
             @('-NonI', @{ Arguments = @('pwsh', '-NONI') }, $false),
+            @('/NonInteractive', @{ Arguments = @('pwsh', '/NonInteractive') }, $false),
+            @('/NonI', @{ Arguments = @('pwsh', '/NonI') }, $false),
             @('-NoExit -NonInteractive', @{ Arguments = @('pwsh', '-NoExit', '-NonInteractive') }, $false),
             @('-NonI -NoExit', @{ Arguments = @('pwsh', '-NonI', '-NoExit') }, $false),
             @('input redirected', @{ InputRedirected = $true }, $false),
@@ -119,15 +123,18 @@ Test-Case 'background profile guard predicate: console payloads keep profiles; h
             @('other host', @{ HostName = 'OtherHost' }, $false),
             @('not a host switch', @{ Arguments = @('pwsh', '-CommandNotASwitch', 'file-with--NonI.ps1') }, $true)
         )
-        foreach ($switch in @('-File', '-F', '-Command', '-CommandWithArgs', '-C', '-EncodedCommand', '-Enc', '-EC', '-E')) {
+        $payloadOptions = @('File', 'F', 'Command', 'CommandWithArgs', 'C', 'EncodedCommand', 'Enc', 'EC', 'E') | ForEach-Object { "-$_"; "/$_" }
+        foreach ($switch in $payloadOptions) {
             $cases += ,@("$switch, no payload", @{ Arguments = @('pwsh', $switch) }, $true)
             $cases += ,@($switch, @{ Arguments = @('pwsh', $switch.ToUpperInvariant(), 'x.ps1') }, $true)
             $cases += ,@("host -NoExit $switch", @{ Arguments = @('pwsh', '-NoExit', $switch, 'payload') }, $true)
             $cases += ,@("$switch payload -NoExit", @{ Arguments = @('pwsh', $switch, 'payload', '-NoExit') }, $true)
         }
-        foreach ($mode in @('-File', '-F', '-Command', '-CommandWithArgs', '-C')) {
+        foreach ($mode in $payloadOptions) {
             $cases += ,@("$mode payload -NonInteractive", @{ Arguments = @('pwsh', $mode, 'x.ps1', '-NonInteractive') }, $true)
+            $cases += ,@("$mode payload /NonInteractive", @{ Arguments = @('pwsh', $mode, 'x.ps1', '/NonInteractive') }, $true)
             $cases += ,@("-NonI before $mode", @{ Arguments = @('pwsh', '-NonI', $mode, 'payload') }, $false)
+            $cases += ,@("/NonI before $mode", @{ Arguments = @('pwsh', '/NonI', $mode, 'payload') }, $false)
         }
         foreach ($case in $cases) {
             $inputs = @{ HostName = 'ConsoleHost'; InputRedirected = $false; OutputRedirected = $false; Arguments = @('pwsh'); Environment = @{} }
@@ -155,9 +162,11 @@ Test-Case 'background profile guard predicate: each non-empty agent marker skips
         $probe = { $inputs }
         Assert-Equal (& $predicate $probe) $true 'unset markers'
         foreach ($name in $markers) {
-            foreach ($value in @('agent', ' ', '')) {
-                $inputs.Environment = @{ $name = $value }
-                Assert-Equal (& $predicate $probe) ([string]::IsNullOrEmpty($value)) "$name='$value'"
+            foreach ($spelling in @($name, $name.ToLowerInvariant(), ($name.Substring(0, 1) + $name.Substring(1).ToLowerInvariant()))) {
+                foreach ($value in @('agent', ' ', '')) {
+                    $inputs.Environment = @{ $spelling = $value }
+                    Assert-Equal (& $predicate $probe) ([string]::IsNullOrEmpty($value)) "$spelling='$value'"
+                }
             }
         }
         # Equality alone could allow a second hard-coded copy: changing the source must change the guard.
@@ -167,6 +176,57 @@ Test-Case 'background profile guard predicate: each non-empty agent marker skips
             & $apply 6>$null
             Assert-True ([IO.File]::ReadAllText($p).Contains('$agentMarkers = @(''AUTOOS_TEST_MARKER'')')) 'rendering did not use the module marker list'
         } finally { & $guardModule { param($original) $script:BackgroundShellMarkers = $original } $markers }
+    }
+}
+Test-Case 'background profile guard default probe: lower-case environment markers resolve upper-case names in real PowerShell children' {
+    Invoke-BackgroundProfileFixture {
+        & $apply 6>$null
+        $command = @'
+$ErrorActionPreference = 'Stop'
+try {
+$ast = [Management.Automation.Language.Parser]::ParseFile('__PROFILE_PATH__', [ref]$null, [ref]$null)
+$predicateAst = $ast.Find({ param($n) $n -is [Management.Automation.Language.ScriptBlockExpressionAst] }, $true).ScriptBlock
+$predicate = $predicateAst.GetScriptBlock()
+$probe = $predicateAst.ParamBlock.Parameters[0].DefaultValue.ScriptBlock.GetScriptBlock()
+foreach ($name in @('claudecode', 'opencode')) {
+    Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+    Set-Item -LiteralPath "Env:$name" -Value 'agent'
+    if (-not (@([Environment]::GetEnvironmentVariables().Keys) -ccontains $name)) { throw "marker not stored in lower case: $name" }
+    $state = & $probe
+    if ($state.Environment[$name.ToUpperInvariant()] -cne 'agent') { throw "probe lookup is case-sensitive: $name" }
+    # Captured stdout must not mask a missed marker by making the predicate skip anyway.
+    $state.HostName = 'ConsoleHost'; $state.InputRedirected = $false; $state.OutputRedirected = $false; $state.Arguments = @('pwsh')
+    if (& $predicate { $state }) { throw "predicate missed marker: $name" }
+    Remove-Item -LiteralPath "Env:$name"
+}
+'probe-case-lookup-ok'
+} catch { $_.Exception.Message; exit 1 }
+'@
+        $command = $command.Replace('__PROFILE_PATH__', $p.Replace("'", "''"))
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+        foreach ($engine in @('pwsh', 'powershell.exe')) {
+            $exe = Get-Command $engine -ErrorAction SilentlyContinue
+            if (-not $exe) { Skip "$engine unavailable for default-probe regression"; continue }
+            $output = & $exe.Source -NoProfile -EncodedCommand $encoded | Out-String
+            Assert-Equal $LASTEXITCODE 0 "$engine default probe: $output"
+            Assert-True ($output -match 'probe-case-lookup-ok') "$engine did not verify lower-case markers"
+        }
+    }
+}
+Test-Case 'background profile guard default probe: case-colliding names retain any non-empty value' {
+    Invoke-BackgroundProfileFixture {
+        & $apply 6>$null
+        $ast = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$null)
+        $predicateAst = $ast.Find({ param($n) $n -is [Management.Automation.Language.ScriptBlockExpressionAst] }, $true).ScriptBlock
+        $probeText = $predicateAst.ParamBlock.Parameters[0].DefaultValue.ScriptBlock.Extent.Text
+        # Windows normally coalesces names; inject a case-sensitive snapshot into the real probe.
+        $probe = [scriptblock]::Create('param($variables)' + $probeText.Substring(1, $probeText.Length - 2).Replace('[Environment]::GetEnvironmentVariables()', '$variables'))
+        foreach ($values in @(@('agent', ''), @('', 'agent'))) {
+            $variables = Get-BackgroundProfileEnvironmentFixture -LowerValue $values[0] -UpperValue $values[1]
+            $state = & $probe $variables
+            Assert-Equal $state.Environment['CLAUDECODE'] 'agent'
+            Assert-Equal $state.Environment['claudecode'] 'agent'
+        }
     }
 }
 Test-Case 'background profile guard: later OpenHands prepends stay below it and a preamble ending at EOF remains valid' {
@@ -227,45 +287,26 @@ function Get-BackgroundProfileGuardReference {
     $ast = [Management.Automation.Language.Parser]::ParseFile($referencePath, [ref]$null, [ref]$null)
     $ast.EndBlock.Statements[0].Extent.Text
 }
-Test-Case 'background profile guard: literal previous round-1 guard is replaced once with a backup, then already configured' {
-    Invoke-BackgroundProfileFixture {
-        # Literal shipped guard, not derived from the implementation being tested.
-        $previous = @'
-if (-not (& { # AutoOS background-shell guard: native profile hooks need an interactive terminal, not an agent/background shell.
-    param([scriptblock]$Probe = {
-        @{ HostName = $Host.Name; InputRedirected = [Console]::IsInputRedirected
-           OutputRedirected = [Console]::IsOutputRedirected; Arguments = [Environment]::GetCommandLineArgs() }
-    })
-    try {
-        $state = & $Probe
-        # -File/-Command consume the remainder: a payload's -NoExit is not a host option.
-        $hostArguments = @($state.Arguments)
-        for ($i = 0; $i -lt $hostArguments.Count; $i++) {
-            if ($hostArguments[$i] -match '^-(Command|CommandWithArgs|C|File|F)$') { $hostArguments = $hostArguments[0..$i]; break }
+Test-Case 'background profile guard: literal previous guards are each replaced once with a backup, then already configured' {
+    foreach ($fixture in (Get-BackgroundProfileGuardLegacyFixture).GetEnumerator()) {
+        Invoke-BackgroundProfileFixture {
+            $current = (Get-BackgroundProfileGuardReference) -replace '\r?\n', "`r`n"
+            $previous = $fixture.Value -replace '\r?\n', "`r`n"
+            Assert-True ($previous -cne $current) "$($fixture.Key) guard is still current"
+            $prefix = "# added by AutoOS`r`n"; $suffix = "`r`n'profile-sentinel'`r`n"
+            [IO.File]::WriteAllText($p, ($prefix + $previous + $suffix), [Text.UTF8Encoding]::new($true))
+            $original = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+            $log = Get-AutoOSConsoleCapture $apply
+            Assert-True ($log -match 'profile updated' -and $log -notmatch 'already configured') "$($fixture.Key) guard was not updated"
+            Assert-Equal ([IO.File]::ReadAllText($p)) ($prefix + $current + $suffix)
+            $after = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+            $log = Get-AutoOSConsoleCapture $apply
+            Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $after
+            Assert-True ($log -match 'already configured' -and $log -notmatch 'profile updated') 'second run did not leave the current guard alone'
+            $backups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $p) -Filter '*.autoos-backup-*')
+            Assert-Equal $backups.Count 1
+            Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName))) $original
         }
-        return ($state.HostName -eq 'ConsoleHost' -and -not $state.InputRedirected -and -not $state.OutputRedirected -and
-            -not @($hostArguments -match '^-(NonInteractive|NonI)$').Count -and
-            (@($hostArguments -match '^-NoExit$').Count -or
-             -not @($state.Arguments -match '^-(Command|CommandWithArgs|C|EncodedCommand|Enc|EC|E|File|F)$').Count))
-    } catch { return $false }
-})) { return }
-'@
-        $current = (Get-BackgroundProfileGuardReference) -replace '\r?\n', "`r`n"
-        $previous = $previous -replace '\r?\n', "`r`n"
-        Assert-True ($previous -cne $current) 'round-1 guard still has the over-broad predicate'
-        $prefix = "# added by AutoOS`r`n"; $suffix = "`r`n'profile-sentinel'`r`n"
-        [IO.File]::WriteAllText($p, ($prefix + $previous + $suffix), [Text.UTF8Encoding]::new($true))
-        $original = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
-        $log = Get-AutoOSConsoleCapture $apply
-        Assert-True ($log -match 'profile updated' -and $log -notmatch 'already configured') 'round-1 guard was not updated'
-        Assert-Equal ([IO.File]::ReadAllText($p)) ($prefix + $current + $suffix)
-        $after = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
-        $log = Get-AutoOSConsoleCapture $apply
-        Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $after
-        Assert-True ($log -match 'already configured' -and $log -notmatch 'profile updated') 'second run did not leave the current guard alone'
-        $backups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $p) -Filter '*.autoos-backup-*')
-        Assert-Equal $backups.Count 1
-        Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName))) $original
     }
 }
 Test-Case 'background profile guard: outdated block is replaced once in place, preserving all surrounding bytes and its backup' {
