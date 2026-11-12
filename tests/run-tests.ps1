@@ -3998,6 +3998,7 @@ Test-Case 'usb: Get-AutoOSServeUsbCreateResult accepts a valid request and repor
 
 # ─── Static analysis ────────────────────────────────────────────────────────
 Describe-Group 'static analysis'
+
 Test-Case 'PSScriptAnalyzer is clean' {
     if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
         Skip 'PSScriptAnalyzer not installed'
@@ -4008,7 +4009,16 @@ Test-Case 'PSScriptAnalyzer is clean' {
     $issues = @()
     $ruleCrashes = @()
     foreach ($f in $files) {
-        # Collection names stay plural; collect diagnostics even if an analyzer rule crashes.
+        # PSUseSingularNouns is excluded deliberately: these functions return
+        # collections, and Get-AutoOSAvailableComponent(s) reads worse singular.
+        # Everything else, including PSAvoidAssignmentToAutomaticVariable and
+        # PSReviewUnusedParameter, is treated as a real failure.
+        #
+        # -ErrorVariable, not $ErrorActionPreference='Stop': the analyzer emits a
+        # non-terminating RULE_ERROR when one of its own rules throws internally
+        # (it does so here on a loaded module, with no single rule reproducing it).
+        # Diagnostics still come through, so they stay the pass criterion - but a
+        # crashed rule is reported rather than silently swallowed.
         $analyzerErrors = $null
         $issues += Invoke-ScriptAnalyzer -Path $f.FullName -Severity Error, Warning `
                    -ExcludeRule PSUseShouldProcessForStateChangingFunctions,
@@ -4027,8 +4037,10 @@ Test-Case 'PSScriptAnalyzer is clean' {
                     ($ruleCrashes -join ', ') + " - diagnostics were still collected") '38;5;179'))
     }
 }
+
 Test-Case 'every PowerShell file has a UTF-8 BOM' {
-    # Windows PowerShell 5.1 misdecodes non-ASCII source without a BOM.
+    # Windows PowerShell 5.1 decodes .ps1/.psm1 as ANSI without one, which turns
+    # every box-drawing character into a parse error.
     $missing = @()
     foreach ($f in Get-ChildItem -Path $Root -Include *.ps1, *.psm1 -Recurse -File) {
         if ($f.FullName -match '\\\.git\\') { continue }
@@ -4039,6 +4051,7 @@ Test-Case 'every PowerShell file has a UTF-8 BOM' {
     }
     Assert-Equal ($missing -join ',') ''
 }
+
 Test-Case 'Resolve-AutoOSOllamaBaseUrl: OLLAMA_BASE_URL wins and is normalised to /v1' {
     $saved = $env:OLLAMA_BASE_URL
     try {
@@ -4046,17 +4059,28 @@ Test-Case 'Resolve-AutoOSOllamaBaseUrl: OLLAMA_BASE_URL wins and is normalised t
         Assert-Equal (Resolve-AutoOSOllamaBaseUrl -Probe { param($u) $true }) 'http://gpu-box:11434/v1'
     } finally { $env:OLLAMA_BASE_URL = $saved }
 }
+
 Test-Case 'Resolve-AutoOSOllamaBaseUrl: host.docker.internal only when Ollama answers there' {
     $saved = $env:OLLAMA_BASE_URL
     try {
         $env:OLLAMA_BASE_URL = $null
         Assert-Equal (Resolve-AutoOSOllamaBaseUrl -Probe { param($u) $u -like '*host.docker.internal:11434/api/version' }) 'http://host.docker.internal:11434/v1'
-        # No Docker listener: retain the catalog's native Ollama address.
+        # No answer there (native Ollama bound to 127.0.0.1, no Docker Desktop):
+        # $null keeps the catalog's 127.0.0.1, which a host-run agent-canvas needs.
         Assert-Equal (Resolve-AutoOSOllamaBaseUrl -Probe { param($u) $false }) $null
     } finally { $env:OLLAMA_BASE_URL = $saved }
 }
+
 function Get-AutoOSConsoleCapture {
-    # Write-AutoOSLine uses Console.Out, bypassing PowerShell's stream-6 redirection.
+    <#
+      .SYNOPSIS Run a scriptblock while Console.Out is redirected, returning what it wrote.
+      .DESCRIPTION
+        Write-AutoOSLine writes via [Console]::WriteLine/Write, not Write-Information,
+        so `6>&1` alone does not capture it (verified: only actual Write-Information/
+        Write-Host output crosses stream 6 - a bare Console.WriteLine bypasses the
+        PowerShell stream pipeline entirely). Redirecting Console.Out for the
+        duration of the call is the only way to capture that text in-process.
+    #>
     param([Parameter(Mandatory)][scriptblock]$Body)
     $origOut = [Console]::Out
     $sw = New-Object IO.StringWriter
@@ -4064,7 +4088,11 @@ function Get-AutoOSConsoleCapture {
     try { & $Body | Out-Null } finally { [Console]::SetOut($origOut) }
     $sw.ToString()
 }
-# Omnigraph needs URL, graph and token even when unauthenticated health reports connected.
+
+# Omnigraph reachability (measured 2026-09-24): the bridge refuses to start
+# without OMNIGRAPH_BASE_URL and OMNIGRAPH_GRAPH_ID (the client only says
+# "Connection closed"), and answers health without a token, so clients show
+# "connected" while every read fails.
 Test-Case 'the omnigraph env file is merged, carries the token, and is stable on a re-run' {
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-og-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $scratch -Force | Out-Null
@@ -4086,12 +4114,14 @@ Test-Case 'the omnigraph env file is merged, carries the token, and is stable on
         Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
 Test-Case 'the omnigraph user variable is set by name only, never PATH-style wholesale' {
     $fn = [regex]::Match($installSource, '(?s)function Set-AutoOSOmnigraphEnv \{.*?\n\}').Value
     Assert-True ($fn -match "GetEnvironmentVariable\('OMNIGRAPH_TOKEN', 'User'\)") 'the user variable is not read first'
     Assert-True ($fn -match "SetEnvironmentVariable\('OMNIGRAPH_TOKEN', \`$token, 'User'\)") 'the user variable is not written by name'
     Assert-True ($installSource -match 'Set-AutoOSOmnigraphEnv -BaseUrl \$baseUrl\r?\n') 'the installer does not call it for real'
 }
+
 Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to start without one)" {
     $realAppData = $env:APPDATA
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
@@ -4112,8 +4142,13 @@ Test-Case "antigravity's omnigraph entry pins a graph id (the bridge refuses to 
         Remove-Item -Path $scratch -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
 Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when nothing changed' {
-    # Pause so a duplicate backup cannot hide behind the first run's timestamp.
+    # mcp_config.json is the user's own file. The first run that changes it takes
+    # ONE backup; an identical second run must not back up again, must leave the
+    # file byte-identical and must say skipped. The pause keeps a second-run
+    # backup from reusing the first one's per-second timestamp, which would make
+    # an extra backup overwrite (and hide behind) the first.
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
@@ -4167,8 +4202,15 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp does not back up again when not
     }
     Pass
 }
+
 Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up again when nothing changed' {
-    # Pause exposes duplicate backups; a reordered equivalent entry is also a no-op.
+    # mcp_config.json is the user's own file. The first run that changes it takes
+    # ONE backup; an identical second run must not back up again, must leave the
+    # file byte-identical and must say skipped. The pause keeps a second-run
+    # backup from reusing the first one's per-second timestamp, which would make
+    # an extra backup overwrite (and hide behind) the first. A third run finds the
+    # same entry hand-formatted with its keys in another order (which is all a
+    # [hashtable] parameter guarantees across processes): still nothing to do.
     $realAppData = $env:APPDATA
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
@@ -4212,6 +4254,7 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up aga
         if ($backups2 -ne $backups1) { throw "run 2 backed up again: $backups2 backup(s) after run 2, $backups1 after run 1" }
         if ($hash2 -ne $hash1) { throw 'run 2 rewrote the file (SHA256 differs from run 1)' }
         if ($out2 -notmatch 'skipped') { throw "run 2 did not report skipped: [$out2]" }
+
         $hand = @'
 {
   "theme": "mine",
@@ -4240,8 +4283,12 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer does not back up aga
     }
     Pass
 }
+
 Test-Case 'backup-once: Copy-AutoOSBackup never overwrites a same-second backup' {
-    # Force a same-second clash without changing the clock: the original must survive.
+    # Every writer names its backup to the second. Two changes inside one second
+    # used to share a name, and Copy-Item -Force made the later copy overwrite the
+    # earlier one, so the user's ORIGINAL was lost. -Stamp forces that clash
+    # without touching the clock.
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $file = Join-Path $scratch 'config.json'
     $stamp = '20260101-000000'
@@ -4271,6 +4318,7 @@ Test-Case 'backup-once: Copy-AutoOSBackup never overwrites a same-second backup'
     }
     Pass
 }
+
 Test-Case 'shell: managed files keep rankable same-second backups' {
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-shell-backup-" + [Guid]::NewGuid().ToString('N'))
     $file = Join-Path $scratch 'profile.ps1'
@@ -4282,6 +4330,7 @@ Test-Case 'shell: managed files keep rankable same-second backups' {
         Set-AutoOSManagedFile -Path $file -Content 'first'
         Set-AutoOSManagedFile -Path $file -Content 'second'
         Set-AutoOSManagedFile -Path $file -Content 'second'
+
         $backups = @(Get-ChildItem -LiteralPath $scratch -Filter 'profile.ps1.autoos-backup-*')
         if ($backups.Count -ne 2) { throw "expected two backups after two changed writes, got $($backups.Count)" }
         foreach ($backup in $backups) {
@@ -4297,8 +4346,14 @@ Test-Case 'shell: managed files keep rankable same-second backups' {
     }
     Pass
 }
+
 Test-Case "backup-once: five Antigravity MCP writes in one second keep the user's original" {
-    # Start early in a second: all five setup writes must retain distinct backups.
+    # One setup pass writes mcp_config.json five times (Set-AutoOSAntigravityMcp,
+    # then Register-AutoOSAntigravityMcpServer for serena, graphify, playwright
+    # and context7), and each one changes the file. Backups named to the second
+    # used to overwrite each other, so the user's own file survived nowhere. The
+    # wait starts the writes early in a second, so all five share one timestamp
+    # without any mocking of the clock.
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
@@ -4345,8 +4400,11 @@ Test-Case "backup-once: five Antigravity MCP writes in one second keep the user'
     }
     Pass
 }
+
 Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs only in case' {
-    # JSON command case matters even though PowerShell's -eq ignores it.
+    # JSON is case-sensitive and PowerShell's -eq on strings is not: a file whose
+    # omnigraph entry says "NPX" compared equal to the entry the writer produces
+    # ("npx"), so the writer reported skipped and left the wrong command behind.
     $realAppData = $env:APPDATA
     $realToken = $env:OMNIGRAPH_TOKEN
     $realGraph = $env:OMNIGRAPH_GRAPH_ID
@@ -4389,8 +4447,10 @@ Test-Case 'backup-once: Set-AutoOSAntigravityMcp rewrites an entry that differs 
     }
     Pass
 }
+
 Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer rewrites an entry that differs only in case' {
-    # Canonical spec comparison must respect JSON case too.
+    # Same trap as above, in the comparison of the canonical strings of the
+    # entry in the file and the spec being registered.
     $realAppData = $env:APPDATA
     $scratch = Join-Path ([IO.Path]::GetTempPath()) ("autoos-backuponce-" + [Guid]::NewGuid().ToString('N'))
     $cfgDir = Join-Path $scratch 'Antigravity'
@@ -4419,16 +4479,26 @@ Test-Case 'backup-once: Register-AutoOSAntigravityMcpServer rewrites an entry th
     }
     Pass
 }
+
+
 # ─── OMNIGRAPH-URL-LOUD: a missing base URL fails loudly, it never defaults ──
-# D-1398: no localhost default; warn and skip absent URLs, preserving user entries.
+# Nothing listens on localhost:8080 on the server since D-1398, so the silent
+# default wrote a config that looked fine and failed at call time. The resolver
+# warns - naming the variable and every place it can be set - and returns $null;
+# a writer holding $null skips its omnigraph entry, never deleting the user's.
+
 function Invoke-OmnigraphBaseScratch {
-    # Fence all resolver sources, restore the environment, and return the body's output.
+    # Run a body with every source the resolver reads under test control:
+    # USERPROFILE, HOME and APPDATA point into a temp dir (the real
+    # ~/.autoos-omnigraph.env is never read), the answer and the variable are set
+    # per case, all four names are restored, and the body's output is returned.
     param(
         [Parameter(Mandatory)][scriptblock]$Body,
         [hashtable]$Answers = @{},
         [string]$EnvUrl = '',
         [string]$EnvFile = '',
-        # Checkout-writing cases get a scratch repo too.
+        # A writer that touches the checkout (project .claude\settings.local.json,
+        # the skill links) runs against a scratch tree, never this one.
         [switch]$ScratchRepo
     )
     $names = @('USERPROFILE', 'HOME', 'APPDATA', 'OMNIGRAPH_BASE_URL')
@@ -4446,7 +4516,7 @@ function Invoke-OmnigraphBaseScratch {
         Set-Variable -Name HOME -Value $scratch -Force -Scope Global
         if ($EnvFile) { [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), $EnvFile) }
         if ($EnvUrl) { $env:OMNIGRAPH_BASE_URL = $EnvUrl } else { Remove-Item Env:OMNIGRAPH_BASE_URL -ErrorAction SilentlyContinue }
-        # Prove the module sees the scratch HOME.
+        # The resolver runs in the module, which reads $HOME, not the test's.
         if ((& (Get-Module AutoOS.Install) { $HOME }) -ne $scratch) { Skip 'HOME cannot be redirected for the installer module'; return }
         Initialize-AutoOSInstaller -DryRun:$false -Answers $Answers -RepoRoot $repo
         $result = & $Body $scratch $repo
@@ -4458,6 +4528,7 @@ function Invoke-OmnigraphBaseScratch {
     }
     $result
 }
+
 Test-Case 'omnigraph base URL: nothing configured warns naming the variable and yields no URL' {
     Invoke-OmnigraphBaseScratch -Body {
         $warnings = @(Get-AutoOSOmnigraphBaseUrl 3>&1 | Where-Object { $_ -is [Management.Automation.WarningRecord] })
@@ -4468,6 +4539,7 @@ Test-Case 'omnigraph base URL: nothing configured warns naming the variable and 
         Assert-True ($null -eq $got) "a localhost default leaked through: [$got]"
     }
 }
+
 Test-Case 'omnigraph base URL: the answer beats OMNIGRAPH_BASE_URL beats the env file, slashes and quotes are stripped' {
     $cases = @(
         @{ Desc = 'environment variable'; Answers = @{}; EnvUrl = 'http://env.invalid:8080'; EnvFile = ''; Want = 'http://env.invalid:8080' }
@@ -4487,6 +4559,8 @@ Test-Case 'omnigraph base URL: the answer beats OMNIGRAPH_BASE_URL beats the env
     }
     Pass
 }
+
+
 Test-Case 'omnigraph base URL: Antigravity with none configured writes no entry and keeps the user''s own, then the resolved value' {
     $keepers = '{"mcpServers":{"other":{"command":"node","args":["srv.js"]},"omnigraph":{"command":"npx","args":["-y","user-pin"],"env":{"OMNIGRAPH_BASE_URL":"http://keep.invalid","OMNIGRAPH_GRAPH_ID":"mine"}}},"theme":"mine"}'
     Invoke-OmnigraphBaseScratch -Body {
@@ -4510,7 +4584,8 @@ Test-Case 'omnigraph base URL: Antigravity with none configured writes no entry 
         Assert-Equal $r.Cfg.mcpServers.other.command 'node' 'the user''s other server was dropped'
         Assert-True ($r.Cfg.theme -eq 'mine') "the user's own top-level key was dropped"
         Assert-True ((Get-Content -LiteralPath $cfg -Raw) -notmatch '8080') 'a defaulted localhost:8080 landed in the Antigravity config'
-        # The config must carry the resolved env-file value, not a variable reference.
+        # The URL resolves from the env file while the variable stays absent:
+        # what lands in mcp_config.json has to be the value, not a reference.
         [IO.File]::WriteAllText((Join-Path $scratch '.autoos-omnigraph.env'), 'OMNIGRAPH_BASE_URL=http://omnigraph.test.invalid:8080')
         $r = & $run
         Assert-Equal $r.Cfg.mcpServers.omnigraph.env.OMNIGRAPH_BASE_URL 'http://omnigraph.test.invalid:8080' 'the entry does not carry the URL resolved from the env file'
@@ -4518,15 +4593,22 @@ Test-Case 'omnigraph base URL: Antigravity with none configured writes no entry 
         Assert-True ($r.Log -notmatch 'skipping the omnigraph part') "a configured URL still skipped: [$($r.Log)]"
     }
 }
+
 function Invoke-WithModuleStub {
-    # Restore module-scope stubs after testing real caller logic without installer side effects.
+    # Swap module-scope functions for the duration of one body and put the real
+    # ones back, so a test can run a whole installer function without its side
+    # effects. No test installs anything: the body of Install-AutoOSAgentSkills
+    # drives the claude CLI, docker and the user's skill links, while the part
+    # under test is only which base URL it hands to the omnigraph env writer -
+    # and whether it hands one over at all.
     param(
         [Parameter(Mandatory)][hashtable]$Stubs,
         [Parameter(Mandatory)][scriptblock]$Body
     )
     $mod = Get-Module AutoOS.Install
     $real = @{}
-    # Resolve unqualified inside the module; function:script:<name> is not found.
+    # Unqualified, from inside the module: a module's own functions are found
+    # there, while "function:script:<name>" resolves to nothing at all.
     foreach ($n in $Stubs.Keys) { $real[$n] = & $mod { param($name) (Get-Item "function:$name").ScriptBlock } $n }
     try {
         foreach ($n in $Stubs.Keys) { $null = & $mod { param($name, $f) Set-Item "function:$name" $f } $n $Stubs[$n] }
@@ -4535,12 +4617,15 @@ function Invoke-WithModuleStub {
         foreach ($n in $Stubs.Keys) { $null = & $mod { param($name, $f) Set-Item "function:$name" $f } $n $real[$n] }
     }
 }
+
 Test-Case 'omnigraph base URL: agent skills with none configured writes no omnigraph env, then the resolved value' {
     $run = {
         param($scratch, $repo)
         $envCalls = New-Object System.Collections.ArrayList
         $otherCalls = New-Object System.Collections.ArrayList
-        # Seed the scratch skill and project-server inputs consumed by the real caller.
+        # The links, the pinned project server and the skills source are part of
+        # the rest of the function, so the scratch checkout has to carry the two
+        # files that make them happen.
         $null = New-Item -ItemType Directory -Force -Path (Join-Path $repo '.agents\skills\alpha')
         [IO.File]::WriteAllText((Join-Path $repo '.mcp.json'), '{"mcpServers":{"omnigraph":{"command":"npx"}}}')
         $stubs = @{
@@ -4569,12 +4654,18 @@ Test-Case 'omnigraph base URL: agent skills with none configured writes no omnig
     Assert-Equal ($r2.Env -join ',') 'http://omnigraph.test.invalid:8080' 'the resolved URL did not reach the omnigraph env writer'
     Assert-True ($r2.Log -notmatch 'skipping the omnigraph part') "a configured URL still skipped: [$($r2.Log)]"
 }
-# Shared Serena fixtures grade both platforms byte-for-byte, including BOM/newlines.
+
+# tests/fixtures/serena/<case>.yml -> <case>.expected.yml is the ONE set of
+# YAML shapes both Set-AutoOSSerenaExclusions (here) and ensure_serena_exclusions
+# (tests/run-tests.sh) are graded against, so the two implementations cannot
+# quietly drift apart. Comparison is byte-for-byte (base64 of the raw bytes),
+# not line-based - CRLF, a UTF-8 BOM or a trailing blank line is a real diff.
 $autoosSerenaFixtureDir = Join-Path $Root 'tests\fixtures\serena'
 Get-ChildItem -Path $autoosSerenaFixtureDir -Filter '*.yml' | Where-Object { $_.Name -notlike '*.expected.yml' } | ForEach-Object {
     $fixtureFile = $_
     $fixtureName = $_.BaseName
     $expectedPath = Join-Path $autoosSerenaFixtureDir "$fixtureName.expected.yml"
+
     Test-Case "Set-AutoOSSerenaExclusions matches fixture '$fixtureName' byte-for-byte (serena)" {
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-fx-" + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -4588,6 +4679,7 @@ Get-ChildItem -Path $autoosSerenaFixtureDir -Filter '*.yml' | Where-Object { $_.
             Assert-Equal $gotB64 $expB64
         } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
     }
+
     Test-Case "Set-AutoOSSerenaExclusions second run on fixture '$fixtureName' skips and writes nothing (serena)" {
         $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-fx-" + [Guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -4605,6 +4697,7 @@ Get-ChildItem -Path $autoosSerenaFixtureDir -Filter '*.yml' | Where-Object { $_.
         } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
     }
 }
+
 Test-Case 'Set-AutoOSSerenaExclusions creates a missing config with just the key (serena)' {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -4612,6 +4705,7 @@ Test-Case 'Set-AutoOSSerenaExclusions creates a missing config with just the key
     try {
         Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
         Set-AutoOSSerenaExclusions -ConfigPath $p 6>$null
+
         $got = @(Get-Content -Path $p) | Where-Object { $_ -match '^- ' } | ForEach-Object { $_ -replace '^- ', '' }
         $want = @('create_text_file', 'read_file', 'execute_shell_command', 'list_dir', 'search_for_pattern',
             'find_file', 'replace_content', 'replace_in_files', 'onboarding', 'write_memory', 'read_memory',
@@ -4621,6 +4715,7 @@ Test-Case 'Set-AutoOSSerenaExclusions creates a missing config with just the key
         Assert-Equal @(Get-ChildItem -Path $tmp -Recurse -Filter '*.autoos-backup-*').Count 0
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
+
 Test-Case 'Set-AutoOSSerenaExclusions skips on the first run when all 15 are already present, any order (serena)' {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -4639,6 +4734,7 @@ Test-Case 'Set-AutoOSSerenaExclusions skips on the first run when all 15 are alr
         Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 0
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
+
 Test-Case 'Set-AutoOSSerenaExclusions on a directory path warns and writes nothing (serena)' {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -4653,7 +4749,11 @@ Test-Case 'Set-AutoOSSerenaExclusions on a directory path warns and writes nothi
         Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 0
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
-# Build CRLF/non-UTF-8 fixtures at runtime: .gitattributes normalizes committed YAML.
+
+# CRLF and a raw non-UTF-8 byte can't live in a committed *.yml fixture -
+# .gitattributes forces `*.yml text eol=lf`, which would silently rewrite a
+# checked-in CRLF fixture to LF and defeat the point of the test. These two
+# build their own bytes at run time instead, exactly like their bash twins.
 Test-Case 'Set-AutoOSSerenaExclusions preserves CRLF line endings and untouched content byte-for-byte (serena)' {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -4672,6 +4772,7 @@ Test-Case 'Set-AutoOSSerenaExclusions preserves CRLF line endings and untouched 
         Assert-Equal $firstLine '# top comment'
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
+
 Test-Case "Set-AutoOSSerenaExclusions keeps each line's own ending outside the edited block (mixed CRLF/LF) (serena)" {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -4687,6 +4788,7 @@ Test-Case "Set-AutoOSSerenaExclusions keeps each line's own ending outside the e
         Assert-True ($text.Contains('- delete_memory')) 'the canonical list was not merged'
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
+
 Test-Case 'Set-AutoOSSerenaExclusions preserves a non-UTF-8 byte outside the block untouched (serena)' {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-serena-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -4704,161 +4806,9 @@ Test-Case 'Set-AutoOSSerenaExclusions preserves a non-UTF-8 byte outside the blo
         Assert-Equal ([BitConverter]::ToString($tail)) ([BitConverter]::ToString($expectedTail))
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
-function Invoke-BackgroundProfileFixture {
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '', Justification = 'Fixture variables are consumed by dynamically scoped test bodies.')]
-    param([scriptblock]$Body)
-    $scratch = Join-Path ([IO.Path]::GetTempPath()) ("opencode\autoos-prof-" + [Guid]::NewGuid().ToString('N'))
-    $savedHome = $HOME
-    $savedEnv = @{}; foreach ($name in @('HOME', 'USERPROFILE')) { $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name) }
-    $docs = Join-Path $scratch 'Documents'; $p = Join-Path $docs 'PowerShell\Microsoft.PowerShell_profile.ps1'
-    $component = [pscustomobject]@{ Id = 'powershell7'; CategoryId = 'terminal'; PostInstall = $null }
-    $seed = "using namespace System.Text`r`nparam([string]`$x)`r`nif (`$env:AI_AGENT -eq 'openhands') { return }`r`n# conda / oh-my-posh / PSFzf`r`n'profile-sentinel'`r`n"
-    $marker = 'AutoOS background-shell guard'
-    $apply = { Invoke-AutoOSPostInstall -Component $component -Documents $docs }
-    try {
-        $null = New-Item -ItemType Directory -Path (Split-Path -Parent $p) -Force
-        $env:HOME = $scratch; $env:USERPROFILE = $scratch
-        Set-Variable -Name HOME -Value $scratch -Force -Scope Global
-        [IO.File]::WriteAllText($p, $seed, [Text.UTF8Encoding]::new($true))
-        Initialize-AutoOSInstaller -DryRun:$false -RepoRoot $Root
-        & $Body
-    } finally {
-        foreach ($name in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnv[$name]) }
-        Set-Variable -Name HOME -Value $savedHome -Force -Scope Global
-        Initialize-AutoOSInstaller -DryRun:$false -RepoRoot $Root
-        Remove-Item -LiteralPath $scratch -Recurse -Force
-    }
-}
-Test-Case 'background profile guard post-install: all four existing profiles, preamble, backup and byte-identical second run' {
-    Invoke-BackgroundProfileFixture {
-        $paths = @('PowerShell\Microsoft.PowerShell_profile.ps1', 'PowerShell\profile.ps1', 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1', 'WindowsPowerShell\profile.ps1') | ForEach-Object { Join-Path $docs $_ }
-        foreach ($path in $paths) { $null = New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force; [IO.File]::WriteAllText($path, $seed, [Text.UTF8Encoding]::new($true)) }
-        & $apply 6>$null
-        foreach ($path in $paths) {
-            $text = [IO.File]::ReadAllText($path); $errs = $null
-            $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$null, [ref]$errs)
-            Assert-Equal @($errs).Count 0
-            Assert-True ($text.StartsWith("using namespace System.Text`r`nparam([string]`$x)`r`n")) 'preamble changed'
-            Assert-True ($ast.EndBlock.Statements[0].Extent.Text -match '^if \(-not') 'guard is not the first executable statement'
-            Assert-True ($text.IndexOf($marker) -lt $text.IndexOf('AI_AGENT')) 'guard is below OpenHands'
-            Assert-True ($text.EndsWith($seed.Substring($seed.IndexOf('if (')))) 'initializer/sentinel tail changed'
-            $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
-            $log = Get-AutoOSConsoleCapture $apply
-            Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path))) $before
-            Assert-True ($log -match 'already configured') 'second run did not report left alone'
-            $backups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $path) -Filter "$(Split-Path -Leaf $path).autoos-backup-*")
-            Assert-Equal $backups.Count 1
-            Assert-Equal ([IO.File]::ReadAllText($backups[0].FullName)) $seed
-        }
-    }
-}
-Test-Case 'background profile guard post-install: encoding and BOM survive, including an empty BOM-less profile' {
-    Invoke-BackgroundProfileFixture {
-        $utf8 = [Text.UTF8Encoding]::new($true); $le = [Text.UnicodeEncoding]::new($false, $true); $be = [Text.UnicodeEncoding]::new($true, $true)
-        foreach ($encoding in @($utf8, $le, $be, [Text.UTF32Encoding]::new($false, $true), [Text.UTF32Encoding]::new($true, $true), [Text.UTF8Encoding]::new($false), [Text.Encoding]::GetEncoding(28591))) {
-            $tail = $encoding.GetBytes("# caf$([char]0xE9)`r`n'profile-sentinel'`r`n"); $bom = $encoding.GetPreamble()
-            [IO.File]::WriteAllBytes($p, ($bom + $tail)); & $apply 6>$null
-            $bytes = [IO.File]::ReadAllBytes($p)
-            Assert-Equal ([BitConverter]::ToString($bytes[($bytes.Length - $tail.Length)..($bytes.Length - 1)])) ([BitConverter]::ToString($tail))
-            if ($bom.Length) { Assert-Equal ([BitConverter]::ToString($bytes[0..($bom.Length - 1)])) ([BitConverter]::ToString($bom)) }
-            else { Assert-Equal $bytes[0] ([byte][char]'#') }
-        }
-        [IO.File]::WriteAllBytes($p, [byte[]]@()); & $apply 6>$null
-        Assert-Equal ([IO.File]::ReadAllBytes($p)[0]) ([byte][char]'#') 'empty existing profile gained a BOM'
-    }
-}
-Test-Case 'background profile guard post-install: DryRun and missing profiles write nothing; partial marker is left alone' {
-    Invoke-BackgroundProfileFixture {
-        $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
-        Initialize-AutoOSInstaller -DryRun:$true -RepoRoot $Root
-        $log = Get-AutoOSConsoleCapture $apply
-        Assert-True ($log -match 'would ensure') 'DryRun omitted its plan'
-        Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $before
-        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Recurse -File).Count 1
-        Initialize-AutoOSInstaller -DryRun:$false -RepoRoot $Root
-        [IO.File]::WriteAllText($p, "# $marker (older partial guard)`r`nreturn`r`n")
-        $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p)); & $apply 6>$null
-        Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $before
-        Remove-Item -LiteralPath $p; & $apply 6>$null
-        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Recurse -File).Count 0
-    }
-}
-Test-Case 'background profile guard post-install: agent, shell and conda components without callbacks are reached; unrelated components are not' {
-    Invoke-BackgroundProfileFixture {
-        foreach ($case in @(@('powershell7', 'terminal', $true), @('opencode', 'ai-coding', $true), @('miniconda', 'science', $true), @('widget', 'media', $false))) {
-            [IO.File]::WriteAllText($p, $seed)
-            $component.Id = $case[0]; $component.CategoryId = $case[1]; & $apply 6>$null
-            Assert-Equal ([IO.File]::ReadAllText($p).Contains($marker)) $case[2]
-        }
-        $component.CategoryId = 'terminal'; $component.PostInstall = 'Add-AutoOSGitToPath'
-        Invoke-WithModuleStub -Stubs @{ 'Add-AutoOSGitToPath' = { Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line "if (`$env:AI_AGENT -eq 'openhands') { return }" -Marker 'AI_AGENT' } } -Body {
-            [IO.File]::WriteAllText($p, "'profile-sentinel'`r`n"); & $apply 6>$null
-            $text = [IO.File]::ReadAllText($p)
-            Assert-True ($text.Contains($marker) -and $text.IndexOf($marker) -lt $text.IndexOf('AI_AGENT')) 'callback prepended above the guard'
-        }
-        $setupText = [IO.File]::ReadAllText((Join-Path $Root 'setup.ps1'))
-        Assert-True ($setupText -match "(?m)if \(\`$state -in @\('installed', 'skipped'\)\).*Invoke-AutoOSPostInstall -Component \`$c") 'normal setup no longer reaches the profile guard'
-    }
-}
-Test-Case 'background profile guard predicate: interactive inputs, every mode switch, NoExit, redirection, host and probe exceptions' {
-    Invoke-BackgroundProfileFixture {
-        & $apply 6>$null
-        $ast = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$null); $predicate = $ast.Find({ param($n) $n -is [Management.Automation.Language.ScriptBlockExpressionAst] }, $true).ScriptBlock.GetScriptBlock()
-        $inputs = @{ HostName = 'ConsoleHost'; InputRedirected = $false; OutputRedirected = $false; Arguments = @('pwsh') }
-        $probe = { $inputs }
-        Assert-Equal (& $predicate $probe) $true
-        foreach ($switch in @('-Command', '-CommandWithArgs', '-C', '-EncodedCommand', '-Enc', '-EC', '-E', '-File', '-F', '-NonInteractive', '-NonI')) {
-            $inputs.Arguments = @('powershell', $switch.ToUpperInvariant(), 'payload'); Assert-Equal (& $predicate $probe) $false $switch
-            $inputs.Arguments = @('powershell', '-NoExit', $switch, 'payload'); Assert-Equal (& $predicate $probe) ($switch -notlike '-Non*') "host -NoExit $switch"
-            $inputs.Arguments = @('powershell', $switch, 'payload', '-NoExit'); Assert-Equal (& $predicate $probe) ($switch -match '^-(EncodedCommand|Enc|EC|E)$') "$switch payload -NoExit"
-        }
-        $inputs.Arguments = @('pwsh', '-NoLogo', '-CommandNotASwitch', 'file-with--NonI.ps1'); Assert-Equal (& $predicate $probe) $true
-        foreach ($mode in @('-Command', '-File')) { $inputs.Arguments = @('pwsh', '-NoExit', $mode, 'payload', '-NonInteractive'); Assert-Equal (& $predicate $probe) $true 'payload is not a host option' }
-        foreach ($field in @('InputRedirected', 'OutputRedirected', 'HostName')) {
-            $old = $inputs[$field]; $inputs[$field] = if ($field -eq 'HostName') { 'OtherHost' } else { $true }
-            Assert-Equal (& $predicate $probe) $false $field; $inputs[$field] = $old
-        }
-        Assert-Equal (& $predicate { throw 'no console handles' }) $false
-    }
-}
-Test-Case 'background profile guard: later OpenHands prepends stay below it and a preamble ending at EOF remains valid' {
-    Invoke-BackgroundProfileFixture {
-        [IO.File]::WriteAllText($p, 'param([string]$x)'); & $apply 6>$null
-        Add-AutoOSProfileLine -Prepend -ProfilePath $p -Line "if (`$env:AI_AGENT -eq 'openhands') { return }" -Marker 'AI_AGENT' 6>$null
-        $text = [IO.File]::ReadAllText($p); $errs = $null
-        $ast = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs)
-        Assert-Equal @($errs).Count 0
-        Assert-True ($ast.EndBlock.Statements[0].Extent.Text.Contains($marker)) 'later prepend displaced the background guard'
-        Assert-True ($text.IndexOf($marker) -lt $text.IndexOf('AI_AGENT')) 'OpenHands is above the guard'
-    }
-}
-Test-Case 'background profile guard: named-block profiles warn and remain byte-identical instead of breaking their semantics' {
-    Invoke-BackgroundProfileFixture {
-        $profiles = @('begin { "native-hook" }', 'param(); process { "native-hook" }', 'end { "native-hook" }')
-        if ($PSVersionTable.PSVersion -ge [version]'7.3') { $profiles += 'clean { "native-hook" }' }
-        foreach ($text in $profiles) {
-            [IO.File]::WriteAllText($p, $text); $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
-            $log = Get-AutoOSConsoleCapture $apply
-            Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $before
-            Assert-True ($log -match 'named blocks.*left unchanged') 'unsupported profile was not announced'
-            Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Recurse -File).Count 1
-        }
-    }
-}
-Test-Case 'background profile guard: non-interactive command-mode PowerShell never reaches the sentinel' {
-    Invoke-BackgroundProfileFixture {
-        [IO.File]::WriteAllText($p, "'profile-sentinel'`r`n")
-        & $apply 6>$null
-        foreach ($engine in @('pwsh', 'powershell.exe')) {
-            $exe = Get-Command $engine -ErrorAction SilentlyContinue; if (-not $exe) { continue }
-            $command = ". '$($p.Replace("'", "''"))'; 'command-completed'"
-            $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-            $output = & $exe.Source -NoProfile -NonInteractive -EncodedCommand $encoded | Out-String
-            Assert-Equal $LASTEXITCODE 0
-            Assert-True ($output -match 'command-completed' -and $output -notmatch 'profile-sentinel') "$engine ran profile hooks or failed to execute"
-        }
-    }
-}
+
+. (Join-Path $PSScriptRoot 'windows\profile-guard.tests.ps1')
+
 Test-Case 'Add-AutoOSProfileLine -Prepend puts the line first, exactly once' {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -4878,8 +4828,10 @@ Test-Case 'Add-AutoOSProfileLine -Prepend puts the line first, exactly once' {
         Assert-Equal @(Get-ChildItem -Path $tmp -Filter '*.autoos-backup-*').Count 1
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
+
 Test-Case 'Add-AutoOSProfileLine -Prepend keeps an ANSI profile byte-for-byte' {
-    # Preserve BOM-less ANSI bytes rather than UTF-8 replacement characters.
+    # A Windows PowerShell 5.1 profile without a BOM is read as the ANSI code page.
+    # Re-encoding it as UTF-8 would turn every non-ASCII byte into U+FFFD.
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
     $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
@@ -4894,8 +4846,10 @@ Test-Case 'Add-AutoOSProfileLine -Prepend keeps an ANSI profile byte-for-byte' {
         Assert-True ($after[0] -eq 0x23) 'a BOM was added to an ANSI profile'
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
+
 Test-Case 'Add-AutoOSProfileLine -Prepend goes after a using/param preamble' {
-    # using/param must precede the guard to remain parseable.
+    # `using` and `param` must be a script's first statements; a guard above them
+    # would make every PowerShell start fail with a parse error.
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
     $p = Join-Path $tmp 'Microsoft.PowerShell_profile.ps1'
@@ -4914,15 +4868,9 @@ Test-Case 'Add-AutoOSProfileLine -Prepend goes after a using/param preamble' {
         Assert-Equal @($errs).Count 0
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
-Test-Case 'Set-AutoOSOpenHandsConfig prepends the OpenHands guard to all four existing profiles' {
-    $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
-    Assert-True ($body -match 'Add-AutoOSProfileLine -Prepend') 'no -Prepend guard call'
-    Assert-True ($body -match "PowerShell\\Microsoft\.PowerShell_profile\.ps1") 'pwsh profile not guarded'
-    Assert-True ($body -match "'PowerShell\\profile\.ps1'") 'pwsh all-hosts profile.ps1 not guarded'
-    Assert-True ($body -match "WindowsPowerShell\\Microsoft\.PowerShell_profile\.ps1") 'Windows PowerShell profile not guarded'
-    Assert-True ($body -match "WindowsPowerShell\\profile\.ps1") 'Windows PowerShell all-hosts profile.ps1 not guarded'
-}
+
 Describe-Group 'mcp pins'
+
 Test-Case 'mcp pins: lib/ carries no floating package spec' {
     $needles = @('serena-agent', 'graphifyy[mcp]', '@playwright/mcp', '@upstash/context7-mcp', '@modernrelay/omnigraph-mcp')
     $files = @(Get-ChildItem -Path $Lib -Filter '*.psm1' -File) +
@@ -4935,6 +4883,7 @@ Test-Case 'mcp pins: lib/ carries no floating package spec' {
     }
     Pass
 }
+
 Test-Case 'mcp pins: no pinned version string appears under lib/' {
     $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $versions = @()
@@ -4952,6 +4901,7 @@ Test-Case 'mcp pins: no pinned version string appears under lib/' {
     }
     Pass
 }
+
 Test-Case 'mcp pins: the client excludeTools list equals serena.excluded_tools' {
     $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $want = @($harness.mcp_servers.serena.excluded_tools)
@@ -4962,8 +4912,11 @@ Test-Case 'mcp pins: the client excludeTools list equals serena.excluded_tools' 
     Assert-True ($src -match '\$canonical = @\(Get-AutoOSSerenaExcludedTools\)') 'Set-AutoOSSerenaExclusions does not use Get-AutoOSSerenaExcludedTools'
     Assert-True ($src -notmatch "excludeTools\s*=\s*@\('onboarding'") 'a hardcoded excludeTools list is still present'
 }
+
 Test-Case 'the embedded OpenHands setup script writes the resolved Ollama address' {
-    # Fence HOME/USERPROFILE/LOCALAPPDATA so the real embedded script touches only scratch state.
+    # Runs the real here-string against a temp ~/.openhands. USERPROFILE, HOME
+    # and LOCALAPPDATA point into the temp dir too, so its uv-cache walk finds
+    # nothing and no file outside the temp dir is read or written.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
@@ -4978,7 +4931,8 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         & $py.Source -c $script $oh 'null' 'null' 'null' 'null' $Root *> $null
         $profile = Get-Content (Join-Path $oh 'profiles\ollama-qwen2.5-coder.json') -Raw | ConvertFrom-Json
         $settings = Get-Content (Join-Path $oh 'settings.json') -Raw | ConvertFrom-Json
-        # ollama_chat/ needs /api/chat, not /v1 (404); OpenCode keeps /v1.
+        # LiteLLM's ollama routes append /api/...: a /v1 base gives 404 (measured 2026-09-19);
+        # ollama_chat/ uses /api/chat, which supports tool calls. OpenCode keeps /v1.
         Assert-Equal $profile.base_url 'http://ollama:11434'
         Assert-Equal $profile.model 'ollama_chat/qwen2.5-coder:7b'
         Assert-Equal $settings.agent_settings.llm.base_url 'http://ollama:11434'
@@ -4987,7 +4941,8 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         Assert-True (-not (Test-Path (Join-Path $oh 'agent-profiles\orchestrator.json'))) 'role profile copied by the embedded script instead of the generator'
         # OpenHands ignores an MCP timeout today and may soon read it as milliseconds (#3254)
         Assert-True (-not @($settings.agent_settings.mcp_config.PSObject.Properties.Value | Where-Object { $_.PSObject.Properties.Name -contains 'timeout' })) 'an MCP server still has a timeout'
-        # Harness-owned pins prevent floating specs from changing under the user.
+        # every MCP server is pinned: a floating npx/uvx spec changes under the user.
+        # Expected specs come from the harness, the one source of truth for the pins.
         $harness = Get-Content (Join-Path $Root 'catalog\agent-harness.json') -Raw -Encoding UTF8 | ConvertFrom-Json
         $pins = [ordered]@{}
         foreach ($p in $harness.mcp_servers.PSObject.Properties) { $pins[$p.Name] = $p.Value.package }
@@ -5001,8 +4956,11 @@ Test-Case 'the embedded OpenHands setup script writes the resolved Ollama addres
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
 Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
-    # Gateway tiers share the Ollama test's scratch-home isolation.
+    # Tier profiles (omniroute-tier* + litellm-tier*) route OpenHands through
+    # the gateways for the 3-level hierarchy. Same temp-dir isolation as the
+    # Ollama test.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
@@ -5036,6 +4994,7 @@ Test-Case 'the embedded OpenHands setup script writes gateway tier profiles' {
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
 Test-Case 'the embedded OpenHands setup script writes no tier profiles without a key' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
@@ -5058,12 +5017,18 @@ Test-Case 'the embedded OpenHands setup script writes no tier profiles without a
         Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
+
 Test-Case 'tier profiles come from the spec, installer and tool agree' {
-    # Installer and sync tool must project the canonical spec identically for the same key.
+    # configuration/openhands/tier-profiles.json is the single source; the
+    # embedded installer and tools/sync-openhands-profiles.py must project it
+    # byte-identically for the same key, or install-time and start-time drift.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $spec = Get-Content (Join-Path $Root 'configuration\openhands\tier-profiles.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    # Derive tiers from the registry; only OPENHANDS_TIER_ORDER is a human-approved pin (PROVPIN).
+    # The expected tiers are the registry's own render: membership follows
+    # provider servability, the push-priority ORDER is the human-approved pin in
+    # tools/registry.py OPENHANDS_TIER_ORDER. Derived, never re-pinned, so the
+    # next provider flip needs no edit here (lesson PROVPIN 2026-09-27).
     $derive = @'
 import json, os, sys
 root = sys.argv[1]
@@ -5079,14 +5044,18 @@ else:
 '@
     $derivePath = Join-Path ([IO.Path]::GetTempPath()) "autoos-tierspec-derive-$PID.py"
     [IO.File]::WriteAllText($derivePath, $derive)
-    try { $deriveOut = & $py.Source $derivePath $Root 2>&1 | Out-String }
-    finally { Remove-Item $derivePath -Force -ErrorAction SilentlyContinue }
+    try {
+        $deriveOut = & $py.Source $derivePath $Root 2>&1 | Out-String
+    } finally {
+        Remove-Item $derivePath -Force -ErrorAction SilentlyContinue
+    }
     Assert-Equal $deriveOut.Trim() '' 'tier-profiles.json is not the registry render (run: python3 tools/registry.py render openhands)'
     # Base URLs are infrastructure, not provider state - pinned on purpose.
     Assert-Equal $spec.gateway_base_url 'http://host.docker.internal:20128/v1'
     Assert-Equal $spec.litellm_base_url 'http://host.docker.internal:4000/v1'
     foreach ($t in $spec.tiers) {
-        # Provider membership is registry state, not another pinned list.
+        # Every tier names a provider-qualified model; which providers answer is
+        # registry state (checked by the render above), not a list repeated here.
         Assert-True ($t.model -match '/') "$($t.id) model is not provider-qualified"
     }
     $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
@@ -5095,7 +5064,8 @@ else:
     $tmpB = Join-Path ([IO.Path]::GetTempPath()) "autoos-tierspecB-$PID"
     $keys = Join-Path $tmpB 'api-keys.yml'
     $litEnv = Join-Path $tmpB '.env'
-    # Hide ambient keys so the generator uses the fixture, not live state.
+    # The generator prefers env over the keys file: force the fixture path by
+    # hiding any ambient key (the suite never asserts on live system state).
     $realOmniKey = $env:AUTOOS_OMNIROUTE_KEY
     $realLitKey = $env:LITELLM_MASTER_KEY
     $realLitApiKey = $env:AUTOOS_LITELLM_API_KEY
@@ -5113,12 +5083,17 @@ else:
         try { & $py.Source (Join-Path $Root 'tools\sync-openhands-profiles.py') --openhands-dir $tmpA --keys-file $keys --litellm-env $litEnv *> $null }
         finally { $ErrorActionPreference = $prev }
         Assert-Equal $LASTEXITCODE 0 'generator failed'
-        # Fixture keys cover every tier: derive the expected count and filenames.
+        # Every spec tier has a key in the fixture, so exactly one profile per
+        # tier must come out - derived from the spec, never a pinned count.
         Assert-Equal (@(Get-ChildItem (Join-Path $tmpA 'profiles') -Filter '*.json').Count) @($spec.tiers).Count 'generator wrote a different number of profiles than the spec lists'
+        # The spec's own tier ids are the expected filenames — derived, never a
+        # pinned list of profile names.
         foreach ($t in @($spec.tiers)) {
             Assert-True (Test-Path (Join-Path $tmpA "profiles\$($t.id).json")) "$($t.id).json missing"
         }
-        # Sample each gateway's current tier to verify key/endpoint wiring without stale pins.
+        # Project one gateway tier and one litellm tier (whichever the registry
+        # currently renders) to prove the key and endpoint wiring, instead of
+        # naming tiers that go stale when a provider flips.
         $gwTier = @($spec.tiers | Where-Object { $_.id -notlike 'litellm-*' }) | Select-Object -First 1
         $litTier = @($spec.tiers | Where-Object { $_.id -like 'litellm-*' }) | Select-Object -First 1
         $t1 = Get-Content (Join-Path $tmpA "profiles\$($gwTier.id).json") -Raw | ConvertFrom-Json
@@ -5128,14 +5103,18 @@ else:
         Assert-Equal $lt.model $litTier.model
         Assert-Equal $lt.base_url 'http://host.docker.internal:4000/v1'
         Assert-Equal $lt.api_key 'test-lit-key'
-        # Direct tiers take their own keys/endpoints, derived from today's spec.
+        # A direct-provider tier (the only kind that carries its own base_url)
+        # takes its OWN key and endpoint, not the gateway's - the effort-ladder
+        # surface. Derived from the spec, so it asserts whatever the registry
+        # renders today and needs no re-pin when that route flips.
         foreach ($d in @($spec.tiers | Where-Object { $_.PSObject.Properties.Name -contains 'base_url' })) {
             $directProfile = Get-Content (Join-Path $tmpA "profiles\$($d.id).json") -Raw | ConvertFrom-Json
             Assert-Equal $directProfile.base_url $d.base_url
             Assert-Equal $directProfile.model $d.model
             Assert-True ($directProfile.api_key -and $directProfile.api_key -ne 'test-omni-key' -and $directProfile.api_key -ne 'test-lit-key') "$($d.id) direct profile reused a gateway key"
         }
-        # Synthetic direct tier covers the behavior even when the committed spec has none.
+        # The same behaviour on a synthetic one-tier spec, so it is exercised
+        # even while the committed spec renders no direct tier.
         $realOrKey = $env:OPENROUTER_API_KEY
         try {
             $syn = Join-Path $tmpB 'synthetic'
@@ -6051,7 +6030,9 @@ Test-Case "agent harness: the generator's unit tests pass" {
     } finally { $ErrorActionPreference = $prevAction; Remove-Item $log -ErrorAction SilentlyContinue }
 }
 
-Test-Case 'the embedded OpenHands setup script is valid Python' {    # Validate before installer-time python -c (a missing except once shipped).
+Test-Case 'the embedded OpenHands setup script is valid Python' {    # Set-AutoOSOpenHandsConfig pipes a literal here-string to `python -c`.
+    # Nothing else parses it before a real install, so a missing `except`
+    # once shipped and silently broke every Windows OpenHands setup.
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $src = Get-Content (Join-Path $Root 'lib\windows\AutoOS.Install.psm1') -Raw -Encoding UTF8
@@ -6060,20 +6041,32 @@ Test-Case 'the embedded OpenHands setup script is valid Python' {    # Validate 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) "autoos-oh-setup-$PID.py"
     [IO.File]::WriteAllText($tmp, $m.Groups[1].Value)
     try {
-        # Doubled single quotes survive 5.1 native-argument marshalling.
+        # NOTE: single-quoted -c string with doubled '' survives Windows
+        # PowerShell 5.1 native-argument quote stripping, which eats inner
+        # double quotes (NameError: name 'utf' is not defined).
         $out = & $py.Source -c 'import ast,sys; ast.parse(open(sys.argv[1], encoding=''utf-8'').read())' $tmp 2>&1
         Assert-True ($LASTEXITCODE -eq 0) "embedded python does not parse: $out"
-        # 5.1 truncates native arguments at bare double quotes; backslash-escaped quotes survive.
+        # No BARE double quote may appear in the embedded script: PowerShell
+        # 5.1 truncates a native argument at the first one it cannot marshal,
+        # silently cutting the script mid-file (measured 2026-09-21: 13677
+        # chars sent, 11107 received, IndentationError at the cut). Backslash-
+        # escaped quotes (\") travel as literal characters and are allowed.
         $bare = [regex]::Matches($m.Groups[1].Value, '(?<!\\)"')
         Assert-Equal $bare.Count 0 'bare double quote in embedded python (5.1 truncates there)'
-        # MCPServer forbids Python 'enabled': True (extra_forbidden); PowerShell's enabled is unrelated.
+        # No 'enabled' key on OpenHands mcp_config entries: the live MCPServer
+        # schema forbids it (extra_forbidden -> /api/v1/settings 500s).
+        # (The opencode writer's PowerShell 'enabled = $true' is a different,
+        # schema-legal shape and is not matched here.)
         $enb = [regex]::Matches($m.Groups[1].Value, "'enabled': True")
         Assert-Equal $enb.Count 0 'enabled key in OpenHands mcp_config (live schema forbids it)'
     } finally { Remove-Item $tmp -ErrorAction SilentlyContinue }
 }
 
 function Remove-TestDirLinks {
-    # Unlink scratch junctions first: 5.1 Remove-Item -Recurse follows them into their targets.
+    # Delete every link directly under $Directory WITHOUT following it. Windows
+    # PowerShell 5.1 follows a junction inside Remove-Item -Recurse and deletes
+    # what the junction points at (here: the repo's own skills), so a scratch
+    # tree that holds skill links is unlinked before it is removed.
     param([string]$Directory)
     if (-not $Directory -or -not (Test-Path -LiteralPath $Directory)) { return }
     foreach ($child in @(Get-ChildItem -LiteralPath $Directory -Force -ErrorAction SilentlyContinue)) {
