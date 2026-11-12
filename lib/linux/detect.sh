@@ -438,6 +438,7 @@ script_is_installed() {
     # has_bin, not has_cmd: every one of these installs somewhere PATH does not
     # necessarily reach - ~/.local/bin, /snap/bin or a flatpak export - and a
     # missed detection here reinstalls software the user already has.
+    # shellcheck disable=SC1091 # Optional desktop module is resolved relative to this file.
     case "$1" in
         oh-my-zsh)       [[ -d "$SYS_HOME/.oh-my-zsh" ]] ;;
         zsh-plugins)     [[ -d "$SYS_HOME/.oh-my-zsh/custom/plugins/zsh-autosuggestions" ]] ;;
@@ -494,14 +495,13 @@ script_is_installed() {
         bitwarden-chrome) [[ -f /opt/google/chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
                          [[ -f /usr/share/google-chrome/extensions/nngceckbapebfimnlniiiahkandclblb.json ]] || \
                          [[ -f /etc/opt/chrome/policies/managed/bitwarden.json ]] ;;
-        *) declare -F desktop_script_is_installed >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/install-desktop-extras.sh"; desktop_script_is_installed "$1" ;;
+        *) declare -F desktop_script_is_installed >/dev/null || . "$(dirname "${BASH_SOURCE[0]}")/install-desktop-extras.sh" || return 1; desktop_script_is_installed "$1" ;;
     esac
 }
 
 # A bounded package-manager query shared by the menu and execution.
 detect_installed_status() {
-    local provider="$1" package="$2" cask="${3:-0}"
-    local SYS_HOME="${SYS_HOME:-$HOME}"
+    local provider="$1" package="$2" cask="${3:-0}" SYS_HOME="${SYS_HOME:-$HOME}"
     INSTALLED_STATUS="unknown"
     if [[ "$provider" == custom ]] && declare -F custom_is_installed >/dev/null; then
         if custom_is_installed "$package"; then INSTALLED_STATUS=installed; else INSTALLED_STATUS=not-detected; fi
