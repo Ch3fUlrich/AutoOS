@@ -15,7 +15,7 @@ $ErrorActionPreference = 'Stop'
 # global copy, which silently strips these functions from the session.
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1')     -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Detect.psm1') -DisableNameChecking
-Import-Module (Join-Path $PSScriptRoot 'AutoOS.Progress.psm1') -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'AutoOS.Progress.psm1'), (Join-Path $PSScriptRoot 'AutoOS.Mcp.psm1') -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.ProfileGuard.psm1') -DisableNameChecking
 
 # winget's APPINSTALLER_CLI_ERROR_PACKAGE_ALREADY_INSTALLED. Script providers
@@ -4136,7 +4136,7 @@ Export-ModuleMember -Function `
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Get-AutoOSLegacyModels, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig, Sync-AutoOSSkillDirs, Sync-AutoOSAgentSkillTargets,
     Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Install-AutoOSOpenHands,
-    Set-AutoOSQoderMcp,
+    Set-AutoOSQoderMcp, Set-AutoOSCodexSpawnerMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,

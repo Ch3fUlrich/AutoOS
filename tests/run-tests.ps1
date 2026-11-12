@@ -1856,20 +1856,7 @@ Test-Case 'approving a server keeps the rest of the settings file' {
     }
 }
 
-Test-Case 'approving twice adds nothing the second time' {
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-mcp-" + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
-    try {
-        Initialize-AutoOSInstaller -DryRun:$false -Answers @{} -RepoRoot $Root
-        Enable-AutoOSProjectMcpServer -RepoPath $tmp -Name 'omnigraph' 6>$null | Out-Null
-        Enable-AutoOSProjectMcpServer -RepoPath $tmp -Name 'omnigraph' 6>$null | Out-Null
-        $after = Get-Content -Path (Join-Path $tmp '.claude\settings.local.json') -Raw -Encoding UTF8 |
-                 ConvertFrom-Json
-        Assert-Equal @($after.enabledMcpjsonServers).Count 1
-    } finally {
-        Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    }
-}
+. (Join-Path $PSScriptRoot 'windows/codex-mcp.tests.ps1')
 
 Test-Case 'backup-once: Enable-AutoOSProjectMcpServer does not back up again when nothing changed' {
     # settings.local.json is the user's own file. The first run that changes it
