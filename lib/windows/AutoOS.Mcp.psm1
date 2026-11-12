@@ -221,4 +221,14 @@ function Set-AutoOSCodexMcpEntry {
     }
 }
 
-Export-ModuleMember -Function Set-AutoOSCodexMcpEntry
+function Set-AutoOSCodexSpawnerMcp {
+    param([scriptblock]$ImportProbe)
+    # Keep installer state and the backup callback in their owning module while
+    # the Codex-specific hook lives alongside its TOML writer.
+    & (Get-Module AutoOS.Install) {
+        param($Probe)
+        Set-AutoOSCodexMcpEntry -Servers (Get-AutoOSAgentHarness).codex_mcp_servers -DryRun $script:DryRun -ImportProbe $Probe -Backup { param($Path) Copy-AutoOSBackup -Path $Path }
+    } $ImportProbe
+}
+
+Export-ModuleMember -Function Set-AutoOSCodexMcpEntry, Set-AutoOSCodexSpawnerMcp
