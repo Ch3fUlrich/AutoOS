@@ -326,6 +326,7 @@
           ],
           "verify": "codex --version",
           "homepage": "https://github.com/openai/codex",
+          "postInstall": "Set-AutoOSCodexSpawnerMcp",
           "notes": "Headless: codex exec. Spawned through omniroute run, so no OpenAI login is needed."
         },
         {

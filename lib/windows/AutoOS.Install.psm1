@@ -16,17 +16,15 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1')     -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Detect.psm1') -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Progress.psm1') -DisableNameChecking
-
+Import-Module (Join-Path $PSScriptRoot 'AutoOS.Mcp.psm1') -DisableNameChecking
 # winget's APPINSTALLER_CLI_ERROR_PACKAGE_ALREADY_INSTALLED. Script providers
 # return it to mean "there was nothing left to do", which is how a second run
 # reports `skipped` instead of `installed`.
 $script:ExitCodeAlreadyInstalled = -1978335189
-
 $script:DryRun  = $false
 $script:Answers = @{}
 $script:RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $script:AgentHarness = $null
-
 # Wall-clock bound on this module's direct network fetches (2026-10-01): the
 # same defect class as AutoOS.Download.psm1 - Invoke-WebRequest has no default
 # timeout, so a stalled host hangs a provision forever. These fetches are all
@@ -41,12 +39,10 @@ function Initialize-AutoOSInstaller {
     Clear-AutoOSInstalledStatus
     if ($RepoRoot) { $script:RepoRoot = $RepoRoot }
 }
-
 function Get-AutoOSAnswer {
     param([string]$Key, $Default = '')
     if ($script:Answers.ContainsKey($Key)) { $script:Answers[$Key] } else { $Default }
 }
-
 function Get-AutoOSOmnigraphBaseUrl {
     <#
       .SYNOPSIS
@@ -1150,6 +1146,10 @@ function Get-AutoOSAgentHarness {
     $script:AgentHarness
 }
 
+function Set-AutoOSCodexSpawnerMcp {
+    param([scriptblock]$ImportProbe)
+    Set-AutoOSCodexMcpEntry -Servers (Get-AutoOSAgentHarness).codex_mcp_servers -DryRun $script:DryRun -ImportProbe $ImportProbe -Backup { param($Path) Copy-AutoOSBackup -Path $Path }
+}
 function Get-AutoOSMcpPackage {
     <#
       .SYNOPSIS The pinned package spec for one MCP server, from the harness.
@@ -4194,7 +4194,7 @@ Export-ModuleMember -Function `
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
     Set-AutoOSOpenCodeConfig, Get-AutoOSLegacyModels, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig, Sync-AutoOSSkillDirs, Sync-AutoOSAgentSkillTargets,
     Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Install-AutoOSOpenHands,
-    Set-AutoOSQoderMcp,
+    Set-AutoOSQoderMcp, Set-AutoOSCodexSpawnerMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,
     Invoke-AutoOSScriptProvider,
     Install-AutoOSOllamaModelQwen34B, Install-AutoOSOllamaModelQwen317B, Install-AutoOSOllamaModelQwenCoder7B,
