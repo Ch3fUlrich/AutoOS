@@ -33,27 +33,29 @@ function Add-AutoOSGuardedProfileLine {
         [Parameter(Mandatory)][scriptblock]$Backup
     )
     $dir = Split-Path -Parent $ProfilePath
-    if ($DryRun) {
+    $isGuard = $Prepend -and $Marker -eq 'AutoOS background-shell guard'
+    if ($DryRun -and -not $isGuard) {
         Write-AutoOSLine "would ensure '$Marker' in $ProfilePath" -Level muted
         return
     }
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    if (-not $DryRun -and -not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     if (($present = Test-Path -LiteralPath $ProfilePath)) {
         # -SimpleMatch: the line contains |, $ and . which are regex metacharacters.
         $existing = Get-Content -Path $ProfilePath -Raw -ErrorAction SilentlyContinue
-        if ($existing -and (Select-String -InputObject $existing -Pattern $Marker -SimpleMatch -Quiet)) {
+        if (-not $isGuard -and $existing -and (Select-String -InputObject $existing -Pattern $Marker -SimpleMatch -Quiet)) {
             Write-AutoOSLine "profile already configured ($Marker)" -Level muted
             return
         }
         if (-not $Prepend) { $null = & $Backup $ProfilePath }
-    } else {
+    } elseif (-not $DryRun) {
         New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
     }
     if ($Prepend) {
         # A guard is useless at the end of a profile: everything slow has already run.
-        # Rule 4: the rest of the file must come back unchanged, so it is decoded and
-        # re-encoded in its own encoding (a BOM-less 5.1 profile is usually ANSI).
-        $bytes = [IO.File]::ReadAllBytes($ProfilePath)
+        # Rule 4: decode for parsing, but splice the original bytes around the edit
+        # in their own encoding (a BOM-less 5.1 profile is usually ANSI).
+        $bytes = [byte[]]@()
+        if ($present) { $bytes = [IO.File]::ReadAllBytes($ProfilePath) }
         $bom = 0
         if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
             $enc = [Text.UTF8Encoding]::new($false); $bom = 3
@@ -77,10 +79,75 @@ function Add-AutoOSGuardedProfileLine {
             }
         }
         $body = $enc.GetString($bytes, $bom, $bytes.Length - $bom)
+        # Refuse lossy decoding: character offsets must map exactly to byte offsets.
+        if ([Convert]::ToBase64String($enc.GetBytes($body)) -cne [Convert]::ToBase64String($bytes, $bom, $bytes.Length - $bom)) {
+            Write-AutoOSLine "profile needs manual review (encoding does not round-trip): $ProfilePath" -Level warn
+            return
+        }
+        $eol = if (-not $body -or $body.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $Line = $Line -replace '\r?\n', $eol
         # `using` and `param` must stay the first statements, so the guard goes after them.
-        $ast = [Management.Automation.Language.Parser]::ParseInput($body, [ref]$null, [ref]$null)
+        $tokens = $null; $parseErrors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseInput($body, [ref]$tokens, [ref]$parseErrors)
+        $markers = [regex]::Matches($body, [regex]::Escape($Marker), [Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($isGuard -and $markers.Count) {
+            # The owned block starts at the marked line's beginning and ends at the
+            # parser's closing brace of ONE top-level if statement on that line.
+            # The marker must be a line comment inside that statement; surrounding
+            # text on its start/end lines may only be whitespace. The closing line's
+            # EOL is NOT owned, preserving suffix bytes and EOF newline state. Parse
+            # errors, duplicate markers and partial/bare-return guards are ambiguous:
+            # never guess a boundary or append a duplicate in those cases.
+            $markerAt = $markers[0].Index
+            $at = $body.LastIndexOf("`n", $markerAt) + 1
+            $statements = @(if ($ast.EndBlock -and $ast.EndBlock.Unnamed) { $ast.EndBlock.Statements | Where-Object {
+                $_ -is [Management.Automation.Language.IfStatementAst] -and
+                $_.Extent.StartOffset -ge $at -and $_.Extent.StartOffset -lt $markerAt -and $_.Extent.EndOffset -gt $markerAt
+            } })
+            $comments = @($tokens | Where-Object {
+                $_.Kind -eq 'Comment' -and $_.Text.StartsWith('#') -and
+                $_.Extent.StartOffset -le $markerAt -and $_.Extent.EndOffset -ge ($markerAt + $Marker.Length)
+            })
+            $safe = $markers.Count -eq 1 -and @($parseErrors).Count -eq 0 -and $statements.Count -eq 1 -and $comments.Count -eq 1 -and $ast.EndBlock.Unnamed
+            if ($safe) {
+                $statement = $statements[0]; $end = $statement.Extent.EndOffset
+                $lineEnd = $body.IndexOf("`n", $end); if ($lineEnd -lt 0) { $lineEnd = $body.Length }
+                $safe = $body.Substring($at, $statement.Extent.StartOffset - $at) -match '^[\t ]*$' -and
+                    $comments[0].Extent.StartOffset -gt $statement.Extent.StartOffset -and
+                    $body.Substring($end, $lineEnd - $end) -match '^[\t \r]*$'
+            }
+            if (-not $safe) {
+                Write-AutoOSLine "profile needs manual review (guard boundaries are ambiguous): $ProfilePath" -Level warn
+                return
+            }
+            $startByte = $bom + $enc.GetByteCount($body.Substring(0, $at))
+            $endByte = $bom + $enc.GetByteCount($body.Substring(0, $end))
+            $newBytes = $enc.GetBytes($Line)
+            if ([Convert]::ToBase64String($bytes, $startByte, $endByte - $startByte) -ceq [Convert]::ToBase64String($newBytes)) {
+                Write-AutoOSLine "profile already configured ($Marker)" -Level muted
+                return
+            }
+            if ($DryRun) {
+                Write-AutoOSLine "would update '$Marker' in $ProfilePath" -Level muted
+                return
+            }
+            if ($present) { $null = & $Backup $ProfilePath }
+            $out = [IO.MemoryStream]::new()
+            try {
+                $out.Write($bytes, 0, $startByte)
+                $out.Write($newBytes, 0, $newBytes.Length)
+                $out.Write($bytes, $endByte, $bytes.Length - $endByte)
+                [IO.File]::WriteAllBytes($ProfilePath, $out.ToArray())
+            } finally { $out.Dispose() }
+            Write-AutoOSLine "profile updated: $ProfilePath" -Level ok
+            return
+        }
         if ($ast.BeginBlock -or $ast.ProcessBlock -or $ast.DynamicParamBlock -or ($ast.PSObject.Properties['CleanBlock'] -and $ast.CleanBlock) -or ($ast.EndBlock -and -not $ast.EndBlock.Unnamed)) {
             Write-AutoOSLine "profile has named blocks; left unchanged (manual guard needed): $ProfilePath" -Level warn
+            return
+        }
+        if ($DryRun) {
+            Write-AutoOSLine "would ensure '$Marker' in $ProfilePath" -Level muted
             return
         }
         if ($present) { $null = & $Backup $ProfilePath }
@@ -91,14 +158,18 @@ function Add-AutoOSGuardedProfileLine {
         foreach ($statement in @($ast.EndBlock.Statements)) {
             if ($statement.Extent.Text.Contains('# AutoOS background-shell guard:')) { $at = [Math]::Max($at, $statement.Extent.EndOffset) }
         }
-        $suffix = $body.Substring($at); $separator = if ($suffix -match '^\r?\n') { '' } else { "`r`n" }
-        $new = if ($at -eq 0) { "# added by AutoOS`r`n$Line`r`n$body" }
-               else { $body.Substring(0, $at) + "`r`n# added by AutoOS`r`n$Line$separator" + $suffix }
+        $suffix = $body.Substring($at); $separator = if ($suffix -match '^\r?\n') { '' } else { $eol }
+        $new = if ($at -eq 0) { "# added by AutoOS${eol}$Line$eol" }
+               else { "${eol}# added by AutoOS${eol}$Line$separator" }
+        $startByte = $bom + $enc.GetByteCount($body.Substring(0, $at))
         $out = [IO.MemoryStream]::new()
-        $out.Write($bytes, 0, $bom)
-        $newBytes = $enc.GetBytes($new)
-        $out.Write($newBytes, 0, $newBytes.Length)
-        [IO.File]::WriteAllBytes($ProfilePath, $out.ToArray())
+        try {
+            $out.Write($bytes, 0, $startByte)
+            $newBytes = $enc.GetBytes($new)
+            $out.Write($newBytes, 0, $newBytes.Length)
+            $out.Write($bytes, $startByte, $bytes.Length - $startByte)
+            [IO.File]::WriteAllBytes($ProfilePath, $out.ToArray())
+        } finally { $out.Dispose() }
     } else {
         Add-Content -Path $ProfilePath -Value "`n# added by AutoOS`n$Line"
     }
@@ -111,8 +182,8 @@ function Install-AutoOSProfileGuard {
         Guard existing profiles for terminal, coding-agent and Miniconda components.
       .DESCRIPTION
         Called after post-install callbacks, including for already-present tools
-        with no callback. Never creates missing profiles; a marker makes reruns
-        leave existing guards alone. DryRun reports the plan without writing.
+        with no callback. Never creates missing profiles; reruns update outdated
+        guards but leave current guards alone. DryRun reports the plan without writing.
     #>
     param(
         [Parameter(Mandatory)][psobject]$Component,

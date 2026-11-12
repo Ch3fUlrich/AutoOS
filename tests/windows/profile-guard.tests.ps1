@@ -37,7 +37,7 @@ Test-Case 'background profile guard post-install: all four existing profiles, pr
             Assert-Equal @($errs).Count 0
             Assert-True ($text.StartsWith("using namespace System.Text`r`nparam([string]`$x)`r`n")) 'preamble changed'
             Assert-True ($ast.EndBlock.Statements[0].Extent.Text -match '^if \(-not') 'guard is not the first executable statement'
-            Assert-True ($text.IndexOf($marker) -lt $text.IndexOf('AI_AGENT')) 'guard is below OpenHands'
+            Assert-True ($text.IndexOf($marker) -lt $text.IndexOf('AI_AGENT')) 'background guard must precede OpenHands'
             Assert-True ($text.EndsWith($seed.Substring($seed.IndexOf('if (')))) 'initializer/sentinel tail changed'
             $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
             $log = Get-AutoOSConsoleCapture $apply
@@ -62,6 +62,8 @@ Test-Case 'background profile guard post-install: encoding and BOM survive, incl
         }
         [IO.File]::WriteAllBytes($p, [byte[]]@()); & $apply 6>$null
         Assert-Equal ([IO.File]::ReadAllBytes($p)[0]) ([byte][char]'#') 'empty existing profile gained a BOM'
+        [IO.File]::WriteAllBytes($p, [byte[]]@([byte][char]'#')); & $apply 6>$null
+        Assert-Equal ([IO.File]::ReadAllBytes($p)[-1]) ([byte][char]'#') 'single-byte profile tail changed'
     }
 }
 Test-Case 'background profile guard post-install: DryRun and missing profiles write nothing; partial marker is left alone' {
@@ -74,8 +76,12 @@ Test-Case 'background profile guard post-install: DryRun and missing profiles wr
         Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Recurse -File).Count 1
         Initialize-AutoOSInstaller -DryRun:$false -RepoRoot $Root
         [IO.File]::WriteAllText($p, "# $marker (older partial guard)`r`nreturn`r`n")
-        $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p)); & $apply 6>$null
+        $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p)); $log = Get-AutoOSConsoleCapture $apply
         Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $before
+        # A bare return has no closing block: conservatively require manual review.
+        Assert-True ($log -match 'needs manual review') 'partial guard was not flagged for manual review'
+        Assert-Equal ([regex]::Matches([IO.File]::ReadAllText($p), [regex]::Escape($marker)).Count) 1
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Recurse -File).Count 1
         Remove-Item -LiteralPath $p; & $apply 6>$null
         Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Recurse -File).Count 0
     }
@@ -126,7 +132,7 @@ Test-Case 'background profile guard: later OpenHands prepends stay below it and 
         $ast = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs)
         Assert-Equal @($errs).Count 0
         Assert-True ($ast.EndBlock.Statements[0].Extent.Text.Contains($marker)) 'later prepend displaced the background guard'
-        Assert-True ($text.IndexOf($marker) -lt $text.IndexOf('AI_AGENT')) 'OpenHands is above the guard'
+        Assert-True ($text.IndexOf($marker) -lt $text.IndexOf('AI_AGENT')) 'OpenHands must follow the background guard'
     }
 }
 Test-Case 'background profile guard: named-block profiles warn and remain byte-identical instead of breaking their semantics' {
@@ -153,6 +159,93 @@ Test-Case 'background profile guard: non-interactive command-mode PowerShell nev
             $output = & $exe.Source -NoProfile -NonInteractive -EncodedCommand $encoded | Out-String
             Assert-Equal $LASTEXITCODE 0
             Assert-True ($output -match 'command-completed' -and $output -notmatch 'profile-sentinel') "$engine ran profile hooks or failed to execute"
+        }
+    }
+}
+
+function Get-BackgroundProfileGuardReference {
+    # Generate the current block through production code, in a separate scratch profile.
+    $referenceDocs = Join-Path $scratch 'reference'
+    $referencePath = Join-Path $referenceDocs 'PowerShell\profile.ps1'
+    $null = New-Item -ItemType Directory -Path (Split-Path -Parent $referencePath) -Force
+    [IO.File]::WriteAllText($referencePath, '')
+    Invoke-AutoOSPostInstall -Component $component -Documents $referenceDocs 6>$null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($referencePath, [ref]$null, [ref]$null)
+    $ast.EndBlock.Statements[0].Extent.Text
+}
+Test-Case 'background profile guard: outdated block is replaced once in place, preserving all surrounding bytes and its backup' {
+    $encodings = @([Text.UTF8Encoding]::new($true), [Text.UnicodeEncoding]::new($false, $true), [Text.UnicodeEncoding]::new($true, $true),
+        [Text.UTF32Encoding]::new($false, $true), [Text.UTF32Encoding]::new($true, $true), [Text.UTF8Encoding]::new($false), [Text.Encoding]::GetEncoding(28591))
+    foreach ($encoding in $encodings) {
+        Invoke-BackgroundProfileFixture {
+            $current = (Get-BackgroundProfileGuardReference) -replace '\r?\n', "`r`n"
+            $prefix = "# caf$([char]0xE9)`nusing namespace System.Text`r`n'preceding hook'`r`n# added by AutoOS`r`n"
+            $old = "if (`$true) { # $marker`: older version`r`n    `$text = 'quoted } brace'`r`n    # } not the end`r`n    if (`$false) { return }`r`n    return`r`n}"
+            $suffix = "`r`n# following caf$([char]0xE9)`n'profile-sentinel'" # Deliberately no trailing newline.
+            $original = $encoding.GetPreamble() + $encoding.GetBytes($prefix + $old + $suffix)
+            [IO.File]::WriteAllBytes($p, $original)
+            $log = Get-AutoOSConsoleCapture $apply
+            Assert-True ($log -match 'profile updated' -and $log -notmatch 'already configured') 'outdated guard was not reported as updated'
+            $expected = $encoding.GetPreamble() + $encoding.GetBytes($prefix + $current + $suffix)
+            $after = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+            Assert-Equal $after ([Convert]::ToBase64String($expected)) 'replacement changed bytes outside the block or did not install the current block'
+            Assert-Equal ([regex]::Matches($encoding.GetString([IO.File]::ReadAllBytes($p)), [regex]::Escape($marker)).Count) 1
+            $backups = @(Get-ChildItem -LiteralPath (Split-Path -Parent $p) -Filter '*.autoos-backup-*')
+            Assert-Equal $backups.Count 1
+            Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($backups[0].FullName))) ([Convert]::ToBase64String($original))
+            $log = Get-AutoOSConsoleCapture $apply
+            Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $after
+            Assert-True ($log -match 'already configured' -and $log -notmatch 'profile updated') 'current guard was not reported as already configured'
+            Assert-Equal @(Get-ChildItem -LiteralPath (Split-Path -Parent $p) -Filter '*.autoos-backup-*').Count 1
+        }
+    }
+}
+Test-Case 'background profile guard: inserted and replaced blocks use LF-only or CRLF profile line endings' {
+    foreach ($eol in @("`n", "`r`n")) {
+        Invoke-BackgroundProfileFixture {
+            $seed = "using namespace System.Text${eol}param([string]`$x)${eol}'profile-sentinel'${eol}"
+            [IO.File]::WriteAllText($p, $seed, [Text.UTF8Encoding]::new($false))
+            & $apply 6>$null
+            $inserted = [IO.File]::ReadAllText($p)
+            if ($eol -eq "`n") { Assert-True (-not $inserted.Contains("`r")) 'LF-only insertion added a CR byte' }
+            else { Assert-True ($inserted -notmatch '(?<!\r)\n') 'CRLF insertion added a bare LF' }
+            $current = [Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$null).EndBlock.Statements[0].Extent.Text
+            $outdated = $inserted.Replace($current, $current.Replace('native profile hooks', 'outdated native hooks'))
+            [IO.File]::WriteAllText($p, $outdated, [Text.UTF8Encoding]::new($false))
+            $log = Get-AutoOSConsoleCapture $apply
+            Assert-True ($log -match 'profile updated') 'line-ending replacement was not performed'
+            foreach ($text in @($inserted, [IO.File]::ReadAllText($p))) {
+                if ($eol -eq "`n") { Assert-True (-not $text.Contains("`r")) 'LF-only profile gained a CR byte' }
+                else { Assert-True ($text -notmatch '(?<!\r)\n') 'CRLF profile gained a bare LF' }
+            }
+            Assert-Equal ([IO.File]::ReadAllText($p)) $inserted 'replacement did not restore the current block and original trailing newline'
+        }
+    }
+}
+Test-Case 'background profile guard: DryRun on an outdated block reports an update without writes or backups' {
+    Invoke-BackgroundProfileFixture {
+        [IO.File]::WriteAllText($p, "if (`$true) { # $marker`: old`n    return`n}`n'profile-sentinel'", [Text.UTF8Encoding]::new($true))
+        $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+        Initialize-AutoOSInstaller -DryRun:$true -RepoRoot $Root
+        $log = Get-AutoOSConsoleCapture $apply
+        Assert-True ($log -match 'would update') 'DryRun did not identify the outdated guard update'
+        Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $before
+        Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Recurse -File).Count 1
+    }
+}
+Test-Case 'background profile guard: ambiguous, nested, unclosed or non-comment markers need manual review without writes' {
+    Invoke-BackgroundProfileFixture {
+        $cases = @("if (`$true) { # $marker`nreturn", "# $marker`nif (`$true) { return }",
+            "function f { if (`$true) { # $marker`nreturn } }", "'quoted $marker'`nif (`$true) { return }",
+            "if (`$true) { # $marker`nreturn }`n# $marker", "'before'; if (`$true) { # $marker`nreturn }",
+            "begin { # $marker`n'profile-sentinel' }", "# $marker")
+        foreach ($text in $cases) {
+            [IO.File]::WriteAllText($p, $text, [Text.UTF8Encoding]::new($true))
+            $before = [Convert]::ToBase64String([IO.File]::ReadAllBytes($p))
+            $log = Get-AutoOSConsoleCapture $apply
+            Assert-True ($log -match 'needs manual review') 'unsafe guard boundaries were accepted'
+            Assert-Equal ([Convert]::ToBase64String([IO.File]::ReadAllBytes($p))) $before
+            Assert-Equal @(Get-ChildItem -LiteralPath $scratch -Recurse -File).Count 1
         }
     }
 }
