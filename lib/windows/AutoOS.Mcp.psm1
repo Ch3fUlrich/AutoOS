@@ -51,6 +51,7 @@ function ConvertTo-AutoOSCodexToml {
     $parent = '(?:mcp_servers|"mcp_servers"|''mcp_servers'')'
     $table = '^\[\s*' + $parent + '\s*\.\s*' + $key
     $ours = $table + '\s*(?:\.[^\]]+)?\]\s*(?:#.*)?$'
+    $array = '^\[\[\s*' + $parent + '\s*\.\s*' + $key + '\s*(?:\.[^\]]+)?\]\]\s*(?:#.*)?$'
     # Consume strings/comments before looking for headers: a multiline prompt
     # may contain something that looks exactly like our table, but is user text.
     $assign = '(?<assign>^[\t ]*(?:' + $parent + '\s*\.\s*)?' + $key + '\s*[.=])|'
@@ -68,6 +69,7 @@ function ConvertTo-AutoOSCodexToml {
     }
     $spans = @()
     foreach ($header in $headers) {
+        if ($header.Value.Trim() -cmatch $array) { throw 'array-of-tables server definition needs manual configuration' }
         if ($header.Value.Trim() -cmatch $ours) { $spans += $header }
     }
     if (-not $spans.Count) {
@@ -97,6 +99,7 @@ function ConvertTo-AutoOSCodexToml {
     if ($valid) { return $Text }
     # Descending edits keep offsets valid, including an env table that appears
     # after another server. Only the first span receives the replacement.
+    $noFinalNewline = -not $Text.EndsWith("`n") -and $headers[-1].Index -eq $spans[-1].Index
     $first = $spans[0].Index
     foreach ($span in @($spans | Sort-Object Index -Descending)) {
         $end = $Text.Length
@@ -109,7 +112,32 @@ function ConvertTo-AutoOSCodexToml {
         $replacement = if ($span.Index -eq $first) { $entry } else { '' }
         $Text = $Text.Substring(0, $span.Index) + $replacement + $Text.Substring($end)
     }
+    if ($noFinalNewline -and $Text.EndsWith($newline)) { $Text = $Text.Substring(0, $Text.Length - $newline.Length) }
     $Text
+}
+
+function Invoke-AutoOSCodexProbeProcess {
+    # Drain both pipes asynchronously: a noisy import must not defeat the deadline.
+    param([string]$FilePath, [string[]]$Arguments, [ValidateRange(1, 15000)][int]$TimeoutMilliseconds = 15000)
+    $info = New-Object Diagnostics.ProcessStartInfo
+    $info.FileName = $FilePath
+    # ProcessStartInfo.ArgumentList is unavailable on Windows PowerShell 5.1.
+    $info.Arguments = ($Arguments | ForEach-Object { '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"' }) -join ' '
+    $info.WorkingDirectory = [IO.Path]::GetTempPath()
+    $info.UseShellExecute = $false; $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $info
+    try {
+        $null = $process.Start()
+        $process.BeginOutputReadLine(); $process.BeginErrorReadLine()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            $process.Kill()
+            $null = $process.WaitForExit(1000)
+            throw (New-Object TimeoutException('import probe timed out'))
+        }
+        return ($process.ExitCode -eq 0)
+    } finally { $process.Dispose() }
 }
 
 function Set-AutoOSCodexMcpEntry {
@@ -118,6 +146,7 @@ function Set-AutoOSCodexMcpEntry {
         [Parameter(Mandatory)][psobject]$Servers,
         [bool]$DryRun = $false,
         [scriptblock]$ImportProbe,
+        [ValidateRange(1, 15000)][int]$ProbeTimeoutMilliseconds = 15000,
         [Parameter(Mandatory)][scriptblock]$Backup
     )
     $profileHome = if ($env:USERPROFILE) { $env:USERPROFILE } else { $env:HOME }
@@ -132,23 +161,24 @@ function Set-AutoOSCodexMcpEntry {
     }
     if (-not $ImportProbe) {
         $ImportProbe = {
-            param($Python, $Source)
-            # sys.path mirrors the sole non-secret env entry without changing
-            # this process's environment. -B prevents import cache writes in DryRun.
-            $previous = $ErrorActionPreference
-            try {
-                $ErrorActionPreference = 'Continue' # native stderr on PowerShell 5.1
-                & $Python -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import plangraph' $Source *> $null
-                return ($LASTEXITCODE -eq 0)
-            } catch { return $false } finally { $ErrorActionPreference = $previous }
+            param($Python, $Source, $TimeoutMilliseconds)
+            # -I excludes ambient PYTHON* paths and cwd; add only the checkout's
+            # source to the isolated stdlib/site paths. -B keeps DryRun read-only.
+            Invoke-AutoOSCodexProbeProcess -FilePath $Python -Arguments @('-I', '-B', '-c', 'import sys; sys.path.insert(0, sys.argv[1]); import plangraph', $Source) -TimeoutMilliseconds $TimeoutMilliseconds
         }
     }
     foreach ($server in $Servers.PSObject.Properties) {
         $name = $server.Name
         $spec = $server.Value
+        $missing = @('root_env', 'args', 'env_vars' | Where-Object { $null -eq $spec -or $null -eq $spec.PSObject.Properties[$_] -or $null -eq $spec.PSObject.Properties[$_].Value })
+        if ($missing.Count) {
+            Write-AutoOSLine "Codex MCP '$name' skipped: catalog row missing required key(s): $($missing -join ', ')" -Level muted
+            continue
+        }
         $root = [Environment]::GetEnvironmentVariable($spec.root_env, 'Process')
         $reason = ''
         if ([string]::IsNullOrWhiteSpace($root)) { $reason = "$($spec.root_env) is unset" }
+        elseif ($root -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') { $reason = "$($spec.root_env) must be an absolute path" }
         elseif (-not (Test-Path -LiteralPath $root -PathType Container)) { $reason = "$($spec.root_env) path does not exist" }
         if ($reason) {
             Write-AutoOSLine "Codex MCP '$name' skipped: $reason" -Level muted
@@ -166,9 +196,12 @@ function Set-AutoOSCodexMcpEntry {
             $python = $found.Source
         }
         $importable = $false
-        try { $importable = & $ImportProbe $python $source } catch { $importable = $false }
+        $probeReason = 'selected python cannot import plangraph'
+        try { $importable = & $ImportProbe $python $source $ProbeTimeoutMilliseconds }
+        catch [TimeoutException] { $probeReason += ' (import probe timed out)' }
+        catch { $importable = $false }
         if (-not $importable) {
-            Write-AutoOSLine "Codex MCP '$name' skipped: selected python cannot import plangraph" -Level muted
+            Write-AutoOSLine "Codex MCP '$name' skipped: $probeReason" -Level muted
             continue
         }
         # JSON basic-string escaping is also TOML basic-string escaping. Values
@@ -203,7 +236,7 @@ function Set-AutoOSCodexMcpEntry {
         }
         try { $candidate = ConvertTo-AutoOSCodexToml -Text $text -Name $name -Lines $lines }
         catch {
-            Write-AutoOSLine "Codex MCP '$name' skipped: unsupported dotted or inline server definition" -Level warn
+            Write-AutoOSLine "Codex MCP '$name' skipped: $($_.Exception.Message)" -Level warn
             continue
         }
         if ($candidate -ceq $text) {
@@ -216,7 +249,12 @@ function Set-AutoOSCodexMcpEntry {
         }
         if (Test-Path -LiteralPath $path) { $null = & $Backup $path }
         if (-not (Test-Path -LiteralPath $dir)) { $null = New-Item -ItemType Directory -Path $dir -Force }
-        [IO.File]::WriteAllBytes($path, [byte[]]($preamble + $encoding.GetBytes($candidate)))
+        $temp = Join-Path $dir ('.config.toml.autoos-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+        try {
+            [IO.File]::WriteAllBytes($temp, [byte[]]($preamble + $encoding.GetBytes($candidate)))
+            if (Test-Path -LiteralPath $path) { [IO.File]::Replace($temp, $path, [NullString]::Value) }
+            else { [IO.File]::Move($temp, $path) }
+        } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force } }
         Write-AutoOSLine "Codex MCP '$name' configured in $path" -Level ok
     }
 }
