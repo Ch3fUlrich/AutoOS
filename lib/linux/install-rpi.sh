@@ -50,13 +50,17 @@ install_moonlight() {
         return 0
     fi
     if has_cmd apt-get; then
-        local paths=() key list os_release ID="" VERSION_CODENAME=""
+        local paths=() release_fields=() key list os_release ID="" VERSION_CODENAME=""
         mapfile -t paths < <(moonlight_repo_paths)
         key="${paths[0]}"; list="${paths[1]}"; os_release="${paths[2]}"
-        # Match detect_system's os-release fields without probing the whole host.
+        # Keep unrelated os-release assignments out of the caller's shell.
         if [[ -r "$os_release" ]]; then
-            # shellcheck disable=SC1090
-            . "$os_release"
+            mapfile -t release_fields < <(
+                # shellcheck disable=SC1090
+                . "$os_release"
+                printf '%s\n' "$ID" "$VERSION_CODENAME"
+            )
+            ID="${release_fields[0]:-}"; VERSION_CODENAME="${release_fields[1]:-}"
         fi
         case "$ID" in
             raspbian|debian|ubuntu) ;;

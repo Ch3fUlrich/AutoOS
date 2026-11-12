@@ -4,13 +4,14 @@
 
 describe "Raspberry Pi and desktop installer modules"
 
-if it "rpi: install.sh loads real extracted functions from a foreign cwd"; then
+if it "rpi: setup.sh loads the extracted installer modules via install.sh from a foreign cwd"; then
     moonlight_tmp="$(mktemp -d)"
     out="$(bash -c '
         set -euo pipefail
         cd "$2"
         . "$1/lib/linux/install.sh"
-        for fn in install_jetbrains_mono_font install_moonlight install_zsh_plugins \
+        for fn in desktop_script_is_installed rpi_custom_is_installed \
+            install_jetbrains_mono_font install_moonlight install_zsh_plugins \
             setup_kitty_config setup_lsd_aliases setup_bat_alias setup_agy_pi_config \
             setup_rpi_cec_tv setup_rpi_moonlight_console; do
             declare -F "$fn" >/dev/null
@@ -21,7 +22,8 @@ if it "rpi: install.sh loads real extracted functions from a foreign cwd"; then
         AUTOOS_DRY_RUN=1
         install_moonlight
     ' _ "$ROOT" "$moonlight_tmp" 2>&1)"; rc=$?
-    if [[ $rc -eq 0 && "$out" == *"would install Moonlight Game Streaming client"* ]]; then pass
+    if [[ $rc -eq 0 && "$out" == *"would install Moonlight Game Streaming client"* ]] \
+        && grep -qE '^[[:space:]]*\.[[:space:]]+"[$]LIB/install\.sh"[[:space:]]*$' "$ROOT/setup.sh"; then pass
     else fail "$out (exit $rc)"; fi
     rm -rf "$moonlight_tmp"
 fi
@@ -43,6 +45,20 @@ if it "rpi: standalone detection retains the extracted desktop checks"; then
         ! script_is_installed unknown-desktop-component
     ' _ "$ROOT" "$moonlight_tmp" 2>&1)"; rc=$?
     if [[ $rc -eq 0 ]]; then pass; else fail "$out (exit $rc)"; fi
+    rm -rf "$moonlight_tmp"
+fi
+
+if it "rpi: missing desktop extras returns not installed without command not found"; then
+    moonlight_tmp="$(mktemp -d)"
+    cp "$ROOT/lib/linux/detect.sh" "$moonlight_tmp/detect.sh"
+    out="$(bash -c '
+        set -euo pipefail
+        cd "$1"
+        . "$1/detect.sh"
+        if script_is_installed unknown-desktop-component; then exit 0; else exit $?; fi
+    ' _ "$moonlight_tmp" 2>&1)"; rc=$?
+    if [[ $rc -eq 1 && "$out" != *"command not found"* ]]; then pass
+    else fail "$out (exit $rc)"; fi
     rm -rf "$moonlight_tmp"
 fi
 
@@ -158,6 +174,32 @@ for moonlight_distro_suite in ubuntu/noble debian/bookworm raspbian/trixie; do
     fi
 done
 
+for moonlight_caller_fields in unset set; do
+    if it "moonlight: os-release leaves unrelated caller fields $moonlight_caller_fields"; then
+        moonlight_test_fixture
+        printf 'ID="debian"\nVERSION_CODENAME="bookworm"\nNAME="Fixture Linux"\nPRETTY_NAME="Fixture Linux 1"\nVERSION="1 (fixture)"\n' >"$moonlight_tmp/os-release"
+        out="$( (
+            moonlight_test_stubs
+            unset NAME PRETTY_NAME VERSION ID VERSION_CODENAME
+            if [[ "$moonlight_caller_fields" == set ]]; then
+                NAME='caller name'; PRETTY_NAME='caller pretty name'; VERSION='caller version'
+            fi
+            install_moonlight || exit $?
+            [[ ! -v ID && ! -v VERSION_CODENAME ]] || exit 3
+            if [[ "$moonlight_caller_fields" == set ]]; then
+                [[ "$NAME" == 'caller name' && "$PRETTY_NAME" == 'caller pretty name' \
+                    && "$VERSION" == 'caller version' ]] || exit 4
+            else
+                [[ ! -v NAME && ! -v PRETTY_NAME && ! -v VERSION ]] || exit 5
+            fi
+        ) 2>&1)"; rc=$?
+        list="$(cat "$moonlight_tmp/moonlight.list" 2>/dev/null)"
+        if [[ $rc -eq 0 && "$list" == *'/deb/debian bookworm main' ]]; then pass
+        else fail "exit $rc; output: $out; list: $list"; fi
+        rm -rf "$moonlight_tmp"
+    fi
+done
+
 for moonlight_distro_suite in unknown/bookworm ubuntu/; do
     if it "moonlight: unsupported suite $moonlight_distro_suite uses flatpak without adding a repository"; then
         moonlight_test_fixture "${moonlight_distro_suite%/*}" "${moonlight_distro_suite#*/}"
@@ -207,6 +249,8 @@ if it "moonlight: failed dearmor removes partial output and a second run downloa
         install_moonlight && exit 3
         [[ ! -e "$AUTOOS_MOONLIGHT_KEYRING" ]] || exit 4
         [[ -z "$(find "$moonlight_tmp" -name 'keyring.gpg*' -print -quit)" ]] || exit 5
+        ! grep -q '^sudo tee ' "$moonlight_tmp/calls" || exit 6
+        [[ ! -e "$AUTOOS_MOONLIGHT_SOURCES_LIST" ]] || exit 7
         unset moonlight_failure
         install_moonlight
     ) 2>&1)"; rc=$?
