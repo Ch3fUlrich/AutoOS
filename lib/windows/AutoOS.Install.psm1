@@ -16,6 +16,7 @@ $ErrorActionPreference = 'Stop'
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Ui.psm1')     -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Detect.psm1') -DisableNameChecking
 Import-Module (Join-Path $PSScriptRoot 'AutoOS.Progress.psm1'), (Join-Path $PSScriptRoot 'AutoOS.Mcp.psm1') -DisableNameChecking
+Import-Module (Join-Path $PSScriptRoot 'AutoOS.ProfileGuard.psm1') -DisableNameChecking
 
 # winget's APPINSTALLER_CLI_ERROR_PACKAGE_ALREADY_INSTALLED. Script providers
 # return it to mean "there was nothing left to do", which is how a second run
@@ -1024,66 +1025,7 @@ function Add-AutoOSProfileLine {
         [Parameter(Mandatory)][string]$Marker,
         [switch]$Prepend
     )
-    $dir = Split-Path -Parent $ProfilePath
-    if ($script:DryRun) {
-        Write-AutoOSLine "would ensure '$Marker' in $ProfilePath" -Level muted
-        return
-    }
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-    if (Test-Path $ProfilePath) {
-        # -SimpleMatch: the line contains |, $ and . which are regex metacharacters.
-        $existing = Get-Content -Path $ProfilePath -Raw -ErrorAction SilentlyContinue
-        if ($existing -and (Select-String -InputObject $existing -Pattern $Marker -SimpleMatch -Quiet)) {
-            Write-AutoOSLine "profile already configured ($Marker)" -Level muted
-            return
-        }
-        $null = Copy-AutoOSBackup -Path $ProfilePath
-    } else {
-        New-Item -ItemType File -Path $ProfilePath -Force | Out-Null
-    }
-    if ($Prepend) {
-        # A guard is useless at the end of a profile: everything slow has already run.
-        # Rule 4: the rest of the file must come back unchanged, so it is decoded and
-        # re-encoded in its own encoding (a BOM-less 5.1 profile is usually ANSI).
-        $bytes = [IO.File]::ReadAllBytes($ProfilePath)
-        $bom = 0
-        if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-            $enc = [Text.UTF8Encoding]::new($false); $bom = 3
-        } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
-            $enc = [Text.UnicodeEncoding]::new($false, $false); $bom = 2
-        } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
-            $enc = [Text.UnicodeEncoding]::new($true, $false); $bom = 2
-        } elseif ($bytes.Length -eq 0) {
-            # a new profile: UTF-8 with BOM reads the same in 5.1 and 7
-            $enc = [Text.UTF8Encoding]::new($false); $bytes = [byte[]](0xEF, 0xBB, 0xBF); $bom = 3
-        } else {
-            try {
-                $enc = [Text.UTF8Encoding]::new($false, $true)
-                [void]$enc.GetString($bytes)
-            } catch {
-                # Some ANSI code page, which one is unknowable from here. Latin-1 maps every
-                # byte to one char and back, so the file round-trips unchanged whatever it
-                # was; `using`/`param` are ASCII, so the parser still finds them.
-                $enc = [Text.Encoding]::GetEncoding(28591)
-            }
-        }
-        $body = $enc.GetString($bytes, $bom, $bytes.Length - $bom)
-        # `using` and `param` must stay the first statements, so the guard goes after them.
-        $ast = [Management.Automation.Language.Parser]::ParseInput($body, [ref]$null, [ref]$null)
-        $at = 0
-        foreach ($u in $ast.UsingStatements) { $at = [Math]::Max($at, $u.Extent.EndOffset) }
-        if ($ast.ParamBlock) { $at = [Math]::Max($at, $ast.ParamBlock.Extent.EndOffset) }
-        $new = if ($at -eq 0) { "# added by AutoOS`r`n$Line`r`n$body" }
-               else { $body.Substring(0, $at) + "`r`n# added by AutoOS`r`n$Line" + $body.Substring($at) }
-        $out = [IO.MemoryStream]::new()
-        $out.Write($bytes, 0, $bom)
-        $newBytes = $enc.GetBytes($new)
-        $out.Write($newBytes, 0, $newBytes.Length)
-        [IO.File]::WriteAllBytes($ProfilePath, $out.ToArray())
-    } else {
-        Add-Content -Path $ProfilePath -Value "`n# added by AutoOS`n$Line"
-    }
-    Write-AutoOSLine "profile updated: $ProfilePath" -Level ok
+    Add-AutoOSGuardedProfileLine -ProfilePath $ProfilePath -Line $Line -Marker $Marker -Prepend:$Prepend -DryRun:$script:DryRun -Backup { param($Path) Copy-AutoOSBackup -Path $Path }
 }
 
 function Install-AutoOSWindhawkMods {
@@ -4166,15 +4108,15 @@ function Enable-AutoOSSidekickExtra {
 }
 
 function Invoke-AutoOSPostInstall {
-    param([Parameter(Mandatory)][psobject]$Component)
-    if (-not $Component.PostInstall) { return }
-    $fn = Get-Command $Component.PostInstall -ErrorAction SilentlyContinue
-    if (-not $fn) {
-        Write-AutoOSLine "post-install '$($Component.PostInstall)' not found" -Level warn
-        return
+    param([Parameter(Mandatory)][psobject]$Component, [string]$Documents = [Environment]::GetFolderPath('MyDocuments'))
+    if ($Component.PostInstall) {
+        $fn = Get-Command $Component.PostInstall -ErrorAction SilentlyContinue
+        if ($fn) {
+            Write-AutoOSLine "post-install: $($Component.PostInstall)" -Level step
+            & $fn
+        } else { Write-AutoOSLine "post-install '$($Component.PostInstall)' not found" -Level warn }
     }
-    Write-AutoOSLine "post-install: $($Component.PostInstall)" -Level step
-    & $fn
+    Install-AutoOSProfileGuard -Component $Component -Documents $Documents -DryRun:$script:DryRun -Backup { param($Path) Copy-AutoOSBackup -Path $Path }
 }
 
 Export-ModuleMember -Function `

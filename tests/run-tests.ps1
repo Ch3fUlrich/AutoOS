@@ -4794,6 +4794,8 @@ Test-Case 'Set-AutoOSSerenaExclusions preserves a non-UTF-8 byte outside the blo
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
+. (Join-Path $PSScriptRoot 'windows\profile-guard.tests.ps1')
+
 Test-Case 'Add-AutoOSProfileLine -Prepend puts the line first, exactly once' {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("autoos-prof-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp -Force | Out-Null
@@ -4852,15 +4854,6 @@ Test-Case 'Add-AutoOSProfileLine -Prepend goes after a using/param preamble' {
         [void][Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs)
         Assert-Equal @($errs).Count 0
     } finally { Remove-Item -Path $tmp -Recurse -Force -ErrorAction SilentlyContinue }
-}
-
-Test-Case 'Set-AutoOSOpenHandsConfig prepends the OpenHands guard to all four existing profiles' {
-    $body = (Get-Command Set-AutoOSOpenHandsConfig).Definition
-    Assert-True ($body -match 'Add-AutoOSProfileLine -Prepend') 'no -Prepend guard call'
-    Assert-True ($body -match "PowerShell\\Microsoft\.PowerShell_profile\.ps1") 'pwsh profile not guarded'
-    Assert-True ($body -match "'PowerShell\\profile\.ps1'") 'pwsh all-hosts profile.ps1 not guarded'
-    Assert-True ($body -match "WindowsPowerShell\\Microsoft\.PowerShell_profile\.ps1") 'Windows PowerShell profile not guarded'
-    Assert-True ($body -match "WindowsPowerShell\\profile\.ps1") 'Windows PowerShell all-hosts profile.ps1 not guarded'
 }
 
 Describe-Group 'mcp pins'
