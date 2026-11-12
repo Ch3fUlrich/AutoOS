@@ -40,6 +40,11 @@ function Get-AutoOSCodexTomlValues {
     } catch { return $null }
 }
 
+function Get-AutoOSCodexManualConfigurationError {
+    param([string]$Message)
+    New-Object Management.Automation.ErrorRecord (New-Object InvalidOperationException($Message)), 'AutoOSCodexManualConfiguration', ([Management.Automation.ErrorCategory]::InvalidData), $null
+}
+
 function ConvertTo-AutoOSCodexToml {
     <# .SYNOPSIS Replace one server table (including its env subtable), preserving surrounding text. #>
     param([string]$Text, [string]$Name, [string[]]$Lines)
@@ -64,12 +69,12 @@ function ConvertTo-AutoOSCodexToml {
         } elseif ($token.Groups['open'].Success) { $depth++ }
         elseif ($token.Groups['close'].Success) { $depth-- }
         elseif ($depth -eq 0 -and $token.Groups['assign'].Success) {
-            throw 'dotted or inline server definition needs manual configuration'
+            throw (Get-AutoOSCodexManualConfigurationError 'dotted or inline server definition needs manual configuration')
         }
     }
     $spans = @()
     foreach ($header in $headers) {
-        if ($header.Value.Trim() -cmatch $array) { throw 'array-of-tables server definition needs manual configuration' }
+        if ($header.Value.Trim() -cmatch $array) { throw (Get-AutoOSCodexManualConfigurationError 'array-of-tables server definition needs manual configuration') }
         if ($header.Value.Trim() -cmatch $ours) { $spans += $header }
     }
     if (-not $spans.Count) {
@@ -116,13 +121,37 @@ function ConvertTo-AutoOSCodexToml {
     $Text
 }
 
+function Invoke-AutoOSCodexProbeTreeStop {
+    param([Diagnostics.Process]$Process)
+    # Framework PowerShell has no Kill(entireProcessTree). Use the system tool,
+    # not PATH (which may contain only a Python shim), and never open a console.
+    $killer = $null
+    try {
+        $info = New-Object Diagnostics.ProcessStartInfo
+        $info.FileName = Join-Path ([Environment]::GetFolderPath('System')) 'taskkill.exe'
+        $info.Arguments = '/T /F /PID ' + $Process.Id
+        $info.UseShellExecute = $false; $info.CreateNoWindow = $true
+        $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+        $killer = New-Object Diagnostics.Process
+        $killer.StartInfo = $info
+        $null = $killer.Start(); $killer.BeginOutputReadLine(); $killer.BeginErrorReadLine()
+        if (-not $killer.WaitForExit(5000)) { $killer.Kill() }
+    } catch { Write-Verbose 'Probe tree termination failed; trying direct termination.' }
+    finally { if ($killer) { $killer.Dispose() } }
+    try { if (-not $Process.HasExited) { $Process.Kill() } } catch { Write-Verbose 'Probe termination raced with exit or was denied; preserving timeout.' }
+}
+
 function Invoke-AutoOSCodexProbeProcess {
     # Drain both pipes asynchronously: a noisy import must not defeat the deadline.
-    param([string]$FilePath, [string[]]$Arguments, [ValidateRange(1, 15000)][int]$TimeoutMilliseconds = 15000)
+    param([string]$FilePath, [string[]]$Arguments, [ValidateRange(1, 15000)][int]$TimeoutMilliseconds = 15000, [scriptblock]$Started)
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = $FilePath
     # ProcessStartInfo.ArgumentList is unavailable on Windows PowerShell 5.1.
     $info.Arguments = ($Arguments | ForEach-Object { '"' + (($_ -replace '(\\*)"', '$1$1\"') -replace '(\\+)$', '$1$1') + '"' }) -join ' '
+    if ([IO.Path]::GetExtension($FilePath) -in @('.cmd', '.bat')) {
+        $info.FileName = Join-Path ([Environment]::GetFolderPath('System')) 'cmd.exe'
+        $info.Arguments = '/d /s /c ""' + $FilePath + '" ' + $info.Arguments + '"'
+    }
     $info.WorkingDirectory = [IO.Path]::GetTempPath()
     $info.UseShellExecute = $false; $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
@@ -131,10 +160,17 @@ function Invoke-AutoOSCodexProbeProcess {
     try {
         $null = $process.Start()
         $process.BeginOutputReadLine(); $process.BeginErrorReadLine()
+        # Tests can await child readiness before applying a short injected deadline.
+        if ($Started) {
+            try { $null = & $Started $process }
+            catch { Invoke-AutoOSCodexProbeTreeStop -Process $process; throw }
+        }
         if (-not $process.WaitForExit($TimeoutMilliseconds)) {
-            try { $process.Kill() } catch { } # An exit race must not hide the timeout reason.
-            $null = $process.WaitForExit(1000)
-            throw (New-Object TimeoutException('import probe timed out'))
+            Invoke-AutoOSCodexProbeTreeStop -Process $process
+            $reason = 'import probe timed out'
+            try { if (-not $process.WaitForExit(1000)) { $reason += ' (probe exit not confirmed)' } }
+            catch { $reason += ' (probe exit unavailable)' }
+            throw (New-Object TimeoutException($reason))
         }
         return ($process.ExitCode -eq 0)
     } finally { $process.Dispose() }
@@ -178,7 +214,7 @@ function Set-AutoOSCodexMcpEntry {
         $root = [Environment]::GetEnvironmentVariable($spec.root_env, 'Process')
         $reason = ''
         if ([string]::IsNullOrWhiteSpace($root)) { $reason = "$($spec.root_env) is unset" }
-        elseif ($root -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') { $reason = "$($spec.root_env) must be an absolute path" }
+        elseif ($root -notmatch '^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))') { $reason = "$($spec.root_env) must be a drive-rooted or UNC absolute Windows path" }
         elseif (-not (Test-Path -LiteralPath $root -PathType Container)) { $reason = "$($spec.root_env) path does not exist" }
         if ($reason) {
             Write-AutoOSLine "Codex MCP '$name' skipped: $reason" -Level muted
@@ -204,17 +240,6 @@ function Set-AutoOSCodexMcpEntry {
             Write-AutoOSLine "Codex MCP '$name' skipped: $probeReason" -Level muted
             continue
         }
-        # JSON basic-string escaping is also TOML basic-string escaping. Values
-        # of env_vars are never read: only their catalog names are serialized.
-        $lines = @(
-            "[mcp_servers.$name]",
-            ('command = ' + (ConvertTo-Json -InputObject $python -Compress)),
-            ('args = [' + ((@($spec.args) | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress }) -join ', ') + ']'),
-            ('env_vars = [' + ((@($spec.env_vars) | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress }) -join ', ') + ']'),
-            'enabled = true',
-            "[mcp_servers.$name.env]",
-            ('PYTHONPATH = ' + (ConvertTo-Json -InputObject $source -Compress))
-        )
         $path = Join-Path $dir 'config.toml'
         # Strict UTF-8 and an explicit preamble preserve the user's BOM (or its
         # absence), mixed line endings and missing final newline outside our span.
@@ -234,9 +259,25 @@ function Set-AutoOSCodexMcpEntry {
                 continue
             }
         }
-        try { $candidate = ConvertTo-AutoOSCodexToml -Text $text -Name $name -Lines $lines }
-        catch {
-            Write-AutoOSLine "Codex MCP '$name' skipped: $($_.Exception.Message)" -Level warn
+        try {
+            # JSON basic-string escaping is also TOML basic-string escaping. Values
+            # of env_vars are never read: only their catalog names are serialized.
+            $lines = @(
+                "[mcp_servers.$name]",
+                ('command = ' + (ConvertTo-Json -InputObject $python -Compress)),
+                ('args = [' + ((@($spec.args) | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress }) -join ', ') + ']'),
+                ('env_vars = [' + ((@($spec.env_vars) | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress }) -join ', ') + ']'),
+                'enabled = true',
+                "[mcp_servers.$name.env]",
+                ('PYTHONPATH = ' + (ConvertTo-Json -InputObject $source -Compress))
+            )
+            $candidate = ConvertTo-AutoOSCodexToml -Text $text -Name $name -Lines $lines
+        } catch {
+            if ($_.FullyQualifiedErrorId -eq 'AutoOSCodexManualConfiguration') {
+                Write-AutoOSLine "Codex MCP '$name' skipped: $($_.Exception.Message)" -Level muted
+            } else {
+                Write-AutoOSLine "Codex MCP '$name' unexpected TOML render exception ($($_.Exception.GetType().FullName)): $($_.Exception.Message)" -Level warn
+            }
             continue
         }
         if ($candidate -ceq $text) {
