@@ -15,16 +15,18 @@ import os
 import sys
 from pathlib import Path
 
-import pytest
-
-SKILL = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(SKILL))
+TOOLS = Path(__file__).resolve().parents[1] / "tools"
+sys.path.insert(0, str(TOOLS))
 
 import trust_worktree  # noqa: E402
 from trust_worktree import load, save
 
 
-@pytest.fixture()
+def test_gate_helper_is_loaded_from_tools():
+    assert trust_worktree.REPO_TOOLS == TOOLS
+    assert trust_worktree.gate_git().__module__ == "prepush"
+
+
 def sandbox(tmp_path, monkeypatch):
     """A fake main checkout, a fake worktree, and a ~/.claude.json the test owns."""
     repo = tmp_path / "repo"
@@ -38,6 +40,11 @@ def sandbox(tmp_path, monkeypatch):
                            encoding="utf-8")
     monkeypatch.setenv("CLAUDE_CONFIG_PATH", str(claude_json))
     return repo, worktree
+
+
+if __name__ != "__main__":
+    import pytest
+    sandbox = pytest.fixture()(sandbox)
 
 
 def test_without_the_flag_it_writes_an_env_file(sandbox):
@@ -279,10 +286,6 @@ def test_trust_both_keys_seeded_with_missing_mcpjson(sandbox, tmp_path, monkeypa
     if claude_json.is_file():
         data = load(claude_json)
     else:
-        # Create the config file if it doesn't exist? 
-        # But note: the trust function expects the config file to exist? 
-        # We are going to write to it via the trust function, but we are pre-seeding.
-        # We'll create a minimal config.
         data = {"projects": {}}
     projects = data.setdefault("projects", {})
     projects[key1] = {
@@ -322,28 +325,12 @@ def test_trust_empty_mcpjson_writes_no_key(sandbox, tmp_path, monkeypatch):
     repo, _ = sandbox
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    # Ensure the config file exists? 
     claude_json = Path(os.environ["CLAUDE_CONFIG_PATH"])
-    # If the config file doesn't exist, the trust function will return early? 
-    # But we want to test writing a new entry. 
-    # We'll create an empty config if needed? 
-    # However, the trust function checks for the config file. 
-    # Let's make sure it exists by touching it? 
-    # But note: the trust function loads the config. 
-    # We'll create a minimal config: {"projects": {}}
     if not claude_json.is_file():
         data = {"projects": {}}
         save(claude_json, data)
     else:
         data = load(claude_json)
-        # We don't want to interfere with existing tests? 
-        # But note: we are using tmp_path for the worktree, and the config file is shared? 
-        # We are going to overwrite the entire config? 
-        # Instead, we should only update the projects section? 
-        # For simplicity, we'll load, then update the projects section, then save.
-        # However, we are going to call trust which will load and save. 
-        # We want to start with a clean config for the worktree? 
-        # We'll remove any existing entry for our worktree keys? 
         key1 = str(worktree)
         key2 = str(worktree).replace("\\", "/")
         projects = data.setdefault("projects", {})
@@ -367,3 +354,39 @@ def test_trust_empty_mcpjson_writes_no_key(sandbox, tmp_path, monkeypatch):
     assert entry.get("hasCompletedProjectOnboarding") is True
     # Check that enabledMcpjsonServers is not present
     assert "enabledMcpjsonServers" not in entry
+
+
+if __name__ == "__main__":
+    # CI's dependency-free harness runs the same assertions as external pytest.
+    import contextlib
+    import inspect
+    import io
+    import tempfile
+    import unittest
+    from functools import partial, update_wrapper
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    def run_case(fn):
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ):
+            out, err = io.StringIO(), io.StringIO()
+
+            def readouterr():
+                captured = SimpleNamespace(out=out.getvalue(), err=err.getvalue())
+                for stream in (out, err):
+                    stream.seek(0)
+                    stream.truncate()
+                return captured
+
+            args = dict(tmp_path=Path(tmp),
+                        monkeypatch=SimpleNamespace(setenv=os.environ.__setitem__),
+                        capsys=SimpleNamespace(readouterr=readouterr))
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                args["sandbox"] = sandbox(args["tmp_path"], args["monkeypatch"])
+                fn(**{name: args[name] for name in inspect.signature(fn).parameters})
+
+    suite = unittest.TestSuite(unittest.FunctionTestCase(update_wrapper(partial(run_case, fn), fn),
+                                   description=name)
+                               for name, fn in list(globals().items())
+                               if name.startswith("test_") and callable(fn))
+    sys.exit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())

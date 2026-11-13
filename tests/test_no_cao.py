@@ -5,20 +5,19 @@ Red-first for the CAO-removal lane (operator 2026-09-29): CAO grew stale
 beside the batch runner and its 52 files plus skill/config touch points
 must go. Fails on any tree that still carries CAO; passes once the
 removal lane deletes the code, cuts the SKILL.md section, and drops the
-example-config block. The batch-runner core assertions pin the other
-side: the test must fail because CAO is present, never because the
-whole skill was deleted.
+example-config block. The legacy runner retires with its skill folder;
+optional tracked blobs are checked without opening that folder's files.
 """
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
-SKILL = (REPO / '.agents' / 'skills' / 'unattended-orchestration'
-         / 'SKILL.md')
-EXAMPLE = (REPO / '.agents' / 'skills' / 'unattended-orchestration'
-           / 'handoff.config.example.json')
+SKILL = '.agents/skills/unattended-orchestration/SKILL.md'
+EXAMPLE = '.agents/skills/unattended-orchestration/handoff.config.example.json'
 
 # Every CAO path on origin/main fae36a3: 18 cao/ modules + 21 tests/cao/ +
 # 12 infra/mcp-servers/cao-setup/ + the runbook. Kept as exact paths (not a
@@ -54,16 +53,6 @@ CAO_PATHS = [
     )
 ]
 
-# Batch-runner core that must survive: the test fails because CAO is
-# present, never because the whole skill was deleted (Principle 9: take
-# the branch production takes — git ls-files, what CI ships).
-RUNNER_CORE = [
-    '.agents/skills/unattended-orchestration/HandoffCore.psm1',
-    '.agents/skills/unattended-orchestration/run_handoff_sessions.ps1',
-    '.agents/skills/unattended-orchestration/l1_handoff.py',
-]
-
-
 def tracked_paths():
     # Staged deletions are removals: `git ls-files` still lists a path until
     # it is committed, so subtract entries staged as deleted (changed 2026-09-29:
@@ -78,6 +67,16 @@ def tracked_paths():
     return set(out.stdout.split()) - set(staged.stdout.split())
 
 
+def tracked_text(path):
+    """Inspect what ships in the index, not files in an optional skill folder."""
+    if path not in tracked_paths():
+        return None
+    out = subprocess.run(['git', 'show', ':' + path], cwd=REPO,
+                         capture_output=True, text=True, encoding='utf-8')
+    assert out.returncode == 0, 'git show failed: %s' % out.stderr
+    return out.stdout
+
+
 class NoCaoTests(unittest.TestCase):
     def test_no_cao_path_is_tracked(self):
         tracked = tracked_paths()
@@ -86,20 +85,44 @@ class NoCaoTests(unittest.TestCase):
                          'CAO paths still tracked: %s' % present)
 
     def test_skill_has_no_cao_section_or_command(self):
-        text = SKILL.read_text(encoding='utf-8')
+        text = tracked_text(SKILL) or ''
         self.assertNotIn('## CAO quickstart', text)
         self.assertNotIn('python -m cao ', text)
         self.assertNotIn('references/cao-runbook.md', text)
 
     def test_example_config_has_no_cao_block(self):
-        doc = json.loads(EXAMPLE.read_text(encoding='utf-8'))
+        text = tracked_text(EXAMPLE)
+        doc = json.loads('{}' if text is None else text)
         self.assertNotIn('cao', doc)
 
-    def test_runner_core_still_ships(self):
-        tracked = tracked_paths()
-        missing = [p for p in RUNNER_CORE if p not in tracked]
-        self.assertEqual(missing, [],
-                         'runner core missing: %s' % missing)
+    def test_optional_blobs_refuse_cao_and_allow_staged_folder_deletion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            with mock.patch(__name__ + '.REPO', repo):
+                self.test_skill_has_no_cao_section_or_command()
+                self.test_example_config_has_no_cao_block()
+                skill, example = repo / SKILL, repo / EXAMPLE
+                skill.parent.mkdir(parents=True)
+                example.write_text('{"cao": {}}', encoding='utf-8')
+                for needle in ('## CAO quickstart', 'python -m cao ',
+                               'references/cao-runbook.md'):
+                    skill.write_text(needle, encoding='utf-8')
+                    subprocess.run(['git', 'add', SKILL, EXAMPLE], cwd=repo, check=True)
+                    with self.assertRaises(AssertionError):
+                        self.test_skill_has_no_cao_section_or_command()
+                with self.assertRaises(AssertionError):
+                    self.test_example_config_has_no_cao_block()
+                skill.write_text('# Runner', encoding='utf-8')
+                example.write_text('{}', encoding='utf-8')
+                subprocess.run(['git', 'add', SKILL, EXAMPLE], cwd=repo, check=True)
+                self.test_skill_has_no_cao_section_or_command()
+                self.test_example_config_has_no_cao_block()
+                skill.unlink()
+                example.unlink()
+                subprocess.run(['git', 'add', '-u'], cwd=repo, check=True)
+                self.test_skill_has_no_cao_section_or_command()
+                self.test_example_config_has_no_cao_block()
 
 
 if __name__ == '__main__':

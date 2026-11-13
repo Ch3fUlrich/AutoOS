@@ -40,9 +40,8 @@ the worktree's own ``.mcp.json`` are copied unchanged; a ``serena`` already
 defined there is kept as-is rather than duplicated. The copy carries their ``env``
 blocks, so keep ``.claude/lane-mcp.local.json`` gitignored like settings.local.json.
 
-This file is part of the ``unattended-orchestration`` skill and carries no
-repository-specific knowledge; reference it from ``postWorktree`` as
-``'{{skillDir}}/trust_worktree.py'``.
+This AutoOS-owned helper lives in ``tools/``; reference it from ``postWorktree``
+as ``'{{repo}}/tools/trust_worktree.py'``.
 
 The last step is not a trust step: ``install_prepush_hook`` drops a small
 ``pre-push`` shim into the worktree's hooks dir so the lane cannot push a branch it
@@ -374,10 +373,8 @@ HOOK_VERSION = 3  # v3 preserves gate status; another shim version is upgraded
 CHAINED_NAME = "pre-push.autoos-chained"
 GATE_TOOL = Path("tools") / "prepush.py"
 
-#: The checkout's ``tools/`` — where the gate this skill installs lives, and where
-#: the one copy of the git helper is. ``.agents/skills/<skill>/`` is three levels
-#: deep, so the file's own path is the only portable way to find it.
-REPO_TOOLS = Path(__file__).resolve().parents[3] / "tools"
+#: The gate and its single git helper live beside this AutoOS-owned tool.
+REPO_TOOLS = Path(__file__).resolve().parent
 
 
 def gate_git():
@@ -388,7 +385,7 @@ def gate_git():
     hooks are*; a stale copy of the answer installs the gate into a directory no
     push ever reads, and the lane believes it is gated (NB1).
 
-    Lazily, and only from the step that needs it, because the skill file is
+    Lazily, and only from the step that needs it, because the trust helper is
     portable: a repository without ``tools/prepush.py`` must still get its
     worktree trusted, and must still hear "nothing installed" rather than an
     ImportError.
@@ -428,8 +425,7 @@ def hook_text() -> str:
     """
     return (
         "#!/bin/sh\n"
-        "# %s v%d — installed by .agents/skills/unattended-orchestration/"
-        "trust_worktree.py\n"
+        "# %s v%d — installed by tools/trust_worktree.py\n"
         "# (operator D-154). All logic is in tools/prepush.py; this shim only\n"
         "# finds it, runs it, and hands over to a hook that was here first.\n"
         "root=$(git rev-parse --show-toplevel) || exit 1\n"

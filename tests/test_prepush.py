@@ -1035,10 +1035,9 @@ class MappingTests(unittest.TestCase):
     def plan_for(self, files, root=ROOT):
         return at.map_changed_files(files, root=root)
 
-    def test_a_skill_change_maps_to_the_skill_rules_test(self):
+    def test_a_rule_citing_change_maps_to_the_skill_rules_test(self):
         # SCOPECLI: R-orch-17 was cited and nothing ran the dangling-id check.
-        for path in (".agents/skills/unattended-orchestration/SKILL.md",
-                     "CHANGELOG.md", "docs/routing.md"):
+        for path in ("CHANGELOG.md", "docs/routing.md"):
             self.assertIn("tests/test_skill_rules.py", self.plan_for([path])["pytest"], path)
 
     def test_a_tools_change_maps_to_the_tests_that_name_it(self):
@@ -1054,22 +1053,14 @@ class MappingTests(unittest.TestCase):
         plan = self.plan_for(["tools/affected-tests.py"])
         self.assertIn("tests/test_affected_tests.py", plan["pytest"], plan)
 
-    def test_a_skill_code_change_maps_to_the_skill_own_tests(self):
-        # The FREEKEYS2 miss one directory over: a skill's code is covered by
-        # pytest files under .agents/skills/<name>/tests/, which `discover()` does
-        # not scan, so a gate that only read `tests/` would push the change unseen.
-        plan = self.plan_for(
-            [".agents/skills/unattended-orchestration/trust_worktree.py"])
-        self.assertIn(
-            ".agents/skills/unattended-orchestration/tests/test_trust_worktree.py",
-            plan["pytest"], plan)
+    def test_the_trust_tool_change_maps_to_its_own_tests(self):
+        # FREEKEYS2: moving the helper must not leave its covering suite unrun.
+        plan = self.plan_for(["tools/trust_worktree.py"])
+        self.assertIn("tests/test_trust_worktree.py", plan["pytest"], plan)
 
     def test_a_changed_test_file_is_run_whatever_directory_it_lives_in(self):
-        plan = self.plan_for(
-            [".agents/skills/unattended-orchestration/tests/test_trust_worktree.py"])
-        self.assertIn(
-            ".agents/skills/unattended-orchestration/tests/test_trust_worktree.py",
-            plan["pytest"], plan)
+        for path in ("tests/test_trust_worktree.py", "infra/example/test_tool.py"):
+            self.assertIn(path, self.plan_for([path])["pytest"], path)
 
     def test_a_test_file_change_pulls_the_repo_wide_lints_that_scan_the_suite(self):
         # CI 36529545083, the root cause of both reds this lane fixes: the lane added
@@ -1104,21 +1095,24 @@ class MappingTests(unittest.TestCase):
     def test_an_ordinary_change_selects_no_repo_wide_lint(self):
         # The rule is a scan, not a sledgehammer: a catalog edit is not an input to the
         # suite lints, and selecting them on every change teaches nothing about the tree.
-        for path in ("catalog/linux.json", "web/index.html", "setup.sh",
-                     ".agents/skills/unattended-orchestration/SKILL.md"):
+        for path in ("catalog/linux.json", "web/index.html", "setup.sh", "docs/routing.md"):
             plan = self.plan_for([path])
             self.assertNotIn("tests/test_windows_portability.py", plan["pytest"], path)
             self.assertNotIn("tests/test_suite_wiring.py", plan["pytest"], path)
 
-    def test_a_skill_code_change_does_not_drag_in_another_skill_s_tests(self):
-        # Over-inclusion is allowed, but not across the whole tree: the tests that
-        # answer a skill are its own, not every skill's.
-        plan = self.plan_for(
-            [".agents/skills/unattended-orchestration/trust_worktree.py"])
-        strays = [p for p in plan["pytest"]
-                  if p.startswith(".agents/skills/")
-                  and not p.startswith(".agents/skills/unattended-orchestration/")]
-        self.assertEqual(strays, [], plan)
+    def test_the_trust_tool_change_does_not_read_skill_tests(self):
+        # The legacy runner's suites retire with the skills, not with this tool.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for folder in ("tests", "infra/check", "scripts/check",
+                           ".agents/skills/retired/tests", ".claude/skills/retired/tests"):
+                path = root / folder / "test_trust_tool.py"
+                path.parent.mkdir(parents=True)
+                path.write_text('# trust_worktree.py\n', encoding="utf-8")
+            plan = self.plan_for(["tools/trust_worktree.py"], root=root)
+            self.assertEqual(plan["pytest"], ["infra/check/test_trust_tool.py",
+                             "scripts/check/test_trust_tool.py", "tests/test_skill_rules.py",
+                             "tests/test_trust_tool.py"], plan)
 
     def test_a_registry_change_maps_to_the_render_and_tier_tests_and_part_17(self):
         # FREEKEYS2: the registry changed; shard e ran none of the 17 render tests.
@@ -1161,7 +1155,7 @@ class HookInstallTests(RepoFixture):
     HOME at an empty temp dir and asserts nothing was created in it.
     """
 
-    TRUST = ROOT / ".agents" / "skills" / "unattended-orchestration" / "trust_worktree.py"
+    TRUST = ROOT / "tools" / "trust_worktree.py"
 
     def setUp(self):
         super().setUp()
@@ -1438,8 +1432,7 @@ class GitLocationEnvTests(RepoFixture):
     line (string check — the shim is POSIX sh, but the text is platform-free).
     """
 
-    TRUST = (ROOT / ".agents" / "skills" / "unattended-orchestration" /
-             "trust_worktree.py")
+    TRUST = ROOT / "tools" / "trust_worktree.py"
 
     #: Not repo pins — every scrub must leave these alone. The config pins are
     #: ci_env's own doing (the SBA rule d), not something to remove.

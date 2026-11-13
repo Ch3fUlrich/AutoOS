@@ -82,7 +82,7 @@ derive the run list from, or a mapper that died — and a caller that waits on 1
 must not wait forever on it.
 
 The pre-push hook is a small shim that calls this file; it is installed by
-``.agents/skills/unattended-orchestration/trust_worktree.py``, which chains rather
+``tools/trust_worktree.py``, which chains rather
 than overwrites any hook that was already there. ``tools/prepush_hook.py`` holds
 the fixture-identity refusal and, for ``--hook-stdin``, the per-pushed-sha gate.
 """

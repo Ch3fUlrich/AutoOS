@@ -628,11 +628,11 @@ def changed_registry_ids(root: Path, rev: str, registry: Path):
 # rather than trusting what the lane thought was relevant. Each rule below names
 # the red it exists for; see tests/test_prepush.py, which pins all of them.
 SKILL_RULES_TEST = "tests/test_skill_rules.py"
-# SCOPECLI (CI 36517453134): a cited R-id that resolves nowhere. A skill file, a
-# changelog or a doc is where a rule id is cited, so any of them maps here — and
+# SCOPECLI (CI 36517453134): a cited R-id that resolves nowhere. A changelog or
+# a doc is where an AutoOS rule id is cited, so either maps here — and
 # the mapping adds it unconditionally, because the check is cheap and a dangling
 # id is otherwise invisible until CI reads the file the lane never ran.
-RULE_CITING_PATHS = (".agents/skills/", "docs/")
+RULE_CITING_PATHS = ("docs/",)
 RULE_CITING_FILES = ("CHANGELOG.md",)
 # CI 36529545083 (shards b and f, 2026-09-29) — the gap behind both reds: a lane added
 # `tests/test_prepush.py`, ran the file it had written, and CI went red in two tests that
@@ -670,11 +670,9 @@ LINUX_PART = re.compile(r"^tests/linux/([0-9]{2})-[^/]+\.sh$")
 #: Every directory family this repository keeps pytest files in. `discover()` reads
 #: the first alone — its corpus is the three suites, and a case-level corpus is the
 #: wrong shape for the gate, which needs whole files (see `pytest_files_naming`).
-#: A skill keeps its own tests beside itself, which is how a gate reading only
-#: `tests/` would wave a changed `trust_worktree.py` through unrun — the FREEKEYS2
-#: miss one directory over.
+#: AutoOS tools (including trust_worktree.py) keep tests under tests/; infra and
+#: public-scrub retain their own suites. Legacy skill runners retire in place.
 PYTEST_GLOBS = ("tests/test_*.py",
-                ".agents/skills/*/tests/**/test_*.py",
                 "infra/**/test_*.py",
                 "scripts/**/test_*.py")
 
@@ -716,8 +714,8 @@ def map_changed_files(files, root: Path = ROOT, ids=()):
     A `tools/X.py` change is answered by every test that *names* it — which is how
     a test reaches a tool, whether it imports it by path or spells it in a
     subprocess command line — using the same strict-at-the-end matching as the ids.
-    A case-level corpus cannot see a module-level constant, nor a skill's tests that
-    live outside `tests/`, so every changed `.py` is answered a second way — by the
+    A case-level corpus cannot see a module-level constant or infra tests outside
+    `tests/`, so every changed `.py` is answered a second way — by the
     pytest files whose text names it — and a changed test file is always run, in
     whichever directory holds it.
     A change to a file a *tree-wide lint* scans is answered by that lint: `tests/` and
