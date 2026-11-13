@@ -5,7 +5,6 @@
 .agents/skills/unattended-orchestration/run_handoff_sessions.ps1 1457
 .agents/skills/unattended-orchestration/tests/HandoffCore.Tests.ps1 946
 .agents/skills/unattended-orchestration/tests/test_deepseek_call.py 523
-.agents/skills/unattended-orchestration/trust_worktree.py 666
 .agents/skills/unattended-orchestration/unattended-orchestration.md 417
 configuration/docker/ai-stack/ai-stack.sh 2323
 configuration/herdr-sessions/install.sh 489
