@@ -1054,22 +1054,23 @@ class MappingTests(unittest.TestCase):
         plan = self.plan_for(["tools/affected-tests.py"])
         self.assertIn("tests/test_affected_tests.py", plan["pytest"], plan)
 
+    def test_the_trust_tool_change_maps_to_its_own_tests(self):
+        # FREEKEYS2: moving the helper must not leave its covering suite unrun.
+        plan = self.plan_for(["tools/trust_worktree.py"])
+        self.assertIn("tests/test_trust_worktree.py", plan["pytest"], plan)
+
     def test_a_skill_code_change_maps_to_the_skill_own_tests(self):
         # The FREEKEYS2 miss one directory over: a skill's code is covered by
         # pytest files under .agents/skills/<name>/tests/, which `discover()` does
         # not scan, so a gate that only read `tests/` would push the change unseen.
-        plan = self.plan_for(
-            [".agents/skills/unattended-orchestration/trust_worktree.py"])
+        plan = self.plan_for([".agents/skills/unattended-orchestration/deepseek_call.py"])
         self.assertIn(
-            ".agents/skills/unattended-orchestration/tests/test_trust_worktree.py",
+            ".agents/skills/unattended-orchestration/tests/test_deepseek_call.py",
             plan["pytest"], plan)
 
     def test_a_changed_test_file_is_run_whatever_directory_it_lives_in(self):
-        plan = self.plan_for(
-            [".agents/skills/unattended-orchestration/tests/test_trust_worktree.py"])
-        self.assertIn(
-            ".agents/skills/unattended-orchestration/tests/test_trust_worktree.py",
-            plan["pytest"], plan)
+        for path in ("tests/test_trust_worktree.py", "infra/example/test_tool.py"):
+            self.assertIn(path, self.plan_for([path])["pytest"], path)
 
     def test_a_test_file_change_pulls_the_repo_wide_lints_that_scan_the_suite(self):
         # CI 36529545083, the root cause of both reds this lane fixes: the lane added
@@ -1114,7 +1115,7 @@ class MappingTests(unittest.TestCase):
         # Over-inclusion is allowed, but not across the whole tree: the tests that
         # answer a skill are its own, not every skill's.
         plan = self.plan_for(
-            [".agents/skills/unattended-orchestration/trust_worktree.py"])
+            [".agents/skills/unattended-orchestration/deepseek_call.py"])
         strays = [p for p in plan["pytest"]
                   if p.startswith(".agents/skills/")
                   and not p.startswith(".agents/skills/unattended-orchestration/")]
@@ -1161,7 +1162,7 @@ class HookInstallTests(RepoFixture):
     HOME at an empty temp dir and asserts nothing was created in it.
     """
 
-    TRUST = ROOT / ".agents" / "skills" / "unattended-orchestration" / "trust_worktree.py"
+    TRUST = ROOT / "tools" / "trust_worktree.py"
 
     def setUp(self):
         super().setUp()
@@ -1438,8 +1439,7 @@ class GitLocationEnvTests(RepoFixture):
     line (string check — the shim is POSIX sh, but the text is platform-free).
     """
 
-    TRUST = (ROOT / ".agents" / "skills" / "unattended-orchestration" /
-             "trust_worktree.py")
+    TRUST = ROOT / "tools" / "trust_worktree.py"
 
     #: Not repo pins — every scrub must leave these alone. The config pins are
     #: ci_env's own doing (the SBA rule d), not something to remove.

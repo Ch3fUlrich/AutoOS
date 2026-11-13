@@ -13,7 +13,7 @@
   "linkDirs": [
     "graphify-out"
   ],
-  "postWorktree": "py '{{skillDir}}\\trust_worktree.py' '{{worktree}}' --repo '{{repo}}'",
+  "postWorktree": "py '{{repo}}\\tools\\trust_worktree.py' '{{worktree}}' --repo '{{repo}}'",
   "subagents": {
     "maxConcurrent": 2,
     "maxDepth": 3,

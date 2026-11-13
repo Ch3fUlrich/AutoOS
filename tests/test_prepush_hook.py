@@ -32,7 +32,7 @@ import test_affected_tests  # noqa: E402
 import test_autoos_risk  # noqa: E402
 
 ZERO = "0" * 40
-TRUST = ROOT / ".agents" / "skills" / "unattended-orchestration" / "trust_worktree.py"
+TRUST = ROOT / "tools" / "trust_worktree.py"
 
 
 def _real_config_files():

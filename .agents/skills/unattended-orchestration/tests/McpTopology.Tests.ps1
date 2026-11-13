@@ -34,7 +34,7 @@ function Assert-Match([string]$Value, [string]$Pattern, [string]$Message = "") {
 
 $modulePath = Join-Path $PSScriptRoot "..\HandoffCore.psm1"
 $adaptersPath = Join-Path $PSScriptRoot "..\AgentAdapters.psm1"
-$trustScript = Join-Path $PSScriptRoot "..\trust_worktree.py"
+$trustScript = Join-Path $PSScriptRoot "..\..\..\..\tools\trust_worktree.py"
 Import-Module (Resolve-Path $modulePath).Path -Force
 Import-Module (Resolve-Path $adaptersPath).Path -Force
 

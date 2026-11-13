@@ -670,9 +670,8 @@ LINUX_PART = re.compile(r"^tests/linux/([0-9]{2})-[^/]+\.sh$")
 #: Every directory family this repository keeps pytest files in. `discover()` reads
 #: the first alone — its corpus is the three suites, and a case-level corpus is the
 #: wrong shape for the gate, which needs whole files (see `pytest_files_naming`).
-#: A skill keeps its own tests beside itself, which is how a gate reading only
-#: `tests/` would wave a changed `trust_worktree.py` through unrun — the FREEKEYS2
-#: miss one directory over.
+#: AutoOS tools (including trust_worktree.py) keep tests under tests/; skill
+#: runners keep their own suites until the delete slice retires their folders.
 PYTEST_GLOBS = ("tests/test_*.py",
                 ".agents/skills/*/tests/**/test_*.py",
                 "infra/**/test_*.py",
@@ -716,8 +715,8 @@ def map_changed_files(files, root: Path = ROOT, ids=()):
     A `tools/X.py` change is answered by every test that *names* it — which is how
     a test reaches a tool, whether it imports it by path or spells it in a
     subprocess command line — using the same strict-at-the-end matching as the ids.
-    A case-level corpus cannot see a module-level constant, nor a skill's tests that
-    live outside `tests/`, so every changed `.py` is answered a second way — by the
+    A case-level corpus cannot see a module-level constant or infra tests outside
+    `tests/`, so every changed `.py` is answered a second way — by the
     pytest files whose text names it — and a changed test file is always run, in
     whichever directory holds it.
     A change to a file a *tree-wide lint* scans is answered by that lint: `tests/` and
