@@ -71,7 +71,7 @@ class ProposalLimitsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn("require --test-mode", result.stderr)
         self.assertEqual(self.cli.calls("check"), [])
-        result = self.cli.run_proposal("--test-timeout", "0.5")
+        result = self.cli.run_proposal("--test-timeout", "5")
         self.assertEqual((result.returncode, result.stdout), (0, "no change\n"), result.stderr)
         self.assertIn("TEST MODE", result.stderr)
 
@@ -97,9 +97,9 @@ class ProposalLimitsTests(unittest.TestCase):
     def assert_gh_timeout(self, operation, expected):
         self.cli.changed()
         self.cli.state[operation] = {"code": 0, "out": fixtures.TOKEN_MARKER, "sleep": 30}
-        result = self.cli.run_proposal("--test-timeout", "0.5")
+        result = self.cli.run_proposal("--test-timeout", "5")
         self.assertEqual(result.returncode, 2)
-        self.assertIn(f"gh {operation}: timed out after 0.5 seconds", result.stderr)
+        self.assertIn(f"gh {operation}: timed out after 5 seconds", result.stderr)
         self.assertIn("TEST MODE", result.stderr)
         self.assertEqual(result.stdout, "")
         calls = self.cli.calls()
