@@ -1,0 +1,9 @@
+{
+  "_fixture": "Trimmed and adapted from public recordings, 2026-11-13. Synthetic second page; irrelevant labels and attributes removed. bnr is omitted from query 1 and its preview label removed for attribute-only discovery; mixed-case pReViEw/TrUe added intentionally.",
+  "resultPageTotal": 2,
+  "resultTotal": 6,
+  "results": [{"groupValue":"ENDPOINT","totalCount":6,"resources":[
+    {"resourceId":"qc69jvmznzxy/nemotron-3_5-rerank-8b","name":"nemotron-3_5-rerank-8b","displayName":"nemotron-3.5-rerank-8b","labels":[{"key":"general","unresolvedValues":["nim_type_preview","reranking"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"PREVIEW","value":"true"}]},
+    {"resourceId":"qc69jvmznzxy/bnr","name":"bnr","displayName":"Background Noise Removal","labels":[{"key":"general","values":["speech enhancement"],"unresolvedValues":["speech enhancement"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"pReViEw","value":"TrUe"}]}
+  ]}]
+}

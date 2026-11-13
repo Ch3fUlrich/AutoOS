@@ -89,6 +89,35 @@ kept a Graphify container on their worktree (stopped by hand).
 | E2 | Effort probe, n ≥ 5 per rung → overlay | S1 | DeepSeek | Qwen |
 | E3 | RTK A/B on the same worker tasks → D19 decision | S2 | DeepSeek | Qwen |
 
+### Keyless NVIDIA NIM free-endpoint inventory
+
+`tools/nim-free-catalog.py` reads only the public NGC ENDPOINT search (all pages,
+up to 50 per query, `nim_type_preview` label plus `PREVIEW=true` attributes) and NVIDIA's public
+`https://integrate.api.nvidia.com/v1/models` list; it reads no keys and sends no Authorization.
+The tracked snapshot is `configuration/omniroute/probes/nim-free-catalog.json`.
+Run `py -3 tools/nim-free-catalog.py`; use `--check` for no writes (0: same IDs,
+1: added/removed IDs, 2: fetch/parse error). `--json` prints deltas and counts;
+`--snapshot PATH` selects another snapshot. Both catalog queries must be nonempty,
+complete and consistent: the unfiltered query must contain every label-query ID.
+Fetch errors never report deltas or replace the snapshot; successful runs print and
+flush stdout before atomically replacing it via a same-directory temporary file.
+`AUTOOS_NIM_CATALOG_BASE_URL` and `AUTOOS_NIM_V1_BASE_URL` are test overrides:
+setting either requires an explicit `--snapshot PATH`, even with `--check`.
+Matching IDs are listed, not inference-tested: both publisher and slug must match
+after casefolding and replacing `_` and `.` with `-`; ambiguous matches stay null.
+Rows always include `v1_ambiguous`. A disappearing resource is dropped; if it
+returns, it gets a new `first_seen` (the snapshot is not a historical ledger).
+“Free” means NVIDIA Developer Program trial endpoints for prototyping and testing,
+rate limited (limits vary by model and are not published per endpoint; unverified);
+data use is unverified.
+The tool proposes nothing by itself and never edits registry, routing or gateway files.
+Classification uses exact case-insensitive `general.unresolvedValues` membership,
+with precedence safety → embedding → rerank → chat → vision → speech → image → other;
+a chat tag beats vision, but not safety/embedding/rerank. Each row's sorted `tags`
+contains only raw values matching ANY rule, not all labels, so classes are auditable.
+The tool's docstring owns the label table. Fixtures are trimmed and adapted from
+public recordings; adaptations listed in each file's _fixture note.
+
 ## Operator steps (not agent work)
 
 1. ~~Top up OpenRouter~~ — declined 2026-09-25; paid openrouter legs leave the routes.

@@ -1,0 +1,11 @@
+{
+  "_fixture": "Trimmed and adapted from public recordings, 2026-11-13. Synthetic split of all.json page 0 (four rows here, two on page 1); irrelevant labels and attributes removed; body-pose PREVIEW flipped to false as in label.json.",
+  "resultPageTotal": 2,
+  "resultTotal": 6,
+  "results": [{"groupValue":"ENDPOINT","totalCount":6,"resources":[
+    {"resourceId":"qc69jvmznzxy/body-pose","name":"body-pose","displayName":"3D Body Pose","labels":[{"key":"general","unresolvedValues":["nim_type_preview","body pose"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"PREVIEW","value":"false"}]},
+    {"resourceId":"qc69jvmznzxy/glm-5-3-flash","name":"glm-5-3-flash","displayName":"glm-5-3-flash","labels":[{"key":"general","unresolvedValues":["playgroundtype_chat","nim_type_preview"]},{"key":"publisher","values":["z-ai"]}],"attributes":[{"key":"PREVIEW","value":"true"}]},
+    {"resourceId":"qc69jvmznzxy/llama-3_1-nemotron-safety-guard-8b-v3","name":"llama-3_1-nemotron-safety-guard-8b-v3","displayName":"llama-3.1-nemotron-safety-guard-8b-v3","labels":[{"key":"general","unresolvedValues":["content moderation","nim_type_preview"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"PREVIEW","value":"true"}]},
+    {"resourceId":"qc69jvmznzxy/nemotron-3_5-embed-1b","name":"nemotron-3_5-embed-1b","displayName":"nemotron-3.5-embed-1b","labels":[{"key":"general","unresolvedValues":["usecase_text_to_embedding","nim_type_preview"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"PREVIEW","value":"true"}]}
+  ]}]
+}

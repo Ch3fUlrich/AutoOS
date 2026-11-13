@@ -1,0 +1,15 @@
+{
+  "_fixture": "Trimmed and adapted from public recordings, 2026-11-13. Five resources; body-pose PREVIEW flipped to false for a label-only case. GPU/partner/irrelevant labels and attributes removed; repeated _scored row retained.",
+  "resultPageTotal": 1,
+  "resultTotal": 5,
+  "results": [
+    {"groupValue":"_scored","resources":[{"resourceId":"qc69jvmznzxy/body-pose","name":"body-pose","displayName":"3D Body Pose","labels":[{"key":"general","values":["Free Endpoint","body pose"],"unresolvedValues":["nim_type_preview","body pose"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"PREVIEW","value":"false"}]}]},
+    {"groupValue":"ENDPOINT","totalCount":5,"resources":[
+      {"resourceId":"qc69jvmznzxy/body-pose","name":"body-pose","displayName":"3D Body Pose","labels":[{"key":"general","values":["Free Endpoint","body pose"],"unresolvedValues":["nim_type_preview","body pose"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"PREVIEW","value":"false"}]},
+      {"resourceId":"qc69jvmznzxy/glm-5-3-flash","name":"glm-5-3-flash","displayName":"glm-5-3-flash","labels":[{"key":"general","values":["chat","Free Endpoint"],"unresolvedValues":["playgroundtype_chat","nim_type_preview"]},{"key":"publisher","values":["z-ai"]}],"attributes":[{"key":"PREVIEW","value":"true"}]},
+      {"resourceId":"qc69jvmznzxy/llama-3_1-nemotron-safety-guard-8b-v3","name":"llama-3_1-nemotron-safety-guard-8b-v3","displayName":"llama-3.1-nemotron-safety-guard-8b-v3","labels":[{"key":"general","values":["content moderation","Free Endpoint"],"unresolvedValues":["content moderation","nim_type_preview"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"PREVIEW","value":"true"}]},
+      {"resourceId":"qc69jvmznzxy/nemotron-3_5-embed-1b","name":"nemotron-3_5-embed-1b","displayName":"nemotron-3.5-embed-1b","labels":[{"key":"general","values":["Text-to-Embedding","Free Endpoint"],"unresolvedValues":["usecase_text_to_embedding","nim_type_preview"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"PREVIEW","value":"true"}]},
+      {"resourceId":"qc69jvmznzxy/nemotron-3_5-rerank-8b","name":"nemotron-3_5-rerank-8b","displayName":"nemotron-3.5-rerank-8b","labels":[{"key":"general","values":["Free Endpoint","reranking"],"unresolvedValues":["nim_type_preview","reranking"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"PREVIEW","value":"true"}]}
+    ]}
+  ]
+}
