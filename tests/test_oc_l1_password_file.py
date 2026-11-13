@@ -217,6 +217,12 @@ def test_windows_acl_is_checked(tmp_path, capsys, returncode):
     assert capsys.readouterr() == ("", str(source) + "\n" if returncode else "")
 
 
+# Driven with arguments by PasswordFileTests below; pytest must not collect them bare.
+for _driven in (test_file_wins, test_bad_file_refuses_without_disclosure,
+                test_scan_rejects_planted_reader, test_windows_acl_is_checked):
+    _driven.__test__ = False
+
+
 class PasswordFileTests(unittest.TestCase):
     def captured(self, test, *args):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
