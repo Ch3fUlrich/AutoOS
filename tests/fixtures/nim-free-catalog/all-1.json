@@ -1,0 +1,9 @@
+{
+  "_fixture": "bnr is a recorded resource intentionally omitted from query 1 and with its preview label removed, to exercise attribute-only discovery. Mixed-case attribute is intentional.",
+  "resultPageTotal": 2,
+  "resultTotal": 6,
+  "results": [{"groupValue":"ENDPOINT","totalCount":6,"resources":[
+    {"resourceId":"qc69jvmznzxy/nemotron-3_5-rerank-8b","name":"nemotron-3_5-rerank-8b","displayName":"nemotron-3.5-rerank-8b","labels":[{"key":"general","unresolvedValues":["nim_type_preview","reranking"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"PREVIEW","value":"true"}]},
+    {"resourceId":"qc69jvmznzxy/bnr","name":"bnr","displayName":"Background Noise Removal","labels":[{"key":"general","values":["speech enhancement"],"unresolvedValues":["speech enhancement"]},{"key":"publisher","values":["nvidia"]}],"attributes":[{"key":"pReViEw","value":"TrUe"}]}
+  ]}]
+}

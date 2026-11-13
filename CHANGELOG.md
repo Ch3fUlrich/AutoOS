@@ -96,6 +96,7 @@ All notable changes to AutoOS are recorded here, newest first.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+- NIM-FREE-CATALOG (2026-11-13, D-2144/D-4909/D-5600): add a stdlib-only, keyless NVIDIA NIM Free Endpoint inventory with paginated/deduplicated label and PREVIEW discovery, conservative v1-ID joins, dated snapshot deltas and no-write `--check`; loopback tests cover retries and fail-closed reads. First live snapshot: label 43 / attribute-only 0 / total 43 / callable 23. No registry, routing or gateway changes; trial terms and unverified data use documented.
 - AO-MAIN-CI-RED-RPI5 (D-5261): extract Raspberry Pi streaming and desktop extras into shared installer modules without raising file-size baselines; add Moonlight's apt key from a downloaded file instead of running a piped Cloudsmith script, refuse key failures, and skip existing native/Flatpak installs. Extend A14 to all installer modules, refresh git's catalog-profile regression expectation, and cover module loading, dry-run safety and repeat installs with hermetic tests.
 - AO-OC-L1-PORTFREE-WIN: probe ports with SO_EXCLUSIVEADDRUSE on Windows so live listeners are busy and closed listeners are free; retain SO_REUSEADDR on POSIX. Tests: PortFreeTest red on Windows -> green; check-file-size ok.
 - MO-1 (D-2148/D-2488): declare the operator writer order, validate forbidden and duplicate writers, derive refusal guidance from data, and expose registry-ordered candidate ranking without changing reviewer seats or writer allow-lists.

@@ -1122,9 +1122,9 @@ if it "probe-ledger: availability ledger record/check/credit/dump (unit tests)";
     out="$(python3 tests/test_probe_ledger.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi
 
-# tools/probe-free.py: ack / tool-call / prompt-cache probe and its TSV output
-# (D-657 AO-PROBE-D657). Offline: the gateway is a fake OpenAI-shape server on a
-# loopback socket, the key a fake env value - no live call, no real key read.
+if it "nim-free-catalog: keyless inventory, pagination, deltas and safe failures (loopback tests)"; then
+    if out="$(python3 tests/test_nim_free_catalog.py 2>&1)"; then pass; else fail "$(printf '%s\n' "$out" | tail -n 20)"; fi
+fi
 if it "probe-free: cache probe verdicts, empty-vs-fail ack and TSV rows (unit tests)"; then
     out="$(python3 tests/test_probe_free.py 2>&1)" && pass || fail "$(printf '%s\n' "$out" | tail -n 20)"
 fi

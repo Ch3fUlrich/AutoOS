@@ -89,6 +89,20 @@ kept a Graphify container on their worktree (stopped by hand).
 | E2 | Effort probe, n ≥ 5 per rung → overlay | S1 | DeepSeek | Qwen |
 | E3 | RTK A/B on the same worker tasks → D19 decision | S2 | DeepSeek | Qwen |
 
+### Keyless NVIDIA NIM free-endpoint inventory
+
+`tools/nim-free-catalog.py` reads only the public NGC ENDPOINT search (all pages,
+`nim_type_preview` label plus `PREVIEW=true` attributes) and NVIDIA's public
+`https://integrate.api.nvidia.com/v1/models` list; it reads no keys and sends no Authorization.
+The tracked snapshot is `configuration/omniroute/probes/nim-free-catalog.json`.
+Run `py -3 tools/nim-free-catalog.py`; use `--check` for no writes (0: same IDs,
+1: added/removed IDs, 2: fetch/parse error). `--json` prints deltas and counts;
+`--snapshot PATH` selects another snapshot. Matching IDs are listed, not inference-tested.
+“Free” means NVIDIA Developer Program trial endpoints for prototyping and testing,
+rate limited (about 40 rpm, varies by model); data use is unverified.
+The tool proposes nothing by itself and never edits registry, routing or gateway files.
+Classification and slug-normalisation rules are documented in the tool.
+
 ## Operator steps (not agent work)
 
 1. ~~Top up OpenRouter~~ — declined 2026-09-25; paid openrouter legs leave the routes.
