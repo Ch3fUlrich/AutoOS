@@ -255,5 +255,64 @@ class ProposalTests(unittest.TestCase):
         self.assertEqual([c["argv"][:2] for c in self.calls()], [["issue", "list"]])
 
 
+class WorkflowTests(unittest.TestCase):
+    def setUp(self):
+        self.text = (ROOT / ".github/workflows/nim-free-catalog.yml").read_text(encoding="utf-8")
+        self.lines = [line for line in self.text.splitlines()
+                      if line.strip() and not line.lstrip().startswith("#")]
+        self.reference = (ROOT / ".github/workflows/catalog-live-check.yml").read_text(
+            encoding="utf-8")
+
+    def block(self, name, indent=0):
+        start = self.lines.index(" " * indent + name + ":") + 1
+        end = next((i for i in range(start, len(self.lines))
+                    if len(self.lines[i]) - len(self.lines[i].lstrip()) <= indent),
+                   len(self.lines))
+        return self.lines[start:end]
+
+    def test_only_weekly_schedule_and_manual_dispatch_with_a_distinct_off_minute(self):
+        triggers = self.block("on")
+        self.assertEqual([line for line in triggers if re.match(r"^  \S", line)],
+                         ["  schedule:", "  workflow_dispatch:"])
+        schedules = [line for line in triggers if line.lstrip().startswith("- cron:")]
+        self.assertEqual(len(schedules), 1)
+        cron = re.fullmatch(r"    - cron: '([0-9]+ [0-9]+ \* \* [0-6])'", schedules[0])[1]
+        minute, hour, _, _, day = cron.split()
+        self.assertTrue(1 <= int(minute) <= 59 and int(minute) != 30)
+        self.assertTrue(0 <= int(hour) <= 23)
+        self.assertEqual((minute, hour, day), ("43", "6", "4"))
+        self.assertNotIn("'" + cron + "'", self.reference)
+
+    def test_permissions_are_exact_and_no_secrets_are_referenced(self):
+        self.assertEqual(self.block("permissions"), ["  contents: read", "  issues: write"])
+        self.assertEqual(sum(line.lstrip().startswith("permissions:")
+                             for line in self.lines), 1)
+        self.assertNotIn("secrets.", self.text)
+
+    def test_same_runner_and_checkout_then_only_the_proposal_step_with_scoped_token(self):
+        runner = next(line.strip() for line in self.reference.splitlines()
+                      if line.lstrip().startswith("runs-on:"))
+        self.assertEqual([line.strip() for line in self.lines if "runs-on:" in line], [runner])
+        steps = self.block("steps", 4)
+        checkout = next(line.strip() for line in self.reference.splitlines() if "- uses:" in line)
+        self.assertEqual(steps, ["      " + checkout, "        with:",
+                                "          persist-credentials: false",
+                                "      - name: Propose NIM free catalog changes",
+                                "        run: python3 tools/nim-free-catalog-proposal.py",
+                                "        env:", "          GH_TOKEN: ${{ github.token }}"])
+        self.assertEqual(self.text.count("GH_TOKEN:"), 1)
+        self.assertEqual(sum(line.lstrip() == "env:" for line in self.lines), 1)
+        self.assertEqual(self.text.count("github.token"), 1)
+
+    def test_overlapping_runs_are_serialized_and_safety_rationale_is_documented(self):
+        self.assertEqual(self.block("concurrency"),
+                         ["  group: nim-free-catalog-proposal", "  cancel-in-progress: false"])
+        comments = " ".join(line.lstrip(" #") for line in self.text.splitlines()
+                            if line.lstrip().startswith("#"))
+        self.assertIn("pull requests", comments)
+        self.assertIn("upstream", comments)
+        self.assertIn("never writes repository content", comments)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

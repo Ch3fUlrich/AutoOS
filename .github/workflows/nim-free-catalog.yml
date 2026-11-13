@@ -1,0 +1,31 @@
+name: NIM free catalog check
+
+on:
+  schedule:
+    # Thursday 06:43 UTC; distinct from the Monday image catalog check.
+    - cron: '43 6 * * 4'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+# Serialize scheduled/manual runs so both cannot observe an empty proposal list.
+concurrency:
+  group: nim-free-catalog-proposal
+  cancel-in-progress: false
+
+# Not wired to pull requests: upstream catalog changes must not fail unrelated PRs
+# or expose an issue-writing token to contributor-controlled code.
+# This job never writes repository content; registry edits require a reviewed PR.
+jobs:
+  propose:
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","fleet-ci"]') || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Propose NIM free catalog changes
+        run: python3 tools/nim-free-catalog-proposal.py
+        env:
+          GH_TOKEN: ${{ github.token }}
