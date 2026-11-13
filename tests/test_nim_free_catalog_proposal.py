@@ -293,6 +293,11 @@ class WorkflowTests(unittest.TestCase):
                              for line in self.lines), 1)
         self.assertNotIn("secrets.", self.text)
 
+    def test_proposal_job_has_a_fifteen_minute_timeout(self):
+        job = self.block("propose", 2)
+        self.assertEqual([line for line in job if line.lstrip().startswith("timeout-minutes:")],
+                         ["    timeout-minutes: 15"])
+
     def test_same_runner_and_checkout_then_only_the_proposal_step_with_scoped_token(self):
         runner = next(line.strip() for line in self.reference.splitlines()
                       if line.lstrip().startswith("runs-on:"))
