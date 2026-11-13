@@ -25,9 +25,11 @@ def read_lane_password(password_env):
                     "$e.IdentityReference -ne $o) {exit 1}}; exit 0"
                 )
                 # -Command appends trailing arguments as code, not as $args.
+                # A PowerShell 7 parent's PSModulePath stops Windows PowerShell
+                # from loading its own security module; the child rebuilds it.
                 child_env = os.environ.copy()
                 for key in list(child_env):
-                    if key.upper() == password_env.upper():
+                    if key.upper() in (password_env.upper(), "PSMODULEPATH"):
                         del child_env[key]
                 child_env["AUTOOS_OCL1_ACL_PATH"] = path
                 result = subprocess.run(

@@ -31,12 +31,19 @@ def windows_owner_only(source):
     return sid
 
 
+def windows_base_env():
+    """Variables Windows needs to start a child at all; empty elsewhere."""
+    keep = ("SYSTEMROOT", "WINDIR", "PATH", "PATHEXT", "COMSPEC", "TEMP", "TMP")
+    return {k: v for k, v in os.environ.items() if os.name == "nt" and k.upper() in keep}
+
+
 def test_file_wins(tmp_path, capsys, suffix):
     source = tmp_path / "password"
-    source.write_text("placeholder-file" + suffix)
+    # Bytes: text mode would turn the suffix into CRLF on Windows.
+    source.write_bytes(("placeholder-file" + suffix).encode())
     source.chmod(0o600)
     windows_owner_only(source)
-    with patch.dict(os.environ, {"AUTOOS_OCL1_PW_FILE": str(source),
+    with patch.dict(os.environ, {**windows_base_env(), "AUTOOS_OCL1_PW_FILE": str(source),
                                  "TEST_PW": "placeholder-env"}, clear=True):
         assert oc_l1.read_lane_password("TEST_PW") == "placeholder-file" + suffix.removesuffix("\n")
     assert capsys.readouterr() == ("", "")
@@ -177,6 +184,7 @@ def test_windows_acl_is_checked(tmp_path, capsys, returncode):
 
     with patch.dict(os.environ, {"AUTOOS_OCL1_PW_FILE": str(source),
                                  "AUTOOS_OCL1_ACL_PATH": "placeholder-stale-path",
+                                 "PSModulePath": "placeholder-modules",
                                  "TEST_PW": "placeholder-env"}, clear=True):
         with patch("builtins.open", side_effect=open_then_change_env), patch.object(oc_l1_password.os, "name", "nt"), patch.object(
                 subprocess, "run", return_value=SimpleNamespace(returncode=returncode)) as run:
@@ -198,6 +206,7 @@ def test_windows_acl_is_checked(tmp_path, capsys, returncode):
     assert child_env["AUTOOS_OCL1_ACL_PATH"] == str(source)
     assert child_env["AUTOOS_OCL1_PW_FILE"] == "placeholder-other-path"
     assert "TEST_PW" not in child_env
+    assert not [k for k in child_env if k.upper() == "PSMODULEPATH"]
     assert "GetAccessRules" in script and "IdentityReference -ne $o" in script
     assert "placeholder-file" not in repr(run.call_args)
     assert "placeholder-env" not in repr(run.call_args)
