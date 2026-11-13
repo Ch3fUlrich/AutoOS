@@ -118,6 +118,13 @@ contains only raw values matching ANY rule, not all labels, so classes are audit
 The tool's docstring owns the label table. Fixtures are trimmed and adapted from
 public recordings; adaptations listed in each file's _fixture note.
 
+`.github/workflows/nim-free-catalog.yml` runs the keyless check weekly (Thursday
+06:43 UTC) or on manual dispatch, never on pull requests; it writes no repository content.
+`tools/nim-free-catalog-proposal.py` opens a registry proposal issue labelled
+`nim-free-catalog` on changed IDs, with one open proposal at a time.
+The registry is edited only by a reviewed pull request; local preview is
+`py -3 tools/nim-free-catalog-proposal.py --dry-run --no-gh`.
+
 ## Operator steps (not agent work)
 
 1. ~~Top up OpenRouter~~ — declined 2026-09-25; paid openrouter legs leave the routes.
