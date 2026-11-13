@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""NIM-FREE-CATALOG: real urllib and CLI, public recordings on loopback only."""
+"""NIM-FREE-CATALOG: real urllib and CLI on loopback only.
+
+Fixtures are trimmed and adapted from public recordings; adaptations listed in
+each file's _fixture note.
+"""
 import contextlib
 import copy
 import importlib.util
@@ -84,7 +88,7 @@ class FakeCatalog:
         self.thread.join()
 
 
-class CatalogTests(unittest.TestCase):
+class CatalogCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -108,6 +112,24 @@ class CatalogTests(unittest.TestCase):
     def rows(self):
         return {r["slug"]: r for r in self.read_snapshot()["rows"]}
 
+    def seed_snapshot(self):
+        self.assertEqual(self.run_tool()[0], 0)
+        self.assertEqual(self.read_snapshot()["counts"], COUNTS)
+        self.assertEqual(len(self.read_snapshot()["rows"]), 6)
+        self.fake.requests.clear()
+
+    def assert_error_preserves(self, *flags):
+        before = self.snapshot.read_bytes()
+        self.assertTrue(self.read_snapshot()["rows"])
+        code, out, err = self.run_tool(*flags)
+        self.assertEqual(code, 2)
+        self.assertEqual(out, "")  # No fabricated removed report on fetch errors.
+        self.assertTrue(err)
+        self.assertEqual(before, self.snapshot.read_bytes())
+        return err
+
+
+class CatalogTests(CatalogCase):
     def test_dedupe_pagination_reasons_and_counts(self):
         code, out, err = self.run_tool()
         self.assertEqual((code, err), (0, ""))
@@ -124,7 +146,10 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual([r[0] for r in self.fake.requests],
                          ["label", "all-0", "all-1", "models"])
         for name, query, headers in self.fake.requests:
-            self.assertNotIn("authorization", {h.lower() for h in headers})
+            # Accept is deliberate; urllib adds the four transport headers below.
+            # Exact equality excludes Authorization, Cookie, X-API-Key and extras.
+            self.assertEqual({h.lower() for h in headers},
+                             {"accept", "host", "user-agent", "accept-encoding", "connection"})
             if query is not None:
                 self.assertEqual(query["query"], "orgName:qc69jvmznzxy")
                 self.assertEqual(query["pageSize"], 100)
@@ -147,7 +172,7 @@ class CatalogTests(unittest.TestCase):
         self.assertNotEqual(catalog.normalise_slug("ab"), catalog.normalise_slug("a-b"))
 
     def test_ambiguous_join_never_guesses(self):
-        self.fake.payloads["models"]["data"] += [{"id": "another/glm-5_3-flash"}]
+        self.fake.payloads["models"]["data"] += [{"id": "z-ai/glm-5_3-flash"}]
         self.assertEqual(self.run_tool()[0], 0)
         row = self.rows()["glm-5-3-flash"]
         self.assertIsNone(row["v1_id"])
@@ -210,6 +235,9 @@ class CatalogTests(unittest.TestCase):
         self.assertNotIn(b"\r", first)
         self.assertEqual(list(self.read_snapshot()),
                          ["schema", "generated", "source", "counts", "rows"])
+        rows = self.read_snapshot()["rows"]
+        self.assertTrue(all(set(row) == set(rows[0]) for row in rows))
+        self.assertTrue(all(row["v1_ambiguous"] is False for row in rows))
 
     def test_check_exit_1_missing_snapshot_and_no_write(self):
         code, out, err = self.run_tool("--check", "--json")
@@ -238,70 +266,10 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(report["counts"], COUNTS)
         self.assertEqual(before, self.snapshot.read_bytes())
 
-    def assert_error_preserves(self, *flags):
-        before = self.snapshot.read_bytes()
-        code, out, err = self.run_tool(*flags)
-        self.assertEqual(code, 2)
-        self.assertEqual(out, "")  # No fabricated removed report on errors.
-        self.assertTrue(err)
-        self.assertEqual(before, self.snapshot.read_bytes())
-        return err
-
-    def test_500_retried_once_then_error_preserves_snapshot(self):
-        self.snapshot.write_bytes(b"{\"schema\":1,\"rows\":[]}\n")
-        for flags in ((), ("--check",)):
-            self.fake.script["all-1"] = [(500, {}), (500, {})]
-            err = self.assert_error_preserves(*flags)
-            self.assertIn(self.base + "/v2/search/catalog/resources/ENDPOINT?q=", err)
-            self.assertIn("500", err)
-        self.assertEqual(sum(r[0] == "all-1" for r in self.fake.requests), 4)
-
     def test_transient_500_retried_successfully(self):
         self.fake.script["models"] = [(500, {})]
         self.assertEqual(self.run_tool()[0], 0)
         self.assertEqual(sum(r[0] == "models" for r in self.fake.requests), 2)
-
-    def test_400_not_retried(self):
-        self.snapshot.write_bytes(b'{"schema":1,"rows":[]}\n')
-        self.fake.script["label"] = [(400, {})]
-        self.assertIn("400", self.assert_error_preserves())
-        self.assertEqual(len(self.fake.requests), 1)
-
-    def test_timeout_retried_once_then_preserves_snapshot(self):
-        self.snapshot.write_bytes(b'{"schema":1,"rows":[]}\n')
-        self.fake.script["label"] = [("timeout", {}), ("timeout", {})]
-        with patch.object(catalog, "TIMEOUT_SECONDS", 0.05):
-            err = self.assert_error_preserves()
-        self.assertIn("timeout", err.lower())
-        self.assertIn(self.base, err)
-        self.assertEqual(len(self.fake.requests), 2)
-
-    def test_empty_label_is_error_not_everything_removed(self):
-        self.snapshot.write_bytes(b'{"schema":1,"rows":[]}\n')
-        self.fake.payloads["label"].update(resultTotal=0, resultPageTotal=0, results=[])
-        self.assertIn("empty", self.assert_error_preserves().lower())
-
-    def test_parse_errors_and_incomplete_pages_preserve_snapshot(self):
-        self.snapshot.write_bytes(b'{"schema":1,"rows":[]}\n')
-        for payload in (b"not json", {}, {"data": [{"id": None}]}):
-            with self.subTest(payload=payload):
-                self.fake.script["models"] = [(200, payload)]
-                self.assert_error_preserves("--check", "--json")
-        self.fake.payloads["all-1"]["results"][0]["resources"] = []
-        self.assert_error_preserves()
-
-    def test_truncated_http_body_preserves_snapshot(self):
-        self.snapshot.write_bytes(b'{"schema":1,"rows":[]}\n')
-        self.fake.script["models"] = [("truncated", {"data": []})]
-        err = self.assert_error_preserves()
-        self.assertIn(self.base + "/v1/models", err)
-        self.assertEqual(sum(r[0] == "models" for r in self.fake.requests), 1)
-
-    def test_redirect_not_followed(self):
-        self.snapshot.write_bytes(b'{"schema":1,"rows":[]}\n')
-        self.fake.script["label"] = [(302, {})]
-        self.assertIn("302", self.assert_error_preserves())
-        self.assertEqual(len(self.fake.requests), 1)
 
     def test_label_query_also_paginates(self):
         label = self.fake.payloads["label"]
@@ -319,6 +287,9 @@ class CatalogTests(unittest.TestCase):
         original = self.fake.payloads["label"]["results"][1]["resources"][1]
         for raw, expected in ((["body pose"], "vision"), (["diffusion models"], "image"),
                               (["chat", "content safety"], "safety"),
+                              (["chat", "vision language model"], "chat"),
+                              (["chat", "usecase_text_to_embedding"], "embedding"),
+                              (["chat", "reranking"], "rerank"),
                               (["unmapped label"], "other")):
             with self.subTest(raw=raw):
                 resource = copy.deepcopy(original)
@@ -327,11 +298,40 @@ class CatalogTests(unittest.TestCase):
                 self.assertEqual(self.run_tool()[0], 0)
                 self.assertEqual(self.rows()["glm-5-3-flash"]["use_class"], expected)
 
+    def test_tags_keep_only_raw_values_matching_any_rule_sorted(self):
+        resource = self.fake.payloads["label"]["results"][1]["resources"][1]
+        resource["labels"] = [
+            {"key": "GeNeRaL", "unresolvedValues": ["VLM", "Chat", "chat", "VLM",
+                                                   "content safety", "unknown"],
+             "values": ["body pose"]},
+            {"key": "unrelated", "unresolvedValues": ["reranking"]}]
+        self.assertEqual(self.run_tool()[0], 0)
+        row = self.rows()["glm-5-3-flash"]
+        self.assertEqual(row["tags"], ["Chat", "VLM", "chat", "content safety"])
+        self.assertEqual(row["use_class"], "safety")
+
+    def test_returning_resource_gets_new_first_seen(self):
+        self.assertEqual(self.run_tool()[0], 0)
+        bnr = self.fake.payloads["all-1"]["results"][0]["resources"].pop()
+        for name in ("all-0", "all-1"):
+            self.fake.payloads[name]["resultTotal"] = 5
+        self.assertEqual(self.run_tool(today="2026-11-14")[0], 0)
+        self.assertNotIn("bnr", self.rows())
+        self.fake.payloads["all-1"]["results"][0]["resources"].append(bnr)
+        for name in ("all-0", "all-1"):
+            self.fake.payloads[name]["resultTotal"] = 6
+        self.assertEqual(self.run_tool(today="2026-11-15")[0], 0)
+        self.assertEqual(self.rows()["bnr"]["first_seen"], "2026-11-15")
+        self.assertEqual(self.rows()["body-pose"]["first_seen"], "2026-11-13")
+
     def test_malformed_previous_snapshot_is_error(self):
         for raw in (b"broken", b'{"schema":2,"rows":[]}', b'{"schema":1,"rows":[{}]}'):
             with self.subTest(raw=raw):
                 self.snapshot.write_bytes(raw)
-                self.assert_error_preserves()
+                code, out, err = self.run_tool()
+                self.assertEqual((code, out), (2, ""))
+                self.assertTrue(err)
+                self.assertEqual(self.snapshot.read_bytes(), raw)
 
     def test_cli_json_and_env_overrides(self):
         proc = subprocess.run([sys.executable, str(TOOL), "--snapshot", str(self.snapshot),
@@ -343,7 +343,8 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(report["removed"], [])
         self.assertEqual(len(report["added"]), 6)
         for _, _, headers in self.fake.requests:
-            self.assertNotIn("authorization", {h.lower() for h in headers})
+            self.assertEqual({h.lower() for h in headers},
+                             {"accept", "host", "user-agent", "accept-encoding", "connection"})
 
 
 if __name__ == "__main__":

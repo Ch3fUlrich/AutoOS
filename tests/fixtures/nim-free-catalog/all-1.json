@@ -1,5 +1,5 @@
 {
-  "_fixture": "bnr is a recorded resource intentionally omitted from query 1 and with its preview label removed, to exercise attribute-only discovery. Mixed-case attribute is intentional.",
+  "_fixture": "Trimmed and adapted from public recordings, 2026-11-13. Synthetic second page; irrelevant labels and attributes removed. bnr is omitted from query 1 and its preview label removed for attribute-only discovery; mixed-case pReViEw/TrUe added intentionally.",
   "resultPageTotal": 2,
   "resultTotal": 6,
   "results": [{"groupValue":"ENDPOINT","totalCount":6,"resources":[

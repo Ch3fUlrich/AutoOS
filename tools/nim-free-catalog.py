@@ -8,17 +8,20 @@ first matching row wins, no name/display-label inference:
            | guardrail, nemoguard
   embedding| usecase_text_to_embedding, text-to-embedding
   rerank   | reranking
+  chat     | playgroundtype_chat, chat, text-to-text, language generation
   vision   | vision language model, vlm, computer vision, cv, body pose,
            | video understanding, usecase_image_to_text, image-to-text, ocr
   speech   | usecase_text_to_speech, usecase_speech_to_text, speech enhancement,
            | speaker detection, tts, asr, automatic speech recognition
   image    | image generation, diffusion models
-  chat     | playgroundtype_chat, chat, text-to-text, language generation
   other    | everything else
 
+Each row's sorted tags contain only raw values matching ANY table rule.
+Disappearing resources are dropped; returning resources get a new first_seen.
 --check compares resource_id sets only, not dates or metadata. A v1 match means
-listed, not inference-tested. Override BOTH origins for hermetic local tests via
-AUTOOS_NIM_CATALOG_BASE_URL and AUTOOS_NIM_V1_BASE_URL. No credential lookup,
+listed, not inference-tested; publisher and slug must both match after normalisation.
+Test overrides AUTOOS_NIM_CATALOG_BASE_URL and AUTOOS_NIM_V1_BASE_URL require an
+explicit --snapshot whenever either is set. No credential lookup,
 Authorization, proxy environment, or redirects; the only write is the snapshot.
 """
 import argparse
@@ -29,6 +32,7 @@ import os
 from pathlib import Path
 import socket
 import sys
+import tempfile
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -48,12 +52,12 @@ USE_CLASS_RULES = (
                 "safety and moderation", "guardrail", "nemoguard"}),
     ("embedding", {"usecase_text_to_embedding", "text-to-embedding"}),
     ("rerank", {"reranking"}),
+    ("chat", {"playgroundtype_chat", "chat", "text-to-text", "language generation"}),
     ("vision", {"vision language model", "vlm", "computer vision", "cv", "body pose",
                 "video understanding", "usecase_image_to_text", "image-to-text", "ocr"}),
     ("speech", {"usecase_text_to_speech", "usecase_speech_to_text", "speech enhancement",
                 "speaker detection", "tts", "asr", "automatic speech recognition"}),
     ("image", {"image generation", "diffusion models"}),
-    ("chat", {"playgroundtype_chat", "chat", "text-to-text", "language generation"}),
 )
 
 
@@ -116,6 +120,8 @@ def validate_resource(resource):
     text(resource.get("displayName"))
     for field in ("labels", "attributes"):
         entries = resource.get(field, [])
+        if field == "attributes" and entries is None:
+            entries = []
         require(isinstance(entries, list), f"invalid {field}")
         for entry in entries:
             require(isinstance(entry, dict), f"invalid {field} entry")
@@ -145,6 +151,7 @@ def catalog_resources(base, labelled):
             count, page_count = payload.get("resultTotal"), payload.get("resultPageTotal")
             require(type(count) is int and count >= 0, "invalid resultTotal")
             require(type(page_count) is int and page_count >= 0, "invalid resultPageTotal")
+            require(page_count <= 50, "catalog exceeds 50-page limit")
             if total is None:
                 total, pages = count, page_count
             require((count, page_count) == (total, pages), "pagination totals changed")
@@ -165,8 +172,9 @@ def catalog_resources(base, labelled):
                 require(len(resources) == total, "incomplete catalog pagination")
         except (ValueError, TypeError) as exc:
             raise CatalogError(f"{url}: HTTP 200: {exc}") from exc
-    if labelled and not resources:
-        raise CatalogError(f"{url}: HTTP 200: empty Free Endpoint result")
+    if not resources:
+        kind = "Free Endpoint" if labelled else "unfiltered catalog"
+        raise CatalogError(f"{url}: HTTP 200: empty {kind} result")
     return resources
 
 
@@ -189,7 +197,7 @@ def v1_index(url):
 
 def preview(resource):
     return any(a["key"].casefold() == "preview" and a["value"].casefold() == "true"
-               for a in resource.get("attributes", []))
+               for a in (resource.get("attributes") or []))
 
 
 def row_of(resource, reason, index, previous, today):
@@ -198,16 +206,21 @@ def row_of(resource, reason, index, previous, today):
     labels = resource.get("labels", [])
     publishers = sorted({v for label in labels if label["key"].casefold() == "publisher"
                          for v in label.get("values", [])})
-    raw = {v.casefold() for label in labels if label["key"].casefold() == "general"
+    raw = {v for label in labels if label["key"].casefold() == "general"
            for v in label.get("unresolvedValues", [])}
-    use_class = next((name for name, values in USE_CLASS_RULES if raw & values), "other")
-    matches = sorted(index.get(normalise_slug(slug), set()))
+    folded = {v.casefold() for v in raw}
+    use_class = next((name for name, values in USE_CLASS_RULES if folded & values), "other")
+    recognised = set().union(*(values for _, values in USE_CLASS_RULES))
+    tags = sorted(v for v in raw if v.casefold() in recognised)
+    publisher = publishers[0] if publishers else None
+    matches = sorted(model_id for model_id in index.get(normalise_slug(slug), set())
+                     if publisher and normalise_slug(model_id.split("/", 1)[0])
+                     == normalise_slug(publisher))
     row = {"resource_id": rid, "slug": slug, "display_name": resource["displayName"],
-           "publisher": publishers[0] if publishers else None, "use_class": use_class,
+           "publisher": publisher, "use_class": use_class, "tags": tags,
            "match_reason": reason, "v1_id": matches[0] if len(matches) == 1 else None,
+           "v1_ambiguous": len(matches) > 1,
            "first_seen": previous.get(rid, {}).get("first_seen", today), "last_seen": today}
-    if len(matches) > 1:
-        row["v1_ambiguous"] = True
     return row
 
 
@@ -233,8 +246,10 @@ def read_previous(path):
 
 def snapshot_of(catalog_base, v1_base, previous, today):
     labelled = catalog_resources(catalog_base, True)
-    attributes = {rid: row for rid, row in catalog_resources(catalog_base, False).items()
-                  if preview(row)}
+    all_resources = catalog_resources(catalog_base, False)
+    if labelled.keys() - all_resources.keys():
+        raise CatalogError("inconsistent catalog read: label resources missing from query 2")
+    attributes = {rid: row for rid, row in all_resources.items() if preview(row)}
     index = v1_index(v1_base + "/v1/models")
     rows = []
     for rid in sorted(labelled.keys() | attributes.keys()):
@@ -258,6 +273,21 @@ def serialise(snapshot):
     return (prefix + ',\n  "rows": [\n' + rows + "\n  ]\n}\n").encode("utf-8")
 
 
+def write_snapshot(path, snapshot):
+    """Replace only a complete same-directory temporary file; clean up on failure."""
+    data = serialise(snapshot)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + ".",
+                                        suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(data)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def base_url(name, default):
     value = os.environ.get(name, default).rstrip("/")
     parsed = urlsplit(value)
@@ -270,10 +300,15 @@ def base_url(name, default):
 def main(argv=None, *, today=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="no write; 1 if resource IDs differ")
-    parser.add_argument("--snapshot", type=Path, default=DEFAULT_SNAPSHOT)
+    parser.add_argument("--snapshot", type=Path)
     parser.add_argument("--json", action="store_true", help="JSON added/removed/counts on stdout")
     args = parser.parse_args(argv)
     try:
+        overridden = any(name in os.environ for name in
+                         ("AUTOOS_NIM_CATALOG_BASE_URL", "AUTOOS_NIM_V1_BASE_URL"))
+        require(args.snapshot is not None or not overridden,
+                "test base-URL overrides require an explicit --snapshot PATH")
+        args.snapshot = args.snapshot if args.snapshot is not None else DEFAULT_SNAPSHOT
         today = today or datetime.now(timezone.utc).date().isoformat()
         previous = read_previous(args.snapshot)
         snapshot = snapshot_of(base_url("AUTOOS_NIM_CATALOG_BASE_URL", CATALOG_BASE),
@@ -281,14 +316,15 @@ def main(argv=None, *, today=None):
         current = {row["resource_id"] for row in snapshot["rows"]}
         report = {"added": sorted(current - previous.keys()),
                   "removed": sorted(previous.keys() - current), "counts": snapshot["counts"]}
-        if not args.check:
-            args.snapshot.write_bytes(serialise(snapshot))
         if args.json:
             print(json.dumps(report, ensure_ascii=False))
         else:
             for key in ("added", "removed"):
                 print(key + ": " + (", ".join(report[key]) or "(none)"))
             print("counts: " + " ".join(f"{key}={value}" for key, value in report["counts"].items()))
+        sys.stdout.flush()
+        if not args.check:
+            write_snapshot(args.snapshot, snapshot)
         return int(args.check and bool(report["added"] or report["removed"]))
     except (CatalogError, OSError, ValueError) as exc:
         print(f"nim-free-catalog: {exc}", file=sys.stderr)

@@ -1,5 +1,5 @@
 {
-  "_fixture": "Trimmed public NGC recording, 2026-11-13. Five recorded resources; body-pose PREVIEW=false is an intentional label-only adaptation. GPU/partner/irrelevant labels and attributes removed.",
+  "_fixture": "Trimmed and adapted from public recordings, 2026-11-13. Five resources; body-pose PREVIEW flipped to false for a label-only case. GPU/partner/irrelevant labels and attributes removed; repeated _scored row retained.",
   "resultPageTotal": 1,
   "resultTotal": 5,
   "results": [

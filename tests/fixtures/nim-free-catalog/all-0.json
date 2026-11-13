@@ -1,5 +1,5 @@
 {
-  "_fixture": "Page split is synthetic (four rows here, two on page 1); resources cut from the recorded all.json page 0. body-pose PREVIEW=false as in label.json.",
+  "_fixture": "Trimmed and adapted from public recordings, 2026-11-13. Synthetic split of all.json page 0 (four rows here, two on page 1); irrelevant labels and attributes removed; body-pose PREVIEW flipped to false as in label.json.",
   "resultPageTotal": 2,
   "resultTotal": 6,
   "results": [{"groupValue":"ENDPOINT","totalCount":6,"resources":[
