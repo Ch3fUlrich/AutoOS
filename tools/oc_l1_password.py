@@ -16,7 +16,7 @@ def read_lane_password(password_env):
                 import subprocess
                 script = (
                     "$ErrorActionPreference='Stop'; "
-                    "$a=Get-Acl -LiteralPath $args[0]; "
+                    "$a=Get-Acl -LiteralPath $env:AUTOOS_OCL1_ACL_PATH; "
                     "$o=$a.GetOwner([System.Security.Principal.SecurityIdentifier]); "
                     "$r=$a.GetAccessRules($true,$true,"
                     "[System.Security.Principal.SecurityIdentifier]); "
@@ -24,9 +24,15 @@ def read_lane_password(password_env):
                     "if ($e.AccessControlType -eq 'Allow' -and "
                     "$e.IdentityReference -ne $o) {exit 1}}; exit 0"
                 )
+                # -Command appends trailing arguments as code, not as $args.
+                child_env = os.environ.copy()
+                for key in list(child_env):
+                    if key.upper() == password_env.upper():
+                        del child_env[key]
+                child_env["AUTOOS_OCL1_ACL_PATH"] = path
                 result = subprocess.run(
-                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script, path],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                    env=child_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
                 if result.returncode:
                     raise ValueError
             elif os.fstat(source.fileno()).st_mode & 0o077:

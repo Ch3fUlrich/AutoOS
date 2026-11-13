@@ -16,10 +16,26 @@ sys.path.insert(0, str(ROOT / "tools"))
 import oc_l1
 
 
+def windows_owner_only(source):
+    """Restrict only a newly created temporary fixture, including elevated owners."""
+    if os.name != "nt":
+        return
+    sid = subprocess.check_output(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+         "[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"],
+        text=True, timeout=10).strip()
+    for options in (("/inheritance:r", "/grant:r", "*" + sid + ":F"),
+                    ("/setowner", "*" + sid)):
+        subprocess.run(["icacls.exe", str(source), *options], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    return sid
+
+
 def test_file_wins(tmp_path, capsys, suffix):
     source = tmp_path / "password"
     source.write_text("placeholder-file" + suffix)
     source.chmod(0o600)
+    windows_owner_only(source)
     with patch.dict(os.environ, {"AUTOOS_OCL1_PW_FILE": str(source),
                                  "TEST_PW": "placeholder-env"}, clear=True):
         assert oc_l1.read_lane_password("TEST_PW") == "placeholder-file" + suffix.removesuffix("\n")
@@ -33,6 +49,8 @@ def test_bad_file_refuses_without_disclosure(tmp_path, capsys, kind):
     elif kind != "missing":
         source.write_bytes(b"\xff" if kind == "invalid" else b"placeholder-file")
         source.chmod(0o644 if kind == "loose" else 0o600)
+        if kind == "invalid":
+            windows_owner_only(source)
     with patch.dict(os.environ, {"AUTOOS_OCL1_PW_FILE": str(source),
                                  "TEST_PW": "placeholder-env"}, clear=True):
         with unittest.TestCase().assertRaises(SystemExit) as exc:
@@ -157,22 +175,36 @@ def test_windows_acl_is_checked(tmp_path, capsys, returncode):
         os.environ["AUTOOS_OCL1_PW_FILE"] = "placeholder-other-path"
         return opened
 
-    with patch.dict(os.environ, {"AUTOOS_OCL1_PW_FILE": str(source)}, clear=True):
+    with patch.dict(os.environ, {"AUTOOS_OCL1_PW_FILE": str(source),
+                                 "AUTOOS_OCL1_ACL_PATH": "placeholder-stale-path",
+                                 "TEST_PW": "placeholder-env"}, clear=True):
         with patch("builtins.open", side_effect=open_then_change_env), patch.object(oc_l1_password.os, "name", "nt"), patch.object(
                 subprocess, "run", return_value=SimpleNamespace(returncode=returncode)) as run:
             if returncode:
                 with unittest.TestCase().assertRaises(SystemExit) as exc:
-                    oc_l1.read_lane_password("TEST_PW")
+                    oc_l1.read_lane_password("test_pw")
                 assert exc.exception.code == 2
             else:
-                assert oc_l1.read_lane_password("TEST_PW") == "placeholder-file"
+                assert oc_l1.read_lane_password("test_pw") == "placeholder-file"
+            assert os.environ["AUTOOS_OCL1_ACL_PATH"] == "placeholder-stale-path"
+            assert os.environ["TEST_PW"] == "placeholder-env"
     argv = run.call_args.args[0]
-    assert argv[-1] == str(source)
-    script = argv[-2]
-    assert "Get-Acl -LiteralPath $args[0]" in script and "GetOwner" in script
-    assert "$env:AUTOOS_OCL1_PW_FILE" not in script
+    assert argv[:4] == ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command"]
+    assert len(argv) == 5  # -Command appends trailing arguments to the script text.
+    script = argv[4]
+    assert "Get-Acl -LiteralPath $env:AUTOOS_OCL1_ACL_PATH" in script and "GetOwner" in script
+    assert "AUTOOS_OCL1_PW_FILE" not in script and "$args" not in script
+    child_env = run.call_args.kwargs["env"]
+    assert child_env["AUTOOS_OCL1_ACL_PATH"] == str(source)
+    assert child_env["AUTOOS_OCL1_PW_FILE"] == "placeholder-other-path"
+    assert "TEST_PW" not in child_env
     assert "GetAccessRules" in script and "IdentityReference -ne $o" in script
     assert "placeholder-file" not in repr(run.call_args)
+    assert "placeholder-env" not in repr(run.call_args)
+    assert str(source) not in repr(argv)
+    assert run.call_args.kwargs["stdout"] == subprocess.DEVNULL
+    assert run.call_args.kwargs["stderr"] == subprocess.DEVNULL
+    assert run.call_args.kwargs["timeout"] == 10
     assert capsys.readouterr() == ("", str(source) + "\n" if returncode else "")
 
 
@@ -229,6 +261,110 @@ class PasswordFileTests(unittest.TestCase):
         for returncode in (0, 1):
             with self.subTest(returncode=returncode):
                 self.captured(test_windows_acl_is_checked, returncode)
+
+
+    def test_windows_check_failures_refuse_without_disclosure(self):
+        import oc_l1_password
+        for failure in (FileNotFoundError("placeholder-file"),
+                        subprocess.TimeoutExpired("powershell.exe", 10,
+                                                  output=b"placeholder-file",
+                                                  stderr=b"placeholder-file")):
+            with self.subTest(failure=type(failure).__name__):
+                def check(tmp, cap):
+                    source = tmp / "password"
+                    source.write_text("placeholder-file")
+                    with patch.dict(os.environ, {"AUTOOS_OCL1_PW_FILE": str(source),
+                                                 "TEST_PW": "placeholder-env"}, clear=True):
+                        with patch.object(oc_l1_password.os, "name", "nt"), patch.object(
+                                subprocess, "run", side_effect=failure):
+                            with self.assertRaises(SystemExit) as exc:
+                                oc_l1.read_lane_password("TEST_PW")
+                    self.assertEqual(exc.exception.code, 2)
+                    self.assertIsNone(exc.exception.__context__)
+                    self.assertEqual(cap.readouterr(), ("", str(source) + "\n"))
+                self.captured(check)
+
+
+@unittest.skipUnless(os.name == "nt", "real Windows DACL checks require os.name == 'nt'")
+class WindowsPasswordAclTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.directory = Path(tmp.name)
+        self.source = self.directory / "placeholder space [path] & 'quote;\u00e9"
+        self.source.write_bytes(b"placeholder-file")
+        self.owner_sid = windows_owner_only(self.source)
+
+    def read(self, refused=False):
+        with patch.dict(os.environ, {"AUTOOS_OCL1_PW_FILE": str(self.source),
+                                     "TEST_PW": "placeholder-env"}):
+            with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                if refused:
+                    with self.assertRaises(SystemExit) as exc:
+                        oc_l1.read_lane_password("TEST_PW")
+                    self.assertEqual(exc.exception.code, 2)
+                    self.assertIsNone(exc.exception.__context__)
+                else:
+                    self.assertEqual(oc_l1.read_lane_password("TEST_PW"), "placeholder-file")
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue(), str(self.source) + "\n" if refused else "")
+
+    def test_owner_only_is_accepted(self):
+        self.read()
+
+    def test_other_identity_allow_is_refused(self):
+        subprocess.run(["icacls.exe", str(self.source), "/grant:r", "*S-1-1-0:R"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        self.read(refused=True)
+
+    def test_inherited_other_identity_allow_is_refused(self):
+        # Seed a deterministic default on our own temp directory, not the host's.
+        subprocess.run(["icacls.exe", str(self.directory), "/grant:r", "*S-1-1-0:(OI)(CI)R"],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        self.source = self.directory / "placeholder-inherited"
+        self.source.write_bytes(b"placeholder-file")
+        for options in (("/grant:r", "*" + self.owner_sid + ":F"),
+                        ("/setowner", "*" + self.owner_sid)):
+            subprocess.run(["icacls.exe", str(self.source), *options], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        # An explicit owner rule means ignoring inherited rules would wrongly pass.
+        env = os.environ.copy()
+        env["AUTOOS_OCL1_ACL_PATH"] = str(self.source)
+        script = (
+            "$ErrorActionPreference='Stop'; "
+            "$a=[System.IO.File]::GetAccessControl($env:AUTOOS_OCL1_ACL_PATH); "
+            "$o=$a.GetOwner([System.Security.Principal.SecurityIdentifier]); "
+            "$r=$a.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier]); "
+            "$own=@($r | Where-Object {!$_.IsInherited -and $_.AccessControlType -eq 'Allow' "
+            "-and $_.IdentityReference -eq $o}); "
+            "$other=@($r | Where-Object {$_.IsInherited -and $_.AccessControlType -eq 'Allow' "
+            "-and $_.IdentityReference -ne $o}); if (!$own.Count -or !$other.Count) {exit 1}"
+        )
+        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                       env=env, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        self.read(refused=True)
+
+    def test_empty_and_null_dacls_are_refused(self):
+        import ctypes
+        from ctypes import wintypes
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        set_acl = advapi.SetNamedSecurityInfoW
+        set_acl.argtypes = [wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+                            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        set_acl.restype = wintypes.DWORD
+        initialize = advapi.InitializeAcl
+        initialize.argtypes = [ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD]
+        initialize.restype = wintypes.BOOL
+        empty = ctypes.create_string_buffer(8)
+        self.assertTrue(initialize(empty, len(empty), 2))
+        for kind, dacl in (("empty", empty), ("NULL", None)):
+            with self.subTest(dacl=kind):
+                try:
+                    self.assertEqual(set_acl(str(self.source), 1, 0x80000004,
+                                             None, None, dacl, None), 0)
+                    self.read(refused=True)
+                finally:
+                    windows_owner_only(self.source)
 
 
 if __name__ == "__main__":
