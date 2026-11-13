@@ -36,7 +36,11 @@ with (root / "calls.jsonl").open("a", encoding="utf-8") as handle:
 if reply.get("signal"):
     import signal
     os.kill(os.getpid(), signal.SIGTERM)
-print(reply.get("out", ""), end="")
+if reply.get("sleep"):
+    import time
+    time.sleep(reply["sleep"])
+# Emit exact fixture bytes; Windows text mode would turn CRLF into CRCRLF.
+sys.stdout.buffer.write(reply.get("out", "").encode("utf-8"))
 print(reply.get("err", ""), end="", file=sys.stderr)
 sys.exit(reply["code"])
 '''
@@ -148,9 +152,9 @@ class ProposalTests(unittest.TestCase):
         result = self.run_proposal("--dry-run", "--no-gh")
         self.assertEqual(result.returncode, 0, result.stderr)
         rows = re.findall(r"^- (?:added|removed): `([^`]+)`$", result.stdout, re.M)
-        self.assertEqual(len(rows), 200)
+        self.assertEqual(len(rows), 189)
         self.assertEqual(rows, sorted(rows))
-        self.assertIn("... and 10 more", result.stdout)
+        self.assertIn("... and 21 more", result.stdout)
         self.assertIn("+120 / -90", result.stdout)
         self.state["check"]["out"] += "\nremoved: @mention"
         self.assertEqual(self.run_proposal("--dry-run", "--no-gh").returncode, 2)

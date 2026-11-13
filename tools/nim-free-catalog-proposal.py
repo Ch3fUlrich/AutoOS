@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Check the keyless NIM catalog and propose registry review, never edit it.
 
-Test-only --check-tool PATH and --gh PATH require --test-mode, which announces
-itself on stderr. Explicit .py gh hooks launch via sys.executable on Windows and
-Linux; production uses plain gh. No environment-based executable overrides or
+Test-only --check-tool, --gh and --test-timeout require --test-mode, announced
+on stderr. Explicit .py gh hooks use sys.executable on every platform; production
+uses plain gh. No environment-based executable overrides or
 credential lookups: children inherit the environment, including the inventory's
 two AUTOOS_NIM_* URL overrides (which still require --snapshot).
 """
@@ -18,6 +18,8 @@ import tempfile
 
 CHECK_TOOL = Path(__file__).resolve().with_name("nim-free-catalog.py")
 ID_PATTERN = re.compile(r"[A-Za-z0-9._/-]{1,200}")
+DELTA_PATTERN = re.compile(rf"(added|removed): (\(none\)|{ID_PATTERN.pattern}"
+                           rf"(?:, {ID_PATTERN.pattern})*)")
 LABEL = "nim-free-catalog"
 
 
@@ -25,9 +27,16 @@ class ProposalError(Exception):
     """Fail closed without exposing child output or environment values."""
 
 
-def run(command, operation):
+def run(command, operation, timeout):
     try:
-        return subprocess.run(command, capture_output=True, text=True, encoding="utf-8")
+        # Text mode would turn an embedded CR into LF before delta validation.
+        result = subprocess.run(command, capture_output=True, timeout=timeout)
+        result.stdout = result.stdout.decode("utf-8")
+        result.stderr = result.stderr.decode("utf-8")
+        return result
+    except subprocess.TimeoutExpired:
+        raise ProposalError(f"{operation}: timed out after {timeout:g} seconds; "
+                            "no success reported") from None
     except FileNotFoundError:
         raise ProposalError(f"{operation}: executable not found") from None
     except (OSError, UnicodeError):
@@ -36,17 +45,17 @@ def run(command, operation):
 
 def delta_ids(output):
     groups = {"added": set(), "removed": set()}
-    for line in output.splitlines():
-        kind, separator, value = line.partition(":")
-        if not separator or kind not in groups:
+    for line in output.split("\n"):
+        line = line.removesuffix("\r")
+        if not line.startswith(("added:", "removed:")):
             continue
-        # Remove the tool's one separator space, not whitespace inside remote IDs.
-        value = value.removeprefix(" ")
+        match = DELTA_PATTERN.fullmatch(line)
+        if match is None:
+            raise ProposalError("invalid delta ID or line; no proposal opened")
+        kind, value = match.groups()
         if value == "(none)":
             continue
         for resource_id in value.split(", "):
-            if ID_PATTERN.fullmatch(resource_id) is None:
-                raise ProposalError("invalid delta ID; no proposal opened")
             groups[kind].add(resource_id)
     if not any(groups.values()):
         raise ProposalError("check exited 1 with no added/removed IDs; no proposal opened")
@@ -60,12 +69,16 @@ def proposal_text(groups):
     rows = [f"- {kind}: `{resource_id}`" for kind, ids in groups.items()
             for resource_id in sorted(ids)]
     body = ["The live public NIM free catalog has changed. Registry proposal only.", ""]
-    body += rows[:200]
-    if len(rows) > 200:
-        body.append(f"... and {len(rows) - 200} more")
-    body += ["", "Regenerate the snapshot for review:", "", "```sh",
-             "python3 tools/nim-free-catalog.py", "```", "",
-             "The registry is edited only by a reviewed pull request."]
+    footer = ["", "Regenerate the snapshot for review:", "", "```sh",
+              "python3 tools/nim-free-catalog.py", "```", "",
+              "The registry is edited only by a reviewed pull request."]
+    row_budget = 200 - len(body) - len(footer)
+    truncated = len(rows) > row_budget
+    shown = row_budget - int(truncated)
+    body += rows[:shown]
+    if truncated:
+        body.append(f"... and {len(rows) - shown} more")
+    body += footer
     return title, "\n".join(body) + "\n"
 
 
@@ -74,7 +87,7 @@ def gh_call(args, *arguments):
     launcher = ([sys.executable, executable] if args.gh and
                 Path(executable).suffix == ".py" else [executable])
     operation = "gh " + " ".join(arguments[:2])
-    result = run(launcher + list(arguments), operation)
+    result = run(launcher + list(arguments), operation, args.test_timeout or 60)
     if result.returncode != 0:
         raise ProposalError(f"{operation} failed (exit {result.returncode}); no success reported")
     return result.stdout
@@ -120,7 +133,7 @@ def propose(args):
     command = [sys.executable, str(args.check_tool or CHECK_TOOL), "--check"]
     if args.snapshot is not None:
         command += ["--snapshot", str(args.snapshot)]
-    check = run(command, "check failed")
+    check = run(command, "check failed", args.test_timeout or 300)
     if check.returncode == 0:
         print("no change")
         return 0
@@ -150,9 +163,14 @@ def main(argv=None):
     parser.add_argument("--test-mode", action="store_true", help="announce explicit test hooks")
     parser.add_argument("--check-tool", type=Path, help="test-only inventory script override")
     parser.add_argument("--gh", help="test-only gh executable or Python script override")
+    parser.add_argument("--test-timeout", type=float,
+                        help="test-only child timeout in seconds (0 < seconds <= 60)")
     args = parser.parse_args(argv)
-    if (args.check_tool is not None or args.gh is not None) and not args.test_mode:
-        parser.error("--check-tool and --gh require --test-mode")
+    if (args.check_tool is not None or args.gh is not None or
+            args.test_timeout is not None) and not args.test_mode:
+        parser.error("--check-tool, --gh and --test-timeout require --test-mode")
+    if args.test_timeout is not None and not (0 < args.test_timeout <= 60):
+        parser.error("--test-timeout must be greater than 0 and at most 60 seconds")
     if args.no_gh and not args.dry_run:
         parser.error("--no-gh requires --dry-run")
     if args.test_mode:
