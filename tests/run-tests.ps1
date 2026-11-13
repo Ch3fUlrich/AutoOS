@@ -5590,7 +5590,7 @@ Test-Case 'oc_l1 launcher: start (unit tests)' {
     $py = Get-Command python, python3 -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $py) { Skip 'no python on PATH'; return }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l1_serve.py') 2>&1 | Out-String; $rc = $LASTEXITCODE }
+    try { $out = & $py.Source (Join-Path $Root 'tests\test_oc_l1_serve.py') 2>&1 | Out-String; $rc = $LASTEXITCODE; if ($rc -eq 0) { $out += & $py.Source (Join-Path $Root 'tests\test_oc_l1_password_owner_windows.py') 2>&1 | Out-String; $rc = $LASTEXITCODE } }
     finally { $ErrorActionPreference = $prev }
     Assert-Equal $rc 0 "test_oc_l1_serve unit tests failed: $out"
 }
