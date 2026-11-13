@@ -58,7 +58,8 @@ def test_bad_file_refuses_without_disclosure(tmp_path, capsys, kind):
         source.chmod(0o644 if kind == "loose" else 0o600)
         if kind == "invalid":
             windows_owner_only(source)
-    with patch.dict(os.environ, {"AUTOOS_OCL1_PW_FILE": str(source),
+    # Base env: on Windows the ACL child must start, so "invalid" reaches the decoder.
+    with patch.dict(os.environ, {**windows_base_env(), "AUTOOS_OCL1_PW_FILE": str(source),
                                  "TEST_PW": "placeholder-env"}, clear=True):
         with unittest.TestCase().assertRaises(SystemExit) as exc:
             oc_l1.read_lane_password("TEST_PW")
