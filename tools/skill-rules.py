@@ -180,11 +180,11 @@ def main():
     subparsers = parser.add_subparsers(dest="cmd", required=True)
 
     check_parser = subparsers.add_parser("check", help="Validate rule files")
-    check_parser.add_argument("files", nargs="*", default=[".agents/skills/unattended-orchestration/SKILL.md"]) 
+    check_parser.add_argument("files", nargs="*", default=[])
 
     list_parser = subparsers.add_parser("list", help="List rule lines")
     list_parser.add_argument("--topic", help="Filter by rule topic")
-    list_parser.add_argument("files", nargs="*", default=[".agents/skills/unattended-orchestration/SKILL.md"]) 
+    list_parser.add_argument("files", nargs="*", default=[])
 
     args = parser.parse_args()
     if args.cmd == "check":

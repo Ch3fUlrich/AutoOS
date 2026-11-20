@@ -610,7 +610,7 @@ if it "omnigraph: a hostile omnigraph_url answer is data, never python source"; 
     for url in "${payloads[@]}"; do
         i=$((i + 1))
         # AUTOOS_ROOT is an empty scratch dir inside the sandbox: neither the real
-        # checkout's .claude/skills nor its settings.local.json can be reached.
+        # checkout's .claude directory nor its settings.local.json can be reached.
         omni_client_spec "$scratch/home$i" "$url" >"$scratch/spec-$i.json"
         if [[ ! -s "$scratch/spec-$i.json" ]]; then
             ok=0; echo "payload $i [$url]: no omnigraph spec was produced (the python source broke)" >&2

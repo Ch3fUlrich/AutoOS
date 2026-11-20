@@ -2,7 +2,7 @@
 """Spawn one agent - any client, the right model, key, isolation and depth - one command.
 
 The 3-tier agents live in opencode.jsonc (l1-orchestrator -> l2-worker ->
-t3-reviewer, .agents/skills/unattended-orchestration/unattended-orchestration.md).
+t3-reviewer, the `unattended-orchestration` skill of the plangraph repository).
 Driving them by hand has
 four traps, all measured 2026-09-24 against opencode 2.0.16:
 

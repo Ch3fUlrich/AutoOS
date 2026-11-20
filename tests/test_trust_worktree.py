@@ -367,3 +367,7 @@ def test_trust_empty_mcpjson_writes_no_key(sandbox, tmp_path, monkeypatch):
     assert entry.get("hasCompletedProjectOnboarding") is True
     # Check that enabledMcpjsonServers is not present
     assert "enabledMcpjsonServers" not in entry
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main(["-q", "-p", "no:libtmux", __file__]))

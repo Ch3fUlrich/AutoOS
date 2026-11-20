@@ -1037,8 +1037,7 @@ class MappingTests(unittest.TestCase):
 
     def test_a_skill_change_maps_to_the_skill_rules_test(self):
         # SCOPECLI: R-orch-17 was cited and nothing ran the dangling-id check.
-        for path in (".agents/skills/unattended-orchestration/SKILL.md",
-                     "CHANGELOG.md", "docs/routing.md"):
+        for path in ("CHANGELOG.md", "docs/routing.md"):
             self.assertIn("tests/test_skill_rules.py", self.plan_for([path])["pytest"], path)
 
     def test_a_tools_change_maps_to_the_tests_that_name_it(self):
@@ -1095,8 +1094,7 @@ class MappingTests(unittest.TestCase):
     def test_an_ordinary_change_selects_no_repo_wide_lint(self):
         # The rule is a scan, not a sledgehammer: a catalog edit is not an input to the
         # suite lints, and selecting them on every change teaches nothing about the tree.
-        for path in ("catalog/linux.json", "web/index.html", "setup.sh",
-                     ".agents/skills/unattended-orchestration/SKILL.md"):
+        for path in ("catalog/linux.json", "web/index.html", "setup.sh"):
             plan = self.plan_for([path])
             self.assertNotIn("tests/test_windows_portability.py", plan["pytest"], path)
             self.assertNotIn("tests/test_suite_wiring.py", plan["pytest"], path)

@@ -41,7 +41,7 @@ Format: NDJSON — `{"type":"NodeType","data":{…}}` and
 `{"edge":"EdgeType","from":"<slug>","to":"<slug>"}`. Nodes carry **no `id`** (0.13
 refuses `data.id`; the id is derived from the `@key` slug), edges use `from`/`to`
 slugs. Schema:
-`../../../../.agents/skills/structured-memory/references/schema.md`.
+the `structured-memory` skill's `references/schema.md` (plangraph repository `skills/`).
 
 **Vector search:** `Decision` embeddings are intentionally NOT stored in these
 seeds (they are large and regenerable). Populate them after loading with

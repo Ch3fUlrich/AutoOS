@@ -7,7 +7,7 @@
 # graphify-out/graph.json serves whichever repo you started Claude Code in.
 #   Workstation: command `uv` ... graphify.serve graphify-out/graph.json
 #   Server:      command `graphify-mcp` (the bin/ wrapper: docker -v "$PWD:/repo")
-# See .agents/skills/mcp-servers-setup/references/graphify.md.
+# See the mcp-servers-setup skill, references/graphify.md (plangraph repository skills/).
 #
 # What this checks:
 #   USER scope  ~/.claude.json
