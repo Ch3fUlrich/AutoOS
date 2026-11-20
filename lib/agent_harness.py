@@ -433,7 +433,7 @@ def desired_opencode(user, harness, repo_root, skills_source):
     # exactly like a skills install that worked.
     if skills_source:
         # A managed skill still read from an agent-skills clone (the skills home
-        # before .agents/skills, retired 2026-09-25) would load the same skill
+        # before the checkout's own skills dir, retired 2026-09-25) would load the same skill
         # twice, from two copies that have since diverged. Drop only those, and
         # only here, where the replacement entry is about to be written.
         instructions = [
@@ -549,9 +549,9 @@ def _create_link(source, link_path):
 
 
 def _link_plan(link_path, source):
-    """Return (needs_change, note) for the skills link."""
-    if not os.path.exists(source):
-        return False, "skills: source missing"
+    """Return (needs_change, note) for the skills link; no source = no link asked for."""
+    if not source or not os.path.exists(source):
+        return False, ("skills: source missing" if source else None)
     if os.path.islink(link_path) or _is_junction(link_path):
         if _same_target(_link_target(link_path), link_path, source):
             return False, None
@@ -997,7 +997,7 @@ def build_parser():
     opencode = with_harness(subparsers.add_parser("opencode"))
     opencode.add_argument("--config", required=True)
     opencode.add_argument("--repo-root", required=True)
-    opencode.add_argument("--skills-source", required=True)
+    opencode.add_argument("--skills-source", default="")
     opencode.add_argument("--dry-run", action="store_true")
     opencode.set_defaults(func=cmd_opencode)
 

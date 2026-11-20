@@ -104,13 +104,12 @@ fi
 if it "summary: a recorded refusal is labelled failed (post-install)"; then
     catalog_load catalog/linux.json x64 0
     git_name="${CAT_NAME[$(catalog_index_of git)]}"
-    # agent-skill-links, not the retired agent-skills: this asks for a real id
-    # whose display name has spaces (the old bug shattered it into three
-    # "failures"), and only the new id is guaranteed to stay in the catalog.
-    skill_name="${CAT_NAME[$(catalog_index_of agent-skill-links)]}"
+    # omnigraph-client, not a retired id: this asks for a real id whose display
+    # name has spaces (the old bug shattered it into three "failures").
+    skill_name="${CAT_NAME[$(catalog_index_of omnigraph-client)]}"
     out="$(
-        AUTOOS_EXTRA_FAILURES=(agent-skill-links)
-        AUTOOS_RESULT_FAILED=(agent-skill-links git not-a-real-id)
+        AUTOOS_EXTRA_FAILURES=(omnigraph-client)
+        AUTOOS_RESULT_FAILED=(omnigraph-client git not-a-real-id)
         for f in "${AUTOOS_RESULT_FAILED[@]}"; do printf '%s\n' "$(autoos_result_label "$f")"; done
     )"
     # One line per component: the old `for f in $failed_names` printed the words

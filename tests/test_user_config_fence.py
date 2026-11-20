@@ -114,8 +114,9 @@ class _RenderCase(unittest.TestCase):
     def render_opencode(self, repo_root, config_path=None, skills_source=None):
         argv = ["opencode",
                 "--config", config_path or self.opencode_path(),
-                "--repo-root", repo_root,
-                "--skills-source", skills_source or os.path.join(repo_root, ".agents", "skills")]
+                "--repo-root", repo_root]
+        if skills_source:
+            argv += ["--skills-source", skills_source]
         return self._run(argv)
 
     def render_openhands(self, repo_root, directory=None):

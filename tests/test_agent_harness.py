@@ -354,10 +354,8 @@ class OpencodeMergeTests(unittest.TestCase):
             self.assertEqual(actual, expected)
 
     def test_an_empty_skills_source_writes_no_bogus_skill_path(self):
-        # install.sh passes "" when neither this checkout's .agents/skills nor
-        # a legacy clone exists. _join("", skill, "SKILL.md") would otherwise
-        # write a relative path that names nothing into the user's config, so
-        # the file reads as wired-up while no skill can ever be found.
+        # No skills source (this repository holds none): _join("", skill, "SKILL.md")
+        # would write a relative path that names nothing into the user's config.
         harness = harness_data()
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "opencode.json"
@@ -373,7 +371,8 @@ class OpencodeMergeTests(unittest.TestCase):
             instructions = read_ordered(config).get("instructions", [])
             for skill in harness["rules"]["skills"]:
                 self.assertNotIn(skill + "/SKILL.md", instructions)
-            self.assertIn("skills: source missing", result.stdout)
+            self.assertNotIn("skills:", result.stdout)
+            self.assertFalse((Path(tmp) / "skills").exists())
 
     def test_every_global_fence_pattern_gets_its_verdict(self):
         # Top level carries deny_all only: the leaf fences live on the leaf

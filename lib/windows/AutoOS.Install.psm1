@@ -1418,7 +1418,7 @@ function Set-AutoOSOmnigraphEnv {
 function Install-AutoOSAgentSkills {
     <#
       .SYNOPSIS
-        Wire the MCP servers into Claude Code and Antigravity, and link the skills.
+        Wire the MCP servers into Claude Code and Antigravity.
 
       .DESCRIPTION
         graphify and omnigraph are wired in opposite ways, and getting it the
@@ -1433,7 +1433,7 @@ function Install-AutoOSAgentSkills {
                       and says so when it finds one.
 
         It used to clone a second repository into Documents\code\agent-skills to
-        get those declarations and its skill links from. It does not: the servers
+        get those declarations from. It does not: the servers
         this wires are declared by this checkout's own .mcp.json, so one less
         copy of what AutoOS already ships, and the checkout is read from the
         tree the caller is in. A machine that ran this installer before keeps its
@@ -1477,41 +1477,6 @@ function Install-AutoOSAgentSkills {
     }
 
     Set-AutoOSAntigravityMcp
-
-    # Antigravity (~/.gemini/config/skills) and Claude Code (~/.claude/skills) are
-    # linked by Sync-AutoOSAgentSkillTargets below, from Get-AutoOSSkillsSource -
-    # never from a clone (WS-SKILLWIN).
-
-    # Repo skills into project .claude/skills (Claude Code reads only that dir).
-    # Junctions, created at install time (never committed - see .gitignore), so a
-    # checkout without symlink rights still works. Guarded: existing entries win.
-    $repoSkills = Join-Path $script:RepoRoot '.agents\skills'
-    $repoClaudeSkills = Join-Path $script:RepoRoot '.claude\skills'
-    if (Test-Path $repoSkills) {
-        if ($script:DryRun) {
-            Write-AutoOSLine "would link repo skills into $repoClaudeSkills" -Level muted
-        } else {
-            if (-not (Test-Path $repoClaudeSkills)) { New-Item -ItemType Directory -Path $repoClaudeSkills -Force | Out-Null }
-            foreach ($s in Get-ChildItem -Path $repoSkills -Directory) {
-                $target = Join-Path $repoClaudeSkills $s.Name
-                if (-not (Test-Path $target)) {
-                    try {
-                        New-Item -ItemType Junction -Path $target -Target $s.FullName | Out-Null
-                    } catch {
-                        Write-AutoOSLine "Could not link repo skill $($s.Name): $_" -Level warn
-                    }
-                }
-            }
-        }
-    }
-
-    # Link repo skills into user-scope directories for clients that read from
-    # ~/.agents/skills (gemini, qoder, qwen) and ~/.codex/skills (codex).
-    # Sync-AutoOSSkillDirs handles dry-run, idempotency and never-overwrite rules.
-    $skillsSource = Get-AutoOSSkillsSource
-    if ($skillsSource) {
-        $null = Sync-AutoOSAgentSkillTargets -Source $skillsSource
-    }
 
     if ($script:DryRun) {
         Write-AutoOSLine 'would check the omnigraph image, network and token' -Level muted
@@ -2169,25 +2134,6 @@ function Install-AutoOSMcpContext7 {
     }
 }
 
-function Get-AutoOSSkillsSource {
-    <#
-      .SYNOPSIS Locate the skills directory: repo-vendored first, external clone second.
-
-      .DESCRIPTION
-        Returns .agents/skills under the repo root when present (single source
-        of truth, including the native rewrites), else the external
-        Documents\Code\agent-skills\skills clone, or $null when neither exists.
-    #>
-    $vendored = Join-Path $script:RepoRoot '.agents\skills'
-    if (Test-Path $vendored) { return $vendored }
-    $myDocs = [Environment]::GetFolderPath('MyDocuments')
-    foreach ($rel in @('Code\agent-skills\skills', 'code\agent-skills\skills')) {
-        $candidate = Join-Path $myDocs $rel
-        if (Test-Path $candidate) { return $candidate }
-    }
-    return $null
-}
-
 function ConvertFrom-AutoOSJsonc {
     <#
       .SYNOPSIS ConvertFrom-Json for JSONC: // and /* */ comments, trailing commas.
@@ -2654,21 +2600,15 @@ function Set-AutoOSOpenCodeConfig {
         Write-AutoOSLine "OpenCode configuration written to $configFile" -Level ok
     }
 
-    # Merge the shared agent harness (roles, skills link) after the config is
+    # Merge the shared agent harness (roles) after the config is
     # written. Judge by exit code only; no 2>&1, since under 'Stop' Windows
     # PowerShell 5.1 turns a native stderr line into a terminating error.
-    $skillsSource = Get-AutoOSSkillsSource
-    if (-not $skillsSource) {
-        # Pass the would-be path even when missing: the generator records
-        # "skills: source missing" rather than failing.
-        $skillsSource = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Code\agent-skills\skills'
-    }
     $pythonCmd = (Get-Command python -ErrorAction SilentlyContinue)
     if (-not $pythonCmd) {
         $pythonCmd = (Get-Command py -ErrorAction SilentlyContinue)
     }
     if ($pythonCmd) {
-        $harnessOut = & $pythonCmd.Source (Join-Path $script:RepoRoot 'lib\agent_harness.py') opencode --config $configFile --repo-root $script:RepoRoot --skills-source $skillsSource
+        $harnessOut = & $pythonCmd.Source (Join-Path $script:RepoRoot 'lib\agent_harness.py') opencode --config $configFile --repo-root $script:RepoRoot
         if ($LASTEXITCODE -ne 0) {
             Write-AutoOSLine "agent harness not applied to OpenCode (exit $LASTEXITCODE)" -Level warn
         } else {
@@ -2700,268 +2640,15 @@ function Set-AutoOSOpenCodeConfig {
     }
 }
 
-function New-AutoOSSkillLink {
-    <#
-      .SYNOPSIS
-        Make one directory link (a junction on Windows, a symlink elsewhere) and
-        prove it exists.
-      .DESCRIPTION
-        The link is read back after New-Item: a link that was silently not created
-        must never be reported as linked. Returns $false, after a warn line, when
-        it could not be made. A junction needs no administrator rights; other
-        hosts only run this from the test suite, where a symlink stands in for it.
-    #>
-    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Target)
-    $type = 'SymbolicLink'
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $type = 'Junction' }
-    try {
-        $null = New-Item -ItemType $type -Path $Path -Target $Target
-    } catch {
-        Write-AutoOSLine "could not link ${Path}: $($_.Exception.Message)" -Level warn
-        return $false
-    }
-    $made = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-    if (-not $made -or -not $made.LinkType) {
-        Write-AutoOSLine "could not link ${Path}: no link was created" -Level warn
-        return $false
-    }
-    return $true
-}
-
-function Get-AutoOSRetiredSkillRoots {
-    <#
-      .SYNOPSIS
-        The retired agent-skills clone's skills directories: <Documents>\Code or
-        \code \agent-skills\skills, for the shell's Documents folder and $HOME's.
-        Where Install-AutoOSAgentSkills linked skills from before 2026-09-25.
-    #>
-    $docs = @([Environment]::GetFolderPath('MyDocuments'), (Join-Path $HOME 'Documents')) | Where-Object { $_ }
-    @(foreach ($d in $docs) {
-        foreach ($code in @('Code', 'code')) { Join-Path $d "$code\agent-skills\skills" }
-    }) | Select-Object -Unique
-}
-
-function Sync-AutoOSSkillDirs {
-    <#
-      .SYNOPSIS
-        Mirror every skill in -Source into -Destination as one directory junction per skill.
-
-      .DESCRIPTION
-        A skill is a direct child of -Source that holds a SKILL.md. -Destination is a
-        real directory of its own, so a user's skills sit beside ours and are never
-        touched:
-          absent                                    -> linked
-          a link to the same directory              -> skipped
-          a link that is ours and dangling          -> repointed
-          anything else (a user's directory or file, any live link that
-            resolves somewhere else, a dangling link of another shape) -> left alone
-        A link is ours only when its target no longer exists AND its path ends with
-        \.agents\skills\<this skill's name> - the exact shape this function creates,
-        so a moved or renamed checkout is repaired. A live link is the user's, even
-        when it points inside the repo's own .agents directory (AGENTS.md hard rule 4).
-        A -Destination that is itself a link (the old whole-directory junction
-        layout) is not written through - that would create links inside the repo or a
-        clone - it is left with one warning that names the fix. A link that cannot be
-        made is a warning, never an ok line. Returns $false when a link failed.
-
-        -RetargetRetiredClone (setup passes it; operator Q-018) adds one more
-        recognised shape: a link, live or dangling, whose target is the retired
-        agent-skills clone's copy of this skill - <root>\<name> for a root in
-        -RetiredSkillRoots (default Get-AutoOSRetiredSkillRoots, the path the
-        installer used before .agents/skills became the only skills home,
-        2026-09-25). A known location, not a suffix: a user's own
-        ...\agent-skills\skills\<name> checkout elsewhere is theirs. The new link is
-        made under a temporary name first and swapped in; a failed swap puts the
-        old link back. Only a move that happened is appended to
-        <Destination>.autoos-backup-<stamp>; the target itself is never touched.
-        AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 turns it off here too.
-    #>
-    param(
-        [Parameter(Mandatory)][string]$Source,
-        [Parameter(Mandatory)][string]$Destination,
-        [switch]$RetargetRetiredClone,
-        [string[]]$RetiredSkillRoots = (Get-AutoOSRetiredSkillRoots)
-    )
-    if ($env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS -eq '0') { $RetargetRetiredClone = $false }
-    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
-        Write-AutoOSLine "no skills to link: $Source is not a directory" -Level muted
-        return $true
-    }
-    $skills = @(Get-ChildItem -LiteralPath $Source -Directory |
-        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'SKILL.md') -PathType Leaf } |
-        Sort-Object Name)
-    if ($skills.Count -eq 0) {
-        Write-AutoOSLine "no skills to link: nothing under $Source holds a SKILL.md" -Level muted
-        return $true
-    }
-    if ($script:DryRun) {
-        Write-AutoOSLine "would link $($skills.Count) skill(s) from $Source into $Destination" -Level muted
-        return $true
-    }
-
-    $destItem = Get-Item -LiteralPath $Destination -Force -ErrorAction SilentlyContinue
-    if ($destItem -and $destItem.LinkType) {
-        Write-AutoOSLine "$Destination is a link (the old whole-directory layout); not writing through it." -Level warn
-        Write-AutoOSLine "    To mirror the skills one by one instead: cmd /c rmdir `"$Destination`" and run setup again." -Level muted
-        return $true
-    }
-    if ($destItem -and -not $destItem.PSIsContainer) {
-        Write-AutoOSLine "$Destination is a file - skills not linked" -Level warn
-        return $false
-    }
-    if (-not $destItem) {
-        try { $null = New-Item -ItemType Directory -Path $Destination -Force }
-        catch {
-            Write-AutoOSLine "could not create ${Destination}: $($_.Exception.Message) - skills not linked" -Level warn
-            return $false
-        }
-    }
-
-    $comparison = [StringComparison]::Ordinal
-    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { $comparison = [StringComparison]::OrdinalIgnoreCase }
-
-    $ok = $true
-    $skipped = 0
-    $record = $null
-    foreach ($skill in $skills) {
-        $link = Join-Path $Destination $skill.Name
-        $want = [IO.Path]::GetFullPath($skill.FullName).TrimEnd('\', '/')
-        $item = Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
-        if (-not $item) {
-            if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
-                Write-AutoOSLine "linked $($skill.Name) into $Destination" -Level ok
-            } else { $ok = $false }
-        } elseif ($item.LinkType) {
-            # Target is a string[] in Windows PowerShell 5.1 and may be relative;
-            # a junction can report its target with a \\?\ or \??\ prefix.
-            $raw = [string]@($item.Target)[0] -replace '^(\\\\\?\\|\\\?\?\\)', ''
-            $have = ''
-            if ($raw) {
-                if (-not [IO.Path]::IsPathRooted($raw)) { $raw = Join-Path $Destination $raw }
-                try { $have = [IO.Path]::GetFullPath($raw).TrimEnd('\', '/') } catch { $have = '' }
-            }
-            # Ours = dangling AND shaped .../.agents/skills/<this skill> (either
-            # separator: a symlink stands in for the junction off Windows).
-            $shape = '/.agents/skills/' + $skill.Name
-            if ($have -and [string]::Equals($have, $want, $comparison)) {
-                $skipped++
-            } elseif ($have -and -not (Test-Path -LiteralPath $have) -and $have.Replace('\', '/').EndsWith($shape, $comparison)) {
-                # Reparse-point safe: Delete() on the link removes the link only,
-                # and here the target is gone anyway. Never a recursive delete.
-                try { $item.Delete() }
-                catch {
-                    Write-AutoOSLine "could not repoint ${link}: $($_.Exception.Message) - left as it was" -Level warn
-                    $ok = $false
-                    continue
-                }
-                if (New-AutoOSSkillLink -Path $link -Target $skill.FullName) {
-                    Write-AutoOSLine "repointed $($skill.Name) (was $raw)" -Level ok
-                } else { $ok = $false }
-            } elseif ($RetargetRetiredClone -and $have -and @($RetiredSkillRoots | Where-Object { $_ } | Where-Object {
-                        [string]::Equals($have, [IO.Path]::GetFullPath((Join-Path $_ $skill.Name)).TrimEnd('\', '/'), $comparison)
-                    }).Count) {
-                # A link (live or dangling) into the retired agent-skills clone's
-                # copy of this skill. Make the new link under a temporary name
-                # first, so a link that cannot be made leaves the old one in place.
-                $staged = "$link.autoos-new-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
-                if (-not (New-AutoOSSkillLink -Path $staged -Target $skill.FullName)) {
-                    Write-AutoOSLine "could not retarget ${link} - left as it was" -Level warn
-                    $ok = $false
-                    continue
-                }
-                try {
-                    $item.Delete()  # the link only - a reparse point is never recursed
-                    [IO.Directory]::Move($staged, $link)
-                } catch {
-                    $why = $_.Exception.Message
-                    $state = 'old link left in place'
-                    if (-not (Get-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue)) {
-                        # A junction needs its target: a dangling old link cannot be
-                        # recreated, and the next run links the skill afresh.
-                        $state = if (New-AutoOSSkillLink -Path $link -Target $raw) { 'old link put back' }
-                                 else { 'old link could not be put back (its target is gone); the next run links it' }
-                    }
-                    $left = Get-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
-                    if ($left -and $left.LinkType) { $left.Delete() }
-                    Write-AutoOSLine "could not retarget ${link}: $why - $state" -Level warn
-                    $ok = $false
-                    continue
-                }
-                # Recorded only now, when the move has happened.
-                if (-not $record) {
-                    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-                    $record = "$Destination.autoos-backup-$stamp"
-                    $n = 0
-                    while (Test-Path -LiteralPath $record) { $n++; $record = "$Destination.autoos-backup-$stamp-$n" }
-                }
-                try { Add-Content -LiteralPath $record -Value "$link -> $raw" -Encoding utf8 }
-                catch { Write-AutoOSLine "retargeted ${link} but could not write ${record}: was $raw" -Level warn }
-                Write-AutoOSLine "retargeted $($skill.Name) from the retired agent-skills clone (was $raw; recorded in $record)" -Level ok
-            } else {
-                Write-AutoOSLine "kept ${link}: a link of your own, not an AutoOS link" -Level muted
-            }
-        } else {
-            Write-AutoOSLine "kept ${link}: yours, not an AutoOS link" -Level muted
-        }
-    }
-    if ($skipped -gt 0) {
-        Write-AutoOSLine "skipped $skipped skill link(s) that are already in place in $Destination" -Level muted
-    }
-    return $ok
-}
-
-function Sync-AutoOSAgentSkillTargets {
-    <#
-      .SYNOPSIS
-        Mirror the repo's skills into the user-scope dirs the other agents read.
-
-      .DESCRIPTION
-        Clients that follow the Agent Skills convention read a user-scope
-        directory: gemini, qoder and qwen read ~/.agents/skills; codex reads
-        ~/.codex/skills. Claude Code reads ~/.claude/skills and Antigravity
-        ~/.gemini/config/skills (the same list as agent_skill_link_dests on
-        Linux). Each skill is linked individually by
-        Sync-AutoOSSkillDirs, so the user's own entries sit beside ours and are
-        never touched, and a second run is a no-op.
-
-        Every destination gets -RetargetRetiredClone (see Sync-AutoOSSkillDirs):
-        setup moves recognised links into the retired agent-skills clone
-        (operator Q-018, 2026-09-28). AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0 opts out.
-
-        ~/.codex/skills is only written when codex is actually there (its
-        command is on PATH or its ~/.codex directory exists): creating the
-        directory for a tool the machine does not have is worse than doing
-        nothing. ~/.agents/skills has no such guard - it is the shared
-        convention directory, not one vendor's.
-    #>
-    param([Parameter(Mandatory)][string]$Source)
-    $retarget = $env:AUTOOS_RETARGET_RETIRED_SKILL_LINKS -ne '0'
-    $dests = @(
-        (Join-Path $HOME '.agents\skills'),
-        (Join-Path $HOME '.claude\skills'),
-        (Join-Path $HOME '.gemini\config\skills')
-    )
-    $codexHome = Join-Path $HOME '.codex'
-    if ((Test-Path -LiteralPath $codexHome) -or (Get-Command codex -ErrorAction SilentlyContinue)) {
-        $dests += Join-Path $codexHome 'skills'
-    }
-    $ok = $true
-    foreach ($dest in $dests) {
-        $ok = (Sync-AutoOSSkillDirs -Source $Source -Destination $dest -RetargetRetiredClone:$retarget) -and $ok
-    }
-    return $ok
-}
-
 function Set-AutoOSOpenHandsConfig {
     <#
-      .SYNOPSIS Configure OpenHands settings, models, profiles, skills, and automations.
+      .SYNOPSIS Configure OpenHands settings, models, profiles, and automations.
 
       .DESCRIPTION
         Configures OpenHands in ~/.openhands/settings.json, creates model profiles in
         ~/.openhands/profiles/ (direct providers plus the gateway-routed
         omniroute-tier* / litellm-tier* profiles from
         configuration/openhands/tier-profiles.json),
-        mirrors the repo skills into ~/.openhands/skills (one junction per skill),
         creates ACP agent profiles, and seeds default configuration.
     #>
     $openhandsDir = Join-Path $HOME '.openhands'
@@ -3000,15 +2687,6 @@ function Set-AutoOSOpenHandsConfig {
     $deepseekKey = if ($env:DEEPSEEK_API_KEY) { $env:DEEPSEEK_API_KEY } elseif ($secrets.ContainsKey('deepseek')) { $secrets['deepseek'] } else { $null }
     $openrouterKey = if ($env:OPENROUTER_API_KEY) { $env:OPENROUTER_API_KEY } elseif ($secrets.ContainsKey('openrouter')) { $secrets['openrouter'] } else { $null }
     $context7Key = if ($env:CONTEXT7_API_KEY) { $env:CONTEXT7_API_KEY } elseif ($secrets.ContainsKey('context7')) { $secrets['context7'] } else { $null }
-
-    # Native OpenHands (host CLI, Windows) loads user skills from
-    # ~/.openhands/skills. The sandbox containers do not mount it: they read the
-    # workspace's .agents/skills instead (AGENTS.md section 8). One junction per
-    # skill; a failure is already reported and must not stop the rest.
-    $skillsSource = Get-AutoOSSkillsSource
-    if ($skillsSource) {
-        $null = Sync-AutoOSSkillDirs -Source $skillsSource -Destination (Join-Path $openhandsDir 'skills')
-    }
 
     $pythonCmd = (Get-Command python -ErrorAction SilentlyContinue)
     if (-not $pythonCmd) {
@@ -4134,7 +3812,7 @@ Export-ModuleMember -Function `
     Install-AutoOSWindhawkMods, Install-AutoOSAgentSkills, Set-AutoOSAntigravityMcp,
     Register-AutoOSAntigravityMcpServer, Install-AutoOSMcpSerena, Set-AutoOSSerenaExclusions, Install-AutoOSMcpGraphify,
     Install-AutoOSMcpPlaywright, Install-AutoOSMcpContext7,
-    Set-AutoOSOpenCodeConfig, Get-AutoOSLegacyModels, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig, Sync-AutoOSSkillDirs, Sync-AutoOSAgentSkillTargets,
+    Set-AutoOSOpenCodeConfig, Get-AutoOSLegacyModels, Test-AutoOSOpenCodeV2, ConvertFrom-AutoOSJsonc, Set-AutoOSOpenHandsConfig,
     Install-AutoOSLitellm, Set-AutoOSClaudeGateway, Set-AutoOSOmniRouteCliKey, Set-AutoOSApiKeyEnv, Install-AutoOSQoderCli, Install-AutoOSOmniRouteRouting, Install-AutoOSOpenHands,
     Set-AutoOSQoderMcp, Set-AutoOSCodexSpawnerMcp,
     Install-AutoOSNeovim, Install-AutoOSLazyVim, Enable-AutoOSSidekickExtra,

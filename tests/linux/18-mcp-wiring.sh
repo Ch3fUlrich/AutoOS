@@ -663,12 +663,6 @@ if it "register_antigravity_mcp_server is idempotent and creates backup"; then
     else fail "backup was not created before edit"; fi
 fi
 
-# The skills-link cases (Antigravity, Claude Code, project .claude/skills,
-# ~/.agents/skills, ~/.codex/skills) all live together in the "skill targets"
-# section below, where the scratch repo helper is defined — A7b moved that whole
-# duty out of the retired agent-skills step into install_agent_skill_links, and
-# one writer deserves one block.
-
 if it "omnigraph-client records a refused project-server approval for the summary"; then
     # A post-install step that refuses to touch a user's file (no backup, no
     # write) must still be counted: setup.sh folds autoos_record_failure ids
@@ -812,13 +806,12 @@ fi
 # run_post_install contains a non-zero step, so each keeps failing on its own.
 if it "no installer calls the mcp-* postInstalls from another component"; then
     ok=1
-    for fn in install_agent_skill_links install_omnigraph_client; do
-        body="$(awk -v f="$fn" '$0 ~ "^"f"\\(\\) \\{"{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
-        for sub in install_mcp_graphify install_mcp_serena install_mcp_playwright install_mcp_context7; do
-            if grep -q "^[[:space:]]*$sub" <<<"$body"; then
-                ok=0; echo "$fn calls $sub (it belongs to the $sub component)" >&2
-            fi
-        done
+    fn=install_omnigraph_client
+    body="$(awk -v f="$fn" '$0 ~ "^"f"\\(\\) \\{"{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
+    for sub in install_mcp_graphify install_mcp_serena install_mcp_playwright install_mcp_context7; do
+        if grep -q "^[[:space:]]*$sub" <<<"$body"; then
+            ok=0; echo "$fn calls $sub (it belongs to the $sub component)" >&2
+        fi
     done
     if (( ok )); then pass; else fail "an mcp-* postInstall is still called from another component"; fi
 fi
@@ -828,14 +821,14 @@ if it "agent-skills: the catalog entry is a tombstone and names its successors";
     # that carries the fact. Every field an installer needed is gone with the
     # installer; the note and the successor ids are what the run prints and plans.
     # Windows is retired too (its clone bit is gone), but it has no
-    # agent-skill-links/omnigraph-client twin, so only the four mcp-* components
+    # omnigraph-client twin, so only the four mcp-* components
     # inherit the work there - hence a per-platform successor list.
     out="$(python3 - <<'PY'
 import json, sys
 successors = {
-    "catalog/linux.json": ["agent-skill-links", "omnigraph-client", "mcp-graphify",
+    "catalog/linux.json": ["omnigraph-client", "mcp-graphify",
                            "mcp-serena", "mcp-playwright", "mcp-context7"],
-    "catalog/macos.json": ["agent-skill-links", "omnigraph-client", "mcp-graphify",
+    "catalog/macos.json": ["omnigraph-client", "mcp-graphify",
                            "mcp-serena", "mcp-playwright", "mcp-context7"],
     "catalog/windows.json": ["mcp-graphify", "mcp-serena", "mcp-playwright", "mcp-context7"],
 }
@@ -875,6 +868,35 @@ PY
 )" && catalog_validate catalog/linux.json >/dev/null 2>&1 && catalog_validate catalog/macos.json >/dev/null 2>&1 \
     && catalog_validate catalog/windows.json >/dev/null 2>&1 \
     && pass || fail "agent-skills tombstone: ${out:0:400}"
+fi
+
+if it "agent-skill-links: a tombstone, and no installer links skills any more"; then
+    # AutoOS holds no skill: skills live in the plangraph repository. The id
+    # stays known so an old selection or state file still resolves, and nothing
+    # in the installers can link, copy or look for a skill.
+    out="$(python3 - <<'PY'
+import json, sys
+problems = []
+for f in ("catalog/linux.json", "catalog/macos.json"):
+    data = json.load(open(f, encoding="utf-8"))
+    found = [c for g in data["categories"] for c in g["components"] if c.get("id") == "agent-skill-links"]
+    if len(found) != 1:
+        problems.append("%s: %d agent-skill-links entries" % (f, len(found))); continue
+    c = found[0]
+    if c.get("tombstone") is not True:
+        problems.append(f + ": agent-skill-links is not a tombstone")
+    for dead in ("postInstall", "profiles", "prompt", "requires", "verify"):
+        if c.get(dead):
+            problems.append("%s: agent-skill-links still carries %s" % (f, dead))
+print("\n".join(problems))
+sys.exit(1 if problems else 0)
+PY
+)"
+    rc=$?
+    for fn in install_agent_skill_links agent_skill_links_current agent_skill_link_dests autoos_skills_source link_skill_dirs retired_skill_link; do
+        if declare -F "$fn" >/dev/null; then rc=1; out+=" $fn is still defined"; fi
+    done
+    (( rc == 0 )) && pass || fail "agent-skill-links: ${out:0:400}"
 fi
 
 if it "agent-skills: the Windows installer never clones the retired repo"; then
@@ -939,7 +961,7 @@ EOS
     out="$(
         catalog_load catalog/linux.json x64 0
         i="$(catalog_index_of agent-skills)"
-        j="$(catalog_index_of agent-skill-links)"
+        j="$(catalog_index_of omnigraph-client)"
         custom_is_installed() { return 0; }
         PATH="$stub_bin:$PATH" catalog_probe_installed
         printf 'tombstone=%s ordinary=%s listed=%s flagged=%s\n' \
@@ -973,7 +995,7 @@ if it "route_detected_clis_to_gateway: a failing Claude routing step is recorded
     fi
 fi
 
-# ─── OpenHands: repo skills mirrored per skill, idempotent settings writer ──
+# ─── OpenHands: idempotent settings writer ──
 # oh_setup_run <home> <repo> [fn]: setup_openhands_config (or `fn`) in a hermetic
 # subshell - scratch HOME and AUTOOS_ROOT, no gateway or provider key, no network
 # - with stdout and stderr merged. AUTOOS_KEYS_FILE points at a file that does not
@@ -991,164 +1013,6 @@ oh_setup_run() {
         "$fn"
     ) 2>&1
 }
-
-# oh_skill_repo <repo>: a scratch AUTOOS_ROOT with two skills (alpha, beta) and
-# one directory without a SKILL.md (nofile) that is not a skill.
-oh_skill_repo() {
-    local repo="$1" n
-    for n in alpha beta; do
-        mkdir -p "$repo/.agents/skills/$n"
-        printf -- '---\nname: %s\ndescription: demo\n---\n' "$n" >"$repo/.agents/skills/$n/SKILL.md"
-    done
-    mkdir -p "$repo/.agents/skills/nofile"
-    printf 'not a skill\n' >"$repo/.agents/skills/nofile/README.md"
-}
-
-if it "openhands: links every repo skill into ~/.openhands/skills"; then
-    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
-    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
-    dest="$tmp/home/.openhands/skills"; problems=""
-    { [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is not a real directory] "; }
-    for n in alpha beta; do
-        [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
-            || problems+="[$n is not a link to the repo skill (got: $(readlink "$dest/$n" 2>/dev/null || echo none))] "
-        [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
-        [[ "$out" == *"linked $n"* ]] || problems+="[no 'linked $n' line] "
-    done
-    { [[ ! -e "$dest/nofile" && ! -L "$dest/nofile" ]] || problems+="[nofile (no SKILL.md) was linked] "; }
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "openhands: a second run reports skipped and changes nothing"; then
-    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
-    oh_setup_run "$tmp/home" "$tmp/repo" >/dev/null
-    dest="$tmp/home/.openhands/skills"
-    before="$(stat -c '%y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
-    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
-    after="$(stat -c '%y' "$dest"; readlink "$dest/alpha" "$dest/beta")"
-    problems=""
-    [[ "$before" == "$after" ]] || problems+="[the skills directory or a link changed: $before -> $after] "
-    grep -Eq '(^|[^[:alnum:]])(linked|repointed) [a-z]' <<<"$out" && problems+="[second run printed a linked/repointed line] "
-    [[ "$out" == *skipped* ]] || problems+="[second run never says skipped] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "openhands: keeps a user's own skill"; then
-    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
-    dest="$tmp/home/.openhands/skills"
-    mkdir -p "$dest/alpha" "$dest/mine"
-    printf 'my own alpha\n' >"$dest/alpha/SKILL.md"
-    printf 'my own skill\n'  >"$dest/mine/SKILL.md"
-    ln -s /nonexistent-user-skill "$dest/foreign"
-    snap() { ( cd "$dest" && find alpha mine -type f -exec sha256sum {} + | sort; readlink foreign; ls -A ) ; }
-    before="$(snap)"
-    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
-    after="$(snap)"
-    problems=""
-    [[ -d "$dest/alpha" && ! -L "$dest/alpha" ]] || problems+="[the user's own alpha is no longer a real directory] "
-    [[ "$(readlink "$dest/beta" 2>/dev/null)" == "$tmp/repo/.agents/skills/beta" ]] || problems+="[beta was not linked next to the user's skills] "
-    # beta is the one new entry: nothing else may differ from before.
-    [[ "$(grep -v '^beta$' <<<"$after")" == "$before" ]] || problems+="[the user's skills changed: $before -> $after] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "openhands: repairs a dangling link into the repo"; then
-    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
-    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
-    # Ours: the exact shape link_skill_dirs creates (<checkout>/.agents/skills/<name>)
-    # into a checkout that has since moved or been renamed, so it dangles.
-    ln -s "$tmp/moved-checkout/.agents/skills/alpha" "$dest/alpha"
-    ln -s /nonexistent-elsewhere/beta "$dest/beta"                 # not ours, dangling: hands off
-    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
-    problems=""
-    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/skills/alpha" ]] || problems+="[alpha still points at $(readlink "$dest/alpha")] "
-    [[ -f "$dest/alpha/SKILL.md" ]] || problems+="[alpha does not resolve after the repair] "
-    [[ "$(readlink "$dest/beta")" == "/nonexistent-elsewhere/beta" ]] || problems+="[a foreign dangling link was rewritten to $(readlink "$dest/beta")] "
-    [[ "$out" == *"repointed alpha"* ]] || problems+="[no 'repointed alpha' line] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-# Only a link this function made is ours (AGENTS.md hard rule 4): it dangles AND
-# has the exact shape .../.agents/skills/<name> for the same skill. A live link,
-# or a dangling one of another shape, is the user's and stays as it is - even
-# when it points inside the repo's own .agents directory.
-if it "openhands: a live link of your own into .agents/custom is kept"; then
-    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
-    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest" "$tmp/repo/.agents/custom/alpha"
-    printf 'my own alpha\n' >"$tmp/repo/.agents/custom/alpha/SKILL.md"
-    ln -s "$tmp/repo/.agents/custom/alpha" "$dest/alpha"           # live, inside the repo's .agents, not our shape
-    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
-    problems=""
-    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/custom/alpha" ]] || problems+="[the user's live link now points at $(readlink "$dest/alpha")] "
-    [[ "$(cat "$dest/alpha/SKILL.md" 2>/dev/null)" == "my own alpha" ]] || problems+="[alpha no longer resolves to the user's own skill] "
-    [[ "$out" != *"repointed alpha"* ]] || problems+="[the live link was reported as repointed] "
-    [[ "$out" == *"kept $dest/alpha"* ]] || problems+="[no 'kept ...alpha' line: the user is not told it was left alone] "
-    [[ "$(readlink "$dest/beta")" == "$tmp/repo/.agents/skills/beta" ]] || problems+="[beta was not linked next to the user's link] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "openhands: a live link into another checkout's skills is kept"; then
-    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
-    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
-    # Another checkout with the same skills layout. One sits beside this repo,
-    # one is nested under this repo's own .agents directory (a worktree kept
-    # there): both are live and both have the shape we would create.
-    oh_skill_repo "$tmp/other"
-    oh_skill_repo "$tmp/repo/.agents/nested"
-    ln -s "$tmp/repo/.agents/nested/.agents/skills/alpha" "$dest/alpha"
-    ln -s "$tmp/other/.agents/skills/beta" "$dest/beta"
-    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
-    problems=""
-    [[ "$(readlink "$dest/alpha")" == "$tmp/repo/.agents/nested/.agents/skills/alpha" ]] || problems+="[the link into the nested checkout now points at $(readlink "$dest/alpha")] "
-    [[ "$(readlink "$dest/beta")" == "$tmp/other/.agents/skills/beta" ]] || problems+="[the link into the other checkout now points at $(readlink "$dest/beta")] "
-    [[ "$out" != *"repointed"* ]] || problems+="[a live link was reported as repointed] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "openhands: a dangling link of another shape is kept"; then
-    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
-    dest="$tmp/home/.openhands/skills"; mkdir -p "$dest"
-    ln -s /nonexistent/other/alpha "$dest/alpha"                    # dangling, outside the repo
-    ln -s "$tmp/repo/.agents/skills/beta-renamed" "$dest/beta"      # dangling, inside the repo, not the shape of beta
-    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
-    problems=""
-    [[ "$(readlink "$dest/alpha")" == "/nonexistent/other/alpha" ]] || problems+="[the dangling link outside the repo now points at $(readlink "$dest/alpha")] "
-    [[ "$(readlink "$dest/beta")" == "$tmp/repo/.agents/skills/beta-renamed" ]] || problems+="[the dangling link of another shape now points at $(readlink "$dest/beta")] "
-    [[ "$out" != *"repointed"* ]] || problems+="[a link of another shape was reported as repointed] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "openhands: an existing whole-dir symlink is not written through"; then
-    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/clone-skills" "$tmp/home/.openhands"
-    ln -s "$tmp/clone-skills" "$tmp/home/.openhands/skills"     # the old whole-dir layout
-    repo_before="$(ls -A "$tmp/repo/.agents/skills")"
-    out="$(oh_setup_run "$tmp/home" "$tmp/repo")"
-    problems=""
-    [[ "$(readlink "$tmp/home/.openhands/skills")" == "$tmp/clone-skills" ]] || problems+="[the whole-dir link was changed] "
-    [[ -z "$(ls -A "$tmp/clone-skills")" ]] || problems+="[links were written through it into the clone: $(ls -A "$tmp/clone-skills" | tr '\n' ' ')] "
-    [[ "$(ls -A "$tmp/repo/.agents/skills")" == "$repo_before" ]] || problems+="[the repo's skills directory gained entries] "
-    [[ "$(grep -c 'rm ' <<<"$out")" == 1 ]] || problems+="[expected one warning naming the rm command, got $(grep -c 'rm ' <<<"$out")] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "openhands: a dry run links nothing"; then
-    tmp="$(mktemp -d)"; oh_skill_repo "$tmp/repo"
-    out="$( ( AUTOOS_DRY_RUN=1; link_skill_dirs "$tmp/repo/.agents/skills" "$tmp/home/.openhands/skills" ) 2>&1 )"
-    problems=""
-    [[ ! -e "$tmp/home" ]] || problems+="[a dry run created $tmp/home] "
-    [[ "$out" == *"would link"* ]] || problems+="[no 'would link' line: $out] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
 
 if it "openhands: second run of the settings writer takes no backup and reports unchanged"; then
     tmp="$(mktemp -d)"
@@ -1438,375 +1302,6 @@ if it "setup_wsl_agent_home does not falsely relocate a CAO home whose path cont
     [[ ! -e "$legacy/.autoos-fifo-probe" ]] || { ok=0; echo "the FIFO probe was left behind" >&2; }
     rm -rf "$tmp"
     if (( ok )); then pass; else fail "a single quote in the CAO path caused a false relocation"; fi
-fi
-
-# ─── Skill targets: the agent-skill-links component ─────────────────────────
-# A7b moved this duty out of the retired agent-skills step: linking this
-# checkout's .agents/skills into every client's skills directory is its own
-# component, install_agent_skill_links. One hermetic runner for the whole block —
-# scratch SYS_HOME and AUTOOS_ROOT, codex present or absent on request, and the
-# repo's own keys file never consulted.
-# asl_run <home> <repo> [dry] [codex] -> the step's output plus its state line.
-asl_run() {
-    local home="$1" repo="$2" dry="${3:-0}" codex="${4:-0}"
-    (
-        SYS_HOME="$home" AUTOOS_ROOT="$repo" AUTOOS_DRY_RUN="$dry"
-        AUTOOS_KEYS_FILE="$home/no-keys.yml"
-        AUTOOS_EXTRA_FAILURES=()
-        has_cmd() { [[ "$codex" == 1 && "$1" == codex ]]; }
-        install_agent_skill_links 2>&1
-        printf 'state=%s recorded=[%s]\n' "${INSTALL_SCRIPT_STATE:-}" "${AUTOOS_EXTRA_FAILURES[*]:-}"
-    )
-}
-
-# asl_gate <home> <repo> [codex]: detection's verdict for the id. Detection is
-# the gate setup.sh runs, so every case that cares about "already in place"
-# asks it, not the writer's private helper.
-asl_gate() {
-    local home="$1" repo="$2" codex="${3:-0}"
-    (
-        SYS_HOME="$home" AUTOOS_ROOT="$repo" AUTOOS_DRY_RUN=0
-        has_cmd() { [[ "$codex" == 1 && "$1" == codex ]]; }
-        custom_is_installed agent-skill-links
-    )
-}
-
-if it "agent-skill-links: does NOT clone the retired agent-skills repo"; then
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/home/Documents/code/agent-skills/skills/old-skill"
-    printf 'old clone\n' >"$tmp/home/Documents/code/agent-skills/skills/old-skill/README.md"
-    clone_flag="$tmp/clone_flag"
-    out="$( (
-        SYS_HOME="$tmp/home" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
-        clone_or_update() { echo called >"$clone_flag"; }
-        install_agent_skill_links 2>&1
-    ) )"
-    problems=""
-    [[ ! -f "$clone_flag" ]] || problems+="[clone_or_update was called (nothing may clone)] "
-    [[ -f "$tmp/home/Documents/code/agent-skills/skills/old-skill/README.md" ]] \
-        || problems+="[the retired clone was modified] "
-    # Proof the step really ran (and from the checkout, not a clone): a step that
-    # does not exist fails no assertion above.
-    [[ -f "$tmp/home/.agents/skills/alpha/SKILL.md" ]] \
-        || problems+="[nothing was linked, so nothing was proven about cloning]"
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: links every skill into Antigravity, Claude Code, the project dir and ~/.agents"; then
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    out="$(asl_run "$tmp/home" "$tmp/repo")"
-    problems=""
-    for dest in "$tmp/home/.gemini/config/skills" "$tmp/home/.claude/skills" "$tmp/repo/.claude/skills"; do
-        for n in alpha beta; do
-            [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through $dest] "
-        done
-    done
-    dest="$tmp/home/.agents/skills"
-    { [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is missing or a symlink] "; }
-    for n in alpha beta; do
-        [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
-            || problems+="[$n not linked into $dest (got: $(readlink "$dest/$n" 2>/dev/null || echo none))] "
-        [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
-    done
-    [[ ! -e "$dest/nofile" ]] || problems+="[nofile (no SKILL.md) was linked into $dest] "
-    [[ ! -d "$tmp/home/.codex/skills" ]] || problems+="[.codex/skills was created even though codex is not present] "
-    [[ "$out" == *"state="* ]] || problems+="[the step printed no state line: $(tail -n 2 <<<"$out")] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: the vendored .agents/skills wins over the retired clone"; then
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/home/Documents/code/agent-skills/skills/old-skill"
-    printf -- '---\nname: old-skill\ndescription: demo\n---\n' \
-        >"$tmp/home/Documents/code/agent-skills/skills/old-skill/SKILL.md"
-    out="$(asl_run "$tmp/home" "$tmp/repo")"
-    problems=""
-    [[ -f "$tmp/home/.claude/skills/alpha/SKILL.md" ]] || problems+="[the repo skills did not link] "
-    [[ ! -e "$tmp/home/.claude/skills/old-skill" ]] || problems+="[the retired clone's skill was linked too] "
-    [[ "$(AUTOOS_ROOT="$tmp/repo" autoos_skills_source)" == "$tmp/repo/.agents/skills" ]] \
-        || problems+="[autoos_skills_source did not name the vendored dir] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: links into ~/.codex/skills when codex is installed"; then
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    out="$(asl_run "$tmp/home" "$tmp/repo" 0 1)"
-    problems=""
-    dest="$tmp/home/.codex/skills"
-    { [[ -d "$dest" && ! -L "$dest" ]] || problems+="[$dest is missing or a symlink] "; }
-    for n in alpha beta; do
-        [[ -L "$dest/$n" && "$(readlink "$dest/$n")" == "$tmp/repo/.agents/skills/$n" ]] \
-            || problems+="[$n not linked into $dest] "
-        [[ -f "$dest/$n/SKILL.md" ]] || problems+="[$n/SKILL.md unreadable through the link] "
-    done
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: creates no ~/.codex when codex is absent"; then
-    # Creating a directory for a tool the machine does not have is worse than
-    # doing nothing: ~/.codex is only touched when it already exists or codex
-    # is on PATH (and the gate must not count a dest it never writes).
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    out="$(asl_run "$tmp/home" "$tmp/repo" 0 0)"
-    problems=""
-    [[ -e "$tmp/home/.codex" ]] && problems+="[~/.codex was created without codex] "
-    [[ -L "$tmp/home/.agents/skills/alpha" ]] || problems+="[~/.agents/skills not linked, so the run did not reach the step] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: second run reports skipped and touches nothing"; then
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/home/.codex"
-    asl_run "$tmp/home" "$tmp/repo" 0 1 >/dev/null
-    dest="$tmp/home/.agents/skills"
-    before="$(stat -c '%Y' "$dest"; readlink "$dest/alpha" "$dest/beta"; readlink "$tmp/home/.gemini/config/skills/alpha")"
-    problems=""
-    # Detection is asked with the same codex answer as the run it gates.
-    asl_gate "$tmp/home" "$tmp/repo" 1 || problems+="[detection still says not installed] "
-    out="$(asl_run "$tmp/home" "$tmp/repo" 0 1)"
-    after="$(stat -c '%Y' "$dest"; readlink "$dest/alpha" "$dest/beta"; readlink "$tmp/home/.gemini/config/skills/alpha")"
-    problems=""
-    [[ "$before" == "$after" ]] || problems+="[the skills directory or a link changed] "
-    grep -Eq '(^|[^[:alnum:]])(linked|repointed) (alpha|beta)\b' <<<"$out" && problems+="[second run printed a linked/repointed line] "
-    grep -qi 'skills linked' <<<"$out" && problems+="[second run claimed to link skills: $(tail -n 3 <<<"$out")] "
-    [[ "$out" == *"state=skipped"* ]] || problems+="[second run did not report skipped: $(tail -n 3 <<<"$out")] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: keeps a user's own skill in ~/.agents/skills"; then
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/home/.agents/skills/alpha" "$tmp/home/.agents/skills/mine"
-    printf 'my own alpha\n' >"$tmp/home/.agents/skills/alpha/SKILL.md"
-    printf 'my own skill\n'  >"$tmp/home/.agents/skills/mine/SKILL.md"
-    snap() { ( cd "$tmp/home/.agents/skills" && find alpha mine -type f -exec sha256sum {} + | sort; ls -A ); }
-    before="$(snap)"
-    asl_run "$tmp/home" "$tmp/repo" >/dev/null
-    after="$(snap)"
-    problems=""
-    [[ -d "$tmp/home/.agents/skills/alpha" && ! -L "$tmp/home/.agents/skills/alpha" ]] \
-        || problems+="[the user's own alpha is no longer a real directory] "
-    [[ "$(readlink "$tmp/home/.agents/skills/beta" 2>/dev/null)" == "$tmp/repo/.agents/skills/beta" ]] \
-        || problems+="[beta was not linked next to the user's skills] "
-    [[ "$(grep -v '^beta$' <<<"$after")" == "$before" ]] || problems+="[the user's skills changed] "
-    asl_gate "$tmp/home" "$tmp/repo" || problems+="[a user's own dir is counted as missing work]"
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: a whole-directory skills symlink of yours is settled, not missing work"; then
-    # AGENTS.md 8: a whole-dir symlink from the old layout is left with ONE
-    # warning. Writing through it would put our links inside a directory of yours,
-    # and counting it as missing work would make every later run report the
-    # component as installed while it in fact did nothing.
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    for n in alpha beta; do
-        mkdir -p "$tmp/yours/$n"
-        printf -- '---\nname: %s\ndescription: mine\n---\n' "$n" >"$tmp/yours/$n/SKILL.md"
-    done
-    mkdir -p "$tmp/home/.agents"
-    ln -s "$tmp/yours" "$tmp/home/.agents/skills"
-    before="$(readlink "$tmp/home/.agents/skills"; ls -A "$tmp/yours" | sort | tr '\n' ' ')"
-    out="$(asl_run "$tmp/home" "$tmp/repo")"
-    after="$(readlink "$tmp/home/.agents/skills"; ls -A "$tmp/yours" | sort | tr '\n' ' ')"
-    problems=""
-    [[ "$before" == "$after" ]] || problems+="[AutoOS wrote through the user's whole-directory symlink] "
-    [[ "$out" == *"is a symlink"* ]] || problems+="[nothing warned about it: $(tail -n 3 <<<"$out")] "
-    [[ "$out" == *"recorded=[]"* ]] || problems+="[a directory of yours being kept is recorded as a failure] "
-    asl_gate "$tmp/home" "$tmp/repo" || problems+="[a destination that is yours counts as missing work] "
-    # One refused directory is not a reason to stop the other clients.
-    [[ -L "$tmp/home/.claude/skills/alpha" ]] || problems+="[the other client dirs were not linked] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: a dry run links nothing and says so"; then
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/home/.codex"
-    out="$(asl_run "$tmp/home" "$tmp/repo" 1 1)"
-    problems=""
-    [[ ! -e "$tmp/home/.gemini" ]] || problems+="[dry run created $tmp/home/.gemini] "
-    [[ ! -e "$tmp/home/.claude" ]] || problems+="[dry run created $tmp/home/.claude] "
-    [[ ! -e "$tmp/home/.agents" ]] || problems+="[dry run created $tmp/home/.agents] "
-    [[ ! -e "$tmp/home/.codex/skills" ]] || problems+="[dry run created $tmp/home/.codex/skills] "
-    [[ ! -e "$tmp/repo/.claude/skills" ]] || problems+="[dry run wrote into the checkout] "
-    [[ "$out" == *"would link"* ]] || problems+="[the dry run made no announcement: $(tail -n 3 <<<"$out")] "
-    [[ "$out" == *"state=skipped"* ]] || problems+="[a dry run reported installed work: $(tail -n 3 <<<"$out")] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: detection says installed only when every client dir is filled"; then
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/home/.codex"
-    ok=1
-    asl_gate "$tmp/home" "$tmp/repo" 1 && { ok=0; echo "an empty machine was detected as installed" >&2; }
-    asl_run "$tmp/home" "$tmp/repo" 0 1 >/dev/null
-    asl_gate "$tmp/home" "$tmp/repo" 1 || { ok=0; echo "a fully linked machine was not detected" >&2; }
-    # A missing skill in ONE client dir is still missing work: that client would
-    # see no skills at all.
-    rm -f "$tmp/home/.claude/skills/beta"
-    asl_gate "$tmp/home" "$tmp/repo" 1 && { ok=0; echo "a client dir missing a skill was detected as installed" >&2; }
-    ln -sfn "$tmp/repo/.agents/skills/beta" "$tmp/home/.claude/skills/beta"
-    # A dest that is not ours at all (the user's own directory) is settled work.
-    rm -rf "$tmp/home/.agents/skills/alpha"
-    mkdir -p "$tmp/home/.agents/skills/alpha"
-    printf -- '---\nname: alpha\ndescription: mine\n---\n' >"$tmp/home/.agents/skills/alpha/SKILL.md"
-    asl_gate "$tmp/home" "$tmp/repo" 1 || { ok=0; echo "the user's own skill dir counted as missing work" >&2; }
-    rm -rf "$tmp"
-    if (( ok )); then pass; else fail "detection disagrees with what the linker writes"; fi
-fi
-
-if it "agent-skill-links: a moved checkout leaves a dangling link and detection notices"; then
-    # The repair rule lives in link_skill_dirs (repoint only our own dangling
-    # link). Detection has to reach it: a gate that calls a dangling link
-    # "installed" would skip the moved-checkout repair forever.
-    tmp="$(mktemp -d)"
-    oh_skill_repo "$tmp/repo"
-    mkdir -p "$tmp/home/.codex"
-    asl_run "$tmp/home" "$tmp/repo" 0 1 >/dev/null
-    mv "$tmp/repo" "$tmp/repo-moved"
-    problems=""
-    asl_gate "$tmp/home" "$tmp/repo-moved" 1 && problems+="[a dangling AutoOS link was detected as installed] "
-    out="$(asl_run "$tmp/home" "$tmp/repo-moved" 0 1)"
-    problems=""
-    [[ -f "$tmp/home/.agents/skills/alpha/SKILL.md" ]] || problems+="[the dangling ~/.agents link was not repointed] "
-    [[ -f "$tmp/home/.gemini/config/skills/alpha/SKILL.md" ]] || problems+="[the dangling ~/.gemini link was not repointed] "
-    [[ "$out" == *"repointed"* ]] || problems+="[the repair was not announced: $(tail -n 3 <<<"$out")] "
-    asl_gate "$tmp/home" "$tmp/repo-moved" 1 || problems+="[still not installed after the repair]"
-    rm -rf "$tmp" "$tmp/repo-moved"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: links into the retired agent-skills clone are retargeted, live or dangling, with a record; =0, foreign and failed cases keep the link (Q-018)"; then
-    # Operator Q-018 (2026-09-28): setup moves links into the retired clone -
-    # exactly $SYS_HOME/Documents/{Code,code}/agent-skills/skills/<name>, the path
-    # autoos_skills_source used - live or dangling (the clone is what gets
-    # deleted). The record is written only after a successful move and names the
-    # literal readlink value; the target is never touched. A user's own checkout
-    # that merely ends in agent-skills/skills/<name> is theirs. =0 opts out.
-    problems=""
-    for mode in live dangling optout foreign lnfail; do
-        tmp="$(mktemp -d)"
-        home="$tmp/home"
-        oh_skill_repo "$tmp/repo"
-        old="$home/Documents/code/agent-skills/skills/alpha"
-        [[ "$mode" == foreign ]] && old="$home/my/agent-skills/skills/alpha"
-        mkdir -p "$old" "$home/.claude/skills"
-        ln -s "$old" "$home/.claude/skills/alpha"
-        [[ "$mode" == dangling ]] && rm -rf "$home/Documents/code/agent-skills"
-        [[ "$mode" == lnfail ]] && chmod 555 "$home/.claude/skills"
-        (
-            unset AUTOOS_RETARGET_RETIRED_SKILL_LINKS
-            [[ "$mode" == optout ]] && export AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0
-            asl_run "$home" "$tmp/repo" >/dev/null
-            got="$(readlink "$home/.claude/skills/alpha")"
-            records=("$home"/.claude/skills.autoos-backup-*)
-            case "$mode" in
-                live|dangling)
-                    [[ "$got" == "$tmp/repo/.agents/skills/alpha" ]] || echo "[$mode: alpha points at $got]"
-                    [[ -f "${records[0]}" ]] && grep -qxF "$home/.claude/skills/alpha -> $old" "${records[0]}" \
-                        || echo "[$mode: no record naming the literal old target]"
-                    asl_gate "$home" "$tmp/repo" || echo "[$mode: not installed after the retarget]"
-                    asl_run "$home" "$tmp/repo" >/dev/null
-                    n=$(ls -d "$home"/.claude/skills.autoos-backup-* 2>/dev/null | wc -l)
-                    [[ "$n" == 1 ]] || echo "[$mode: second run left $n records]"
-                    ;;
-                *)
-                    [[ "$got" == "$old" ]] || echo "[$mode: alpha was moved to $got]"
-                    [[ ! -e "${records[0]}" ]] || echo "[$mode: a record was written]"
-                    ;;
-            esac
-            if [[ "$mode" != dangling && ! -d "$old" ]]; then echo "[$mode: the old target was deleted]"; fi
-        ) >"$tmp/out" 2>&1
-        problems+="$(grep '^\[' "$tmp/out")"
-        chmod 755 "$home/.claude/skills" 2>/dev/null
-        rm -rf "$tmp"
-    done
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links: the linker and detection read one destination list"; then
-    # One fact, one home: the gate must check exactly what the writer writes, or
-    # a machine is told it is finished while a client directory is still empty.
-    # .codex/skills is the conditional entry, so it must appear in the list too.
-    linker="$(awk '/^install_agent_skill_links\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
-    gate="$(awk '/^agent_skill_links_current\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
-    dests="$(awk '/^agent_skill_link_dests\(\) \{/{on=1} on{print} on && /^\}$/{exit}' lib/linux/install.sh)"
-    ok=1
-    grep -q 'agent_skill_link_dests' <<<"$linker" || { ok=0; echo "install_agent_skill_links does not read agent_skill_link_dests" >&2; }
-    grep -q 'agent_skill_link_dests' <<<"$gate"   || { ok=0; echo "agent_skill_links_current does not read agent_skill_link_dests" >&2; }
-    for body in "$linker" "$gate"; do
-        grep -q '\.gemini/config/skills' <<<"$body" && { ok=0; echo "a destination is hardcoded outside the list" >&2; }
-    done
-    for want in '.gemini/config/skills' '.claude/skills' '.agents/skills' '.codex/skills'; do
-        grep -qF -- "$want" <<<"$dests" || { ok=0; echo "the destination list does not name $want" >&2; }
-    done
-    if (( ok )); then pass; else fail "the skill destinations have more than one home"; fi
-fi
-
-if it "agent-skill-links: linux and macos carry the component and the catalogs still validate"; then
-    out="$(python3 - <<'PY'
-import json, sys
-want = {
-    "id": "agent-skill-links", "provider": "custom", "package": "agent-skill-links",
-    "postInstall": "install_agent_skill_links",
-    "profiles": ["workstation", "ai-coding"],
-}
-problems = []
-for f in ("catalog/linux.json", "catalog/macos.json"):
-    data = json.load(open(f, encoding="utf-8"))
-    found = [c for g in data["categories"] for c in g["components"] if c.get("id") == "agent-skill-links"]
-    if len(found) != 1:
-        problems.append(f + ": " + str(len(found)) + " entries"); continue
-    c = found[0]
-    for k, v in want.items():
-        if c.get(k) != v:
-            problems.append("%s: %s is %r, expected %r" % (f, k, c.get(k), v))
-    # Linking a directory of markdown needs no package manager: `requires` here
-    # would drag git and nodejs into a skills-only run.
-    if c.get("requires"):
-        problems.append(f + ": the skill links require nothing — git and nodejs are not their business")
-    if c.get("homepage") != "https://github.com/Ch3fUlrich/AutoOS":
-        problems.append(f + ": homepage is not the repo the skills live in")
-    if c.get("prompt"):
-        problems.append(f + ": the skill links ask no question — omnigraph_url belongs to the omnigraph components")
-    if len(c.get("description", "")) > 70:
-        problems.append(f + ": description longer than 70 chars")
-# Windows is another lane's work; the id must not appear there yet.
-win = json.load(open("catalog/windows.json", encoding="utf-8"))
-if any(c.get("id") == "agent-skill-links" for g in win["categories"] for c in g["components"]):
-    problems.append("catalog/windows.json: the component is not built on Windows in this lane")
-print("\n".join(problems))
-sys.exit(1 if problems else 0)
-PY
-)" && catalog_validate catalog/linux.json >/dev/null 2>&1 && catalog_validate catalog/macos.json >/dev/null 2>&1 \
-    && pass || fail "catalog entry: ${out:0:400}"
-fi
-
-if it "the rehomed postInstalls name functions that exist"; then
-    # postInstall is not schema-validated: run_post_install only warns when the
-    # named function is missing, so a typo silently installs nothing.
-    ok=1
-    for fn in install_agent_skill_links install_omnigraph_client; do
-        declare -F "$fn" >/dev/null || { ok=0; echo "$fn is not defined in lib/linux/install.sh" >&2; }
-    done
-    if (( ok )); then pass; else fail "a catalogued postInstall names no function"; fi
 fi
 
 # ─── keys-file lookup order (autoos_api_keys_conf) ──────────────────────────
@@ -2429,9 +1924,9 @@ if it "every uv call whose output install.sh parses runs colour-free"; then
 fi
 
 
-# ─── keys and skills source reach the writer that actually runs ───
+# ─── keys reach the writer that actually runs ───
 # These drive setup_opencode_config (the postInstall path), not
-# _opencode_merge_config on its own: the harness merge and the skills-source
+# _opencode_merge_config on its own: the harness merge and the key
 # lookup live in the loop around it, and a candidate file the inline reader
 # cannot parse is a key that silently never arrives — which reads on the
 # machine exactly like a machine with no keys.
@@ -2483,109 +1978,30 @@ print('yes' if 'openrouter' in d.get('provider', {}) else 'no')
     fi
 fi
 
-if it "opencode: the agent harness gets this checkout's .agents/skills, not agent-skills"; then
+if it "opencode: the agent harness is handed no skills source (this repository holds no skill)"; then
     if ! has_cmd python3; then skip "python3 not found"; else
     tmp="$(mktemp -d)"
-    mkdir -p "$tmp/repo/.agents/skills/x"
-    printf -- '---\nname: x\ndescription: x\n---\n' >"$tmp/repo/.agents/skills/x/SKILL.md"
-    src_flag="$tmp/skills-source"; : >"$src_flag"
+    mkdir -p "$tmp/repo"
+    seen="$tmp/harness-args"; : >"$seen"
     ( SYS_HOME="$tmp/home" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
       unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
       curl() { return 6; }
-      src_flag="$src_flag"
+      seen="$seen"
       python3() {
           if [[ "${1:-}" == */lib/agent_harness.py ]]; then
-              local prev="" a
-              for a in "$@"; do
-                  [[ "$prev" == "--skills-source" ]] && printf '%s\n' "$a" >>"$src_flag"
-                  prev="$a"
-              done
+              printf '%s\n' "$*" >>"$seen"
               return 0
           fi
           command python3 "$@"
       }
       setup_opencode_config >/dev/null 2>&1 )
-    got="$(head -n 1 "$src_flag" 2>/dev/null || true)"
-    calls="$(wc -l <"$src_flag" 2>/dev/null | tr -d ' ')"
+    calls="$(wc -l <"$seen" 2>/dev/null | tr -d ' ')"
+    got="$(cat "$seen" 2>/dev/null || true)"
     rm -rf "$tmp"
     if [[ "$calls" == "0" ]]; then fail "the agent harness was never invoked — the test proves nothing"
-    elif [[ "$got" == */.agents/skills ]]; then pass
-    else fail "harness got [$got], expected the checkout's .agents/skills"; fi
+    elif [[ "$got" != *"--skills-source"* ]]; then pass
+    else fail "harness was handed a skills source: [$got]"; fi
     fi
-fi
-
-if it "opencode: no agent-skills path is invented when there is no skills source"; then
-    if ! has_cmd python3; then skip "python3 not found"; else
-    tmp="$(mktemp -d)"
-    mkdir -p "$tmp/repo"
-    src_flag="$tmp/skills-source"; : >"$src_flag"
-    ( SYS_HOME="$tmp/home" AUTOOS_ROOT="$tmp/repo" AUTOOS_DRY_RUN=0
-      unset META_API_KEY MUSE_API_KEY DEEPSEEK_API_KEY OPENROUTER_API_KEY CONTEXT7_API_KEY
-      curl() { return 6; }
-      src_flag="$src_flag"
-      python3() {
-          if [[ "${1:-}" == */lib/agent_harness.py ]]; then
-              local prev="" a
-              for a in "$@"; do
-                  [[ "$prev" == "--skills-source" ]] && printf '%s\n' "$a" >>"$src_flag"
-                  prev="$a"
-              done
-              return 0
-          fi
-          command python3 "$@"
-      }
-      setup_opencode_config >/dev/null 2>&1 )
-    got="$(head -n 1 "$src_flag" 2>/dev/null || true)"
-    calls="$(wc -l <"$src_flag" 2>/dev/null | tr -d ' ')"
-    rm -rf "$tmp"
-    if [[ "$calls" == "0" ]]; then fail "the agent harness was never invoked — the test proves nothing"
-    elif [[ -z "$got" ]]; then pass
-    else fail "harness was handed a skills source that does not exist: [$got]"; fi
-    fi
-fi
-
-
-# A machine mid-migration: this checkout has no vendored .agents/skills yet
-# (an AutoOS clone older than the subtree) but the retired agent-skills clone
-# is still on disk. Every skills link — user scope AND the per-client
-# directories — has to come from that one fallback, or the same run both
-# links ~/.agents/skills and silently skips Antigravity and Claude Code.
-oh_clone_only() {
-    local home="$1"
-    mkdir -p "$home/Documents/code/agent-skills/skills/gamma"
-    printf -- '---\nname: gamma\ndescription: demo\n---\n' \
-        >"$home/Documents/code/agent-skills/skills/gamma/SKILL.md"
-}
-
-if it "agent-skill-links links the retired clone's skills into every client dir"; then
-    tmp="$(mktemp -d)"
-    mkdir -p "$tmp/repo"
-    printf '{"mcpServers":{}}' >"$tmp/repo/.mcp.json"
-    oh_clone_only "$tmp/home"
-    asl_run "$tmp/home" "$tmp/repo" >/dev/null
-    problems=""
-    for dest in "$tmp/home/.claude/skills" "$tmp/home/.gemini/config/skills" "$tmp/home/.agents/skills"; do
-        [[ -L "$dest/gamma" && "$(readlink "$dest/gamma")" == *"/agent-skills/skills/gamma" ]] \
-            || problems+="[gamma not linked from the clone into $dest] "
-    done
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
-fi
-
-if it "agent-skill-links names it when there is no skills source at all"; then
-    tmp="$(mktemp -d)"
-    mkdir -p "$tmp/repo"
-    printf '{"mcpServers":{}}' >"$tmp/repo/.mcp.json"
-    out="$(asl_run "$tmp/home" "$tmp/repo")"
-    problems=""
-    [[ "$out" == *"no skills to link"* ]] \
-        || problems+="[nothing named the missing skills source — $(tail -n 2 <<<"$out")] "
-    [[ ! -d "$tmp/home/.claude/skills" ]] || problems+="[an empty ~/.claude/skills was created for nothing] "
-    [[ ! -d "$tmp/home/.gemini/config/skills" ]] || problems+="[an empty ~/.gemini/config/skills was created for nothing] "
-    [[ ! -d "$tmp/repo/.claude/skills" ]] || problems+="[an empty project .claude/skills was created for nothing] "
-    asl_gate "$tmp/home" "$tmp/repo" && problems+="[a machine with no skills source is detected as done] "
-    rm -rf "$tmp"
-    if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
 # ─── graphify registration: the installed tool, not an on-demand uv run ────
