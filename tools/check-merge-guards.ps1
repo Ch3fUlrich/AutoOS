@@ -6,7 +6,7 @@
     Runs the AGENTS.md section 7 definition of done that can run headless:
     both suites, the vendored-profile mirror guard, the harness unit tests,
     and the linters when present. Exit 0 = mergeable, anything else = stop
-    the lane. Used as the `guards` command in .claude/handoff.config.json.
+    the lane. Used as the `guards` command of the batch runner config.
     Run from the repo root (the runner runs it in the guards worktree).
     Extra argv (e.g. the runner's path list) is accepted and ignored.
 #>

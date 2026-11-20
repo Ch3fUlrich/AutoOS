@@ -40,6 +40,5 @@ live schema, so the check keys on a decision that only this repo's graph holds.)
 
 ## Skills
 
-Project skills live in `.agents/skills/` (single home; see `AGENTS.md` §8).
-Claude Code reads `.claude/skills/` — the installers link each skill there,
-so never copy a skill into both places by hand.
+This repository holds no skill: every skill lives in the plangraph repository
+under `skills/` (see `AGENTS.md` §8). Never add a skill directory here.

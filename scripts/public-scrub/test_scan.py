@@ -298,12 +298,11 @@ def test_that_skipping_is_the_default_and_not_an_accident(tmp_path):
     assert "test_scan.py" in proc.stdout
 
 
-# ─── the published .agents/ and deploy/ trees are inside the gate ────────────
-# Router skills and host-unit templates get published in these two trees, and a
-# skill body quoting a host path or a .service template naming a user carries the
-# same shapes as infra/. Naming them in ci.yml is not enough on its own: a
-# directory-wide exclude in scan-exclude.txt would un-gate each tree while
-# keeping the job green, so the exemption is asserted closed as well.
+# ─── the published deploy/ tree is inside the gate ───────────────────────────
+# Host-unit templates get published in this tree, and a .service template naming
+# a user carries the same shapes as infra/. Naming it in ci.yml is not enough on
+# its own: a directory-wide exclude in scan-exclude.txt would un-gate the tree
+# while keeping the job green, so the exemption is asserted closed as well.
 
 def _scrub_scan_args(ci_text):
     """The token list of ci.yml's scan.py command, shell continuations joined."""
@@ -320,35 +319,35 @@ def _scrub_scan_args(ci_text):
     return " ".join(b[:-1].strip() if b.endswith("\\") else b for b in buf).split()
 
 
-def test_ci_scan_scope_names_the_agents_and_deploy_trees():
+def test_ci_scan_scope_names_the_deploy_tree():
     repo = REPO_PATTERNS.parents[2]
     ci = (repo / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     args = _scrub_scan_args(ci)
     assert any(a.endswith("scan.py") for a in args), "ci.yml has no scan.py command"
-    for scope in (".agents/", "deploy/"):
+    for scope in ("deploy/",):
         assert scope in args, "ci.yml's public scrub scan no longer names %s" % scope
 
 
-def test_the_published_agents_and_deploy_trees_are_clean():
+def test_the_published_deploy_tree_is_clean():
     # The real tree, the real patterns, run from the repository root as CI runs it.
     repo = REPO_PATTERNS.parents[2]
-    proc = run_scan(["--patterns", str(REPO_PATTERNS), ".agents/", "deploy/"],
+    proc = run_scan(["--patterns", str(REPO_PATTERNS), "deploy/"],
                     cwd=repo)
     assert proc.returncode == 0, proc.stdout
 
 
-def test_agents_style_paths_are_not_exempt(tmp_path):
+def test_deploy_paths_are_not_exempt(tmp_path):
     mod = _scan_module()
     prefixes = mod.load_excludes(REPO_PATTERNS.parent / "scan-exclude.txt")
-    for rel in (".agents/skills/x/SKILL.md", "deploy/host.service"):
+    for rel in ("deploy/x/host.service", "deploy/host.service"):
         assert not mod.is_excluded(rel, prefixes), "%s is exempted by scan-exclude.txt" % rel
-    planted = tmp_path / ".agents" / "skills" / "x"
+    planted = tmp_path / "deploy" / "x"
     planted.mkdir(parents=True)
-    (planted / "SKILL.md").write_text(
+    (planted / "host.service").write_text(
         "runs on %s\n" % SHAPES["private-host"][2], encoding="utf-8")
-    proc = run_scan(["--patterns", str(REPO_PATTERNS), ".agents/"], cwd=tmp_path)
+    proc = run_scan(["--patterns", str(REPO_PATTERNS), "deploy/"], cwd=tmp_path)
     assert proc.returncode == 1, proc.stdout
-    assert ".agents/skills/x/SKILL.md:1: private-host" in proc.stdout
+    assert "deploy/x/host.service:1: private-host" in proc.stdout
 
 
 def _runs_this_file(text):

@@ -5,7 +5,7 @@ graph engine with combined graph-traversal + vector + full-text retrieval,
 backed by an S3-compatible store (MinIO here). It is the source of truth for
 cross-project, cross-agent memory. See
 ADR 0001 (retired agent-skills repo, history)
-for the rationale, and the [structured-memory skill](../../../../.agents/skills/structured-memory/SKILL.md) for the
+for the rationale, and the `structured-memory` skill (plangraph repository `skills/`) for the
 usage protocol.
 
 There is no source to build here — the server runs from the upstream image and

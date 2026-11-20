@@ -1,25 +1,15 @@
 #!/usr/bin/env python3
-"""CAO is deprecated: no CAO path, section, or config may ship.
+"""CAO is deprecated: no CAO path may ship, and neither may the old runner.
 
-Red-first for the CAO-removal lane (operator 2026-09-29): CAO grew stale
-beside the batch runner and its 52 files plus skill/config touch points
-must go. Fails on any tree that still carries CAO; passes once the
-removal lane deletes the code, cuts the SKILL.md section, and drops the
-example-config block. The batch-runner core assertions pin the other
-side: the test must fail because CAO is present, never because the
-whole skill was deleted.
+CAO grew stale beside the batch runner (operator 2026-09-29). AutoOS holds
+no skill and no old runner any more (D-6366): both the CAO paths and the
+old runner's core files must be absent from the tracked tree.
 """
-import json
 import subprocess
 import unittest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SKILL = (REPO / '.agents' / 'skills' / 'unattended-orchestration'
-         / 'SKILL.md')
-EXAMPLE = (REPO / '.agents' / 'skills' / 'unattended-orchestration'
-           / 'handoff.config.example.json')
-
 # Every CAO path on origin/main fae36a3: 18 cao/ modules + 21 tests/cao/ +
 # 12 infra/mcp-servers/cao-setup/ + the runbook. Kept as exact paths (not a
 # segment match) so a future docs sentence mentioning CAO cannot fail this.
@@ -54,10 +44,8 @@ CAO_PATHS = [
     )
 ]
 
-# Batch-runner core that must survive: the test fails because CAO is
-# present, never because the whole skill was deleted (Principle 9: take
-# the branch production takes — git ls-files, what CI ships).
-RUNNER_CORE = [
+# The old runner (a skill's three core files), removed with the skill.
+OLD_RUNNER = [
     '.agents/skills/unattended-orchestration/HandoffCore.psm1',
     '.agents/skills/unattended-orchestration/run_handoff_sessions.ps1',
     '.agents/skills/unattended-orchestration/l1_handoff.py',
@@ -85,21 +73,10 @@ class NoCaoTests(unittest.TestCase):
         self.assertEqual(present, [],
                          'CAO paths still tracked: %s' % present)
 
-    def test_skill_has_no_cao_section_or_command(self):
-        text = SKILL.read_text(encoding='utf-8')
-        self.assertNotIn('## CAO quickstart', text)
-        self.assertNotIn('python -m cao ', text)
-        self.assertNotIn('references/cao-runbook.md', text)
-
-    def test_example_config_has_no_cao_block(self):
-        doc = json.loads(EXAMPLE.read_text(encoding='utf-8'))
-        self.assertNotIn('cao', doc)
-
-    def test_runner_core_still_ships(self):
+    def test_the_old_runner_is_gone(self):
         tracked = tracked_paths()
-        missing = [p for p in RUNNER_CORE if p not in tracked]
-        self.assertEqual(missing, [],
-                         'runner core missing: %s' % missing)
+        present = [p for p in OLD_RUNNER if p in tracked]
+        self.assertEqual(present, [], 'old runner still tracked: %s' % present)
 
 
 if __name__ == '__main__':

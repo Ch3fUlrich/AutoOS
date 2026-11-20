@@ -632,7 +632,7 @@ SKILL_RULES_TEST = "tests/test_skill_rules.py"
 # changelog or a doc is where a rule id is cited, so any of them maps here — and
 # the mapping adds it unconditionally, because the check is cheap and a dangling
 # id is otherwise invisible until CI reads the file the lane never ran.
-RULE_CITING_PATHS = (".agents/skills/", "docs/")
+RULE_CITING_PATHS = ("docs/",)
 RULE_CITING_FILES = ("CHANGELOG.md",)
 # CI 36529545083 (shards b and f, 2026-09-29) — the gap behind both reds: a lane added
 # `tests/test_prepush.py`, ran the file it had written, and CI went red in two tests that
@@ -670,11 +670,7 @@ LINUX_PART = re.compile(r"^tests/linux/([0-9]{2})-[^/]+\.sh$")
 #: Every directory family this repository keeps pytest files in. `discover()` reads
 #: the first alone — its corpus is the three suites, and a case-level corpus is the
 #: wrong shape for the gate, which needs whole files (see `pytest_files_naming`).
-#: A skill keeps its own tests beside itself, which is how a gate reading only
-#: `tests/` would wave a changed `trust_worktree.py` through unrun — the FREEKEYS2
-#: miss one directory over.
 PYTEST_GLOBS = ("tests/test_*.py",
-                ".agents/skills/*/tests/**/test_*.py",
                 "infra/**/test_*.py",
                 "scripts/**/test_*.py")
 

@@ -719,9 +719,8 @@
           "provider": "custom",
           "package": "agent-skills",
           "tombstone": true,
-          "note": "its work moved to agent-skill-links, omnigraph-client and the mcp-* components",
+          "note": "its work moved to omnigraph-client and the mcp-* components",
           "replaced_by": [
-            "agent-skill-links",
             "omnigraph-client",
             "mcp-graphify",
             "mcp-serena",
@@ -732,17 +731,13 @@
         },
         {
           "id": "agent-skill-links",
-          "name": "Agent skill links",
-          "description": "Link this checkout's skills into every client's skills dir",
+          "name": "Agent skill links (retired)",
+          "description": "Retired: skills live in the plangraph repository, AutoOS links none",
           "provider": "custom",
           "package": "agent-skill-links",
-          "postInstall": "install_agent_skill_links",
-          "profiles": [
-            "workstation",
-            "ai-coding"
-          ],
-          "homepage": "https://github.com/Ch3fUlrich/AutoOS",
-          "notes": "One symlink per skill of this checkout's .agents/skills into Antigravity, Claude Code (user and project scope), ~/.agents/skills and — when codex is present — ~/.codex/skills. Your own skills and links are never touched; a checkout that moved is repointed."
+          "tombstone": true,
+          "note": "AutoOS holds no skill; skills live in the plangraph repository and are installed from there",
+          "homepage": "https://github.com/Ch3fUlrich/AutoOS"
         },
         {
           "id": "omnigraph-client",

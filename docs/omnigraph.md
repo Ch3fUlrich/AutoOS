@@ -7,7 +7,7 @@ is auto-extracted — you decide what is durable and write it as a typed node.
 A session without recall is slower, not wrong; there is no fallback layer.
 
 Full protocol with every debugged failure mode: the `structured-memory`
-skill in this repo's `.agents/skills/` directory. What follows is the minimum contract to use it without breaking.
+skill (plangraph repository `skills/structured-memory`). What follows is the minimum contract to use it without breaking.
 
 ## Session boundaries
 
@@ -337,8 +337,7 @@ one real outage, two latent faults and one misleading log line:
    down; context7 and playwright failed the same way. Long-lived sessions
    connect. Read the run's earlier lines before blaming the server.
 
-Not a cause, but watch for it: `trust_worktree.py` (vendored at
-`.agents/skills/unattended-orchestration/`) writes
+Not a cause, but watch for it: `tools/trust_worktree.py` writes
 `OMNIGRAPH_GRAPH_ID=<folder name>` (`AutoOS`) into worktree `.env` files.
 Graph ids are case-sensitive, the server only has `autoos`, and nothing in
 this repo reads that file; the probe warns about it.

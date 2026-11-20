@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-SKILL = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(SKILL))
+TOOLS = Path(__file__).resolve().parents[1] / "tools"
+sys.path.insert(0, str(TOOLS))
 
 import trust_worktree  # noqa: E402
 from trust_worktree import load, save
@@ -367,3 +367,7 @@ def test_trust_empty_mcpjson_writes_no_key(sandbox, tmp_path, monkeypatch):
     assert entry.get("hasCompletedProjectOnboarding") is True
     # Check that enabledMcpjsonServers is not present
     assert "enabledMcpjsonServers" not in entry
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main(["-q", "-p", "no:libtmux", __file__]))

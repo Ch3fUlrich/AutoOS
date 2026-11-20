@@ -167,7 +167,7 @@ So agents write to local `main` and stay dumb about branches; the sync creates
   rollback — is in
   REMOTE-SYNC-TEST-PLAN (retired agent-skills repo, history; see [SYNC-MANUAL.md](SYNC-MANUAL.md)).
 
-See [`../servers/omnigraph/README.md`](../servers/omnigraph/README.md) and the [structured-memory skill](../../../.agents/skills/structured-memory/SKILL.md).
+See [`../servers/omnigraph/README.md`](../servers/omnigraph/README.md) and the `structured-memory` skill (plangraph repository `skills/`).
 
 ## Automatic dedup (server-side)
 

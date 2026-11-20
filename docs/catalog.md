@@ -160,14 +160,14 @@ which reads like success.
 
 `replaced_by` is the catalog's answer — the ids that took the work on. The
 shipped retirement, `agent-skills`, names only the successors that platform
-offers. On Linux and macOS six took the work on; on Windows the four `mcp-*`
-components do, because it has no `agent-skill-links` or `omnigraph-client` twin:
+offers. On Linux and macOS five took the work on; on Windows the four `mcp-*`
+components do, because it has no `omnigraph-client` twin:
 
 ```jsonc
 {
   "id": "agent-skills", "tombstone": true,
-  "note": "its work moved to agent-skill-links, omnigraph-client and the mcp-* components",
-  "replaced_by": ["agent-skill-links", "omnigraph-client", "mcp-graphify",
+  "note": "its work moved to omnigraph-client and the mcp-* components",
+  "replaced_by": ["omnigraph-client", "mcp-graphify",
                   "mcp-serena", "mcp-playwright", "mcp-context7"]
 }
 // catalog/windows.json:
@@ -184,8 +184,7 @@ path made it — `--from-state` / `-FromState`, `--only` / `-Only`, a browser ru
 profile a `-Yes` run takes:
 
 - One muted line announces it: `agent-skills is retired: replaced by
-  agent-skill-links, omnigraph-client, mcp-graphify, mcp-serena, mcp-playwright,
-  mcp-context7`. Nothing is substituted silently.
+  omnigraph-client, mcp-graphify, mcp-serena, mcp-playwright, mcp-context7`. Nothing is substituted silently.
 - The retired row **stays** in the plan and still reports `skipped: retired`, so
   what the reader replayed is what the report names, and the successors do the
   installing beside it.
@@ -318,14 +317,11 @@ Available standalone MCP components in the catalog:
   steps run even when the URL answer is blank — only the artifacts that carry the
   URL and token wait for it. See `docs/omnigraph.md`
   ("The `omnigraph-client` component").
-- `agent-skill-links`: links this checkout's `.agents/skills` into every client's
-  skills directory — the table in AGENTS.md section 8 is which directory each
-  client reads, and `link_skill_dirs` is the one link rule they all go through.
 
 The retired `agent-skills` component is a **tombstone**: the id stays known so an
 old selection or state file still resolves, and it runs nothing at all — no
 installer, no prompt, no profile — while its row reports `skipped: retired` and
-the catalog names what took the work: `agent-skill-links`, `omnigraph-client` and
+the catalog names what took the work: `omnigraph-client` and
 the four `mcp-*` components, which each register their own server. Selecting the
 retired id, by hand or from an old state file, plans exactly those.
 

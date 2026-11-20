@@ -2186,7 +2186,7 @@ class McpToolTest(unittest.TestCase):
 
 class ForeignRepoFooterTests(unittest.TestCase):
     """AO-L2-SEAT-INTEGRITY P4: the fixed footer may not hard-require a skill
-    that only exists in THIS repo's `.agents/skills`. Measured: an L2 launched in
+    that is not part of THIS repo. Measured: an L2 launched in
     a scratch/foreign repo errored `Unable to load skill
     unattended-orchestration` and the lane never worked. The load is
     best-effort now and the rules an L2 needs travel with the footer, as ONE

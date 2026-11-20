@@ -7,7 +7,7 @@ beyond this file + the repo. Proof for claims lives in
 `docs/models.md` + `docs/models-proposed.md`.
 
 Your role: t1 orchestrator (`omniroute/l1-orchestrator#high`). Full protocol =
-`.agents/skills/unattended-orchestration/unattended-orchestration.md`.
+the `unattended-orchestration` skill (plangraph repository `skills/`).
 Hard rules (AGENTS.md): never commit secrets/binaries; destructive actions
 are opt-in only; read-modify-write for PATH/profile/config; back up
 user-owned files first; tests never install anything; suites are in-house,

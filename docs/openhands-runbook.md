@@ -16,8 +16,8 @@ read it, then continue from `docs/handoff.md` Open item 1.
   (`configuration/omniroute/combos.json`): `l1-orchestrator` = the `meta_api`
   Muse Spark contributor head with a free `gemini` fallback, `xhigh`, and a
   128k promise (a route may only advertise what its smallest servable leg
-  takes — PROVFIX3), `*-clean` = paid legs only (privacy). Full skill:
-  `.agents/skills/unattended-orchestration/unattended-orchestration.md`. Live board: `docs/tasks.md`.
+  takes — PROVFIX3), `*-clean` = paid legs only (privacy). Full skill: `unattended-orchestration`
+  (plangraph repository `skills/`). Live board: `docs/tasks.md`.
 
 ## 2. Get the repo in your sandbox
 

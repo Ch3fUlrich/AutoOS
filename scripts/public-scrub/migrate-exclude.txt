@@ -7,7 +7,3 @@
 # The scanner's own rules: patterns.txt holds the private values themselves.
 scripts/public-scrub/
 
-# No upstream licence (THIRD_PARTY.md); excluded until the clean-room rewrite.
-skills/qa-swarm/
-skills/review-triage/
-skills/babysit-prs/

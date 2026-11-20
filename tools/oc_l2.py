@@ -158,8 +158,8 @@ _WAKE_COOLDOWN_S = 10 * 60.0
 _SAFE_TEXT_MAX = 200
 # The L2's contract, appended to every phase brief: what it may not do, the
 # one route to a change, and where its reports land.
-# AO-L2-SEAT-INTEGRITY (P4): the skill only exists in this repo's `.agents/skills`
-# (or the user's skills dir), so a phase lane launched in a scratch/foreign repo
+# AO-L2-SEAT-INTEGRITY (P4): the skill only exists in the user's skills dir
+# (it is not part of this repo), so a phase lane launched in a scratch/foreign repo
 # errored `Unable to load skill unattended-orchestration` and never worked. The
 # load is best-effort now and the few rules an L2 acts on travel with the footer
 # as ONE line — no private content, and who may spawn what is unchanged.

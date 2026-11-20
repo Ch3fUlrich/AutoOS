@@ -293,12 +293,12 @@ if it "agent harness installers: the OpenCode writer calls the generator"; then
     body="$(declare -f setup_opencode_config)"
     hands="$(declare -f setup_openhands_config)"
     if { [[ "$body" == *'agent_harness.py" opencode'* ]] || [[ "$body" == *'agent_harness.py opencode'* ]]; } \
-        && declare -F autoos_skills_source >/dev/null \
-        && [[ "$body" == *'autoos_skills_source'* ]] \
-        && [[ "$hands" == *'autoos_skills_source'* ]]; then
+        && ! declare -F autoos_skills_source >/dev/null \
+        && [[ "$body" != *'skills'* ]] \
+        && [[ "$hands" != *'skills_source'* ]]; then
         pass
     else
-        fail "setup_opencode_config does not call agent_harness.py opencode and use autoos_skills_source"
+        fail "setup_opencode_config must call agent_harness.py opencode and carry no skills source (this repository holds no skill)"
     fi
 fi
 

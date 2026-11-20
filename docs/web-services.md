@@ -483,7 +483,6 @@ The config is **derived**, never kept twice:
 | MCP `graphify`, `context7` | unchanged (`uvx` / `npx`) | the layer adds `uv`, `python3`, `nodejs`; packages download into the persistent home on first use |
 | MCP `playwright` | **disabled** | it drives a browser the Alpine image does not ship; use it from a host client |
 | `instructions` outside the code tree | **dropped** | not mounted, so not readable |
-| skills link | recreated when it points into the code tree | AGENTS.md §8 wiring keeps working |
 
 Why a local layer at all: the upstream image is V2 (`opencode --version` ->
 `v2.0.16`, the same as the host) but bare Alpine - no `git` (an agent could

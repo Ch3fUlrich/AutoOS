@@ -768,15 +768,6 @@ cmd_init() {
             --out "$oc_cfg" --code-dir "$CODE_DIR" "${dry_flag[@]}"
         mapfile -t names < <(grep -oE '\{env:[A-Za-z_][A-Za-z0-9_]*\}' "$oc_cfg" 2>/dev/null \
             | sed -e 's/^{env://' -e 's/}$//' | sort -u)
-        # The skills link (AGENTS.md §8) resolves inside the mounted tree.
-        local link="$USER_CFG/opencode/skills" target
-        if [[ -L "$link" ]]; then
-            target="$(readlink "$link")"
-            if [[ "$target" == "$CODE_DIR"/* && ! -e "$(dirname "$oc_cfg")/skills" ]]; then
-                if [[ $DRY -eq 1 ]]; then echo "  - would link the skills directory ($target)"
-                else ln -s "$target" "$(dirname "$oc_cfg")/skills"; echo "  + linked skills -> $target"; fi
-            fi
-        fi
     else
         echo "  ! no host opencode config at $OC_HOST_CFG - run: ./setup.sh --only opencode-cli --yes"
         echo "    (opencode starts with its defaults until then; re-run init afterwards)"

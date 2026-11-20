@@ -18,8 +18,6 @@ flowchart LR
     LITE --> OCLITE["opencode.jsonc providers.litellm"]
     COMBO --> OH["tier-profiles.json\n→ sync-openhands-profiles.py\n→ OpenHands :3000"]
     OC --> NVIM["nvim + sidekick\n(inherits opencode routing)"]
-    SK[".agents/skills/\n(single home)"] -->|installer junctions| CL[".claude/skills/\n(Claude Code)"]
-    SK -->|load_skills_from_dir| OH
 ```
 
 Drift gates (run after any combo/client edit): `audit-router.py` (live) /

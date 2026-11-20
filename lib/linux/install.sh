@@ -347,11 +347,6 @@ custom_is_installed() {
         wsl-agent-home)
             [[ -d "$SYS_HOME/.cao" && -n "$(ls -A "$SYS_HOME/.cao" 2>/dev/null || true)" ]]
             ;;
-        agent-skill-links)
-            # "Installed" = nothing left to link, checked by the same function the
-            # postInstall asks, so the gate and the writer can never disagree.
-            agent_skill_links_current
-            ;;
         mcp-serena)
             mcp_has_server serena || antigravity_has_server serena
             ;;
@@ -4913,93 +4908,6 @@ replace_or_append_marked_line() {
     ui_ok "replaced the '${old_marker}' line in ${file}"
 }
 
-# agent_skill_link_dests [repo_root]
-# Prints the skills directories the clients read, one per line. ONE home for
-# that list: the linker writes exactly these and detection checks exactly these,
-# so a machine can never be told it is finished while one client still sees no
-# skills. ~/.codex is the conditional entry — a directory is created for codex
-# only when the tool is on PATH or its home already exists, because making a home
-# for software the machine does not have is worse than doing nothing.
-agent_skill_link_dests() {
-    local repo_root="${1:-${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"
-    printf '%s\n' \
-        "$SYS_HOME/.gemini/config/skills" \
-        "$SYS_HOME/.claude/skills" \
-        "$repo_root/.claude/skills" \
-        "$SYS_HOME/.agents/skills"
-    if [[ -d "$SYS_HOME/.codex" ]] || has_cmd codex; then
-        printf '%s\n' "$SYS_HOME/.codex/skills"
-    fi
-}
-
-# agent_skill_links_current [repo_root]: the detection gate for the id. Returns 0
-# only when there is nothing left to link — every skill of the source resolves in
-# every destination, or the entry there is the user's own (AGENTS.md hard rule 4:
-# a directory of yours is settled work, never missing work). A dangling link IS
-# missing work: that is the moved-checkout repair, and a gate that called it
-# "installed" would skip the repair forever. A destination that is itself a
-# symlink is the old whole-directory layout: link_skill_dirs refuses to write
-# through it and leaves one warning, so it is settled too — holding it against the
-# machine would re-plan the component on every run and then report it *installed*
-# having done nothing.
-agent_skill_links_current() {
-    local repo_root source_dir dest s_dir name
-    repo_root="${1:-${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}}"
-    source_dir="$(autoos_skills_source)"
-    [[ -n "$source_dir" ]] || return 1
-    while IFS= read -r dest; do
-        if [[ -L "$dest" ]]; then continue; fi
-        [[ -d "$dest" ]] || return 1
-        for s_dir in "$source_dir"/*/; do
-            [[ -f "${s_dir}SKILL.md" ]] || continue
-            s_dir="${s_dir%/}"
-            name="${s_dir##*/}"
-            # A link into the retired clone, live or dangling, is work setup
-            # still does (Q-018); link_skill_dirs "retarget" is what does it.
-            retired_skill_link "$dest/$name" "$name" && return 1
-            [[ -e "$dest/$name" ]] || return 1
-        done
-    done < <(agent_skill_link_dests "$repo_root")
-    return 0
-}
-
-# install_agent_skill_links: postInstall for the agent-skill-links catalog entry
-# (Linux and macOS) — the skills-linking duty moved out of the retired
-# agent-skills step, with the same rules: one source (autoos_skills_source, so no
-# client can be linked from the checkout and another from the retired clone) and
-# one link rule (link_skill_dirs, which keeps the user's own files and repairs a
-# dangling AutoOS link). Contains every failure: a destination it could not write
-# is recorded for the summary and the run continues.
-install_agent_skill_links() {
-    INSTALL_SCRIPT_STATE=""
-    local repo_root skills_source dest
-    repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-    skills_source="$(autoos_skills_source)"
-    if [[ -z "$skills_source" ]]; then
-        ui_warn "no skills to link: neither $repo_root/.agents/skills nor the retired clone's skills dir exists."
-        INSTALL_SCRIPT_STATE=skipped
-        return 0
-    fi
-    # The gate is the same function detection asks (custom_is_installed), and
-    # setup.sh runs this step on a skipped component too — so this is what keeps a
-    # second run from printing links it did not make. A dry run never reaches it:
-    # the check compares on-disk links the mode promises to announce.
-    if (( ! AUTOOS_DRY_RUN )) && agent_skill_links_current "$repo_root"; then
-        ui_info "agent-skill-links: skipped: every client directory is already linked"
-        INSTALL_SCRIPT_STATE=skipped
-        return 0
-    fi
-    while IFS= read -r dest; do
-        link_skill_dirs "$skills_source" "$dest" retarget ||
-            autoos_record_failure "${AUTOOS_POST_COMPONENT:-agent-skill-links}"
-    done < <(agent_skill_link_dests "$repo_root")
-    if (( AUTOOS_DRY_RUN )); then
-        ui_info "agent-skill-links: dry run: nothing was linked"
-        INSTALL_SCRIPT_STATE=skipped
-    fi
-    return 0
-}
-
 # resolve_ollama_base_url
 # Prints the Ollama endpoint the generated OpenCode/OpenHands configs should
 # use, or nothing to keep the catalog default (http://127.0.0.1:11434/v1).
@@ -5022,26 +4930,6 @@ resolve_ollama_base_url() {
     fi
     if curl -fsS --max-time 2 -o /dev/null "http://host.docker.internal:11434/api/version" 2>/dev/null; then
         printf '%s\n' "http://host.docker.internal:11434/v1"
-    fi
-    return 0
-}
-
-# Prints the machine's agent-skills skills directory, or nothing when absent.
-autoos_skills_source() {
-    # Repo-vendored .agents/skills first (single source of truth, including
-    # the native rewrites), external agent-skills clone second.
-    local repo_root="${AUTOOS_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-    if [[ -d "$repo_root/.agents/skills" ]]; then
-        printf '%s\n' "$repo_root/.agents/skills"
-        return 0
-    fi
-    local code_root="$SYS_HOME/Documents/Code"
-    if [[ -d "$SYS_HOME/Documents/code" ]]; then
-        code_root="$SYS_HOME/Documents/code"
-    fi
-    local skills_source="$code_root/agent-skills/skills"
-    if [[ -d "$skills_source" ]]; then
-        printf '%s\n' "$skills_source"
     fi
     return 0
 }
@@ -5441,17 +5329,12 @@ setup_opencode_config() {
             continue
         fi
 
-        # Merge the shared agent harness (roles, skills link) after the config
+        # Merge the shared agent harness (roles) after the config
         # is written. Judge by exit code only; the generator's notes are muted.
         if has_cmd python3; then
-            local harness_out harness_rc skills_source
-            skills_source="$(autoos_skills_source)"
-            # An empty source is passed through and the harness reports
-            # "skills: source missing". Naming the retired agent-skills clone
-            # here would invent a path that does not exist and read as a
-            # machine whose skills are simply absent.
+            local harness_out harness_rc
             harness_rc=0
-            harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" --skills-source "$skills_source" 2>&1)" || harness_rc=$?
+            harness_out="$(python3 "$AUTOOS_ROOT/lib/agent_harness.py" opencode --config "$config_file" --repo-root "$AUTOOS_ROOT" 2>&1)" || harness_rc=$?
             if (( harness_rc != 0 )); then
                 ui_warn "agent harness not applied to OpenCode (exit $harness_rc)"
                 # Warned is not reported: the component's own harness never
@@ -5850,137 +5733,6 @@ phys_path() {
     fi
 }
 
-# retired_skill_link LINK NAME: true when LINK is a symlink - live or dangling,
-# the retired clone is exactly what gets deleted - whose target is the retired
-# agent-skills clone's copy of skill NAME: $SYS_HOME/Documents/{Code,code}/
-# agent-skills/skills/NAME, the path autoos_skills_source used. A known location,
-# not a suffix, so a user's own .../agent-skills/skills/NAME checkout is theirs.
-# False when setup was told to leave these alone
-# (AUTOOS_RETARGET_RETIRED_SKILL_LINKS=0).
-retired_skill_link() {
-    local link="$1" name="$2" raw code
-    [[ "${AUTOOS_RETARGET_RETIRED_SKILL_LINKS:-1}" != 0 ]] || return 1
-    [[ -L "$link" ]] || return 1
-    raw="$(readlink -- "$link")"
-    [[ "$raw" == /* ]] || raw="$(dirname -- "$link")/$raw"
-    raw="${raw%/}"
-    for code in Code code; do
-        [[ "$raw" == "$SYS_HOME/Documents/$code/agent-skills/skills/$name" ]] && return 0
-    done
-    return 1
-}
-
-# link_skill_dirs SRC_DIR DEST_DIR [retarget]
-# Mirrors every skill in SRC_DIR (a direct child holding a SKILL.md) into
-# DEST_DIR as one symlink per skill. DEST_DIR is a real directory of its own,
-# so a user's skills sit beside ours and are never touched:
-#   absent                                     -> linked
-#   a link to the same directory               -> skipped
-#   a link that is ours and dangling           -> repointed
-#   anything else (a user's directory or file, any live link that resolves
-#     somewhere else, a dangling link of another shape)   -> left alone
-# A link is ours only when it dangles AND its target ends with
-# /.agents/skills/<this skill's name> - the exact shape this function creates,
-# so a moved or renamed checkout is repaired. A live link is the user's, even
-# when it points inside the repo's own .agents directory (AGENTS.md hard rule 4).
-# A DEST_DIR that is itself a symlink (the old whole-directory layout) is not
-# written through - that would create links inside the repo or a clone - it
-# is left with one warning that names the fix. Returns 0 unless a link failed.
-#
-# A third argument "retarget" adds one recognised shape (operator Q-018,
-# 2026-09-28): a link, live or dangling, into the retired agent-skills clone
-# (retired_skill_link). The link (never its target) is replaced, then its old
-# target is appended to DEST_DIR.autoos-backup-<stamp>.
-link_skill_dirs() {
-    local src="${1%/}" dest="${2%/}" retarget="${3:-}" record=""
-    [[ "$src" == /* ]] || src="$PWD/$src"
-    [[ "$dest" == /* ]] || dest="$PWD/$dest"
-
-    if [[ ! -d "$src" ]]; then
-        ui_muted "no skills to link: $src is not a directory"
-        return 0
-    fi
-    local names=() s_dir
-    for s_dir in "$src"/*/; do
-        if [[ -f "${s_dir}SKILL.md" ]]; then
-            s_dir="${s_dir%/}"
-            names+=("${s_dir##*/}")
-        fi
-    done
-    if (( ${#names[@]} == 0 )); then
-        ui_muted "no skills to link: nothing under $src holds a SKILL.md"
-        return 0
-    fi
-
-    if (( AUTOOS_DRY_RUN )); then
-        ui_muted "would link ${#names[@]} skill(s) from $src into $dest"
-        return 0
-    fi
-    if [[ -L "$dest" ]]; then
-        ui_warn "$dest is a symlink (the old whole-directory layout); not writing through it."
-        ui_muted "    To mirror the skills one by one instead: rm \"$dest\" and run setup again."
-        return 0
-    fi
-    if ! mkdir -p "$dest" 2>/dev/null; then
-        ui_warn "could not create $dest - skills not linked"
-        return 1
-    fi
-
-    local name t raw have want skipped=0 failed=0
-    for name in "${names[@]}"; do
-        t="$dest/$name"
-        want="$(phys_path "$src/$name")"
-        if [[ -L "$t" ]]; then
-            raw="$(readlink -- "$t")"
-            [[ "$raw" == /* ]] || raw="$dest/$raw"
-            have="$(phys_path "$raw")"
-            if [[ "$have" == "$want" ]]; then
-                skipped=$((skipped + 1))
-            elif [[ ! -e "$t" && "${raw%/}" == */.agents/skills/"$name" ]]; then
-                if ln -sfn "$src/$name" "$t" 2>/dev/null; then
-                    ui_ok "repointed $name (was $raw)"
-                else
-                    ui_warn "could not repoint $t - left as it was"
-                    failed=1
-                fi
-            elif [[ "$retarget" == retarget ]] && retired_skill_link "$t" "$name"; then
-                # Replace first, record after: a record names only a move that
-                # happened, with the literal readlink value. A failed replace that
-                # left no link puts the old one back.
-                local literal
-                literal="$(readlink -- "$t")"
-                if ln -sfn "$src/$name" "$t" 2>/dev/null; then
-                    if [[ -z "$record" ]]; then
-                        record="$dest.autoos-backup-$(date +%Y%m%d-%H%M%S)"
-                        local n=0 base="$record"
-                        while [[ -e "$record" ]]; do n=$((n + 1)); record="$base-$n"; done
-                    fi
-                    printf '%s -> %s\n' "$t" "$literal" >>"$record" ||
-                        ui_warn "retargeted $t but could not write $record (was $literal)"
-                    ui_ok "retargeted $name from the retired agent-skills clone (was $literal; recorded in $record)"
-                else
-                    [[ -L "$t" ]] || ln -s -- "$literal" "$t" 2>/dev/null
-                    ui_warn "could not retarget $t - left as it was"
-                    failed=1
-                fi
-            else
-                ui_muted "kept $t: a link of your own, not an AutoOS link"
-            fi
-        elif [[ -e "$t" ]]; then
-            ui_muted "kept $t: yours, not an AutoOS link"
-        elif ln -s "$src/$name" "$t" 2>/dev/null; then
-            ui_ok "linked $name into $dest"
-        else
-            ui_warn "could not link $t"
-            failed=1
-        fi
-    done
-    if (( skipped > 0 )); then
-        ui_muted "skipped $skipped skill link(s) that are already in place in $dest"
-    fi
-    return "$failed"
-}
-
 # setup_openhands_config
 # Writes the OpenHands settings and profiles under ~/.openhands. Every file is
 # written only when its content differs from what is on disk, and settings.json
@@ -6000,18 +5752,6 @@ setup_openhands_config() {
     if [[ -d "$SYS_HOME/Documents/code" ]]; then
         code_root="$SYS_HOME/Documents/code"
     fi
-    # Native OpenHands (host CLI, Windows) loads user skills from
-    # ~/.openhands/skills. The sandbox containers do not mount it: they read the
-    # workspace's .agents/skills instead (AGENTS.md section 8). One link per
-    # repo skill; a failure is already reported and must not stop the rest.
-    # autoos_skills_source is the repo's .agents/skills (the single home), and
-    # only without it the external agent-skills clone.
-    local skills_source
-    skills_source="$(autoos_skills_source)"
-    if [[ -n "$skills_source" ]]; then
-        link_skill_dirs "$skills_source" "$openhands_dir/skills" || true
-    fi
-
     local secrets_file
     secrets_file="$(autoos_api_keys_conf)" || secrets_file=""
 

@@ -14,7 +14,7 @@ ADR 0003 and ADR 0001 explain why Omnigraph is the memory store; both are histor
 retired agent-skills repo).
 For the authoritative overview
 see [`../../docs/architecture.md`](../../docs/architecture.md); for the memory
-protocol see [structured-memory skill](../../.agents/skills/structured-memory/SKILL.md).
+protocol see `structured-memory` skill (plangraph repository `skills/`).
 
 ## Quick Start
 
@@ -173,7 +173,7 @@ Graphify provides built-in tools to visualize your project graph. After extracti
 ## Graphify as a Docker Container — the SERVER path
 
 Graphify is wired as **one cwd-relative `graphify` entry in user scope**, never per repo
-(see `.agents/skills/mcp-servers-setup/references/graphify.md`). On a **workstation** that entry is
+(see the `mcp-servers-setup` skill's `references/graphify.md` (plangraph repository `skills/`)). On a **workstation** that entry is
 `uv`. On a **server** (e.g. `coding.example.internal`) that lacks a per-user `uv`/Python toolchain,
 `servers/graphify-mcp/` builds a Docker image with `graphifyy[mcp]` preinstalled running the
 same stdio server (`graphify.serve`); the tracked wrapper `bin/graphify-mcp` injects
@@ -264,7 +264,7 @@ graphify install once and be done.
 
 While Serena includes basic local memory capabilities, **Omnigraph is the designated single source of truth for all cross-session memory in this stack.**
 
-1. **Structure:** memory is written as typed nodes (`Decision`/`Rule`/`Preference`/`Convention`/`Component`/`Task`) that are queryable and reviewable, not free-text blobs — see the [structured-memory skill](../../.agents/skills/structured-memory/SKILL.md).
+1. **Structure:** memory is written as typed nodes (`Decision`/`Rule`/`Preference`/`Convention`/`Component`/`Task`) that are queryable and reviewable, not free-text blobs — see the `structured-memory` skill (plangraph repository `skills/`).
 2. **Project Isolation:** each repo gets its **own** graph, pinned per-agent via `OMNIGRAPH_GRAPH_ID`, so a bad write in one project cannot touch another.
 3. **Retrieval:** graph traversal + vector + full-text in one engine, with a local Ollama embedder (no cloud key).
 

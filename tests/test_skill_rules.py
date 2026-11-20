@@ -145,102 +145,6 @@ class SkillRulesTests(unittest.TestCase):
         self.assertIn('R-foo-01', result.stdout)
         self.assertNotIn('R-bar-02', result.stdout)
 
-class RuleResolutionTests(unittest.TestCase):
-    """Every R-<topic>-NN cited in git-tracked files (except CHANGELOG.md and
-    references/PROPOSALS-*) must resolve to either:
-      - a rule in SKILL.md, or
-      - a row in references/rule-map.md.
-    Every rule-map target that is a new R-id must exist in SKILL.md."""
-
-    REPO = Path(__file__).resolve().parent.parent
-    SKILL = REPO / '.agents' / 'skills' / 'unattended-orchestration' / 'SKILL.md'
-    RULE_MAP = REPO / '.agents' / 'skills' / 'unattended-orchestration' / 'references' / 'rule-map.md'
-    RULE_ID_RE = re.compile(r'R-[a-z]+-\d{2}')
-
-    def _skill_ids(self):
-        """All R-ids defined as rules in SKILL.md."""
-        text = self.SKILL.read_text(encoding='utf-8')
-        ids = set()
-        for line in text.splitlines():
-            parsed = parse_rule(line)
-            if parsed:
-                ids.add(parsed[0])
-        return ids
-
-    def _rule_map_old_ids(self):
-        """All old R-ids listed in rule-map.md (first column)."""
-        if not self.RULE_MAP.is_file():
-            return set(), {}
-        text = self.RULE_MAP.read_text(encoding='utf-8')
-        old_ids = set()
-        targets = {}  # old_id -> target string
-        for line in text.splitlines():
-            line = line.strip()
-            if not line.startswith('|') or line.startswith('|---') or line.startswith('| old'):
-                continue
-            cols = [c.strip() for c in line.split('|')]
-            if len(cols) < 3:
-                continue
-            old_id = cols[1].strip().strip('`')
-            target = cols[2].strip()
-            m = self.RULE_ID_RE.match(old_id)
-            if m:
-                old_ids.add(old_id)
-                targets[old_id] = target
-        return old_ids, targets
-
-    def _cited_ids(self):
-        """All R-ids cited in git-tracked files, excluding CHANGELOG.md,
-        references/PROPOSALS-*, and SKILL.md itself."""
-        result = subprocess.run(
-            ['git', 'ls-files'],
-            capture_output=True, text=True, cwd=str(self.REPO))
-        cited = set()
-        for f in result.stdout.splitlines():
-            if 'CHANGELOG.md' in f:
-                continue
-            if 'references/PROPOSALS-' in f:
-                continue
-            if f.endswith('SKILL.md') and 'unattended-orchestration' in f:
-                continue
-            if f.endswith('test_skill_rules.py'):
-                continue
-            if f.endswith('rule-map.md'):
-                continue
-            path = self.REPO / f
-            if not path.is_file():
-                continue
-            try:
-                text = path.read_text(encoding='utf-8', errors='replace')
-            except Exception:
-                continue
-            for m in self.RULE_ID_RE.finditer(text):
-                cited.add(m.group(0))
-        return cited
-
-    def test_every_cited_id_resolves(self):
-        """Every R-id cited anywhere must be a rule in SKILL.md or a row in rule-map.md."""
-        skill_ids = self._skill_ids()
-        map_old_ids, _ = self._rule_map_old_ids()
-        cited = self._cited_ids()
-        unresolved = cited - skill_ids - map_old_ids
-        self.assertEqual(unresolved, set(),
-                         f"cited R-ids that resolve nowhere: {sorted(unresolved)}")
-
-    def test_every_rule_map_target_id_exists_in_skill(self):
-        """Every rule-map target that is a new R-id must exist in SKILL.md."""
-        skill_ids = self._skill_ids()
-        _, targets = self._rule_map_old_ids()
-        missing = []
-        for old_id, target in targets.items():
-            for m in self.RULE_ID_RE.finditer(target):
-                new_id = m.group(0)
-                if new_id not in skill_ids:
-                    missing.append(f"{old_id} -> {new_id}")
-        self.assertEqual(missing, [],
-                         f"rule-map targets not in SKILL.md: {missing}")
-
-
 class CompactionRuleTests(unittest.TestCase):
     """D-146 / SB-C item 2: `R-worker-11` — who may ask for a transcript summary.
 
@@ -253,7 +157,6 @@ class CompactionRuleTests(unittest.TestCase):
     one — fails here rather than in a live lane."""
 
     REPO = Path(__file__).resolve().parent.parent
-    SKILL = REPO / '.agents' / 'skills' / 'unattended-orchestration' / 'SKILL.md'
     FIXTURE = REPO / 'tests' / 'fixtures' / 'skill-rules-compaction.jsonl'
 
     def cases(self):
@@ -282,82 +185,6 @@ class CompactionRuleTests(unittest.TestCase):
     def test_the_fixture_carries_both_classes(self):
         self.assertEqual({c['expect'] for c in self.cases()},
                          {_sr.HARNESS_COMPACTION, _sr.PEER})
-
-    def test_the_skill_file_defines_the_rule(self):
-        rules = {}
-        for line in self.SKILL.read_text(encoding='utf-8').splitlines():
-            parsed = parse_rule(line)
-            if parsed:
-                rules[parsed[0]] = parsed
-        rule = rules.get('R-worker-11')
-        self.assertIsNotNone(rule, 'R-worker-11 is not a rule in SKILL.md')
-        _id, imperative, why, source = rule
-        self.assertIn('from=', imperative)
-        self.assertTrue(why and source, 'the rule lost its (why: …; source: …) tail')
-
-    def test_the_skill_file_passes_the_checker(self):
-        result = subprocess.run([sys.executable, str(SCRIPT), 'check', str(self.SKILL)],
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout)
-
-
-class FoldedLessonRuleTests(unittest.TestCase):
-    """SKILLFOLD-1: four measured lessons folded into the skill as rules.
-
-    Each lesson was measured in a lane (SB-A2..A3, FREEKEYS-2c, SCOPEBUS) and only
-    becomes a rule once a test binds it, per R-orch-15. These assertions are that
-    binding: the id exists in `SKILL.md`, still carries its (why: …; source: …)
-    tail, still names the fact it is about, and the evidence it cites is still
-    there — a rule whose proof test was deleted is a rule that silently stops
-    meaning anything."""
-
-    REPO = Path(__file__).resolve().parent.parent
-    SKILL = REPO / '.agents' / 'skills' / 'unattended-orchestration' / 'SKILL.md'
-    SPAWNER = REPO / 'tests' / 'test_autoos_spawner.py'
-
-    # id -> (fragment the imperative must still name, fragment the source must still cite)
-    FOLDED = {
-        'R-orch-17': ('runner-private', 'SB-A'),
-        'R-orch-18': ('test_registry_render.py', 'FREEKEYS-2'),
-        'R-orch-19': ('unmocked', 'test_a_real_spawn_runs_in_its_scope'),
-        'R-coord-11': ('cwd checkout', 'SCOPEBUS'),
-    }
-
-    def _rules(self):
-        rules = {}
-        for line in self.SKILL.read_text(encoding='utf-8').splitlines():
-            parsed = parse_rule(line)
-            if parsed:
-                rules[parsed[0]] = parsed
-        return rules
-
-    def test_each_folded_lesson_is_a_rule_with_why_and_source(self):
-        rules = self._rules()
-        for rule_id in self.FOLDED:
-            self.assertIn(rule_id, rules, f"{rule_id} is not a rule in SKILL.md")
-            _id, imperative, why, source = rules[rule_id]
-            self.assertTrue(imperative.strip(), f"{rule_id} has an empty imperative")
-            self.assertTrue(why and source, f"{rule_id} lost its (why: …; source: …) tail")
-
-    def test_each_rule_still_names_its_fact_and_its_measurement(self):
-        rules = self._rules()
-        for rule_id, (fact, measurement) in self.FOLDED.items():
-            _id, imperative, why, source = rules[rule_id]
-            self.assertIn(fact, imperative, f"{rule_id} no longer names {fact!r}")
-            self.assertIn(measurement, source, f"{rule_id} no longer cites {measurement!r}")
-
-    def test_rule_19_evidence_test_still_exists(self):
-        """R-orch-19 cites `test_a_real_spawn_runs_in_its_scope` as its measurement;
-        if that test is renamed or deleted the rule's proof is gone."""
-        self.assertTrue(self.SPAWNER.is_file(), "tests/test_autoos_spawner.py is missing")
-        text = self.SPAWNER.read_text(encoding='utf-8')
-        self.assertIn('def test_a_real_spawn_runs_in_its_scope', text,
-                      "R-orch-19's evidence test no longer exists in test_autoos_spawner.py")
-
-    def test_the_skill_file_passes_the_checker(self):
-        result = subprocess.run([sys.executable, str(SCRIPT), 'check', str(self.SKILL)],
-                                capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout)
 
 
 if __name__ == '__main__':

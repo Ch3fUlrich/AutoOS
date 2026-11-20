@@ -22,7 +22,7 @@ if it "--only agent-skills plans the components that took its work"; then
     (( rc == 0 )) || problems+="[exit $rc: $(printf '%s\n' "$out" | tail -3)] "
     [[ "$out" == *"agent-skills is retired: replaced by"* ]] \
         || problems+="[the expansion was announced as nothing: $(printf '%s\n' "$out" | grep -i retired | head -3)] "
-    for want in agent-skill-links omnigraph-client mcp-graphify mcp-serena \
+    for want in omnigraph-client mcp-graphify mcp-serena \
                 mcp-playwright mcp-context7; do
         grep -qE "^\s+[0-9]+\.\s.*\s$want\s*$" <<<"$planned" \
             || problems+="[$want is not in the plan] "
@@ -35,7 +35,7 @@ if it "--only agent-skills plans the components that took its work"; then
         || problems+="[the retired row was claimed already installed] "
     skipped="$(printf '%s\n' "$out" | grep -c 'skipped: retired' || true)"
     [[ "$skipped" == "1" ]] || problems+="[$skipped 'skipped: retired' lines, expected 1] "
-    grep -qE 'skipped: retired \(.*moved to agent-skill-links' <<<"$out" \
+    grep -qE 'skipped: retired \(.*moved to omnigraph-client' <<<"$out" \
         || problems+="[the skip line does not carry the retirement note: $(grep -F 'skipped: retired' <<<"$out")]"
     # Nothing that belonged to the retired step may leak back in: the fetch and
     # the skills link are the successors' work now, named by their own rows.
@@ -58,10 +58,11 @@ if it "--profile never plans the retired agent-skills id"; then
             && problems+="[$profile planned the retired id] "
         # The successors are profile members in their own right, so the work the
         # retired id used to pre-tick is still planned by the same run.
-        for want in agent-skill-links omnigraph-client; do
-            grep -qE "^\s+[0-9]+\.\s.*\s$want\s*$" <<<"$planned" \
-                || problems+="[$want is not in the $profile plan] "
-        done
+        grep -qE "^\s+[0-9]+\.\s.*\somnigraph-client\s*$" <<<"$planned" \
+            || problems+="[omnigraph-client is not in the $profile plan] "
+        # AutoOS holds no skill, so the retired skill-links row is in no profile.
+        grep -qE '^\s+[0-9]+\.\s+Agent skill links' <<<"$planned" \
+            && problems+="[$profile planned the retired agent-skill-links id] "
         [[ -z "$problems" ]] || all_problems+="$problems "
     done
     if [[ -z "$all_problems" ]]; then pass; else fail "$all_problems"; fi
@@ -82,7 +83,7 @@ if it "from-state: a state file saved before the retirement replays to the repla
     (( rc == 0 )) || problems+="[exit $rc: $(printf '%s\n' "$out" | tail -3)] "
     [[ "$out" == *"agent-skills is retired: replaced by"* ]] \
         || problems+="[a replayed retired id was not expanded] "
-    for want in agent-skill-links omnigraph-client mcp-context7; do
+    for want in omnigraph-client mcp-context7; do
         grep -qE "^\s+[0-9]+\.\s.*\s$want\s*$" <<<"$planned" \
             || problems+="[$want is not in the replayed plan] "
     done
@@ -90,7 +91,7 @@ if it "from-state: a state file saved before the retirement replays to the repla
     if [[ -z "$problems" ]]; then pass; else fail "$problems"; fi
 fi
 
-if it "the ai-coding plan carries the agent-skill-links and omnigraph-client homes"; then
+if it "the ai-coding plan carries the omnigraph-client home and plans no retired skill-links row"; then
     # The A7 verify row: a fresh ai-coding dry run never *touches* the
     # agent-skills repo. The machine this suite runs on has the retired clone or
     # does not; either way the plan must never send anyone to fetch it, and the
@@ -101,9 +102,7 @@ if it "the ai-coding plan carries the agent-skill-links and omnigraph-client hom
     memo_dry_run out rc e2e -- --profile ai-coding --dry-run --yes --no-color
     problems=""
     (( rc == 0 )) || problems+="[exit $rc] "
-    for want in 'agent-skill-links' 'omnigraph-client'; do
-        grep -qE "^\s+[0-9]+\.\s.*\s$want\s*$" <<<"$out" || problems+="[$want is not in the ai-coding plan] "
-    done
+    grep -qE "^\s+[0-9]+\.\s.*\somnigraph-client\s*$" <<<"$out" || problems+="[omnigraph-client is not in the ai-coding plan] "
     # Only the RETIRED repo may never be fetched. A machine that has not been set
     # up yet plans clones of its own and legitimately so — measured on a scratch
     # home: the two oh-my-zsh plugins and powerlevel10k
