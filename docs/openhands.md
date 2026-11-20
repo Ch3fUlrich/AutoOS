@@ -32,7 +32,7 @@ replaced.
 | `settings.json` | The default LLM — the first of Muse Spark → DeepSeek → OpenRouter free → local Ollama you have a key for — plus the Serena, Graphify and Omnigraph MCP servers |
 | `profiles/*.json` | One LLM profile per model in [`catalog/ai-registry.json`](../catalog/ai-registry.json) `models` (DeepSeek, Muse Spark, OpenRouter models, Ollama) with context windows and prices, plus one per gateway tier (`omniroute-tier*`, `litellm-tier*`) from [`configuration/openhands/tier-profiles.json`](../configuration/openhands/tier-profiles.json) |
 | `agent-profiles/*.json` | The agent hierarchy, copied from [`openhands/agent-profiles/`](../openhands/agent-profiles) |
-| `skills` | A link to this repo's `.agents/skills` (vendored), or the legacy `agent-skills/skills` checkout if present |
+| `skills` | A link to the plangraph repository `skills/` directory, or the legacy `agent-skills/skills` checkout if present |
 
 ## 3. Start it and open the page
 
@@ -75,7 +75,7 @@ profile can switch model at run time (`enable_switch_llm_tool`).
   the configure step.
 - **`agent-canvas` has no headless mode.** It has no `--prompt`, `--model` or
   session flags, so it can't be driven as a CLI worker from a script. For
-  unattended runs, use the orchestration skills in this repo's `.agents/skills`,
+  unattended runs, use the orchestration skills of the plangraph repository (`skills/`),
   and use the canvas when a person is watching.
 - Muse Spark and DeepSeek are paid per token. The `-free` profiles and Ollama
   cost nothing.

@@ -95,7 +95,7 @@
   // rule wins, so the broad deny comes first and the narrow allow after it.
   // NOTE: this binds inside the opencode runtime (CLI/TUI/serve). Harness or
   // API callers that bypass agents must follow the same depth by convention
-  // (see .agents/skills/unattended-orchestration/unattended-orchestration.md "Tier enforcement").
+  // (see the plangraph repository skills/unattended-orchestration "Tier enforcement").
   // Depth lives under `experimental`: opencode v2 drops a top-level
   // subagent_depth as an "unsupported legacy setting" and defaults to 1,
   // which made l2-worker answer "Subagent depth limit reached (1)" (2026-09-24).

@@ -2,8 +2,8 @@
 
 The working rules for this repository live in **[AGENTS.md](AGENTS.md)**. Read that file first;
 it is the canonical instruction set for every agent, not a summary of one.
-This file is *only* the Gemini/Antigravity delta. Start at the router:
-`.agents/skills/repository-index/SKILL.md`.
+This file is *only* the Gemini/Antigravity delta. Skills live in the plangraph repository under `skills/`
+(see `AGENTS.md` §8).
 
 ## Antigravity notes
 
@@ -17,7 +17,7 @@ This file is *only* the Gemini/Antigravity delta. Start at the router:
   Then confirm with the `whoami` query in `CLAUDE.md`: it must return exactly one row.
 - Token-only, all-or-nothing: no header ⇒ 401; missing grant ⇒ 403.
 - Before changing a design choice, check for a `docs/decisions/` equivalent;
-  before building something, check `.agents/skills/` — it may already exist.
+  before building something, check the plangraph repository `skills/` — it may already exist.
 
 ## Orchestrator rules (Antigravity)
 
@@ -36,4 +36,4 @@ This file is *only* the Gemini/Antigravity delta. Start at the router:
 - **Never** create scratch scripts in random locations or the repo root.
 - Use the session scratch directory or the repository's `scratch/` folder,
   and delete throwaway scripts when finished.
-- Project skills live in `.agents/skills/` (see `AGENTS.md` §8).
+- Skills live in the plangraph repository `skills/`, not here (see `AGENTS.md` §8).

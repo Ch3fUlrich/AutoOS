@@ -227,58 +227,24 @@ Before you claim a change is complete:
 
 Do not report work as done because the code looks right. Run it.
 
-## 8. Agent skills (`.agents/skills/`)
+## 8. Agent skills (plangraph repository)
 
-Reusable workflows live in `.agents/skills/<name>/SKILL.md` — the skill file
-owns its workflow; this section only routes. One home per fact
-(`coding-principles` principle 1 applies here too): never restate a skill's
-content in docs.
+This repository holds no skill. Every skill lives in the plangraph repository
+under `skills/<name>/SKILL.md` and is installed into each agent client from
+there; AutoOS neither carries nor links one. The skill owns its workflow; this
+section only routes. One home per fact (`coding-principles` principle 1 applies
+here too): never restate a skill's content in docs.
 
-| Skill | Load when |
+| Skill (plangraph repository `skills/`) | Load when |
 |---|---|
 | `coding-principles` | **any** implementation, refactor, bugfix |
 | `structured-memory` | **every** session — recall at start, persist at end |
-| `swarm-orchestration` | multi-file work (drives `qa-swarm`, `review-triage`) |
-| `qa-swarm` / `review-triage` | review phase only (native rewrites; scope: AutoOS) |
+| `implement` / `review` / `research` | one closed brief / one review / one cited question |
+| `batch-writer` / `phase-batch-orchestration` | a brief with several items / work run as phase batches |
+| `plangraph-planning` / `plangraph-spawn` | planning layered work / dispatching per-host agents |
 | `unattended-orchestration` | work runs for **hours with nobody watching** |
 | `mcp-servers-setup` | wiring or debugging the MCP stack |
-| `no-mistakes` / `babysit-prs` | pre-push validation / async CI sweeps |
-| `repository-index` | lost, or unsure which skill applies |
-| `html-working-documents` | plan / report / diagram that outgrew chat |
-| `homelab-access` / `herdr-orchestration` | homelab commands / supervised persistent agents |
+| `routing-registry` | adding, changing or removing a route, model, provider or combo |
 
-Loading per agent: opencode reads `.agents/skills` as project-compat source
-natively; Claude Code reads `.claude/skills` — the `agent-skill-links` component
-links each skill there (`link_skill_dirs` is the one link rule: absent → linked,
-an AutoOS link that dangles → repointed, anything of yours → kept). OpenHands
-(SDK 1.36) reads
-the workspace's `.agents/skills/*/SKILL.md` natively and user skills from
-`~/.agents/skills` and `~/.openhands/skills` (`agent_context.load_user_skills`,
-which the installers write as true); the profiles carry no skills path. The
-installers mirror each repo skill into `~/.openhands/skills` as its own link.
-A link is repointed only when it dangles and ends in `.agents/skills/<name>` for
-that skill (the shape the installers create, so a moved checkout is repaired);
-everything else is kept as it is — a directory or file of yours, a live link
-of yours (even one into this repo's `.agents`), a dangling link of any other
-shape — and a whole-dir symlink from the old layout is left with one warning.
-That reaches native OpenHands (host CLI, Windows) only: a
-Docker sandbox runs with the image's own `HOME`
-(`/home/<container-user>`) and gets no host `~/.openhands`
-(only the app container mounts it), so its agent sees just the workspace
-`.agents/skills` inside the mounted code tree. A skill that loads nowhere is a
-defect — the suites assert the wiring, not just the files.
-
-| client | user-scope skills dir it reads | linked by the installers |
-|---|---|---|
-| Claude Code | `~/.claude/skills` (+ project `.claude/skills`) | yes |
-| Antigravity (agy) | `~/.gemini/config/skills` | yes |
-| gemini, qoder, qwen | `~/.agents/skills` (qwen also `~/.qwen/skills`) | yes, `~/.agents/skills` |
-| codex | `~/.codex/skills` | yes, only when `~/.codex` exists or `codex` is on PATH |
-| OpenHands | `~/.agents/skills`, `~/.openhands/skills` | yes |
-| opencode | project `.agents/skills` | not needed |
-
-Measured 2026-09-27 (`logs/handoff-sessions/20260925/status/L1-backlog.spike-c5-skills-dirs.md`).
-
-Provenance: subtree from `agent-skills` (`git log -- .agents/skills`);
-`qa-swarm`, `review-triage`, `babysit-prs` are native rewrites (unlicensed
-upstreams — see the sync ledger at `.agents/SYNC.md`).
+A skill that loads nowhere is a defect: wiring a skill into a client is the
+plangraph repository's job, not this repository's.
