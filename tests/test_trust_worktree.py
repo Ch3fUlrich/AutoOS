@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-SKILL = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(SKILL))
+TOOLS = Path(__file__).resolve().parents[1] / "tools"
+sys.path.insert(0, str(TOOLS))
 
 import trust_worktree  # noqa: E402
 from trust_worktree import load, save
